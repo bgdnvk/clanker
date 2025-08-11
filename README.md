@@ -6,6 +6,11 @@ EARLY ALPHA
 DevOps Observability ChatOps and that kind of stuff. 
 Clanker only reads, and judges you, never modifies anything (yet).
 
+## how to use
+make install
+add a yaml file with AWS bedrock or OpenAI key as LLM calls and your AWS infra profile
+```clanker ask "what's the status of my chat service lambda?"```
+
 ## WHAT YOU NEED
 Go, AWS CLI, OpenAI key or Claude on Bedrock (Anthropic and Gemini coming soon)
 
@@ -20,7 +25,7 @@ ONLY TESTED ON MAC
 ## WHAT WORKS AND WHAT IVE TESTED
 ask command works rly well, analyzing AWS infra on different AWS environments is pretty cool, OpenAI works and so does Claude 4 on AWS Bedrock (use claude 4 with bedrock if you can)
 
-once you establish your AI and INFRA profiles in the yaml you can just do ```clanker ask "what's the last error from my big-api-service lambda?"```  
+once you add your AI and INFRA profiles in the yaml you can just do ```clanker ask "what's the last error from my big-api-service lambda?"```  
 
 I also have added keywords you can establish with your services, this will become a matrix later on for dependencies we modify.
 
@@ -40,6 +45,9 @@ I'm lazy and I want my job to be easier
 
 ## Who is this for?
 Anyone dealing with infra/cloud stuff - especially those with multiple environments and different clouds. The last part is also why we do AWS CLI calls directly and don't use Golang packages
+
+## contact
+@ tekbog on twitter
 
 ## ----- Below is an AI slop summary with examples ------
 
@@ -80,7 +88,7 @@ make install  # Builds and installs to /usr/local/bin
 
     ```bash
     # Basic AWS queries
-    clanker ask "What EC2 instances are running?" --profile govcloud-stage --aws
+    clanker ask "What EC2 instances are running?" --profile your-profile-here --aws
 
     # Multi-provider AI queries
     clanker ask "Analyze my S3 buckets" --ai-profile openai --aws
@@ -120,7 +128,7 @@ clanker ask "<your question>" [flags]
 clanker ask "What security groups need attention?" --ai-profile bedrock --aws --debug
 
 # Multi-environment infrastructure query
-clanker ask "Compare EC2 instances across environments" --ai-profile bedrock --profile govcloud-dev --aws
+clanker ask "Compare EC2 instances across environments" --ai-profile bedrock --profile your-dev-profile-name --aws
 
 # Combined code and infrastructure analysis
 clanker ask "How does my code deploy to AWS?" --ai-profile bedrock --aws --code
@@ -168,7 +176,7 @@ clanker ask "Suggest improvements for my Go project" --ai-profile gemini --code
 clanker ask "How can I improve my deployment pipeline?" --ai-profile bedrock --aws --code --github
 
 # Environment-specific queries
-clanker ask "Why is staging slow?" --ai-profile openai --profile govcloud-stage --aws --code
+clanker ask "Why is staging slow?" --ai-profile openai --profile your-stage-profile --aws --code
 ```
 
 #### Debug Mode Deep Dives
@@ -233,8 +241,8 @@ clanker aws list ecr-repositories      # List ECR repositories
 clanker aws list lambda-ai             # List AI/ML Lambda functions
 
 # With specific profiles
-clanker aws list ec2 --profile govcloud-stage
-clanker aws list lambda --profile govcloud-prod
+clanker aws list ec2 --profile your-stage-profile
+clanker aws list lambda --profile your-prod-profile
 ```
 
 ### GitHub Commands
@@ -381,7 +389,7 @@ aws configure list-profiles
 aws sts get-caller-identity
 
 # Check specific profile
-aws sts get-caller-identity --profile govcloud-dev
+aws sts get-caller-identity --profile dev
 
 # Re-login if needed
 aws sso login --profile commercial-dev
