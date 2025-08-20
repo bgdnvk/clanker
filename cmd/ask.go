@@ -38,10 +38,54 @@ Examples:
 		includeTerraform, _ := cmd.Flags().GetBool("terraform")
 		verbose, _ := cmd.Flags().GetBool("verbose")
 		debug, _ := cmd.Flags().GetBool("debug")
+		discovery, _ := cmd.Flags().GetBool("discovery")
+		compliance, _ := cmd.Flags().GetBool("compliance")
 		codebasePath, _ := cmd.Flags().GetString("codebase-path")
 		profile, _ := cmd.Flags().GetString("profile")
 		workspace, _ := cmd.Flags().GetString("workspace")
 		aiProfile, _ := cmd.Flags().GetString("ai-profile")
+
+		// Compliance mode enables comprehensive service discovery with specific formatting
+		if compliance {
+			includeAWS = true
+			includeTerraform = true
+			discovery = true // Enable full discovery for comprehensive compliance data
+			question = `Generate a comprehensive SSP (System Security Plan) compliance report "Services, Ports, and Protocols". 
+
+Create a detailed table with the following columns exactly as specified:
+- Reference # (sequential numbering)
+- System (service name)
+- Vendor (AWS, or specific vendor if applicable)
+- Port (specific port numbers used)
+- Protocol (TCP, UDP, HTTPS, etc.)
+- External IP Address (public IPs, DNS names, or "Internal" if private)
+- Description (detailed purpose and function)
+- Hosting Environment (AWS region, VPC, or specific environment details)
+- Risk/Impact/Mitigation (security measures, encryption, access controls)
+- Authorizing Official (system owner or responsible party)
+
+For each active AWS service with resources, identify:
+1. The specific ports and protocols it uses
+2. Whether it has external access or is internal-only
+3. The security controls and mitigations in place
+4. The hosting environment details
+
+Include all active services: compute, storage, database, networking, security, ML/AI, analytics, and management services. Focus on services that actually have active resources deployed.
+
+Format as a professional compliance table suitable for government security documentation.`
+			if verbose {
+				fmt.Println("Compliance mode enabled: Full infrastructure discovery for comprehensive SSP documentation")
+			}
+		}
+
+		// Discovery mode enables comprehensive infrastructure analysis
+		if discovery {
+			includeAWS = true
+			includeTerraform = true
+			if verbose {
+				fmt.Println("Discovery mode enabled: AWS and Terraform contexts activated")
+			}
+		}
 
 		// If no specific context is requested, try to infer from the question
 		if !includeAWS && !includeCode && !includeGitHub && !includeTerraform {
@@ -284,6 +328,8 @@ func init() {
 	askCmd.Flags().Bool("github", false, "Include GitHub repository context")
 	askCmd.Flags().Bool("terraform", false, "Include Terraform workspace context")
 	askCmd.Flags().Bool("debug", false, "Enable debug logging")
+	askCmd.Flags().Bool("discovery", false, "Run comprehensive infrastructure discovery (all services)")
+	askCmd.Flags().Bool("compliance", false, "Generate compliance report showing all services, ports, and protocols")
 	askCmd.Flags().String("codebase-path", "", "Path to codebase (default: current directory)")
 	askCmd.Flags().String("profile", "", "AWS profile to use for infrastructure queries")
 	askCmd.Flags().String("workspace", "", "Terraform workspace to use for infrastructure queries")
@@ -305,6 +351,8 @@ func inferContext(question string) (aws bool, code bool, github bool, terraform 
 		"cost", "billing", "price", "usage", "spend", "budget",
 		// Monitoring and debugging
 		"monitor", "trace", "debug", "performance", "latency", "throughput", "error-rate", "failure", "timeout", "retry",
+		// Infrastructure discovery
+		"services", "active", "deployed", "discovery", "overview", "summary", "list-all", "what's-running", "what-services", "infrastructure-overview",
 	}
 
 	codeKeywords := []string{

@@ -2,6 +2,7 @@ package terraform
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -75,6 +76,16 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 		if err == nil {
 			context.WriteString("Terraform Plan:\n")
 			context.WriteString(planInfo)
+			context.WriteString("\n\n")
+		}
+	}
+
+	// Get outputs if question is about outputs or infrastructure details
+	if strings.Contains(questionLower, "output") || strings.Contains(questionLower, "infrastructure") || strings.Contains(questionLower, "resource") {
+		outputInfo, err := c.getOutputInfo(ctx)
+		if err == nil && outputInfo != "" {
+			context.WriteString("Terraform Outputs:\n")
+			context.WriteString(outputInfo)
 			context.WriteString("\n\n")
 		}
 	}
@@ -175,4 +186,54 @@ func (c *Client) getPlanInfo(ctx context.Context) (string, error) {
 	}
 
 	return strings.Join(lines, "\n"), nil
+}
+
+func (c *Client) getOutputInfo(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, "terraform", "output", "-json")
+	cmd.Dir = c.path
+
+	output, err := cmd.Output()
+	if err != nil {
+		// Try non-JSON output as fallback
+		cmd = exec.CommandContext(ctx, "terraform", "output")
+		cmd.Dir = c.path
+		output, err = cmd.Output()
+		if err != nil {
+			return "", err
+		}
+	}
+
+	outputStr := strings.TrimSpace(string(output))
+	if outputStr == "" || outputStr == "{}" {
+		return "No outputs defined", nil
+	}
+
+	return outputStr, nil
+}
+
+func (c *Client) GetTerraformOutputs(ctx context.Context) (map[string]interface{}, error) {
+	cmd := exec.CommandContext(ctx, "terraform", "output", "-json")
+	cmd.Dir = c.path
+
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	var outputs map[string]interface{}
+	if err := json.Unmarshal(output, &outputs); err != nil {
+		return nil, fmt.Errorf("failed to parse terraform outputs: %w", err)
+	}
+
+	// Extract just the values from terraform output format
+	result := make(map[string]interface{})
+	for key, value := range outputs {
+		if valueMap, ok := value.(map[string]interface{}); ok {
+			if val, exists := valueMap["value"]; exists {
+				result[key] = val
+			}
+		}
+	}
+
+	return result, nil
 }
