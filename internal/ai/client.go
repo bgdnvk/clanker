@@ -422,6 +422,7 @@ Please provide a comprehensive answer based on the live data above.`, question, 
 	if c.debug {
 		fmt.Printf("🎯 Final prompt length: %d characters\n", len(finalPrompt))
 		fmt.Printf("🚀 Sending final request to AI provider (%s)...\n", c.provider)
+		fmt.Printf("📤 Query to LLM: %s\n", question)
 	}
 
 	// Use the same provider switching logic as in the analysis phase
