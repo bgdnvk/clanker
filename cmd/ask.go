@@ -248,7 +248,7 @@ Format as a professional compliance table suitable for government security docum
 				apiKey = viper.GetString("ai.api_key")
 			}
 
-			aiClient = ai.NewClientWithTools(provider, apiKey, awsClient, githubClient, debug, aiProfile)
+			aiClient = ai.NewClientWithTools(provider, apiKey, awsClient, githubClient, verbose || debug, aiProfile)
 			if verbose {
 				fmt.Printf("Created AI client with tools: AWS=%v, GitHub=%v\n", awsClient != nil, githubClient != nil)
 			}
@@ -286,7 +286,7 @@ Format as a professional compliance table suitable for government security docum
 				apiKey = viper.GetString("ai.api_key")
 			}
 
-			aiClient = ai.NewClient(provider, apiKey, debug, aiProfile)
+			aiClient = ai.NewClient(provider, apiKey, verbose || debug, aiProfile)
 		}
 
 		// Combine code and terraform contexts

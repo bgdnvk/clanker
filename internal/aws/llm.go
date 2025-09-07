@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
-	"sync"
 	"time"
 
 	tfclient "github.com/bgdnvk/clanker/internal/terraform"
@@ -67,103 +66,52 @@ func GetAIProfile(providerName string) (*AIProfile, error) {
 	return &profile, nil
 }
 
-// ExecuteOperationsConcurrently executes multiple AWS operations concurrently for LLM processing
-func (c *Client) ExecuteOperationsConcurrently(ctx context.Context, operations []LLMOperation, aiProfile string) (string, error) {
-	if len(operations) == 0 {
-		return "", nil
-	}
-
-	// Get AI profile configuration
-	profile, err := GetAIProfile(aiProfile)
-	if err != nil {
-		return "", fmt.Errorf("failed to get AI profile: %w", err)
-	}
-
-	return c.executeOperationsWithProfile(ctx, operations, profile)
-}
-
-// ExecuteOperationsWithAWSProfile executes multiple AWS operations concurrently using a direct AWS profile
-func (c *Client) ExecuteOperationsWithAWSProfile(ctx context.Context, operations []LLMOperation, awsProfile, region string) (string, error) {
-	if len(operations) == 0 {
-		return "", nil
-	}
-
-	// Create a temporary AI profile with the specified AWS profile
-	profile := &AIProfile{
-		Provider:   "bedrock", // Not used for AWS operations
-		AWSProfile: awsProfile,
-		Region:     region,
-	}
-
-	return c.executeOperationsWithProfile(ctx, operations, profile)
-}
-
-// executeOperationsWithProfile executes operations with a given profile
-func (c *Client) executeOperationsWithProfile(ctx context.Context, operations []LLMOperation, profile *AIProfile) (string, error) {
-
-	// Create channels for results
-	resultChan := make(chan LLMOperationResult, len(operations))
-	var wg sync.WaitGroup
-
-	// Execute all operations concurrently
-	for i, op := range operations {
-		wg.Add(1)
-		go func(index int, operation string, params map[string]interface{}) {
-			defer wg.Done()
-			result, err := c.executeAWSOperation(ctx, operation, params, profile)
-			resultChan <- LLMOperationResult{
-				Operation: operation,
-				Result:    result,
-				Error:     err,
-				Index:     index,
-			}
-		}(i, op.Operation, op.Parameters)
-	}
-
-	// Wait for all operations to complete
-	go func() {
-		wg.Wait()
-		close(resultChan)
-	}()
-
-	// Collect results in order
-	results := make([]LLMOperationResult, len(operations))
-	for result := range resultChan {
-		results[result.Index] = result
-	}
-
-	// Build results string in original order
-	var awsResults strings.Builder
-	for _, result := range results {
-		if result.Error != nil {
-			awsResults.WriteString(fmt.Sprintf("❌ %s failed: %v\n", result.Operation, result.Error))
-		} else {
-			awsResults.WriteString(fmt.Sprintf("✅ %s:\n%s\n\n", result.Operation, result.Result))
-		}
-	}
-
-	return awsResults.String(), nil
-}
-
 // executeAWSOperation executes a specific AWS operation with the given parameters
 func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input map[string]interface{}, profile *AIProfile) (string, error) {
+	verbose := viper.GetBool("verbose")
+
+	if verbose {
+		fmt.Printf("🔍 %s: Starting AWS operation with profile: %s, region: %s\n", toolName, profile.AWSProfile, profile.Region)
+	}
+
 	// All operations are read-only and safe - no modifications or deletions possible
 	switch toolName {
 	// SERVICE EXISTENCE CHECKS - Quick checks to see if services exist/are configured
 	case "check_sqs_service":
 		args := []string{"sqs", "list-queues", "--max-items", "1", "--output", "table"}
+		if verbose {
+			fmt.Printf("🔍 %s: Checking service availability with: aws %s\n", toolName, strings.Join(args, " "))
+		}
 		_, err := c.execAWSCLI(ctx, args, profile)
 		if err != nil {
+			if verbose {
+				fmt.Printf("❌ %s: Service check failed: %v\n", toolName, err)
+			}
 			return "❌ SQS service not available or no access", nil
 		}
+		if verbose {
+			fmt.Printf("✅ %s: Service is available, getting count...\n", toolName)
+		}
 		queueCountArgs := []string{"sqs", "list-queues", "--output", "json", "--query", "length(QueueUrls)"}
+		if verbose {
+			fmt.Printf("🔍 %s: Getting count with: aws %s\n", toolName, strings.Join(queueCountArgs, " "))
+		}
 		countResult, _ := c.execAWSCLI(ctx, queueCountArgs, profile)
+		if verbose {
+			fmt.Printf("📊 %s: Raw count result: '%s'\n", toolName, countResult)
+		}
 		return fmt.Sprintf("✅ SQS service is available. Queue count: %s", strings.TrimSpace(countResult)), nil
 
 	case "check_eventbridge_service":
 		args := []string{"events", "list-event-buses", "--limit", "1", "--output", "table"}
+		if verbose {
+			fmt.Printf("🔍 %s: Checking service availability with: aws %s\n", toolName, strings.Join(args, " "))
+		}
 		_, err := c.execAWSCLI(ctx, args, profile)
 		if err != nil {
+			if verbose {
+				fmt.Printf("❌ %s: Service check failed: %v\n", toolName, err)
+			}
 			return "❌ EventBridge service not available or no access", nil
 		}
 		// Count rules on default bus
@@ -2260,24 +2208,37 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 
 // execAWSCLI executes AWS CLI commands directly
 func (c *Client) execAWSCLI(ctx context.Context, args []string, profile *AIProfile) (string, error) {
+	verbose := viper.GetBool("verbose")
+
 	// Build AWS CLI command
 	cmd := exec.CommandContext(ctx, "aws")
 	cmd.Args = append(cmd.Args, args...)
 	cmd.Args = append(cmd.Args, "--profile", profile.AWSProfile, "--region", profile.Region, "--no-cli-pager")
 
-	if c.debug {
+	if c.debug || verbose {
 		fmt.Printf("🚀 Executing: %s\n", strings.Join(cmd.Args, " "))
 	}
+
+	start := time.Now()
 	output, err := cmd.CombinedOutput()
+	duration := time.Since(start)
+
 	if err != nil {
-		if c.debug {
-			fmt.Printf("❌ Command failed: %v, output: %s\n", err, string(output))
+		if c.debug || verbose {
+			fmt.Printf("❌ Command failed (%v): %v\nOutput: %s\nCommand: %s\n",
+				duration, err, string(output), strings.Join(cmd.Args, " "))
 		}
 		return "", fmt.Errorf("AWS CLI command failed: %w, output: %s", err, string(output))
 	}
 
-	if c.debug {
-		fmt.Printf("✅ Command output (%d bytes): %s\n", len(output), string(output))
+	if c.debug || verbose {
+		outputLen := len(output)
+		if outputLen > 200 {
+			fmt.Printf("✅ Command succeeded (%v): %d bytes output (truncated): %s...\n",
+				duration, outputLen, string(output[:200]))
+		} else {
+			fmt.Printf("✅ Command succeeded (%v): %s\n", duration, string(output))
+		}
 	}
 	return string(output), nil
 }

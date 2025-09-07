@@ -30,8 +30,16 @@ func init() {
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.clanker.yaml)")
 	rootCmd.PersistentFlags().Bool("verbose", false, "verbose output")
+	rootCmd.PersistentFlags().Bool("local-mode", true, "enable local mode with rate limiting to prevent system overload (default: true)")
+	rootCmd.PersistentFlags().Int("local-delay", 100, "delay in milliseconds between calls in local mode (default 100ms)")
 
 	viper.BindPFlag("verbose", rootCmd.PersistentFlags().Lookup("verbose"))
+	viper.BindPFlag("local_mode", rootCmd.PersistentFlags().Lookup("local-mode"))
+	viper.BindPFlag("local_delay_ms", rootCmd.PersistentFlags().Lookup("local-delay"))
+
+	// Set defaults for local mode
+	viper.SetDefault("local_mode", true)
+	viper.SetDefault("local_delay_ms", 100)
 
 	// Register AWS static commands
 	awsCmd := aws.CreateAWSCommands()
