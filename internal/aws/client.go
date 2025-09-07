@@ -853,3 +853,135 @@ func (c *Client) GetRecentAlarms(ctx context.Context) (string, error) {
 
 	return result.String(), nil
 }
+
+// GetAIProfiles returns all AI profiles from the configuration
+func (c *Client) GetAIProfiles() map[string]AIProfile {
+	profiles := make(map[string]AIProfile)
+
+	// First try to get from ai.profiles (new structure)
+	allProfiles := viper.GetStringMap("ai.profiles")
+	for name, profileData := range allProfiles {
+		if profileMap, ok := profileData.(map[string]interface{}); ok {
+			profile := AIProfile{}
+
+			// Extract profile fields
+			if provider, ok := profileMap["provider"].(string); ok {
+				profile.Provider = provider
+			}
+			if awsProfile, ok := profileMap["aws_profile"].(string); ok {
+				profile.AWSProfile = awsProfile
+			}
+			if model, ok := profileMap["model"].(string); ok {
+				profile.Model = model
+			}
+			if region, ok := profileMap["region"].(string); ok {
+				profile.Region = region
+			}
+			if apiKeyEnv, ok := profileMap["api_key_env"].(string); ok {
+				profile.APIKeyEnv = apiKeyEnv
+			}
+
+			profiles[name] = profile
+		}
+	}
+
+	// If no profiles found, convert from ai.providers (legacy structure)
+	if len(profiles) == 0 {
+		allProviders := viper.GetStringMap("ai.providers")
+		for name, providerData := range allProviders {
+			if providerMap, ok := providerData.(map[string]interface{}); ok {
+				profile := AIProfile{
+					Provider: name, // Use the provider name as the provider type
+				}
+
+				// Extract provider fields and map to profile
+				if awsProfile, ok := providerMap["aws_profile"].(string); ok {
+					profile.AWSProfile = awsProfile
+				}
+				if model, ok := providerMap["model"].(string); ok {
+					profile.Model = model
+				}
+				if region, ok := providerMap["region"].(string); ok {
+					profile.Region = region
+				}
+				if apiKeyEnv, ok := providerMap["api_key_env"].(string); ok {
+					profile.APIKeyEnv = apiKeyEnv
+				}
+
+				profiles[name] = profile
+			}
+		}
+	}
+
+	return profiles
+}
+
+// executeOperation executes an AWS operation using the default infrastructure profile
+func (c *Client) executeOperation(ctx context.Context, toolName string, input map[string]interface{}) (string, error) {
+	// Get infrastructure profile from config
+	defaultEnv := viper.GetString("infra.default_environment")
+	if defaultEnv == "" {
+		defaultEnv = "dev"
+	}
+	awsProfile := viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+	if awsProfile == "" {
+		awsProfile = "govcloud-dev"
+	}
+	awsRegion := viper.GetString(fmt.Sprintf("infra.aws.environments.%s.region", defaultEnv))
+	if awsRegion == "" {
+		awsRegion = "us-gov-west-1"
+	}
+
+	profile := &AIProfile{
+		Provider:   "aws-cli",
+		AWSProfile: awsProfile,
+		Region:     awsRegion,
+	}
+	return c.executeAWSOperation(ctx, toolName, input, profile)
+}
+
+// executeOperations executes multiple AWS operations using the default infrastructure profile
+func (c *Client) executeOperations(ctx context.Context, operations []LLMOperation) (string, error) {
+	defaultEnv := viper.GetString("infra.default_environment")
+	if defaultEnv == "" {
+		defaultEnv = "dev"
+	}
+	awsProfile := viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+	if awsProfile == "" {
+		awsProfile = "govcloud-dev"
+	}
+	awsRegion := viper.GetString(fmt.Sprintf("infra.aws.environments.%s.region", defaultEnv))
+	if awsRegion == "" {
+		awsRegion = "us-gov-west-1"
+	}
+
+	profile := &AIProfile{
+		Provider:   "aws-cli",
+		AWSProfile: awsProfile,
+		Region:     awsRegion,
+	}
+	return c.executeOperationsWithProfile(ctx, operations, profile)
+}
+
+// execCLI executes AWS CLI commands using the default infrastructure profile
+func (c *Client) execCLI(ctx context.Context, args []string) (string, error) {
+	defaultEnv := viper.GetString("infra.default_environment")
+	if defaultEnv == "" {
+		defaultEnv = "dev"
+	}
+	awsProfile := viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+	if awsProfile == "" {
+		awsProfile = "govcloud-dev"
+	}
+	awsRegion := viper.GetString(fmt.Sprintf("infra.aws.environments.%s.region", defaultEnv))
+	if awsRegion == "" {
+		awsRegion = "us-gov-west-1"
+	}
+
+	profile := &AIProfile{
+		Provider:   "aws-cli",
+		AWSProfile: awsProfile,
+		Region:     awsRegion,
+	}
+	return c.execAWSCLI(ctx, args, profile)
+}

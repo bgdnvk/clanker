@@ -1409,10 +1409,11 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		return "✅ Interactive Video Service (IVS) is available", nil
 
 	case "check_appflow_service":
+		// AppFlow may not be available in all regions
 		args := []string{"appflow", "list-flows", "--max-results", "1", "--output", "table"}
-		_, err := c.execAWSCLI(ctx, args, profile)
+		result, err := c.execAWSCLIWithGracefulError(ctx, args, profile, "AppFlow")
 		if err != nil {
-			return "❌ AppFlow service not available or no access", nil
+			return result, nil
 		}
 		return "✅ AppFlow service is available", nil
 
@@ -1613,10 +1614,10 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		return "✅ Cost and Usage Report service is available", nil
 
 	case "check_applicationcostprofiler_service":
-		args := []string{"application-cost-profiler", "list-report-definitions", "--max-results", "1", "--output", "table"}
-		_, err := c.execAWSCLI(ctx, args, profile)
+		args := []string{"applicationcostprofiler", "list-report-definitions", "--max-results", "1", "--output", "table"}
+		result, err := c.execAWSCLIWithGracefulError(ctx, args, profile, "Application Cost Profiler")
 		if err != nil {
-			return "❌ Application Cost Profiler service not available or no access", nil
+			return result, nil
 		}
 		return "✅ Application Cost Profiler service is available", nil
 
@@ -1629,12 +1630,8 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		return "✅ Managed Blockchain service is available", nil
 
 	case "check_alexaforbusiness_service":
-		args := []string{"alexaforbusiness", "list-skills", "--max-results", "1", "--output", "table"}
-		_, err := c.execAWSCLI(ctx, args, profile)
-		if err != nil {
-			return "❌ Alexa for Business service not available or no access", nil
-		}
-		return "✅ Alexa for Business service is available", nil
+		// Alexa for Business was deprecated and shut down
+		return "❌ Alexa for Business service has been discontinued", nil
 
 	case "check_outposts_service":
 		args := []string{"outposts", "list-outposts", "--max-results", "1", "--output", "table"}
@@ -1645,12 +1642,12 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		return "✅ Outposts service is available", nil
 
 	case "check_serverlessrepo_service":
-		args := []string{"serverlessrepo", "list-applications", "--max-items", "1", "--output", "table"}
+		args := []string{"serverlessrepo", "list-applications", "--max-results", "1", "--output", "table"}
 		_, err := c.execAWSCLI(ctx, args, profile)
 		if err != nil {
 			return "❌ Serverless Application Repository not available or no access", nil
 		}
-		return "✅ Serverless Application Repository is available", nil
+		return "✅ Serverless Application Repository service is available", nil
 
 	case "check_wavelength_service":
 		args := []string{"ec2", "describe-carrier-gateways", "--max-results", "1", "--output", "table"}
@@ -1673,7 +1670,7 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		return "✅ Location Service is available", nil
 
 	case "check_iot1click_service":
-		args := []string{"iot1click-projects", "list-projects", "--max-results", "1", "--output", "table"}
+		args := []string{"iot1click-projects", "list-projects", "--max-results", "5", "--output", "table"}
 		_, err := c.execAWSCLI(ctx, args, profile)
 		if err != nil {
 			return "❌ IoT 1-Click service not available or no access", nil
@@ -1689,7 +1686,7 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		return "✅ IoT FleetWise service is available", nil
 
 	case "check_iotthingsgraph_service":
-		args := []string{"iotthingsgraph", "list-flow-templates", "--max-results", "1", "--output", "table"}
+		args := []string{"iotthingsgraph", "search-flow-templates", "--max-results", "1", "--output", "table"}
 		_, err := c.execAWSCLI(ctx, args, profile)
 		if err != nil {
 			return "❌ IoT Things Graph service not available or no access", nil
@@ -1739,10 +1736,10 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		return fmt.Sprintf("✅ Network Firewall service is available. Firewall count: %s", strings.TrimSpace(countResult)), nil
 
 	case "check_shield_service":
-		args := []string{"shield", "list-subscriptions", "--max-results", "1", "--output", "table"}
+		args := []string{"shield", "describe-subscription", "--output", "table"}
 		_, err := c.execAWSCLI(ctx, args, profile)
 		if err != nil {
-			return "❌ Shield service not available or no access", nil
+			return "❌ Shield service not available or no subscription", nil
 		}
 		return "✅ Shield service is available", nil
 
@@ -1771,6 +1768,83 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		services, _ := c.execAWSCLI(ctx, serviceArgs, profile)
 		return fmt.Sprintf("Clusters:\n%s\n\nServices:\n%s", clusters, services), nil
 
+	case "analyze_ecs_service_logs":
+		serviceName, ok := input["service_name"].(string)
+		if !ok {
+			return "", fmt.Errorf("service_name parameter required")
+		}
+		clusterName := input["cluster_name"].(string) // optional
+		if clusterName == "" {
+			clusterName = "default"
+		}
+
+		// ECS services typically log to /ecs/service-name or /aws/ecs/service-name
+		logGroups := []string{
+			fmt.Sprintf("/ecs/%s", serviceName),
+			fmt.Sprintf("/aws/ecs/%s", serviceName),
+			fmt.Sprintf("/aws/ecs/containerinsights/%s/performance", clusterName),
+		}
+
+		analysis := fmt.Sprintf("🔍 ECS SERVICE LOG ANALYSIS FOR %s\n", serviceName)
+		analysis += "=========================================\n\n"
+
+		for _, logGroup := range logGroups {
+			args := []string{
+				"logs", "filter-log-events",
+				"--log-group-name", logGroup,
+				"--start-time", fmt.Sprintf("%d", time.Now().Add(-6*time.Hour).Unix()*1000),
+				"--filter-pattern", "ERROR",
+				"--output", "json",
+				"--query", "events[*].{Timestamp:timestamp,Message:message}",
+			}
+
+			if verbose {
+				fmt.Printf("🔍 %s: Checking log group %s for service %s\n", toolName, logGroup, serviceName)
+			}
+
+			result, err := c.execAWSCLI(ctx, args, profile)
+			if err == nil && result != "[]" {
+				analysis += fmt.Sprintf("🚨 ERRORS in %s:\n", logGroup)
+				analysis += result + "\n\n"
+			}
+		}
+
+		return analysis, nil
+
+	case "get_ecs_task_logs":
+		taskArn, ok := input["task_arn"].(string)
+		if !ok {
+			return "", fmt.Errorf("task_arn parameter required")
+		}
+		clusterName := input["cluster_name"].(string)
+		if clusterName == "" {
+			clusterName = "default"
+		}
+
+		// Get task definition to find log configuration
+		taskArgs := []string{
+			"ecs", "describe-tasks",
+			"--cluster", clusterName,
+			"--tasks", taskArn,
+			"--output", "json",
+		}
+
+		if verbose {
+			fmt.Printf("🔍 %s: Getting task details for %s\n", toolName, taskArn)
+		}
+
+		taskResult, err := c.execAWSCLI(ctx, taskArgs, profile)
+		if err != nil {
+			return fmt.Sprintf("❌ Failed to get task details: %v", err), nil
+		}
+
+		analysis := "📋 ECS TASK LOG ANALYSIS\n"
+		analysis += "===========================\n\n"
+		analysis += "🔧 Task Details:\n"
+		analysis += taskResult + "\n\n"
+
+		return analysis, nil
+
 	// SERVERLESS operations
 	case "list_lambda_functions":
 		args := []string{"lambda", "list-functions", "--output", "table", "--query", "Functions[*].{Name:FunctionName,Runtime:Runtime,LastModified:LastModified}"}
@@ -1783,6 +1857,114 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		}
 		args := []string{"lambda", "get-function", "--function-name", functionName, "--output", "json"}
 		return c.execAWSCLI(ctx, args, profile)
+
+	case "analyze_lambda_errors":
+		functionName, ok := input["function_name"].(string)
+		if !ok {
+			return "", fmt.Errorf("function_name parameter required")
+		}
+		logGroupName := fmt.Sprintf("/aws/lambda/%s", functionName)
+
+		// Get recent error logs from the last 24 hours
+		args := []string{
+			"logs", "filter-log-events",
+			"--log-group-name", logGroupName,
+			"--start-time", fmt.Sprintf("%d", time.Now().Add(-24*time.Hour).Unix()*1000),
+			"--filter-pattern", "ERROR",
+			"--output", "json",
+			"--query", "events[*].{Timestamp:timestamp,Message:message}",
+		}
+
+		if verbose {
+			fmt.Printf("🔍 %s: Analyzing errors for %s in log group %s\n", toolName, functionName, logGroupName)
+		}
+
+		result, err := c.execAWSCLI(ctx, args, profile)
+		if err != nil {
+			return fmt.Sprintf("❌ Failed to get error logs for %s: %v", functionName, err), nil
+		}
+
+		// Also get function configuration for context
+		configArgs := []string{"lambda", "get-function-configuration", "--function-name", functionName, "--output", "json"}
+		configResult, configErr := c.execAWSCLI(ctx, configArgs, profile)
+
+		analysis := fmt.Sprintf("🔍 ERROR ANALYSIS FOR %s\n", functionName)
+		analysis += "================================\n\n"
+
+		if configErr == nil {
+			analysis += "📋 FUNCTION CONFIGURATION:\n"
+			analysis += configResult + "\n\n"
+		}
+
+		analysis += "🚨 ERROR LOGS (Last 24 hours):\n"
+		analysis += result + "\n"
+
+		return analysis, nil
+
+	case "analyze_lambda_performance":
+		functionName, ok := input["function_name"].(string)
+		if !ok {
+			return "", fmt.Errorf("function_name parameter required")
+		}
+		logGroupName := fmt.Sprintf("/aws/lambda/%s", functionName)
+
+		// Get recent logs with duration and memory usage patterns
+		args := []string{
+			"logs", "filter-log-events",
+			"--log-group-name", logGroupName,
+			"--start-time", fmt.Sprintf("%d", time.Now().Add(-24*time.Hour).Unix()*1000),
+			"--filter-pattern", "[REPORT]",
+			"--output", "json",
+			"--query", "events[*].{Timestamp:timestamp,Message:message}",
+		}
+
+		if verbose {
+			fmt.Printf("🔍 %s: Analyzing performance for %s\n", toolName, functionName)
+		}
+
+		result, err := c.execAWSCLI(ctx, args, profile)
+		if err != nil {
+			return fmt.Sprintf("❌ Failed to get performance logs for %s: %v", functionName, err), nil
+		}
+
+		analysis := fmt.Sprintf("📊 PERFORMANCE ANALYSIS FOR %s\n", functionName)
+		analysis += "=====================================\n\n"
+		analysis += "⏱️ EXECUTION REPORTS (Last 24 hours):\n"
+		analysis += result + "\n"
+
+		return analysis, nil
+
+	case "get_lambda_recent_logs":
+		functionName, ok := input["function_name"].(string)
+		if !ok {
+			return "", fmt.Errorf("function_name parameter required")
+		}
+		logGroupName := fmt.Sprintf("/aws/lambda/%s", functionName)
+
+		// Get all recent logs (last 6 hours)
+		args := []string{
+			"logs", "filter-log-events",
+			"--log-group-name", logGroupName,
+			"--start-time", fmt.Sprintf("%d", time.Now().Add(-6*time.Hour).Unix()*1000),
+			"--output", "json",
+			"--query", "events[*].{Timestamp:timestamp,Message:message}",
+		}
+
+		if verbose {
+			fmt.Printf("🔍 %s: Getting recent logs for %s\n", toolName, functionName)
+		}
+
+		result, err := c.execAWSCLI(ctx, args, profile)
+		if err != nil {
+			return fmt.Sprintf("❌ Failed to get recent logs for %s: %v", functionName, err), nil
+		}
+
+		analysis := fmt.Sprintf("📝 RECENT LOGS FOR %s\n", functionName)
+		analysis += "============================\n\n"
+		analysis += "🕐 LOGS (Last 6 hours):\n"
+		analysis += result + "\n"
+
+		return analysis, nil
 
 	// STORAGE operations
 	case "list_s3_buckets":
@@ -2243,168 +2425,6 @@ func (c *Client) execAWSCLI(ctx context.Context, args []string, profile *AIProfi
 	return string(output), nil
 }
 
-// GetLLMAnalysisPrompt returns the prompt for LLM to analyze what AWS operations are needed
-func GetLLMAnalysisPrompt(question string) string {
-	return fmt.Sprintf(`Analyze this user query and determine what AWS operations would be needed to answer it accurately. 
-
-User Query: "%s"
-
-Available AWS READ-ONLY operations (all are safe and never modify/delete anything):
-
-INFRASTRUCTURE DISCOVERY (New Enhanced Operations):
-- discover_all_active_services: Automatically discover all active AWS services by running service checks in parallel
-- get_infrastructure_overview: Get a comprehensive overview of the entire infrastructure across all services
-- check_all_services_parallel: Run all service availability checks in parallel to map the infrastructure
-
-TERRAFORM INTEGRATION:
-- get_terraform_outputs: Get terraform outputs from the configured workspace
-- get_terraform_state_summary: Get a summary of terraform state resources
-
-SERVICE EXISTENCE CHECKS (Quick checks to see if services exist and their basic counts):
-- check_sqs_service: Check if SQS service is available and count queues
-- check_eventbridge_service: Check if EventBridge service is available and count rules
-- check_lambda_service: Check if Lambda service is available and count functions
-- check_sns_service: Check if SNS service is available and count topics
-- check_dynamodb_service: Check if DynamoDB service is available and count tables
-- check_s3_service: Check if S3 service is available and count buckets
-- check_rds_service: Check if RDS service is available and count instances
-- check_ec2_service: Check if EC2 service is available and count instances
-- check_ecs_service: Check if ECS service is available and count clusters
-- check_ecr_service: Check if ECR service is available and count repositories
-
-COMPUTE:
-- list_ec2_instances: List EC2 instances with state, type, and details
-- describe_instance: Get detailed info about a specific EC2 instance
-- list_ecs_clusters: List ECS clusters and their running services/tasks
-- describe_ecs_service: Get details about a specific ECS service
-- list_batch_jobs: List AWS Batch jobs and their status
-- list_auto_scaling_groups: List Auto Scaling Groups with instance counts and capacity
-- describe_auto_scaling_group: Get detailed ASG configuration and instances
-- list_launch_templates: List EC2 Launch Templates and their versions
-- describe_launch_template: Get detailed Launch Template configuration
-
-SERVERLESS:
-- list_lambda_functions: List Lambda functions with runtime and last modified
-- describe_lambda_function: Get detailed config for a specific Lambda function
-- list_lambda_layers: List Lambda layers available
-
-CONTAINER SERVICES:
-- list_ecr_repositories: List ECR repositories with URIs and creation dates
-- describe_ecr_repository: Get images and details for a specific ECR repository
-- list_eks_clusters: List EKS Kubernetes clusters with status and details
-- describe_eks_cluster: Get detailed EKS cluster configuration
-
-STORAGE:
-- list_s3_buckets: List S3 buckets with creation dates and regions
-- describe_s3_bucket: Get details about a specific S3 bucket (size, objects, etc.)
-- list_ebs_volumes: List EBS volumes and their attachments, size, type
-- describe_ebs_volume: Get detailed info about a specific EBS volume
-- list_efs_filesystems: List EFS file systems with performance modes
-- describe_efs_filesystem: Get detailed EFS configuration and mount targets
-
-DATABASE:
-- list_rds_instances: List RDS database instances with status and config
-- describe_rds_instance: Get detailed info about a specific RDS instance
-- list_rds_clusters: List RDS Aurora clusters with engine and status
-- list_dynamodb_tables: List DynamoDB tables
-- describe_dynamodb_table: Get detailed DynamoDB table schema and settings
-
-NETWORKING:
-- list_vpcs: List VPCs and their CIDR blocks
-- list_subnets: List subnets across VPCs
-- list_security_groups: List security groups and their rules
-- describe_load_balancers: List and describe load balancers (ALB/NLB/CLB)
-- list_route_tables: List route tables and their routes
-
-MESSAGE QUEUING & EVENTS:
-- list_sqs_queues: List SQS queues with URLs and attributes
-- describe_sqs_queue: Get detailed SQS queue configuration and metrics
-- list_sns_topics: List SNS topics and their ARNs
-- describe_sns_topic: Get SNS topic configuration and subscriptions
-- list_eventbridge_rules: List EventBridge rules with schedules and targets
-- list_eventbridge_buses: List custom EventBridge event buses
-
-MONITORING & LOGS:
-- get_recent_logs: Get recent CloudWatch logs and errors
-- list_cloudwatch_alarms: List CloudWatch alarms and their status
-- describe_cloudwatch_metrics: Get CloudWatch metrics for resources
-- list_log_groups: List CloudWatch log groups
-
-SECURITY & IAM:
-- list_iam_roles: List IAM roles (names only, no sensitive data)
-- list_iam_users: List IAM users (names only, no sensitive data)
-- describe_security_groups: Get security group rules and associations
-- list_kms_keys: List KMS encryption keys
-- describe_kms_key: Get KMS key details and policies
-- list_acm_certificates: List SSL/TLS certificates with status
-- describe_acm_certificate: Get certificate details and validation
-- list_waf_webacls: List WAF Web ACLs for regional and CloudFront
-
-DEVOPS & CI/CD:
-- list_codebuild_projects: List CodeBuild projects with build history
-- list_codepipelines: List CodePipeline pipelines with status
-- describe_codepipeline: Get detailed pipeline configuration and stages
-- list_codecommit_repositories: List CodeCommit Git repositories
-
-ANALYTICS & BIG DATA:
-- list_kinesis_streams: List Kinesis data streams
-- describe_kinesis_stream: Get Kinesis stream shards and throughput
-- list_glue_jobs: List AWS Glue ETL jobs and schedules
-- list_glue_databases: List Glue Data Catalog databases
-- list_emr_clusters: List EMR big data clusters
-
-MACHINE LEARNING:
-- list_sagemaker_endpoints: List SageMaker model endpoints
-- list_sagemaker_models: List trained SageMaker models
-- list_sagemaker_notebook_instances: List SageMaker notebook instances
-
-CACHING:
-- list_elasticache_clusters: List ElastiCache Redis/Memcached clusters
-- describe_elasticache_cluster: Get cache cluster configuration and nodes
-
-APPLICATION INTEGRATION:
-- list_step_functions: List Step Functions state machines
-- describe_step_function: Get Step Function workflow definition
-
-COST & BILLING:
-- get_cost_and_usage: Get cost information and usage metrics
-- list_budgets: List AWS Budgets and spending alerts
-
-AI/ML SERVICES:
-- list_bedrock_foundation_models: List available Bedrock foundation models
-- list_bedrock_custom_models: List custom Bedrock models
-- list_bedrock_agents: List Bedrock agents
-- list_bedrock_knowledge_bases: List Bedrock knowledge bases
-- list_bedrock_guardrails: List Bedrock guardrails
-- list_sagemaker_endpoints: List SageMaker model endpoints
-- list_sagemaker_models: List trained SageMaker models
-- list_sagemaker_notebook_instances: List SageMaker notebook instances
-- list_comprehend_jobs: List Comprehend analysis jobs
-- list_textract_jobs: List Textract document analysis jobs
-- list_rekognition_collections: List Rekognition face collections
-
-OTHER SERVICES:
-- list_api_gateways: List API Gateway REST and HTTP APIs
-- list_cloudfront_distributions: List CloudFront distributions
-- list_route53_zones: List Route53 hosted zones
-- list_secrets: List AWS Secrets Manager secrets (names only)
-- list_ssm_parameters: List Systems Manager parameters (names only)
-
-Respond with ONLY a JSON object in this format:
-{
-  "operations": [
-    {
-      "operation": "operation_name",
-      "reason": "why this operation is needed",
-      "parameters": {"key": "value"}
-    }
-  ],
-  "analysis": "brief explanation of what the user wants to know"
-}
-
-If no AWS operations are needed, return: {"operations": [], "analysis": "explanation"}`, question)
-}
-
 // discoverAllActiveServices discovers all active AWS services by running service checks in parallel
 func (c *Client) discoverAllActiveServices(ctx context.Context, profile *AIProfile) (string, error) {
 	serviceChecks := []string{
@@ -2696,4 +2716,41 @@ func (c *Client) getTerraformStateSummary(ctx context.Context, profile *AIProfil
 	}
 
 	return context, nil
+}
+
+// categorizeAWSError categorizes AWS CLI errors to provide better user feedback
+func categorizeAWSError(err error, serviceName string) string {
+	if err == nil {
+		return ""
+	}
+
+	errStr := strings.ToLower(err.Error())
+
+	switch {
+	case strings.Contains(errStr, "could not connect to the endpoint"):
+		return fmt.Sprintf("❌ %s service not available in this region", serviceName)
+	case strings.Contains(errStr, "invalid choice"):
+		return fmt.Sprintf("❌ %s service not supported by current AWS CLI version", serviceName)
+	case strings.Contains(errStr, "account not initialized"):
+		return fmt.Sprintf("❌ %s service requires account initialization", serviceName)
+	case strings.Contains(errStr, "accessdenied"):
+		return fmt.Sprintf("❌ %s service access denied - insufficient permissions", serviceName)
+	case strings.Contains(errStr, "parameter validation failed"):
+		return fmt.Sprintf("❌ %s service parameter validation error", serviceName)
+	case strings.Contains(errStr, "service has been discontinued"):
+		return fmt.Sprintf("❌ %s service has been discontinued", serviceName)
+	case strings.Contains(errStr, "not authorized"):
+		return fmt.Sprintf("❌ %s service not authorized for this account", serviceName)
+	default:
+		return fmt.Sprintf("❌ %s service not available or no access", serviceName)
+	}
+}
+
+// execAWSCLIWithGracefulError executes AWS CLI with better error categorization
+func (c *Client) execAWSCLIWithGracefulError(ctx context.Context, args []string, profile *AIProfile, serviceName string) (string, error) {
+	output, err := c.execAWSCLI(ctx, args, profile)
+	if err != nil {
+		return categorizeAWSError(err, serviceName), nil
+	}
+	return output, nil
 }
