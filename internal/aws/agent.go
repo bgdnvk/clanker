@@ -241,10 +241,11 @@ type AgentContext struct {
 
 // Agent represents the intelligent context-gathering agent
 type Agent struct {
-	client   *Client
-	debug    bool
-	maxSteps int
-	memory   *AgentMemory
+	client       *Client
+	debug        bool
+	maxSteps     int
+	memory       *AgentMemory
+	aiDecisionFn func(context.Context, string) (string, error) // AI decision making function
 }
 
 // NewAgent creates a new intelligent agent for context gathering
@@ -254,6 +255,11 @@ func NewAgent(client *Client, debug bool) *Agent {
 		debug:    debug,
 		maxSteps: 6, // Maximum 6 back-and-forth calls before final response
 	}
+}
+
+// SetAIDecisionFunction sets the AI decision making function
+func (a *Agent) SetAIDecisionFunction(fn func(context.Context, string) (string, error)) {
+	a.aiDecisionFn = fn
 }
 
 // InvestigateQuery intelligently investigates a query using decision trees and parallel agents
@@ -463,9 +469,31 @@ func (a *Agent) InvestigateQuery(ctx context.Context, query string) (*AgentConte
 
 // makeDecision returns a simple decision based on the query without AI calls
 func (a *Agent) makeDecision(ctx context.Context, agentCtx *AgentContext) (*AgentDecision, error) {
-	// Simple rule-based decision making instead of AI calls
-	// The agent focuses only on infrastructure operations
+	// Use AI-based decision making if available
+	if a.aiDecisionFn != nil {
+		prompt := a.BuildDecisionPrompt(agentCtx)
+		response, err := a.aiDecisionFn(ctx, prompt)
+		if err != nil {
+			if a.debug {
+				fmt.Printf("⚠️  AI decision failed: %v, falling back to rule-based decision\n", err)
+			}
+		} else {
+			// Parse JSON response
+			var decision AgentDecision
+			if err := json.Unmarshal([]byte(response), &decision); err != nil {
+				if a.debug {
+					fmt.Printf("⚠️  Failed to parse AI decision JSON: %v, falling back to rule-based decision\n", err)
+				}
+			} else {
+				if a.debug {
+					fmt.Printf("🧠 AI decision: %s (confidence: %.2f)\n", decision.Action, decision.Confidence)
+				}
+				return &decision, nil
+			}
+		}
+	}
 
+	// Fallback to simple rule-based decision making
 	query := strings.ToLower(agentCtx.OriginalQuery)
 
 	if strings.Contains(query, "error") || strings.Contains(query, "fail") {
@@ -821,40 +849,6 @@ func (a *Agent) getMostActiveLogGroups(allGroups []string, limit int) []string {
 	return allGroups[:limit]
 }
 
-// discoverServices dynamically discovers AWS services that might be relevant
-func (a *Agent) discoverServices(ctx context.Context, query string) ([]string, error) {
-	queryLower := strings.ToLower(query)
-	var services []string
-
-	// Service keywords mapping
-	serviceKeywords := map[string][]string{
-		"lambda":     {"lambda", "function", "serverless"},
-		"ecs":        {"ecs", "container", "fargate", "task"},
-		"ec2":        {"ec2", "instance", "server", "compute"},
-		"rds":        {"rds", "database", "db", "mysql", "postgres"},
-		"s3":         {"s3", "bucket", "storage", "file"},
-		"apigateway": {"api", "gateway", "endpoint", "rest"},
-		"batch":      {"batch", "job", "queue", "processing"},
-		"cloudwatch": {"logs", "metrics", "alarm", "monitor"},
-	}
-
-	for service, keywords := range serviceKeywords {
-		for _, keyword := range keywords {
-			if strings.Contains(queryLower, keyword) {
-				services = append(services, service)
-				break
-			}
-		}
-	}
-
-	// If no specific services detected, return common services
-	if len(services) == 0 {
-		services = []string{"lambda", "ecs", "ec2", "rds", "s3"}
-	}
-
-	return services, nil
-}
-
 func (a *Agent) getRecentLogsFromGroup(ctx context.Context, logGroup string) ([]string, error) {
 	// Get logs from the last hour
 	endTime := time.Now()
@@ -924,13 +918,8 @@ func (a *Agent) findErrorPatterns(allLogs []string) ErrorPatterns {
 	return patterns
 }
 
-func (a *Agent) encodePrompt(prompt string) string {
-	// This would encode the prompt for Bedrock API call
-	// For now, returning the prompt as-is for simplicity
-	return prompt
-}
-
-func (a *Agent) buildDecisionPrompt(agentCtx *AgentContext) string {
+// BuildDecisionPrompt creates a sophisticated prompt for AI-based decision making
+func (a *Agent) BuildDecisionPrompt(agentCtx *AgentContext) string {
 	// Count gathered data
 	logCount := 0
 	for key, data := range agentCtx.GatheredData {
@@ -1730,15 +1719,31 @@ func (ac *AgentCoordinator) getOperationsForAgentType(agentType AgentType, param
 			{Operation: "get_error_logs", Reason: "Get error log entries", Parameters: map[string]any{"filter_pattern": "ERROR"}},
 		}
 
-		// Add specific Lambda function analysis for critical functions
-		lambdaFunctions := []string{"abel-dev-api", "abel-dev-chat", "abel-dev-health-checker"}
-		for _, funcName := range lambdaFunctions {
-			operations = append(operations, []LLMOperation{
-				{Operation: "analyze_lambda_errors", Reason: fmt.Sprintf("Analyze errors for %s", funcName), Parameters: map[string]any{"function_name": funcName}},
-				{Operation: "analyze_lambda_performance", Reason: fmt.Sprintf("Analyze performance for %s", funcName), Parameters: map[string]any{"function_name": funcName}},
-				{Operation: "get_lambda_recent_logs", Reason: fmt.Sprintf("Get recent logs for %s", funcName), Parameters: map[string]any{"function_name": funcName}},
-			}...)
+		// Check if the original query mentions a specific function name
+		query := strings.ToLower(ac.MainContext.OriginalQuery)
+		words := strings.Fields(query)
+
+		// Look for any hyphenated names that could be function names
+		var functionName string
+		for _, word := range words {
+			word = strings.Trim(word, ".,!?;:")
+			if strings.Contains(word, "-") && len(word) > 5 {
+				functionName = word
+				break
+			}
 		}
+
+		// Add Lambda function analysis with function name if found
+		lambdaParams := map[string]any{}
+		if functionName != "" {
+			lambdaParams["function_name"] = functionName
+		}
+
+		operations = append(operations, []LLMOperation{
+			{Operation: "analyze_lambda_errors", Reason: "Analyze Lambda function errors", Parameters: lambdaParams},
+			{Operation: "analyze_lambda_performance", Reason: "Analyze Lambda function performance", Parameters: lambdaParams},
+			{Operation: "get_lambda_recent_logs", Reason: "Get recent Lambda logs", Parameters: lambdaParams},
+		}...)
 
 		return operations
 	case "metrics":
@@ -1754,15 +1759,12 @@ func (ac *AgentCoordinator) getOperationsForAgentType(agentType AgentType, param
 			{Operation: "list_rds_instances", Reason: "List RDS instances", Parameters: map[string]any{}},
 		}
 
-		// Add ECS service log analysis if ECS is detected
-		ecsServices := []string{"abel-dev"} // Common service pattern
-		for _, serviceName := range ecsServices {
-			operations = append(operations, LLMOperation{
-				Operation:  "analyze_ecs_service_logs",
-				Reason:     fmt.Sprintf("Analyze ECS service logs for %s", serviceName),
-				Parameters: map[string]any{"service_name": serviceName},
-			})
-		}
+		// Add ECS service log analysis for discovered services
+		operations = append(operations, LLMOperation{
+			Operation:  "analyze_ecs_service_logs",
+			Reason:     "Analyze ECS service logs",
+			Parameters: map[string]any{},
+		})
 
 		return operations
 	case "security":

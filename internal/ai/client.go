@@ -893,6 +893,12 @@ func (c *Client) askWithAgentInvestigation(ctx context.Context, question, awsCon
 
 	// Create and run the agent
 	agent := awsclient.NewAgent(c.awsClient, c.debug)
+
+	// Set AI decision function so agent can make intelligent decisions
+	agent.SetAIDecisionFunction(func(ctx context.Context, prompt string) (string, error) {
+		return c.Ask(ctx, prompt, "", "")
+	})
+
 	agentContext, err := agent.InvestigateQuery(ctx, question)
 	if err != nil {
 		if c.debug {
