@@ -19,6 +19,7 @@ import (
 
 	awsclient "github.com/bgdnvk/clanker/internal/aws"
 	ghclient "github.com/bgdnvk/clanker/internal/github"
+	"github.com/spf13/viper"
 	"google.golang.org/genai"
 )
 
@@ -261,7 +262,12 @@ func (c *Client) Ask(ctx context.Context, question, awsContext, codeContext stri
 
 // AskWithTools performs the full AWS tool calling workflow
 func (c *Client) AskWithTools(ctx context.Context, question, awsContext, codeContext, profileInfraAnalysis string, githubContext ...string) (string, error) {
-	// All providers use the dynamic three-stage approach
+	// Check if this query would benefit from intelligent agent investigation
+	if c.shouldUseAgent(question) && c.awsClient != nil {
+		return c.askWithAgentInvestigation(ctx, question, awsContext, codeContext, profileInfraAnalysis, githubContext...)
+	}
+
+	// Otherwise use the standard dynamic three-stage approach
 	return c.askWithDynamicAnalysis(ctx, question, awsContext, codeContext, profileInfraAnalysis, githubContext...)
 }
 
@@ -847,4 +853,166 @@ findEnd:
 	jsonStr = strings.ReplaceAll(jsonStr, "`", "'")
 
 	return jsonStr
+}
+
+// shouldUseAgent determines if the query would benefit from intelligent agent investigation
+func (c *Client) shouldUseAgent(question string) bool {
+	questionLower := strings.ToLower(question)
+
+	// Agent keywords that indicate need for log analysis and service investigation
+	agentKeywords := []string{
+		"chat", "logs", "latest", "recent", "error", "issue", "problem", "failure",
+		"debug", "investigate", "analyze", "status", "health", "performance",
+		"image", "processing", "service", "api", "response", "timeout",
+		"summary", "what happened", "whats wrong", "why", "how", "when",
+	}
+
+	for _, keyword := range agentKeywords {
+		if strings.Contains(questionLower, keyword) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// askWithAgentInvestigation uses the intelligent agent to gather context before answering
+func (c *Client) askWithAgentInvestigation(ctx context.Context, question, awsContext, codeContext, profileInfraAnalysis string, githubContext ...string) (string, error) {
+	if c.debug {
+		fmt.Printf("🤖 Using intelligent agent for context investigation...\n")
+	}
+
+	// Find the appropriate AI profile for agent operations
+	profile := c.findAgentProfile(profileInfraAnalysis)
+	if profile == nil {
+		if c.debug {
+			fmt.Printf("⚠️  No suitable AI profile found for agent operations, falling back to standard approach\n")
+		}
+		return c.askWithDynamicAnalysis(ctx, question, awsContext, codeContext, profileInfraAnalysis, githubContext...)
+	}
+
+	// Create and run the agent
+	agent := awsclient.NewAgent(c.awsClient, c.debug)
+	agentContext, err := agent.InvestigateQuery(ctx, question)
+	if err != nil {
+		if c.debug {
+			fmt.Printf("⚠️  Agent investigation failed: %v, falling back to standard approach\n", err)
+		}
+		return c.askWithDynamicAnalysis(ctx, question, awsContext, codeContext, profileInfraAnalysis, githubContext...)
+	}
+
+	// Build final context with agent's findings
+	finalContext := agent.BuildFinalContext(agentContext)
+
+	if c.debug {
+		fmt.Printf("🎯 Agent gathered %d chars of context in %d steps\n", len(finalContext), agentContext.CurrentStep)
+	}
+
+	// Combine with existing contexts
+	combinedContext := ""
+	if awsContext != "" {
+		combinedContext += "=== EXISTING AWS CONTEXT ===\n" + awsContext + "\n\n"
+	}
+	if codeContext != "" {
+		combinedContext += "=== CODE CONTEXT ===\n" + codeContext + "\n\n"
+	}
+	if len(githubContext) > 0 && githubContext[0] != "" {
+		combinedContext += "=== GITHUB CONTEXT ===\n" + githubContext[0] + "\n\n"
+	}
+
+	combinedContext += finalContext
+
+	// Final LLM call with comprehensive context
+	finalPrompt := fmt.Sprintf(`Based on the comprehensive investigation below, please answer the user's question: "%s"
+
+%s
+
+CRITICAL INSTRUCTIONS:
+- THINK DEEPLY and analyze every piece of data provided
+- EXAMINE ALL EVIDENCE carefully and look for patterns, anomalies, and connections
+- REASON THROUGH the implications of each finding systematically
+- CONSIDER multiple perspectives and potential root causes
+- SYNTHESIZE information across different services and data sources
+- Include ALL specific details, data points, and findings from the investigation
+- Quote exact messages, outputs, and critical information when available  
+- Highlight any important issues, warnings, errors, or notable patterns discovered
+- Provide specific names, values, timestamps, and concrete data points
+- Do not summarize away important details - show them when relevant
+- Focus on actionable findings with concrete evidence from the gathered data
+- Present information clearly with proper context and explanations
+- THINK STEP BY STEP through your analysis and reasoning
+- CHALLENGE your initial assumptions and verify conclusions with evidence
+- PRIORITIZE findings by severity and business impact
+
+Take your time to thoroughly analyze the data. Think extremely hard about what the evidence tells you and what actions should be taken. Please provide a comprehensive, actionable response based on the gathered information, ensuring all critical findings and specific details are prominently featured.`, question, combinedContext)
+
+	// Use the same AI provider for the final response
+	var response string
+	switch c.provider {
+	case "bedrock", "claude":
+		response, err = c.askBedrock(ctx, finalPrompt)
+	case "openai":
+		response, err = c.askOpenAI(ctx, finalPrompt)
+	case "anthropic":
+		response, err = c.askAnthropic(ctx, finalPrompt)
+	case "gemini", "gemini-api":
+		response, err = c.askGemini(ctx, finalPrompt)
+	default:
+		response, err = c.askBedrock(ctx, finalPrompt)
+	}
+
+	if err != nil {
+		return "", fmt.Errorf("failed to get final AI response: %w", err)
+	}
+
+	return response, nil
+}
+
+// findAgentProfile finds the appropriate AI profile for agent operations
+func (c *Client) findAgentProfile(fallbackProfile string) *awsclient.AIProfile {
+	// Try to find agent-specific profile first
+	if c.awsClient != nil {
+		profiles := c.awsClient.GetAIProfiles()
+
+		// Look for agent-specific profiles
+		for name, profile := range profiles {
+			if strings.Contains(strings.ToLower(name), "agent") {
+				return &profile
+			}
+		}
+
+		// Look for LLM call profiles
+		for name, profile := range profiles {
+			if strings.Contains(strings.ToLower(name), "llm-call") {
+				return &profile
+			}
+		}
+
+		// Use the fallback profile if specified
+		if fallbackProfile != "" {
+			if profile, exists := profiles[fallbackProfile]; exists {
+				return &profile
+			}
+		}
+
+		// Use the default AI provider from config
+		defaultProvider := viper.GetString("ai.default_provider")
+		if defaultProvider != "" {
+			if profile, exists := profiles[defaultProvider]; exists {
+				return &profile
+			}
+		}
+
+		// Use default profile as last resort
+		if profile, exists := profiles["default"]; exists {
+			return &profile
+		}
+
+		// If we have any profiles, use the first one
+		for _, profile := range profiles {
+			return &profile
+		}
+	}
+
+	return nil
 }
