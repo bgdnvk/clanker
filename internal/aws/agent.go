@@ -124,7 +124,7 @@ var (
 			RequiredData:   []string{},
 			ProvidedData:   []string{"logs", "error_patterns", "log_metrics"},
 			ExecutionOrder: 1,
-			WaitTimeout:    10 * time.Second,
+			WaitTimeout:    5 * time.Second, // Reduced for faster execution
 		},
 	}
 	AgentTypeMetrics = AgentType{
@@ -133,7 +133,7 @@ var (
 			RequiredData:   []string{},
 			ProvidedData:   []string{"metrics", "performance_data", "thresholds"},
 			ExecutionOrder: 1,
-			WaitTimeout:    10 * time.Second,
+			WaitTimeout:    5 * time.Second, // Reduced for faster execution
 		},
 	}
 	AgentTypeInfrastructure = AgentType{
@@ -142,7 +142,7 @@ var (
 			RequiredData:   []string{},
 			ProvidedData:   []string{"service_config", "deployment_status", "resource_health"},
 			ExecutionOrder: 2,
-			WaitTimeout:    15 * time.Second,
+			WaitTimeout:    8 * time.Second, // Reduced for faster execution
 		},
 	}
 	AgentTypeSecurity = AgentType{
@@ -151,7 +151,7 @@ var (
 			RequiredData:   []string{"logs", "service_config"},
 			ProvidedData:   []string{"security_status", "access_patterns", "vulnerabilities"},
 			ExecutionOrder: 3,
-			WaitTimeout:    12 * time.Second,
+			WaitTimeout:    6 * time.Second, // Reduced for faster execution
 		},
 	}
 	AgentTypeCost = AgentType{
@@ -160,7 +160,7 @@ var (
 			RequiredData:   []string{"metrics", "resource_health"},
 			ProvidedData:   []string{"cost_analysis", "usage_patterns", "optimization_suggestions"},
 			ExecutionOrder: 4,
-			WaitTimeout:    20 * time.Second,
+			WaitTimeout:    8 * time.Second, // Reduced for faster execution
 		},
 	}
 	AgentTypePerformance = AgentType{
@@ -169,7 +169,7 @@ var (
 			RequiredData:   []string{"metrics", "logs", "resource_health"},
 			ProvidedData:   []string{"performance_analysis", "bottlenecks", "scaling_recommendations"},
 			ExecutionOrder: 5,
-			WaitTimeout:    15 * time.Second,
+			WaitTimeout:    8 * time.Second, // Reduced for faster execution
 		},
 	}
 )
@@ -253,7 +253,7 @@ func NewAgent(client *Client, debug bool) *Agent {
 	return &Agent{
 		client:   client,
 		debug:    debug,
-		maxSteps: 6, // Maximum 6 back-and-forth calls before final response
+		maxSteps: 3, // Reduced to 3 steps for faster decisions
 	}
 }
 
@@ -335,8 +335,8 @@ func (a *Agent) InvestigateQuery(ctx context.Context, query string) (*AgentConte
 	if len(applicableNodes) > 0 {
 		coordinator.SpawnAgents(ctx, a, applicableNodes)
 
-		// Wait for parallel agents to complete (with timeout)
-		timeout := 30 * time.Second
+		// Wait for parallel agents to complete (with shorter timeout for faster decisions)
+		timeout := 15 * time.Second
 		err := coordinator.WaitForCompletion(ctx, timeout)
 		if err != nil {
 			a.addThought(agentCtx, fmt.Sprintf("Some parallel agents failed or timed out: %v", err), "warning", "Proceeding with available data")
@@ -811,22 +811,9 @@ func (a *Agent) getAllLogGroups(ctx context.Context) ([]string, error) {
 
 // extractKeywordsFromQuery extracts relevant keywords from the user's query
 func (a *Agent) extractKeywordsFromQuery(query string) []string {
-	// Common service/technology keywords that might appear in log group names
-	potentialKeywords := []string{
-		"api", "lambda", "ecs", "batch", "fargate", "ec2", "rds", "s3",
-		"chat", "image", "process", "worker", "job", "task", "service",
-		"auth", "user", "admin", "health", "monitor", "log", "error",
-		"dev", "stage", "prod", "test", "qa",
-	}
-
 	var keywords []string
-	for _, keyword := range potentialKeywords {
-		if strings.Contains(query, keyword) {
-			keywords = append(keywords, keyword)
-		}
-	}
 
-	// Also extract any quoted strings or specific service names mentioned
+	// Extract all words from query - NO HARDCODED LISTS
 	words := strings.Fields(query)
 	for _, word := range words {
 		// Clean word of punctuation
@@ -1430,72 +1417,45 @@ func NewDecisionTree() *DecisionTree {
 		Parameters: make(AWSData),
 	}
 
-	// Build the decision tree structure
+	// Build a focused decision tree that makes quick decisions
 	root.Children = []*DecisionNode{
 		{
-			ID:         "logs_check",
-			Name:       "Check if logs are needed",
-			Condition:  "contains_keywords(['logs', 'errors', 'latest', 'recent', 'problems'])",
-			Action:     "spawn_log_agents",
-			Priority:   9,
+			ID:         "logs_priority",
+			Name:       "Logs investigation priority",
+			Condition:  "contains_keywords(['logs', 'log', 'errors', 'latest', 'recent', 'problems', 'investigate'])",
+			Action:     "prioritize_log_investigation",
+			Priority:   10,
 			AgentTypes: []string{"log"},
-			Parameters: AWSData{"priority": "high"},
+			Parameters: AWSData{"priority": "critical", "focus": "targeted"},
 			Children: []*DecisionNode{
 				{
-					ID:         "error_focus",
-					Name:       "Focus on error logs",
-					Condition:  "contains_keywords(['error', 'fail', 'exception', 'problem'])",
-					Action:     "prioritize_error_logs",
+					ID:         "service_logs",
+					Name:       "Specific service logs",
+					Condition:  "contains_keywords(['service', 'api', 'lambda', 'function', 'logs', 'investigate'])",
+					Action:     "investigate_service_logs",
 					Priority:   10,
 					AgentTypes: []string{"log"},
-					Parameters: AWSData{"filter": "ERROR", "priority": "critical"},
-				},
-				{
-					ID:         "recent_focus",
-					Name:       "Focus on recent logs",
-					Condition:  "contains_keywords(['latest', 'recent', 'last'])",
-					Action:     "prioritize_recent_logs",
-					Priority:   8,
-					AgentTypes: []string{"log"},
-					Parameters: AWSData{"time_range": "1h", "priority": "high"},
+					Parameters: AWSData{"approach": "service_specific", "priority": "critical"},
 				},
 			},
 		},
 		{
-			ID:         "metrics_check",
-			Name:       "Check if metrics are needed",
-			Condition:  "contains_keywords(['performance', 'metrics', 'cpu', 'memory', 'latency'])",
-			Action:     "spawn_metrics_agents",
-			Priority:   7,
-			AgentTypes: []string{"metrics", "performance"},
-			Parameters: AWSData{"priority": "medium"},
-		},
-		{
-			ID:         "infrastructure_check",
-			Name:       "Check if infrastructure info is needed",
-			Condition:  "contains_keywords(['service', 'status', 'running', 'instances', 'infrastructure'])",
-			Action:     "spawn_infrastructure_agents",
-			Priority:   6,
+			ID:         "service_discovery",
+			Name:       "Service discovery needed",
+			Condition:  "contains_keywords(['service', 'api', 'lambda', 'function', 'running', 'status', 'discover'])",
+			Action:     "quick_service_discovery",
+			Priority:   8,
 			AgentTypes: []string{"infrastructure"},
-			Parameters: AWSData{"priority": "medium"},
+			Parameters: AWSData{"scope": "targeted", "priority": "high"},
 		},
 		{
-			ID:         "security_check",
-			Name:       "Check if security info is needed",
-			Condition:  "contains_keywords(['security', 'access', 'permissions', 'roles', 'iam'])",
-			Action:     "spawn_security_agents",
-			Priority:   5,
-			AgentTypes: []string{"security"},
-			Parameters: AWSData{"priority": "low"},
-		},
-		{
-			ID:         "cost_check",
-			Name:       "Check if cost info is needed",
-			Condition:  "contains_keywords(['cost', 'billing', 'spend', 'budget'])",
-			Action:     "spawn_cost_agents",
-			Priority:   4,
-			AgentTypes: []string{"cost"},
-			Parameters: AWSData{"priority": "low"},
+			ID:         "performance_check",
+			Name:       "Performance investigation",
+			Condition:  "contains_keywords(['performance', 'slow', 'metrics', 'cpu', 'memory', 'latency', 'errors'])",
+			Action:     "focused_performance_check",
+			Priority:   7,
+			AgentTypes: []string{"metrics"},
+			Parameters: AWSData{"focus": "key_metrics", "priority": "medium"},
 		},
 	}
 
@@ -1674,13 +1634,48 @@ func (ac *AgentCoordinator) runParallelAgent(ctx context.Context, agent *Agent, 
 
 	// Execute operations for this agent type
 	for _, operation := range parallelAgent.Operations {
-		result, err := agent.client.executeOperation(ctx, operation.Operation, operation.Parameters)
+		var result any
+		var err error
+
+		// Use AI decision-making for discovery and intelligent operations
+		if operation.Operation == "discover_services" {
+			result, err = ac.discoverServicesWithAI(ctx, agent, operation.Parameters)
+		} else if operation.Operation == "investigate_service_logs" {
+			// Check if discovery was skipped - use MainContext ServiceData instead
+			var discoveredServices map[string]any
+			if skipDiscovery, exists := operation.Parameters["skip_discovery"]; exists && skipDiscovery == true {
+				// Use already discovered services from coordinator context
+				discoveredServices = make(map[string]any)
+				for k, v := range ac.MainContext.ServiceData {
+					discoveredServices[k] = v
+				}
+				if verbose {
+					fmt.Printf("🔄 Using previously discovered services from coordinator context\n")
+				}
+			} else {
+				// Use results from current agent (normal flow)
+				discoveredServices = parallelAgent.Results
+			}
+			result, err = ac.investigateServiceLogsWithAI(ctx, agent, operation.Parameters, discoveredServices)
+		} else {
+			// Fallback to traditional operation execution
+			result, err = agent.client.executeOperation(ctx, operation.Operation, operation.Parameters)
+		}
+
 		if err != nil {
 			parallelAgent.Error = err
 			if verbose {
 				fmt.Printf("❌ Agent %s operation %s failed: %v\n", parallelAgent.ID, operation.Operation, err)
 			}
-			return
+			// For service discovery operations, continue with partial results rather than failing entirely
+			if operation.Operation == "discover_services" || operation.Operation == "investigate_service_logs" {
+				if verbose {
+					fmt.Printf("⚠️  Continuing with partial results for %s\n", operation.Operation)
+				}
+				parallelAgent.Error = nil // Reset error to continue
+			} else {
+				return
+			}
 		}
 
 		// Store result
@@ -1691,6 +1686,408 @@ func (ac *AgentCoordinator) runParallelAgent(ctx context.Context, agent *Agent, 
 			fmt.Printf("✅ Agent %s completed operation: %s\n", parallelAgent.ID, operation.Operation)
 		}
 	}
+}
+
+// discoverServicesWithAI uses smart discovery to find services based on the query
+func (ac *AgentCoordinator) discoverServicesWithAI(ctx context.Context, agent *Agent, parameters map[string]any) (any, error) {
+	verbose := viper.GetBool("verbose")
+
+	// Check if we already have services discovered in the coordinator context
+	if len(ac.MainContext.ServiceData) > 0 {
+		if verbose {
+			fmt.Printf("🔄 Using already discovered services, skipping redundant discovery\n")
+		}
+		return ac.MainContext.ServiceData, nil
+	}
+
+	if verbose {
+		fmt.Printf("🔍 Smart service discovery for query: %s\n", ac.MainContext.OriginalQuery)
+	}
+
+	// Skip AI call and go directly to minimal discovery that works
+	services, err := ac.minimalServiceDiscovery(ctx, agent)
+	if err == nil {
+		// Store discovered services in coordinator context to avoid rediscovery
+		for k, v := range services.(map[string]any) {
+			ac.MainContext.ServiceData[k] = v
+		}
+	}
+	return services, err
+}
+
+// minimalServiceDiscovery runs only essential service discovery operations
+func (ac *AgentCoordinator) minimalServiceDiscovery(ctx context.Context, agent *Agent) (any, error) {
+	verbose := viper.GetBool("verbose")
+	services := make(map[string]any)
+
+	if verbose {
+		fmt.Printf("🔄 Using minimal service discovery (Lambda + logs only)\n")
+	}
+
+	// Just get Lambda functions and log groups - most common for backend services
+	lambdaResult, lambdaErr := agent.client.executeOperation(ctx, "list_lambda_functions", map[string]any{})
+	if lambdaErr == nil {
+		services["lambda_functions"] = lambdaResult
+	}
+
+	logGroupsResult, logGroupsErr := agent.client.executeOperation(ctx, "list_log_groups", map[string]any{})
+	if logGroupsErr == nil {
+		services["log_groups"] = logGroupsResult
+	}
+
+	if verbose {
+		fmt.Printf("✅ Minimal discovery: Lambda=%v, LogGroups=%v\n",
+			lambdaErr == nil, logGroupsErr == nil)
+	}
+
+	return services, nil
+}
+
+// investigateServiceLogsWithAI uses AI to intelligently investigate logs for discovered services
+func (ac *AgentCoordinator) investigateServiceLogsWithAI(ctx context.Context, agent *Agent, parameters map[string]any, discoveredServices map[string]any) (any, error) {
+	verbose := viper.GetBool("verbose")
+
+	if verbose {
+		fmt.Printf("🎯 Investigating logs for discovered services based on query\n")
+	}
+
+	// Skip AI call for now - go directly to smart fallback investigation
+	return ac.fallbackLogInvestigation(ctx, agent, discoveredServices)
+}
+
+// fallbackLogInvestigation provides intelligent fallback when AI decisions fail
+func (ac *AgentCoordinator) fallbackLogInvestigation(ctx context.Context, agent *Agent, discoveredServices map[string]any) (any, error) {
+	verbose := viper.GetBool("verbose")
+	query := strings.ToLower(ac.MainContext.OriginalQuery)
+	results := make(map[string]any)
+
+	if verbose {
+		fmt.Printf("🔄 Using intelligent fallback log investigation\n")
+	}
+
+	// Derive candidate keywords from the query
+	keywords := ac.extractKeywords(query)
+
+	if verbose {
+		fmt.Printf("🔍 Extracted keywords: %v\n", keywords)
+		// Debug: show what keys exist in discovered services
+		keys := make([]string, 0, len(discoveredServices))
+		for k := range discoveredServices {
+			keys = append(keys, k)
+		}
+		fmt.Printf("🔍 Discovered services contain: %v\n", keys)
+	}
+
+	// Unwrap nested discovery results if needed
+	// Agent stores results as "agent_type_operation" keys
+	var lambdaData any
+	var lambdaExists bool
+
+	// Try direct key first
+	lambdaData, lambdaExists = discoveredServices["lambda_functions"]
+
+	// If not found, try unwrapping from log_discover_services
+	if !lambdaExists {
+		if nestedData, exists := discoveredServices["log_discover_services"]; exists {
+			if nestedMap, ok := nestedData.(map[string]any); ok {
+				lambdaData, lambdaExists = nestedMap["lambda_functions"]
+			}
+		}
+	}
+
+	// Target Lambda functions first
+	if lambdaExists {
+		if verbose {
+			fmt.Printf("🔍 Lambda data found\n")
+		}
+		relevant := ac.findRelevantServices(lambdaData, query)
+
+		if verbose {
+			fmt.Printf("🔍 findRelevantServices returned %d matches\n", len(relevant))
+		}
+
+		// If no matches found, try to match keywords against actual function names
+		if len(relevant) == 0 && len(keywords) > 0 {
+			// Extract actual function names from the Lambda data
+			functionNames := ac.extractLambdaFunctionNames(lambdaData)
+
+			if verbose {
+				fmt.Printf("🔍 Extracted %d function names: %v\n", len(functionNames), functionNames)
+			}
+
+			// Match keywords against actual function names
+			for _, keyword := range keywords {
+				for _, fnName := range functionNames {
+					// Check if keyword is part of the function name (case-insensitive)
+					if strings.Contains(strings.ToLower(fnName), keyword) {
+						relevant = append(relevant, fnName)
+						if verbose {
+							fmt.Printf("🔍 Matched '%s' → '%s'\n", keyword, fnName)
+						}
+					}
+				}
+			}
+		}
+
+		targets := uniqueStrings(relevant)
+		if len(targets) > 5 {
+			targets = targets[:5]
+		}
+		if len(targets) > 0 && verbose {
+			fmt.Printf("🎯 Targeting %d Lambda service(s): %v\n", len(targets), targets)
+		}
+		for _, name := range targets {
+			logGroup := fmt.Sprintf("/aws/lambda/%s", name)
+			out, err := agent.client.executeOperation(ctx, "get_recent_logs", map[string]any{
+				"log_group_name": logGroup,
+				"hours_back":     24,
+				"limit":          300,
+				"filter_pattern": "?ERROR ?Exception ?CRITICAL ?WARN ?WARNING",
+			})
+			if err == nil {
+				results[fmt.Sprintf("lambda_%s_logs", name)] = out
+				if verbose {
+					fmt.Printf("✅ Retrieved Lambda logs for %s\n", name)
+				}
+			} else if verbose {
+				fmt.Printf("⚠️  Failed to get Lambda logs for %s: %v\n", name, err)
+			}
+		}
+	}
+
+	// API Gateway execution logs when relevant
+	if strings.Contains(query, "api") || strings.Contains(query, "gateway") {
+		if logGroupData, exists := discoveredServices["log_groups"]; exists {
+			lgStr := fmt.Sprintf("%v", logGroupData)
+			lines := strings.Split(lgStr, "\n")
+			count := 0
+			for _, line := range lines {
+				if count >= 3 {
+					break
+				}
+				if strings.Contains(line, "API-Gateway-Execution-Logs") && strings.Contains(line, "|") {
+					parts := strings.Split(line, "|")
+					for _, part := range parts {
+						name := strings.TrimSpace(part)
+						if strings.HasPrefix(name, "/") {
+							out, err := agent.client.executeOperation(ctx, "get_recent_logs", map[string]any{
+								"log_group_name": name,
+								"hours_back":     24,
+								"limit":          200,
+								"filter_pattern": "?ERROR ?EXCEPTION ?5xx ?4xx",
+							})
+							if err == nil {
+								results[fmt.Sprintf("apigw_%d_logs", count)] = out
+								count++
+								if verbose {
+									fmt.Printf("✅ Retrieved API Gateway logs from %s\n", name)
+								}
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if len(results) > 0 {
+		return results, nil
+	}
+
+	// Fallback: general logs if nothing targeted found
+	if logGroupData, exists := discoveredServices["log_groups"]; exists {
+		general, err := ac.investigateGeneralLogs(ctx, agent, logGroupData)
+		if err == nil {
+			results["general_logs"] = general
+		}
+	}
+
+	return results, nil
+}
+
+// findRelevantServices finds services matching the query using generic pattern matching
+func (ac *AgentCoordinator) findRelevantServices(lambdaData any, query string) []string {
+	var relevantServices []string
+	queryLower := strings.ToLower(query)
+
+	// Extract keywords from the query
+	keywords := ac.extractKeywords(queryLower)
+
+	// Extract function names from the Lambda data
+	if lambdaFunctions, ok := lambdaData.(map[string]any); ok {
+		if functions, exists := lambdaFunctions["lambda_functions"]; exists {
+			// Convert to string and look for function names
+			functionsStr := fmt.Sprintf("%v", functions)
+
+			// Pattern matching for services based on extracted keywords
+			if len(keywords) > 0 {
+				// Look for function names containing any of the keywords
+				lines := strings.Split(functionsStr, "\n")
+				for _, line := range lines {
+					lineLower := strings.ToLower(line)
+					for _, keyword := range keywords {
+						if strings.Contains(lineLower, keyword) && strings.Contains(line, "|") {
+							// Extract function name from table format
+							parts := strings.Split(line, "|")
+							for _, part := range parts {
+								part = strings.TrimSpace(part)
+								partLower := strings.ToLower(part)
+								if strings.Contains(partLower, keyword) && !strings.Contains(part, "/") && !strings.Contains(part, "Function") {
+									relevantServices = append(relevantServices, part)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return relevantServices
+}
+
+// extractKeywords extracts relevant keywords from the user query
+func (ac *AgentCoordinator) extractKeywords(query string) []string {
+	var keywords []string
+
+	// Extract words from query - split on spaces and common punctuation
+	// Keep hyphens in words (e.g., "twocents-prod" stays together)
+	words := strings.FieldsFunc(query, func(r rune) bool {
+		return r == ' ' || r == ',' || r == '.' || r == '!' || r == '?' || r == ';' || r == ':'
+	})
+
+	for _, word := range words {
+		// Clean word of trailing punctuation but preserve hyphens
+		word = strings.Trim(word, ".,!?;:")
+		if len(word) > 2 { // Only consider words longer than 2 characters
+			keywords = append(keywords, word)
+		}
+	}
+
+	// Remove duplicates
+	seen := make(map[string]bool)
+	var uniqueKeywords []string
+	for _, keyword := range keywords {
+		if !seen[keyword] {
+			seen[keyword] = true
+			uniqueKeywords = append(uniqueKeywords, keyword)
+		}
+	}
+
+	return uniqueKeywords
+}
+
+// investigateGeneralLogs provides general log investigation
+func (ac *AgentCoordinator) investigateGeneralLogs(ctx context.Context, agent *Agent, logGroupData any) (any, error) {
+	// Get recent errors and warnings from the last few hours
+	result, err := agent.client.executeOperation(ctx, "get_recent_logs", map[string]any{
+		"hours_back":     6,
+		"limit":          200,
+		"filter_pattern": "?ERROR ?Exception ?CRITICAL ?WARN ?WARNING",
+	})
+	return result, err
+}
+
+// uniqueStrings returns a deduplicated copy of input while preserving order
+func uniqueStrings(in []string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+// extractLambdaFunctionNames extracts actual Lambda function names from Lambda data
+func (ac *AgentCoordinator) extractLambdaFunctionNames(lambdaData any) []string {
+	var names []string
+	verbose := viper.GetBool("verbose")
+
+	if verbose {
+		fmt.Printf("🔍 extractLambdaFunctionNames called with type: %T\n", lambdaData)
+	}
+
+	var functionsStr string
+
+	// Handle different input types
+	switch v := lambdaData.(type) {
+	case string:
+		functionsStr = v
+	case map[string]any:
+		if functions, exists := v["lambda_functions"]; exists {
+			functionsStr = fmt.Sprintf("%v", functions)
+		}
+	default:
+		functionsStr = fmt.Sprintf("%v", lambdaData)
+	}
+
+	if functionsStr == "" {
+		return names
+	}
+
+	// Debug: print first 500 chars of Lambda data
+	if verbose {
+		previewLen := 500
+		if len(functionsStr) < previewLen {
+			previewLen = len(functionsStr)
+		}
+		fmt.Printf("🔍 Lambda data preview: %s\n", functionsStr[:previewLen])
+	}
+
+	lines := strings.Split(functionsStr, "\n")
+
+	// Find the header line to determine Name column index
+	nameColIndex := -1
+	for _, line := range lines {
+		if strings.Contains(line, "|") && strings.Contains(line, "Name") {
+			parts := strings.Split(line, "|")
+			for i, part := range parts {
+				if strings.TrimSpace(part) == "Name" {
+					nameColIndex = i
+					if verbose {
+						fmt.Printf("🔍 Found Name column at index %d\n", i)
+					}
+					break
+				}
+			}
+			break
+		}
+	}
+
+	// Extract names from data rows
+	for _, line := range lines {
+		if !strings.Contains(line, "|") || strings.Contains(line, "---") || strings.Contains(line, "List") {
+			continue
+		}
+
+		parts := strings.Split(line, "|")
+
+		// If we found Name column, use that index
+		if nameColIndex >= 0 && nameColIndex < len(parts) {
+			name := strings.TrimSpace(parts[nameColIndex])
+			if name != "" && name != "Name" {
+				names = append(names, name)
+			}
+		} else {
+			// Fallback: look for function-like names in any column
+			for _, part := range parts {
+				part = strings.TrimSpace(part)
+				// Function names typically have hyphens, are longer than 3 chars, no spaces/colons
+				if len(part) > 3 && !strings.Contains(part, " ") && !strings.Contains(part, ":") &&
+					(strings.Contains(part, "-") || strings.Contains(part, "_")) {
+					names = append(names, part)
+					break // Only take first match per row
+				}
+			}
+		}
+	}
+
+	return uniqueStrings(names)
 }
 
 // copyContextForAgent creates a copy of the main context for an agent
@@ -1713,74 +2110,58 @@ func (ac *AgentCoordinator) copyContextForAgent(agentType AgentType) *AgentConte
 func (ac *AgentCoordinator) getOperationsForAgentType(agentType AgentType, parameters AWSData) []LLMOperation {
 	switch agentType.Name {
 	case "log":
-		operations := []LLMOperation{
-			{Operation: "list_log_groups", Reason: "Find available log groups", Parameters: map[string]any{}},
-			{Operation: "get_recent_logs", Reason: "Get recent log entries", Parameters: map[string]any{"hours_back": 1}},
-			{Operation: "get_error_logs", Reason: "Get error log entries", Parameters: map[string]any{"filter_pattern": "ERROR"}},
+		// Check if services are already discovered
+		if len(ac.MainContext.ServiceData) > 0 {
+			// Services already discovered, skip discovery and go straight to investigation
+			return []LLMOperation{
+				{Operation: "investigate_service_logs", Reason: "Investigate logs for already discovered services", Parameters: map[string]any{"query": ac.MainContext.OriginalQuery, "skip_discovery": true}},
+			}
+		} else {
+			// Need to discover services first, then investigate
+			return []LLMOperation{
+				{Operation: "discover_services", Reason: "Discover services matching the query", Parameters: map[string]any{"query": ac.MainContext.OriginalQuery}},
+				{Operation: "investigate_service_logs", Reason: "Investigate logs for discovered services", Parameters: map[string]any{"query": ac.MainContext.OriginalQuery}},
+			}
 		}
-
-		// Check if the original query mentions a specific function name
-		query := strings.ToLower(ac.MainContext.OriginalQuery)
-		words := strings.Fields(query)
-
-		// Look for any hyphenated names that could be function names
-		var functionName string
-		for _, word := range words {
-			word = strings.Trim(word, ".,!?;:")
-			if strings.Contains(word, "-") && len(word) > 5 {
-				functionName = word
-				break
+	case "metrics":
+		return []LLMOperation{
+			{Operation: "list_cloudwatch_alarms", Reason: "Get CloudWatch alarms for performance issues", Parameters: map[string]any{}},
+		}
+	case "infrastructure":
+		// Make infrastructure discovery more focused and faster
+		priority := "medium"
+		if p, exists := parameters["priority"]; exists {
+			if pStr, ok := p.(string); ok {
+				priority = pStr
 			}
 		}
 
-		// Add Lambda function analysis with function name if found
-		lambdaParams := map[string]any{}
-		if functionName != "" {
-			lambdaParams["function_name"] = functionName
+		if priority == "high" || priority == "critical" {
+			// High priority: focus on most relevant services only
+			return []LLMOperation{
+				{Operation: "list_lambda_functions", Reason: "Quick Lambda function discovery", Parameters: map[string]any{}},
+				{Operation: "describe_log_groups", Reason: "Get log groups for service discovery", Parameters: map[string]any{}},
+			}
+		} else {
+			// Regular priority: broader discovery
+			return []LLMOperation{
+				{Operation: "list_ec2_instances", Reason: "List EC2 instances", Parameters: map[string]any{}},
+				{Operation: "list_ecs_clusters", Reason: "List ECS clusters", Parameters: map[string]any{}},
+				{Operation: "list_lambda_functions", Reason: "List Lambda functions", Parameters: map[string]any{}},
+				{Operation: "describe_log_groups", Reason: "Get log groups", Parameters: map[string]any{}},
+			}
 		}
-
-		operations = append(operations, []LLMOperation{
-			{Operation: "analyze_lambda_errors", Reason: "Analyze Lambda function errors", Parameters: lambdaParams},
-			{Operation: "analyze_lambda_performance", Reason: "Analyze Lambda function performance", Parameters: lambdaParams},
-			{Operation: "get_lambda_recent_logs", Reason: "Get recent Lambda logs", Parameters: lambdaParams},
-		}...)
-
-		return operations
-	case "metrics":
-		return []LLMOperation{
-			{Operation: "list_cloudwatch_alarms", Reason: "Get CloudWatch alarms", Parameters: map[string]any{}},
-			{Operation: "get_cost_and_usage", Reason: "Get cost metrics", Parameters: map[string]any{}},
-		}
-	case "infrastructure":
-		operations := []LLMOperation{
-			{Operation: "list_ec2_instances", Reason: "List EC2 instances", Parameters: map[string]any{}},
-			{Operation: "list_ecs_clusters", Reason: "List ECS clusters", Parameters: map[string]any{}},
-			{Operation: "list_lambda_functions", Reason: "List Lambda functions", Parameters: map[string]any{}},
-			{Operation: "list_rds_instances", Reason: "List RDS instances", Parameters: map[string]any{}},
-		}
-
-		// Add ECS service log analysis for discovered services
-		operations = append(operations, LLMOperation{
-			Operation:  "analyze_ecs_service_logs",
-			Reason:     "Analyze ECS service logs",
-			Parameters: map[string]any{},
-		})
-
-		return operations
 	case "security":
 		return []LLMOperation{
 			{Operation: "list_iam_roles", Reason: "List IAM roles", Parameters: map[string]any{}},
-			{Operation: "list_security_groups", Reason: "List security groups", Parameters: map[string]any{}},
 		}
 	case "cost":
 		return []LLMOperation{
 			{Operation: "get_cost_and_usage", Reason: "Get cost analysis", Parameters: map[string]any{}},
-			{Operation: "list_budgets", Reason: "List budgets", Parameters: map[string]any{}},
 		}
 	case "performance":
 		return []LLMOperation{
 			{Operation: "list_cloudwatch_alarms", Reason: "Get performance alarms", Parameters: map[string]any{}},
-			{Operation: "describe_auto_scaling_group", Reason: "Get auto scaling info", Parameters: map[string]any{}},
 		}
 	default:
 		return []LLMOperation{}

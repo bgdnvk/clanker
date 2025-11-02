@@ -417,13 +417,25 @@ func (c *Client) askWithDynamicAnalysis(ctx context.Context, question, awsContex
 		}
 	}
 
+	// Summarize context if too large to avoid CLI arg limits and reduce token usage
+	summarizedContext, err := c.summarizeContextIfNeeded(ctx, question, finalContext.String())
+	if err != nil {
+		// Fallback: truncate context if summarization fails
+		const fallbackLimit = 80000
+		if len(finalContext.String()) > fallbackLimit {
+			summarizedContext = finalContext.String()[:fallbackLimit]
+		} else {
+			summarizedContext = finalContext.String()
+		}
+	}
+
 	// Build final prompt
 	finalPrompt := fmt.Sprintf(`%s
 
 Context:
 %s
 
-Please provide a comprehensive answer based on the live data above.`, question, finalContext.String())
+Please provide a comprehensive answer based on the live data above.`, question, summarizedContext)
 
 	if c.debug {
 		fmt.Printf("🎯 Final prompt length: %d characters\n", len(finalPrompt))
@@ -548,6 +560,9 @@ func (c *Client) askBedrock(ctx context.Context, prompt string) (string, error) 
 		return "", fmt.Errorf("failed to get AI profile for LLM calls: %w", err)
 	}
 
+	// Sanitize to ASCII-only to satisfy AWS CLI argv constraints
+	prompt = sanitizeASCII(prompt)
+
 	// Use AWS CLI directly since it works while Go SDK has SSO credential issues
 	request := ClaudeRequest{
 		AnthropicVersion: "bedrock-2023-05-31",
@@ -565,7 +580,7 @@ func (c *Client) askBedrock(ctx context.Context, prompt string) (string, error) 
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	// Base64 encode the request body for AWS CLI
+	// Base64 encode to pass as inline body; ensures ASCII-only
 	encodedBody := base64.StdEncoding.EncodeToString(requestBody)
 
 	// Call AWS CLI with LLM profile from config (for Bedrock API access)
@@ -614,7 +629,7 @@ func (c *Client) askGemini(ctx context.Context, prompt string) (string, error) {
 	}
 
 	// Create content from text
-	content := genai.NewContentFromText(prompt, genai.RoleUser)
+	content := genai.NewContentFromText(sanitizeASCII(prompt), genai.RoleUser)
 
 	// Generate content using the configured model
 	resp, err := c.geminiClient.Models.GenerateContent(ctx, profileLLMCall.Model, []*genai.Content{content}, nil)
@@ -653,7 +668,7 @@ func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
 		Messages: []Message{
 			{
 				Role:    "user",
-				Content: prompt,
+				Content: sanitizeASCII(prompt),
 			},
 		},
 	}
@@ -928,29 +943,33 @@ func (c *Client) askWithAgentInvestigation(ctx context.Context, question, awsCon
 
 	combinedContext += finalContext
 
-	// Final LLM call with comprehensive context
+	// Summarize context if too large to avoid CLI arg limits and reduce token usage
+	summarizedContext, sErr := c.summarizeContextIfNeeded(ctx, question, combinedContext)
+	if sErr != nil {
+		// Fallback: truncate context if summarization fails
+		if c.debug {
+			fmt.Printf("⚠️  Summarization failed: %v. Falling back to truncation.\n", sErr)
+		}
+		const fallbackLimit = 80000
+		if len(combinedContext) > fallbackLimit {
+			summarizedContext = combinedContext[:fallbackLimit]
+		} else {
+			summarizedContext = combinedContext
+		}
+	}
+
+	if c.debug {
+		fmt.Printf("📦 Combined context length: %d, summarized length: %d\n", len(combinedContext), len(summarizedContext))
+	}
+
+	// Final LLM call with compacted context
 	finalPrompt := fmt.Sprintf(`Based on the comprehensive investigation below, please answer the user's question: "%s"
 
 %s
 
 CRITICAL INSTRUCTIONS:
-- THINK DEEPLY and analyze every piece of data provided
-- EXAMINE ALL EVIDENCE carefully and look for patterns, anomalies, and connections
-- REASON THROUGH the implications of each finding systematically
-- CONSIDER multiple perspectives and potential root causes
-- SYNTHESIZE information across different services and data sources
-- Include ALL specific details, data points, and findings from the investigation
-- Quote exact messages, outputs, and critical information when available  
-- Highlight any important issues, warnings, errors, or notable patterns discovered
-- Provide specific names, values, timestamps, and concrete data points
-- Do not summarize away important details - show them when relevant
-- Focus on actionable findings with concrete evidence from the gathered data
-- Present information clearly with proper context and explanations
-- THINK STEP BY STEP through your analysis and reasoning
-- CHALLENGE your initial assumptions and verify conclusions with evidence
-- PRIORITIZE findings by severity and business impact
 
-Take your time to thoroughly analyze the data. Think extremely hard about what the evidence tells you and what actions should be taken. Please provide a comprehensive, actionable response based on the gathered information, ensuring all critical findings and specific details are prominently featured.`, question, combinedContext)
+Take your time to thoroughly analyze the data. Think extremely hard about what the evidence tells you and what actions should be taken. Please provide a comprehensive, actionable response based on the gathered information, ensuring all critical findings and specific details are prominently featured.`, question, summarizedContext)
 
 	// Use the same AI provider for the final response
 	var response string
@@ -972,6 +991,189 @@ Take your time to thoroughly analyze the data. Think extremely hard about what t
 	}
 
 	return response, nil
+}
+
+// summarizeContextIfNeeded reduces context size by chunking and summarizing when it exceeds limits
+func (c *Client) summarizeContextIfNeeded(ctx context.Context, question, contextText string) (string, error) {
+	// Allow override via config, else default safe limit under macOS arg max
+	maxChars := viper.GetInt("ai.max_prompt_chars")
+	if maxChars <= 0 {
+		maxChars = 120000
+	}
+
+	if len(contextText) <= maxChars {
+		return contextText, nil
+	}
+
+	// Chunk the context
+	chunkSize := viper.GetInt("ai.chunk_chars")
+	if chunkSize <= 0 {
+		chunkSize = 120000
+	}
+
+	chunks := chunkString(contextText, chunkSize)
+	// Limit total chunks to keep latency reasonable
+	maxChunks := viper.GetInt("ai.max_chunks")
+	if maxChunks <= 0 {
+		maxChunks = 6
+	}
+	if len(chunks) > maxChunks {
+		if c.debug {
+			fmt.Printf("🧩 Context split into %d chunks; sampling to %d for summarization...\n", len(chunks), maxChunks)
+		}
+		chunks = sampleChunks(chunks, maxChunks)
+	}
+	if c.debug {
+		fmt.Printf("🧠 Summarizing %d chunk(s), ~%d chars each (target <= %d chars)\n", len(chunks), chunkSize, maxChars)
+	}
+
+	summaries := make([]string, 0, len(chunks))
+	for i, ch := range chunks {
+		if c.debug {
+			fmt.Printf("📝 Summarizing chunk %d/%d (size %d chars)\n", i+1, len(chunks), len(ch))
+		}
+		sum, err := c.summarizeChunk(ctx, question, ch, i+1, len(chunks))
+		if err != nil {
+			// Fallback: truncate chunk
+			const chunkFallback = 5000
+			if len(ch) > chunkFallback {
+				summaries = append(summaries, ch[:chunkFallback])
+			} else {
+				summaries = append(summaries, ch)
+			}
+			continue
+		}
+		summaries = append(summaries, sum)
+	}
+
+	// Merge summaries and, if still too big, do a final pass summarization
+	merged := strings.Join(summaries, "\n\n")
+	if len(merged) > maxChars {
+		final, err := c.summarizeText(ctx, question, merged, "MERGE")
+		if err == nil {
+			// Ensure within limit
+			if len(final) > maxChars {
+				return final[:maxChars], nil
+			}
+			return final, nil
+		}
+		// Fallback: truncate merged summaries
+		return merged[:maxChars], nil
+	}
+	return merged, nil
+}
+
+// summarizeChunk summarizes a single chunk with strong guidance
+func (c *Client) summarizeChunk(ctx context.Context, question, chunk string, idx, total int) (string, error) {
+	prompt := fmt.Sprintf(`You are condensing AWS investigation output to the essentials needed to answer the question: "%s".
+
+CHUNK %d/%d. Create a concise, lossless summary with only:
+- Specific service/function names, ARNs, and log group names
+- Time ranges, timestamps, counts, metrics
+- Errors/exceptions with messages and frequencies
+- Alarms and states
+- Any anomalies or patterns strongly related to the question
+
+Remove boilerplate, headers, pagination, and duplicates. Keep it under 1500 words.
+
+Content:\n%s`, question, idx, total, chunk)
+
+	return c.dispatchLLM(ctx, prompt)
+}
+
+// summarizeText performs a final merge summarization
+func (c *Client) summarizeText(ctx context.Context, question, text, mode string) (string, error) {
+	prompt := fmt.Sprintf(`You are merging summarized AWS findings to answer: "%s".
+
+Task: Combine the summaries into a single concise context preserving all concrete findings (names, timestamps, errors, counts, states). Remove duplicates. Keep it under 2000 words.
+
+Mode: %s
+
+Summaries:\n%s`, question, mode, text)
+	return c.dispatchLLM(ctx, prompt)
+}
+
+// dispatchLLM routes a small prompt to the configured LLM provider
+func (c *Client) dispatchLLM(ctx context.Context, prompt string) (string, error) {
+	switch c.provider {
+	case "bedrock", "claude":
+		return c.askBedrock(ctx, prompt)
+	case "openai":
+		return c.askOpenAI(ctx, prompt)
+	case "anthropic":
+		return c.askAnthropic(ctx, prompt)
+	case "gemini", "gemini-api":
+		return c.askGemini(ctx, prompt)
+	default:
+		return c.askBedrock(ctx, prompt)
+	}
+}
+
+// chunkString splits s into chunks up to size n runes (approx by bytes here)
+func chunkString(s string, n int) []string {
+	if n <= 0 || len(s) <= n {
+		return []string{s}
+	}
+	chunks := make([]string, 0, (len(s)+n-1)/n)
+	for start := 0; start < len(s); start += n {
+		end := start + n
+		if end > len(s) {
+			end = len(s)
+		}
+		chunks = append(chunks, s[start:end])
+	}
+	return chunks
+}
+
+// sampleChunks selects up to k chunks evenly from the sequence, preserving start/end
+func sampleChunks(chunks []string, k int) []string {
+	if k <= 0 || len(chunks) <= k {
+		return chunks
+	}
+	sampled := make([]string, 0, k)
+	// Always include first and last
+	sampled = append(sampled, chunks[0])
+	sampled = append(sampled, chunks[len(chunks)-1])
+	if k == 2 {
+		return sampled
+	}
+	// Evenly sample remaining from the middle range
+	remaining := k - 2
+	step := float64(len(chunks)-2) / float64(remaining+1)
+	used := map[int]bool{0: true, len(chunks) - 1: true}
+	for i := 1; i <= remaining; i++ {
+		idx := 1 + int(step*float64(i))
+		if idx >= len(chunks)-1 {
+			idx = len(chunks) - 2
+		}
+		if !used[idx] {
+			sampled = append(sampled, chunks[idx])
+			used[idx] = true
+		}
+	}
+	return sampled
+}
+
+// sanitizeASCII strips non-ASCII runes to avoid CLI argv issues and provider limits
+func sanitizeASCII(s string) string {
+	// Fast path: if all bytes < 128
+	allASCII := true
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 128 {
+			allASCII = false
+			break
+		}
+	}
+	if allASCII {
+		return s
+	}
+	b := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] < 128 {
+			b = append(b, s[i])
+		}
+	}
+	return string(b)
 }
 
 // findAgentProfile finds the appropriate AI profile for agent operations

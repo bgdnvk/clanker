@@ -2037,7 +2037,71 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 
 	// MONITORING & LOGS operations
 	case "get_recent_logs":
-		// Use the existing log functionality
+		// If specific log group parameters are provided, fetch targeted logs
+		if input != nil {
+			if lg, ok := input["log_group_name"].(string); ok && lg != "" {
+				// Defaults
+				hoursBack := 24
+				if hb, ok := input["hours_back"]; ok {
+					switch v := hb.(type) {
+					case int:
+						hoursBack = v
+					case int32:
+						hoursBack = int(v)
+					case int64:
+						hoursBack = int(v)
+					case float64:
+						hoursBack = int(v)
+					}
+				}
+				limit := 200
+				if lim, ok := input["limit"]; ok {
+					switch v := lim.(type) {
+					case int:
+						limit = v
+					case int32:
+						limit = int(v)
+					case int64:
+						limit = int(v)
+					case float64:
+						limit = int(v)
+					}
+				}
+				filterPattern := ""
+				if fp, ok := input["filter_pattern"].(string); ok {
+					filterPattern = fp
+				}
+
+				startMillis := fmt.Sprintf("%d", time.Now().Add(-time.Duration(hoursBack)*time.Hour).Unix()*1000)
+
+				args := []string{
+					"logs", "filter-log-events",
+					"--log-group-name", lg,
+					"--start-time", startMillis,
+					"--output", "json",
+					"--query", "events[*].{Timestamp:timestamp,Message:message}",
+					"--limit", fmt.Sprintf("%d", limit),
+				}
+				if filterPattern != "" {
+					args = append(args, "--filter-pattern", filterPattern)
+				}
+
+				if verbose {
+					fmt.Printf("🔍 %s: Filtering logs for %s (last %dh, limit %d, pattern '%s')\n", toolName, lg, hoursBack, limit, filterPattern)
+				}
+
+				result, err := c.execAWSCLI(ctx, args, profile)
+				if err != nil {
+					return fmt.Sprintf("❌ Failed to get logs for %s: %v", lg, err), nil
+				}
+
+				analysis := fmt.Sprintf("📝 RECENT LOGS FROM %s\n", lg)
+				analysis += "===============================\n\n"
+				analysis += result + "\n"
+				return analysis, nil
+			}
+		}
+		// Otherwise, use the existing generic recent error logs
 		return c.getRecentErrorLogs(ctx, "recent logs")
 
 	case "list_cloudwatch_alarms":
