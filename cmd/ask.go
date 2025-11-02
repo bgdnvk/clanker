@@ -44,6 +44,8 @@ Examples:
 		profile, _ := cmd.Flags().GetString("profile")
 		workspace, _ := cmd.Flags().GetString("workspace")
 		aiProfile, _ := cmd.Flags().GetString("ai-profile")
+		openaiKey, _ := cmd.Flags().GetString("openai-key")
+		anthropicKey, _ := cmd.Flags().GetString("anthropic-key")
 
 		// Compliance mode enables comprehensive service discovery with specific formatting
 		if compliance {
@@ -117,7 +119,15 @@ Format as a professional compliance table suitable for government security docum
 			// Use specified profile or default from config
 			targetProfile := profile
 			if targetProfile == "" {
-				targetProfile = viper.GetString("aws.default_profile")
+				// Try infra config first
+				defaultEnv := viper.GetString("infra.default_environment")
+				if defaultEnv == "" {
+					defaultEnv = "dev"
+				}
+				targetProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+				if targetProfile == "" {
+					targetProfile = viper.GetString("aws.default_profile")
+				}
 				if targetProfile == "" {
 					targetProfile = "default" // fallback
 				}
@@ -164,14 +174,20 @@ Format as a professional compliance table suitable for government security docum
 		}
 
 		if includeTerraform {
-			tfClient, err := tfclient.NewClient(workspace)
-			if err != nil {
-				return fmt.Errorf("failed to create Terraform client: %w", err)
-			}
+			// Only try to create Terraform client if workspaces are configured
+			workspaces := viper.GetStringMap("terraform.workspaces")
+			if len(workspaces) > 0 {
+				tfClient, err := tfclient.NewClient(workspace)
+				if err != nil {
+					return fmt.Errorf("failed to create Terraform client: %w", err)
+				}
 
-			terraformContext, err = tfClient.GetRelevantContext(ctx, question)
-			if err != nil {
-				return fmt.Errorf("failed to get Terraform context: %w", err)
+				terraformContext, err = tfClient.GetRelevantContext(ctx, question)
+				if err != nil {
+					return fmt.Errorf("failed to get Terraform context: %w", err)
+				}
+			} else if verbose {
+				fmt.Println("Terraform context requested but no workspaces configured, skipping")
 			}
 		}
 
@@ -192,7 +208,15 @@ Format as a professional compliance table suitable for government security docum
 				// Use specified profile or default from config
 				targetProfile := profile
 				if targetProfile == "" {
-					targetProfile = viper.GetString("aws.default_profile")
+					// Try infra config first
+					defaultEnv := viper.GetString("infra.default_environment")
+					if defaultEnv == "" {
+						defaultEnv = "dev"
+					}
+					targetProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+					if targetProfile == "" {
+						targetProfile = viper.GetString("aws.default_profile")
+					}
 					if targetProfile == "" {
 						targetProfile = "default" // fallback
 					}
@@ -238,11 +262,19 @@ Format as a professional compliance table suitable for government security docum
 				// Only use API key for explicit gemini-api provider
 				apiKey = viper.GetString("ai.providers.gemini-api.api_key_env")
 			} else if provider == "openai" {
-				// Get OpenAI API key from config
-				apiKey = viper.GetString("ai.providers.openai.api_key")
+				// Get OpenAI API key from flag or config
+				if openaiKey != "" {
+					apiKey = openaiKey
+				} else {
+					apiKey = viper.GetString("ai.providers.openai.api_key")
+				}
 			} else if provider == "anthropic" {
-				// Get Anthropic API key from config
-				apiKey = viper.GetString("ai.providers.anthropic.api_key_env")
+				// Get Anthropic API key from flag or config
+				if anthropicKey != "" {
+					apiKey = anthropicKey
+				} else {
+					apiKey = viper.GetString("ai.providers.anthropic.api_key_env")
+				}
 			} else {
 				// Default/other providers
 				apiKey = viper.GetString("ai.api_key")
@@ -275,13 +307,20 @@ Format as a professional compliance table suitable for government security docum
 				// Only use API key for explicit gemini-api provider
 				apiKey = viper.GetString("ai.providers.gemini-api.api_key_env")
 			} else if provider == "openai" {
-				// Get OpenAI API key from config
-				apiKey = viper.GetString("ai.providers.openai.api_key")
+				// Get OpenAI API key from flag or config
+				if openaiKey != "" {
+					apiKey = openaiKey
+				} else {
+					apiKey = viper.GetString("ai.providers.openai.api_key")
+				}
 			} else if provider == "anthropic" {
-				// Get Anthropic API key from config
-				apiKey = viper.GetString("ai.providers.anthropic.api_key_env")
+				// Get Anthropic API key from flag or config
+				if anthropicKey != "" {
+					apiKey = anthropicKey
+				} else {
+					apiKey = viper.GetString("ai.providers.anthropic.api_key_env")
+				}
 			} else {
-				// Default/other providers
 				// Default/other providers
 				apiKey = viper.GetString("ai.api_key")
 			}
@@ -334,6 +373,8 @@ func init() {
 	askCmd.Flags().String("profile", "", "AWS profile to use for infrastructure queries")
 	askCmd.Flags().String("workspace", "", "Terraform workspace to use for infrastructure queries")
 	askCmd.Flags().String("ai-profile", "", "AI profile to use (default: 'default')")
+	askCmd.Flags().String("openai-key", "", "OpenAI API key (overrides config)")
+	askCmd.Flags().String("anthropic-key", "", "Anthropic API key (overrides config)")
 }
 
 // inferContext tries to determine if the question is about AWS, code, GitHub, or Terraform

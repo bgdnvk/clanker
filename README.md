@@ -1,20 +1,29 @@
 # Clanker CLI
 
 Instead of losing your mind about why your infra isn't working just ask clanker what's the issue.  
-EARLY ALPHA   
+EARLY ALPHA
 
-DevOps Observability ChatOps and that kind of stuff. 
+DevOps Observability ChatOps and that kind of stuff.
 Clanker only reads, and judges you, never modifies anything (yet).
 
 ## how to use
+
 make install
 add a yaml file with AWS bedrock or OpenAI key as LLM calls and your AWS infra profile
-```clanker ask "what's the status of my chat service lambda?"```
+`clanker ask "what's the status of my chat service lambda?"`
 
 ## WHAT YOU NEED
-Go, AWS CLI, OpenAI key or Claude on Bedrock (Anthropic and Gemini coming soon)
+
+Go, **AWS CLI v2** (v1 will give "Unknown options: --no-cli-pager" errors), OpenAI key or Claude on Bedrock (Anthropic and Gemini coming soon)
+
+Install AWS CLI v2:
+
+```bash
+brew install awscli
+```
 
 ## Read the .clanker.example.yaml
+
 This tool is made to help move and check infra in different environments and clouds, we have AI LLM call provider and the INFRA we want to analyze, define those in your yaml!! READ THE YAML EXAMPLE!!!!  
 We can change both with --ai-profile (for what AI provider to use to make LLM calls) and --profile (what infra/env you want to analyze) read the examples below.
 
@@ -23,13 +32,15 @@ After you read the yaml example just do make install.
 ONLY TESTED ON MAC
 
 ## WHAT WORKS AND WHAT IVE TESTED
+
 ask command works rly well, analyzing AWS infra on different AWS environments is pretty cool, OpenAI works and so does Claude 4 on AWS Bedrock (use claude 4 with bedrock if you can)
 
-once you add your AI and INFRA profiles in the yaml you can just do ```clanker ask "what's the last error from my big-api-service lambda?"```  
+once you add your AI and INFRA profiles in the yaml you can just do `clanker ask "what's the last error from my big-api-service lambda?"`
 
 I also have added keywords you can establish with your services, this will become a matrix later on for dependencies we modify.
 
 ## TOP Priority and what ill be working on
+
 1. Terraform with workspaces
 2. Github Actions
 3. GCP and Azure support
@@ -41,12 +52,15 @@ I also have added keywords you can establish with your services, this will becom
 9. Better code, ikr?
 
 ## Why build this?
+
 I'm lazy and I want my job to be easier
 
 ## Who is this for?
+
 Anyone dealing with infra/cloud stuff - especially those with multiple environments and different clouds. The last part is also why we do AWS CLI calls directly and don't use Golang packages
 
 ## contact
+
 @ tekbog on twitter
 
 ## ----- Below is an AI slop summary with examples ------
