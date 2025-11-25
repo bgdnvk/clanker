@@ -940,6 +940,11 @@ func (c *Client) executeOperation(ctx context.Context, toolName string, input ma
 	return c.executeAWSOperation(ctx, toolName, input, profile)
 }
 
+// ExecuteOperation exposes the default single-operation execution helper.
+func (c *Client) ExecuteOperation(ctx context.Context, toolName string, input map[string]interface{}) (string, error) {
+	return c.executeOperation(ctx, toolName, input)
+}
+
 // executeOperations executes multiple AWS operations using the default infrastructure profile
 func (c *Client) executeOperations(ctx context.Context, operations []LLMOperation) (string, error) {
 	defaultEnv := viper.GetString("infra.default_environment")
@@ -963,6 +968,11 @@ func (c *Client) executeOperations(ctx context.Context, operations []LLMOperatio
 	return c.executeOperationsWithProfile(ctx, operations, profile)
 }
 
+// ExecuteOperations exposes the default batch execution helper.
+func (c *Client) ExecuteOperations(ctx context.Context, operations []LLMOperation) (string, error) {
+	return c.executeOperations(ctx, operations)
+}
+
 // execCLI executes AWS CLI commands using the default infrastructure profile
 func (c *Client) execCLI(ctx context.Context, args []string) (string, error) {
 	defaultEnv := viper.GetString("infra.default_environment")
@@ -984,4 +994,9 @@ func (c *Client) execCLI(ctx context.Context, args []string) (string, error) {
 		Region:     awsRegion,
 	}
 	return c.execAWSCLI(ctx, args, profile)
+}
+
+// ExecCLI exposes the CLI helper to other packages.
+func (c *Client) ExecCLI(ctx context.Context, args []string) (string, error) {
+	return c.execCLI(ctx, args)
 }
