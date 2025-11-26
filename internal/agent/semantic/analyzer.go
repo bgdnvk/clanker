@@ -8,90 +8,22 @@ import (
 	"github.com/bgdnvk/clanker/internal/agent/model"
 )
 
-type Analyzer struct {
-	KeywordWeights  map[string]float64
-	ContextPatterns map[string][]string
-	ServiceMapping  map[string][]string
-	IntentSignals   map[string]map[string]float64
-	UrgencyKeywords map[string]float64
-	TimeFrameWords  map[string]string
-}
-
 func NewAnalyzer() *Analyzer {
 	return &Analyzer{
-		KeywordWeights: map[string]float64{
-			"error":    1.0,
-			"failed":   0.9,
-			"warning":  0.7,
-			"critical": 1.0,
-			"down":     0.9,
-			"slow":     0.6,
-			"timeout":  0.8,
-			"crash":    1.0,
-			"debug":    0.3,
-			"info":     0.2,
-			"success":  0.1,
-			"healthy":  0.1,
-		},
-		ContextPatterns: map[string][]string{
-			"troubleshoot": {"error", "failed", "broken", "issue", "problem", "trouble"},
-			"monitor":      {"status", "health", "performance", "metrics", "dashboard"},
-			"analyze":      {"data", "logs", "patterns", "trends", "analysis"},
-			"investigate":  {"investigate", "find", "search", "look", "check"},
-		},
-		ServiceMapping: map[string][]string{
-			"lambda":      {"lambda", "function", "serverless"},
-			"ec2":         {"ec2", "instance", "server", "vm"},
-			"rds":         {"rds", "database", "db", "mysql", "postgres"},
-			"s3":          {"s3", "bucket", "storage", "object"},
-			"cloudwatch":  {"cloudwatch", "logs", "metrics", "alarm"},
-			"ecs":         {"ecs", "container", "docker", "task"},
-			"api_gateway": {"api", "gateway", "endpoint", "rest"},
-		},
-		IntentSignals: map[string]map[string]float64{
-			"troubleshoot": {
-				"error":   1.0,
-				"failed":  0.9,
-				"issue":   0.8,
-				"problem": 0.8,
-			},
-			"monitor": {
-				"status":      0.9,
-				"health":      0.8,
-				"performance": 0.7,
-				"metrics":     0.6,
-			},
-			"analyze": {
-				"analyze":  1.0,
-				"data":     0.7,
-				"patterns": 0.8,
-				"trends":   0.6,
-			},
-		},
-		UrgencyKeywords: map[string]float64{
-			"critical":  1.0,
-			"urgent":    0.9,
-			"emergency": 1.0,
-			"down":      0.9,
-			"outage":    1.0,
-			"crash":     0.8,
-			"failed":    0.7,
-		},
-		TimeFrameWords: map[string]string{
-			"now":        "real_time",
-			"current":    "real_time",
-			"latest":     "recent",
-			"recent":     "recent",
-			"today":      "recent",
-			"yesterday":  "recent",
-			"last":       "recent",
-			"historical": "historical",
-			"past":       "historical",
-			"old":        "historical",
-		},
+		KeywordWeights:  cloneKeywordWeights(defaultKeywordWeights),
+		ContextPatterns: cloneContextPatterns(defaultContextPatterns),
+		ServiceMapping:  cloneServiceMapping(defaultServiceMapping),
+		IntentSignals:   cloneIntentSignals(defaultIntentSignals),
+		UrgencyKeywords: cloneUrgencyKeywords(defaultUrgencyKeywords),
+		TimeFrameWords:  cloneTimeFrameWords(defaultTimeFrameWords),
 	}
 }
 
+// AnalyzeQuery performs a purely lexical pass that classifies the user's
+// question without calling external NLP services. It scores intent by summing
+// word weights, infers urgency and timeframe from keyword buckets, tags cloud
+// services via the mapping table, and fills in likely data types so downstream
+// planners can quickly decide which collectors to run.
 func (sa *Analyzer) AnalyzeQuery(query string) model.QueryIntent {
 	queryLower := strings.ToLower(query)
 	words := strings.Fields(queryLower)

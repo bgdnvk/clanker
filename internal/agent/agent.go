@@ -83,7 +83,7 @@ func (a *Agent) InvestigateQuery(ctx context.Context, query string) (*AgentConte
 	}
 
 	// Add semantic analysis results to context
-	agentCtx.GatheredData["semantic_analysis"] = map[string]interface{}{
+	agentCtx.GatheredData["semantic_analysis"] = map[string]any{
 		"intent":          queryIntent,
 		"confidence":      queryIntent.Confidence,
 		"target_services": queryIntent.TargetServices,
