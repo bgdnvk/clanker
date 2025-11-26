@@ -567,37 +567,6 @@ func (a *Agent) BuildFinalContext(agentCtx *AgentContext) string {
 	return context.String()
 }
 
-// addThought adds a reasoning step to the chain of thought
-func (a *Agent) addThought(agentCtx *AgentContext, thought, action, outcome string) {
-	chainStep := ChainOfThought{
-		Step:      len(agentCtx.ChainOfThought) + 1,
-		Thought:   thought,
-		Action:    action,
-		Outcome:   outcome,
-		Timestamp: time.Now(),
-	}
-	agentCtx.ChainOfThought = append(agentCtx.ChainOfThought, chainStep)
-}
-
-// displayChainOfThought shows the current reasoning chain to the user
-func (a *Agent) displayChainOfThought(agentCtx *AgentContext) {
-	if len(agentCtx.ChainOfThought) == 0 {
-		return
-	}
-
-	fmt.Printf("💭 Agent Reasoning Chain:\n")
-	for i, thought := range agentCtx.ChainOfThought {
-		if i >= len(agentCtx.ChainOfThought)-3 { // Show last 3 thoughts
-			timestamp := thought.Timestamp.Format("15:04:05")
-			fmt.Printf("   [%s] %s: %s\n", timestamp, thought.Action, thought.Thought)
-			if thought.Outcome != "" {
-				fmt.Printf("   → %s\n", thought.Outcome)
-			}
-		}
-	}
-	fmt.Printf("\n")
-}
-
 // getErrorLogsFromGroup gets error logs from a specific log group
 func (a *Agent) getErrorLogsFromGroup(ctx context.Context, logGroup string) ([]string, error) {
 	// Get logs from the last hour with ERROR filter
