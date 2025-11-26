@@ -10,7 +10,7 @@ agent/
 ├── coordinator/      # Dependency-aware parallel execution driver
 ├── decisiontree/     # Intent rules that map queries to agent types
 ├── memory/           # Rolling knowledge of previous investigations
-├── model/            # Shared structs and type aliases
+├── model/            # Disabled for now - Shared structs and type aliases
 └── semantic/         # Lightweight NLP classifier for intents
 ```
 
