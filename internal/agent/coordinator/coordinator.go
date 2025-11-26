@@ -80,6 +80,46 @@ var (
 			WaitTimeout:    8 * time.Second,
 		},
 	}
+	AgentTypeDeployment = AgentType{
+		Name: "deployment",
+		Dependencies: Dependency{
+			ProvidedData:   []string{"deployment_status", "recent_changes"},
+			ExecutionOrder: 2,
+			WaitTimeout:    6 * time.Second,
+		},
+	}
+	AgentTypeDataPipeline = AgentType{
+		Name: "datapipeline",
+		Dependencies: Dependency{
+			ProvidedData:   []string{"pipeline_status", "etl_health"},
+			ExecutionOrder: 3,
+			WaitTimeout:    8 * time.Second,
+		},
+	}
+	AgentTypeQueue = AgentType{
+		Name: "queue",
+		Dependencies: Dependency{
+			ProvidedData:   []string{"queue_health", "backlog_metrics"},
+			ExecutionOrder: 3,
+			WaitTimeout:    6 * time.Second,
+		},
+	}
+	AgentTypeAvailability = AgentType{
+		Name: "availability",
+		Dependencies: Dependency{
+			ProvidedData:   []string{"availability_status", "region_health"},
+			ExecutionOrder: 4,
+			WaitTimeout:    6 * time.Second,
+		},
+	}
+	AgentTypeLLM = AgentType{
+		Name: "llm",
+		Dependencies: Dependency{
+			ProvidedData:   []string{"llm_metrics", "model_health"},
+			ExecutionOrder: 2,
+			WaitTimeout:    6 * time.Second,
+		},
+	}
 )
 
 // ParallelAgent represents a running worker instance.
@@ -592,6 +632,33 @@ func (c *Coordinator) getOperationsForAgentType(agentType AgentType, params mode
 		return []awsclient.LLMOperation{{Operation: "get_cost_and_usage", Reason: "Analyze spending", Parameters: map[string]any{}}}
 	case "performance":
 		return []awsclient.LLMOperation{{Operation: "describe_auto_scaling_groups", Reason: "Check scaling state", Parameters: map[string]any{}}}
+	case "deployment":
+		return []awsclient.LLMOperation{
+			{Operation: "list_codepipelines", Reason: "List active deployment pipelines", Parameters: map[string]any{}},
+			{Operation: "list_codebuild_projects", Reason: "Check build projects for recent failures", Parameters: map[string]any{}},
+		}
+	case "datapipeline":
+		return []awsclient.LLMOperation{
+			{Operation: "list_glue_jobs", Reason: "Inspect Glue/ETL jobs", Parameters: map[string]any{}},
+			{Operation: "list_step_functions", Reason: "Check orchestration state machines", Parameters: map[string]any{}},
+			{Operation: "list_kinesis_streams", Reason: "Review streaming pipelines", Parameters: map[string]any{}},
+		}
+	case "queue":
+		return []awsclient.LLMOperation{
+			{Operation: "list_sqs_queues", Reason: "List queues and their attributes", Parameters: map[string]any{}},
+			{Operation: "list_sns_topics", Reason: "Review SNS topics feeding queues", Parameters: map[string]any{}},
+		}
+	case "availability":
+		return []awsclient.LLMOperation{
+			{Operation: "check_route53_service", Reason: "Check DNS health", Parameters: map[string]any{}},
+			{Operation: "list_route53_zones", Reason: "Inspect hosted zones for issues", Parameters: map[string]any{}},
+		}
+	case "llm":
+		return []awsclient.LLMOperation{
+			{Operation: "list_bedrock_foundation_models", Reason: "Review Bedrock model status", Parameters: map[string]any{}},
+			{Operation: "list_sagemaker_endpoints", Reason: "Check SageMaker endpoint health", Parameters: map[string]any{}},
+			{Operation: "list_sagemaker_models", Reason: "Reference deployed models", Parameters: map[string]any{}},
+		}
 	default:
 		return nil
 	}
@@ -641,6 +708,16 @@ func (c *Coordinator) lookupAgentType(name string) (AgentType, bool) {
 		return AgentTypeCost, true
 	case "performance":
 		return AgentTypePerformance, true
+	case "deployment":
+		return AgentTypeDeployment, true
+	case "datapipeline":
+		return AgentTypeDataPipeline, true
+	case "queue":
+		return AgentTypeQueue, true
+	case "availability":
+		return AgentTypeAvailability, true
+	case "llm":
+		return AgentTypeLLM, true
 	default:
 		return AgentType{}, false
 	}

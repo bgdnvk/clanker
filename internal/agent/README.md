@@ -52,6 +52,27 @@ Handles dependency-aware, parallel execution of specialized agents:
 -   Shares results across agents through a synchronized map.
 -   Wraps AWS client calls (`ExecuteOperation`, `ExecuteOperations`, `ExecCLI`).
 
+## Investigation Flow
+
+```
+User Query
+    ↓
+semantic.Analyzer — classify intent, urgency, data types
+    ↓
+Decision Tree — map intent to agent types + parameters
+    ↓
+Coordinator
+    ├─ spawn agent order 1 (logs/metrics/etc.)
+    ├─ share provided data, satisfy dependencies
+    └─ advance through orders until all agents finish
+    ↓
+Parallel Agent Results → AgentContext.GatheredData
+    ↓
+Sequential Planner (fallback if no agents) / Final Context Builder
+    ↓
+LLM prompt with investigation data + chain-of-thought
+```
+
 ## Development Notes
 
 -   Keep shared structs inside `model` to avoid circular imports.
