@@ -18,6 +18,8 @@ or call it with an openai key directly:
 
 `clanker ask --agent-trace --profile tekbog --openai-key "$OPENAI_API_KEY" "how can i create an additional lambda and link it to dev?"` 
 
+`clanker ask --ai-profile gemini-api --gemini-model gemini-3-pro-preview --gemini-key your-gemini-key "How can we add another AWS Lambda function to our dev environment using best practices?"`
+
 ## WHAT YOU NEED
 
 Go, **AWS CLI v2** (v1 will give "Unknown options: --no-cli-pager" errors), OpenAI key or Claude on Bedrock (Anthropic and Gemini coming soon)

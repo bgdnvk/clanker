@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/bgdnvk/clanker/internal/ai"
@@ -15,6 +16,8 @@ import (
 )
 
 // askCmd represents the ask command
+const defaultGeminiModel = "gemini-3-pro-preview"
+
 var askCmd = &cobra.Command{
 	Use:   "ask [question]",
 	Short: "Ask AI about your AWS infrastructure, codebase, or GitHub repository",
@@ -46,6 +49,8 @@ Examples:
 		aiProfile, _ := cmd.Flags().GetString("ai-profile")
 		openaiKey, _ := cmd.Flags().GetString("openai-key")
 		anthropicKey, _ := cmd.Flags().GetString("anthropic-key")
+		geminiKey, _ := cmd.Flags().GetString("gemini-key")
+		geminiModel, _ := cmd.Flags().GetString("gemini-model")
 		agentTrace, _ := cmd.Flags().GetBool("agent-trace")
 		if cmd.Flags().Changed("agent-trace") {
 			viper.Set("agent.trace", agentTrace)
@@ -257,29 +262,31 @@ Format as a professional compliance table suitable for government security docum
 				}
 			}
 
+			maybeOverrideGeminiModel(provider, geminiModel)
+
 			// Get the appropriate API key based on provider
 			var apiKey string
-			if provider == "gemini" {
+			switch provider {
+			case "gemini":
 				// Gemini uses Application Default Credentials - no API key needed
 				apiKey = ""
-			} else if provider == "gemini-api" {
-				// Only use API key for explicit gemini-api provider
-				apiKey = viper.GetString("ai.providers.gemini-api.api_key_env")
-			} else if provider == "openai" {
+			case "gemini-api":
+				apiKey = resolveGeminiAPIKey(geminiKey)
+			case "openai":
 				// Get OpenAI API key from flag or config
 				if openaiKey != "" {
 					apiKey = openaiKey
 				} else {
 					apiKey = viper.GetString("ai.providers.openai.api_key")
 				}
-			} else if provider == "anthropic" {
+			case "anthropic":
 				// Get Anthropic API key from flag or config
 				if anthropicKey != "" {
 					apiKey = anthropicKey
 				} else {
 					apiKey = viper.GetString("ai.providers.anthropic.api_key_env")
 				}
-			} else {
+			default:
 				// Default/other providers
 				apiKey = viper.GetString("ai.api_key")
 			}
@@ -302,29 +309,31 @@ Format as a professional compliance table suitable for government security docum
 				}
 			}
 
+			maybeOverrideGeminiModel(provider, geminiModel)
+
 			// Get the appropriate API key based on provider
 			var apiKey string
-			if provider == "gemini" {
+			switch provider {
+			case "gemini":
 				// Gemini uses Application Default Credentials - no API key needed
 				apiKey = ""
-			} else if provider == "gemini-api" {
-				// Only use API key for explicit gemini-api provider
-				apiKey = viper.GetString("ai.providers.gemini-api.api_key_env")
-			} else if provider == "openai" {
+			case "gemini-api":
+				apiKey = resolveGeminiAPIKey(geminiKey)
+			case "openai":
 				// Get OpenAI API key from flag or config
 				if openaiKey != "" {
 					apiKey = openaiKey
 				} else {
 					apiKey = viper.GetString("ai.providers.openai.api_key")
 				}
-			} else if provider == "anthropic" {
+			case "anthropic":
 				// Get Anthropic API key from flag or config
 				if anthropicKey != "" {
 					apiKey = anthropicKey
 				} else {
 					apiKey = viper.GetString("ai.providers.anthropic.api_key_env")
 				}
-			} else {
+			default:
 				// Default/other providers
 				apiKey = viper.GetString("ai.api_key")
 			}
@@ -379,7 +388,51 @@ func init() {
 	askCmd.Flags().String("ai-profile", "", "AI profile to use (default: 'default')")
 	askCmd.Flags().String("openai-key", "", "OpenAI API key (overrides config)")
 	askCmd.Flags().String("anthropic-key", "", "Anthropic API key (overrides config)")
+	askCmd.Flags().String("gemini-key", "", "Gemini API key (overrides config and env vars)")
+	askCmd.Flags().String("gemini-model", "", "Gemini model to use (overrides config)")
 	askCmd.Flags().Bool("agent-trace", false, "Show detailed coordinator agent lifecycle logs (overrides config)")
+}
+
+func resolveGeminiAPIKey(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if key := viper.GetString("ai.providers.gemini-api.api_key"); key != "" {
+		return key
+	}
+	if envName := viper.GetString("ai.providers.gemini-api.api_key_env"); envName != "" {
+		if envVal := os.Getenv(envName); envVal != "" {
+			return envVal
+		}
+	}
+	if envVal := os.Getenv("GEMINI_API_KEY"); envVal != "" {
+		return envVal
+	}
+	return ""
+}
+
+func maybeOverrideGeminiModel(provider, flagValue string) {
+	if provider != "gemini" && provider != "gemini-api" {
+		return
+	}
+
+	if model := resolveGeminiModel(provider, flagValue); model != "" {
+		viper.Set(fmt.Sprintf("ai.providers.%s.model", provider), model)
+	}
+}
+
+func resolveGeminiModel(provider, flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+
+	configKey := fmt.Sprintf("ai.providers.%s.model", provider)
+	model := viper.GetString(configKey)
+	if model == "" || strings.EqualFold(model, "gemini-pro") {
+		return defaultGeminiModel
+	}
+
+	return model
 }
 
 // inferContext tries to determine if the question is about AWS, code, GitHub, or Terraform
