@@ -21,9 +21,10 @@ ai:
     
     gemini:
       project_id: your-gcp-project-id
+      model: gemini-3-pro-preview
     
     gemini-api:
-      model: gemini-pro
+      model: gemini-3-pro-preview
       api_key_env: GEMINI_API_KEY
 
 # Infrastructure Providers Configuration
