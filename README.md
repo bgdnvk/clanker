@@ -1,7 +1,7 @@
 # Clanker CLI
 
 EARLY ALPHA
-Instead of losing your mind about why your infra isn't working just ask clanker what's the issue.  
+Instead of losing your mind about why your infra isn't working just ask clanker what's the issue.
 
 DevOps Observability ChatOps and that kind of stuff.
 Clanker only reads, and judges you, never modifies anything (yet).
@@ -14,11 +14,13 @@ add a yaml file with AWS bedrock or OpenAI key as LLM calls and your AWS infra p
 
 `clanker ask "what's the status of my chat service lambda?"`  
 or call it with an openai key directly:  
-`clanker ask --verbose --profile tekbog --openai-key "$OPENAI_API_KEY" "What are the latest logs for our dev Lambda functions?"`  
+`clanker ask --verbose --profile tekbog --openai-key "$OPENAI_API_KEY" "What are the latest logs for our dev Lambda functions?"`
 
-`clanker ask --agent-trace --profile tekbog --openai-key "$OPENAI_API_KEY" "how can i create an additional lambda and link it to dev?"` 
+`clanker ask --agent-trace --profile tekbog --openai-key "$OPENAI_API_KEY" "how can i create an additional lambda and link it to dev?"`
 
 `clanker ask --ai-profile gemini-api --gemini-model gemini-3-pro-preview --gemini-key your-gemini-key "How can we add another AWS Lambda function to our dev environment using best practices?"`
+
+`clanker ask --ai-profile gemini-api --gemini-model gemini-2.0-flash --gemini-key your-g-key "Explain how observability helps Lambda debugging" | cat`
 
 ## WHAT YOU NEED
 
@@ -282,7 +284,7 @@ clanker profiles                      # List available AWS profiles
 
 Create `~/.clanker.yaml` with your environment setup:
 
-```yaml
+````yaml
 # Infrastructure configuration per environment
 infra:
     aws:
@@ -312,30 +314,53 @@ ai:
         api_key: your-gemini-key-here
         model: gemini-1.5-pro
 
+### Setting the Default AI Provider (e.g., Gemini API)
+
+Clanker always picks its provider from `ai.default_provider`. Update `~/.clanker.yaml` to point at the profile you want to use by default:
+
+```yaml
+ai:
+    default_provider: gemini-api
+    providers:
+        gemini-api:
+            model: gemini-3-pro-preview
+            api_key: YOUR_GEMINI_KEY # or set api_key_env: GEMINI_API_KEY
+````
+
+-   `default_provider` controls what runs when you omit `--ai-profile`.
+-   `providers.gemini-api.model` is what `--gemini-model` overrides at runtime.
+-   You can still temporarily switch providers with `--ai-profile openai`, `--ai-profile bedrock`, etc.
+
+For Application Default Credentials (no API key), use the `gemini` profile instead and point it at your GCP project.
+
 # GitHub integration
+
 github:
-    token: ghp_your-github-token-here
-    owner: your-username
-    repo: your-repo-name
+token: ghp_your-github-token-here
+owner: your-username
+repo: your-repo-name
 
 # PostgreSQL configuration (optional)
+
 postgres:
-    host: localhost
-    port: 5432
-    user: postgres
-    password: your-password
-    database: your-database
+host: localhost
+port: 5432
+user: postgres
+password: your-password
+database: your-database
 
 # Service keywords for intelligent routing
+
 services:
-    keywords:
-        containers: [docker, k8s, kubernetes, ecs, fargate]
-        serverless: [lambda, step-functions, api-gateway]
-        storage: [s3, dynamodb, rds, aurora]
-        networking: [vpc, subnet, security-group, load-balancer]
-        monitoring: [cloudwatch, logs, metrics, alarms]
-        cicd: [github-actions, workflow, pipeline, deploy]
-```
+keywords:
+containers: [docker, k8s, kubernetes, ecs, fargate]
+serverless: [lambda, step-functions, api-gateway]
+storage: [s3, dynamodb, rds, aurora]
+networking: [vpc, subnet, security-group, load-balancer]
+monitoring: [cloudwatch, logs, metrics, alarms]
+cicd: [github-actions, workflow, pipeline, deploy]
+
+````
 
 ## Development and Building
 
@@ -346,7 +371,7 @@ make build      # Build binary to ./bin/clanker
 make install    # Install to /usr/local/bin (system-wide)
 make uninstall  # Remove from system
 make help       # Show all available targets
-```
+````
 
 ## Troubleshooting
 
