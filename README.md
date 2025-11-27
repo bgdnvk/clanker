@@ -12,7 +12,7 @@ make install
 add a yaml file with AWS bedrock or OpenAI key as LLM calls and your AWS infra profile
 `clanker ask "what's the status of my chat service lambda?"`  
 or call it with an openai key directly:  
-`TODO: add example`  
+`clanker ask --verbose --profile tekbog --openai-key "$OPENAI_API_KEY" "What are the latest logs for our dev Lambda functions?"`  
 
 ## WHAT YOU NEED
 

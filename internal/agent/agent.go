@@ -154,11 +154,12 @@ func (a *Agent) InvestigateQuery(ctx context.Context, query string) (*AgentConte
 			agentCtx.GatheredData[key] = value
 		}
 
-		a.addThought(agentCtx, fmt.Sprintf("Completed parallel execution with %d agents", coord.TotalAgents), "success", "Data gathering completed")
+		stats := coord.Stats()
+		a.addThought(agentCtx, fmt.Sprintf("Completed parallel execution with %d agents", stats.Total), "success", "Data gathering completed")
 
 		if verbose {
 			fmt.Printf("🎉 Parallel execution completed: %d successful, %d failed\n",
-				coord.CompletedCount, coord.FailedCount)
+				stats.Completed, stats.Failed)
 		}
 	}
 
