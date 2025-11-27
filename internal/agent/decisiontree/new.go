@@ -17,7 +17,7 @@ func New() *Tree {
 		{
 			ID:         "logs_priority",
 			Name:       "Logs investigation priority",
-			Condition:  "contains_keywords(['logs', 'log', 'errors', 'latest', 'recent', 'problems', 'investigate'])",
+			Condition:  "contains_keywords(['logs', 'log', 'errors', 'stacktrace', 'trace', 'panic', 'exception', 'latest', 'recent', 'problems', 'debug', 'investigate', 'crash'])",
 			Action:     "prioritize_log_investigation",
 			Priority:   10,
 			AgentTypes: []string{"log"},
@@ -37,7 +37,7 @@ func New() *Tree {
 		{
 			ID:         "service_discovery",
 			Name:       "Service discovery needed",
-			Condition:  "contains_keywords(['service', 'api', 'lambda', 'function', 'running', 'status', 'discover'])",
+			Condition:  "contains_keywords(['service', 'services', 'api', 'endpoint', 'lambda', 'function', 'component', 'microservice', 'tier', 'module', 'running', 'status', 'discover', 'unknown'])",
 			Action:     "quick_service_discovery",
 			Priority:   8,
 			AgentTypes: []string{"infrastructure"},
@@ -46,7 +46,7 @@ func New() *Tree {
 		{
 			ID:         "performance_check",
 			Name:       "Performance investigation",
-			Condition:  "contains_keywords(['performance', 'slow', 'metrics', 'cpu', 'memory', 'latency', 'errors'])",
+			Condition:  "contains_keywords(['performance', 'slow', 'laggy', 'lag', 'throughput', 'latency', 'jitter', 'metrics', 'cpu', 'memory', 'throttle', 'overload', 'errors'])",
 			Action:     "focused_performance_check",
 			Priority:   7,
 			AgentTypes: []string{"metrics"},
@@ -55,7 +55,7 @@ func New() *Tree {
 		{
 			ID:         "security_alerts",
 			Name:       "Security or IAM issues",
-			Condition:  "contains_keywords(['security', 'breach', 'unauthorized', 'iam', 'key', 'credential', 'secret'])",
+			Condition:  "contains_keywords(['security', 'breach', 'breached', 'unauthorized', 'iam', 'key', 'credential', 'secret', 'token', 'rotate', 'privilege', 'access', 'leak', 'compromise'])",
 			Action:     "investigate_security",
 			Priority:   9,
 			AgentTypes: []string{"security"},
@@ -64,7 +64,7 @@ func New() *Tree {
 		{
 			ID:         "cost_anomaly",
 			Name:       "Cost and usage anomaly",
-			Condition:  "contains_keywords(['cost', 'spend', 'bill', 'budget', 'usage', 'savings'])",
+			Condition:  "contains_keywords(['cost', 'spend', 'bill', 'billing', 'budget', 'usage', 'savings', 'expensive', 'increase', 'spike', 'surge'])",
 			Action:     "investigate_costs",
 			Priority:   6,
 			AgentTypes: []string{"cost"},
@@ -73,7 +73,7 @@ func New() *Tree {
 		{
 			ID:         "deployment_changes",
 			Name:       "Deployment or release issues",
-			Condition:  "contains_keywords(['deploy', 'release', 'rollout', 'pipeline', 'codebuild', 'codepipeline'])",
+			Condition:  "contains_keywords(['deploy', 'deployed', 'release', 'rollout', 'ship', 'pipeline', 'codebuild', 'codepipeline', 'build', 'rollback', 'promotion', 'canary', 'launch'])",
 			Action:     "check_deployment_status",
 			Priority:   8,
 			AgentTypes: []string{"deployment"},
@@ -82,7 +82,7 @@ func New() *Tree {
 		{
 			ID:         "data_pipeline_issues",
 			Name:       "Data or ETL pipeline failures",
-			Condition:  "contains_keywords(['etl', 'glue', 'step function', 'dataflow', 'airflow', 'pipeline'])",
+			Condition:  "contains_keywords(['etl', 'glue', 'step function', 'stepfunction', 'dataflow', 'airflow', 'pipeline', 'dataproc', 'databricks', 'spark', 'batch job', 'scheduler', 'workflow'])",
 			Action:     "inspect_data_pipelines",
 			Priority:   7,
 			AgentTypes: []string{"datapipeline"},
@@ -91,7 +91,7 @@ func New() *Tree {
 		{
 			ID:         "queue_backlog",
 			Name:       "Queue depth or backlog",
-			Condition:  "contains_keywords(['queue', 'backlog', 'message', 'kafka', 'sqs', 'sns'])",
+			Condition:  "contains_keywords(['queue', 'queued', 'backlog', 'message', 'kafka', 'sqs', 'sns', 'pubsub', 'mq', 'dlq', 'stuck'])",
 			Action:     "inspect_queue_health",
 			Priority:   7,
 			AgentTypes: []string{"queue"},
@@ -100,7 +100,7 @@ func New() *Tree {
 		{
 			ID:         "availability_incident",
 			Name:       "Availability or outage reports",
-			Condition:  "contains_keywords(['outage', 'downtime', 'availability', 'region', 'uptime', 'sla'])",
+			Condition:  "contains_keywords(['outage', 'downtime', 'down', 'downed', 'availability', 'region', 'zone', 'uptime', 'sla', 'failover', 'pager', 'sev'])",
 			Action:     "check_availability",
 			Priority:   9,
 			AgentTypes: []string{"availability"},
@@ -109,11 +109,20 @@ func New() *Tree {
 		{
 			ID:         "llm_observability",
 			Name:       "LLM / inference support",
-			Condition:  "contains_keywords(['llm', 'model', 'inference', 'tokens', 'bedrock', 'sagemaker', 'rag'])",
+			Condition:  "contains_keywords(['llm', 'model', 'inference', 'tokens', 'bedrock', 'sagemaker', 'rag', 'embedding', 'vector', 'prompt', 'openai', 'anthropic'])",
 			Action:     "inspect_llm_stack",
 			Priority:   8,
 			AgentTypes: []string{"llm"},
 			Parameters: model.AWSData{"focus": "model_health"},
+		},
+		{
+			ID:         "general_investigation",
+			Name:       "General issue or vague request",
+			Condition:  "contains_keywords(['issue', 'problem', 'broken', 'wtf', 'help', 'fix', 'investigation', 'what is happening', 'why'])",
+			Action:     "broad_context_scan",
+			Priority:   5,
+			AgentTypes: []string{"log", "infrastructure", "metrics"},
+			Parameters: model.AWSData{"scope": "broad", "priority": "medium"},
 		},
 	}
 
