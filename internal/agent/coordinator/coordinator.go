@@ -13,6 +13,10 @@ import (
 	"github.com/spf13/viper"
 )
 
+func verboseAgents() bool {
+	return viper.GetBool("verbose") || viper.GetBool("agent.trace")
+}
+
 // ParallelAgent represents a running worker instance.
 type ParallelAgent struct {
 	ID         string
@@ -79,7 +83,7 @@ func (c *Coordinator) SpawnAgents(ctx context.Context, applicable []*dt.Node) {
 	}
 
 	planned := c.scheduler.Plan(agentConfigs)
-	verbose := viper.GetBool("verbose")
+	verbose := verboseAgents()
 
 	for _, group := range planned {
 		if verbose {
@@ -108,7 +112,7 @@ func (c *Coordinator) SpawnAgents(ctx context.Context, applicable []*dt.Node) {
 // WaitForCompletion blocks until all agents finish or timeout occurs.
 func (c *Coordinator) WaitForCompletion(ctx context.Context, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	verbose := viper.GetBool("verbose")
+	verbose := verboseAgents()
 
 	for time.Now().Before(deadline) {
 		stats := c.registry.Stats()
@@ -162,7 +166,7 @@ func (c *Coordinator) Stats() AgentStats {
 
 func (c *Coordinator) runPlannedAgent(ctx context.Context, wg *sync.WaitGroup, agent *ParallelAgent) {
 	defer wg.Done()
-	verbose := viper.GetBool("verbose")
+	verbose := verboseAgents()
 	if verbose {
 		fmt.Printf("  ✨ Started %s agent (ID: %s) with dependencies\n", agent.Type.Name, agent.ID)
 	}
@@ -188,7 +192,7 @@ func (c *Coordinator) runParallelAgent(ctx context.Context, agent *ParallelAgent
 		c.registry.MarkCompleted()
 	}()
 
-	verbose := viper.GetBool("verbose")
+	verbose := verboseAgents()
 	if verbose {
 		fmt.Printf("🤖 Agent %s (%s) executing %d operations\n",
 			agent.ID, agent.Type.Name, len(agent.Operations))

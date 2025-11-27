@@ -46,6 +46,10 @@ Examples:
 		aiProfile, _ := cmd.Flags().GetString("ai-profile")
 		openaiKey, _ := cmd.Flags().GetString("openai-key")
 		anthropicKey, _ := cmd.Flags().GetString("anthropic-key")
+		agentTrace, _ := cmd.Flags().GetBool("agent-trace")
+		if cmd.Flags().Changed("agent-trace") {
+			viper.Set("agent.trace", agentTrace)
+		}
 
 		// Compliance mode enables comprehensive service discovery with specific formatting
 		if compliance {
@@ -375,6 +379,7 @@ func init() {
 	askCmd.Flags().String("ai-profile", "", "AI profile to use (default: 'default')")
 	askCmd.Flags().String("openai-key", "", "OpenAI API key (overrides config)")
 	askCmd.Flags().String("anthropic-key", "", "Anthropic API key (overrides config)")
+	askCmd.Flags().Bool("agent-trace", false, "Show detailed coordinator agent lifecycle logs (overrides config)")
 }
 
 // inferContext tries to determine if the question is about AWS, code, GitHub, or Terraform
