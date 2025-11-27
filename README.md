@@ -1,7 +1,7 @@
 # Clanker CLI
 
-Instead of losing your mind about why your infra isn't working just ask clanker what's the issue.  
 EARLY ALPHA
+Instead of losing your mind about why your infra isn't working just ask clanker what's the issue.  
 
 DevOps Observability ChatOps and that kind of stuff.
 Clanker only reads, and judges you, never modifies anything (yet).
@@ -9,8 +9,14 @@ Clanker only reads, and judges you, never modifies anything (yet).
 ## how to use
 
 make install
+
 add a yaml file with AWS bedrock or OpenAI key as LLM calls and your AWS infra profile
-`clanker ask "what's the status of my chat service lambda?"`
+
+`clanker ask "what's the status of my chat service lambda?"`  
+or call it with an openai key directly:  
+`clanker ask --verbose --profile tekbog --openai-key "$OPENAI_API_KEY" "What are the latest logs for our dev Lambda functions?"`  
+
+`clanker ask --agent-trace --profile tekbog --openai-key "$OPENAI_API_KEY" "how can i create an additional lambda and link it to dev?"` 
 
 ## WHAT YOU NEED
 
@@ -216,22 +222,6 @@ clanker ask "Audit IAM policies" --ai-profile anthropic --aws
 clanker ask "Find unused resources" --ai-profile gemini --aws
 ```
 
-### Three-Stage Analysis Process
-
-When using the `ask` command, Clanker employs a sophisticated three-stage analysis:
-
-1. **Context Gathering**: Analyzes your query to determine required data sources
-2. **Data Collection**: Executes AWS CLI commands, code analysis, or GitHub queries
-3. **AI Processing**: Sends context and data to your chosen AI provider for intelligent analysis
-
-### Tips for Better Results
-
--   **Be Specific**: "Show me EC2 instances with high CPU" vs "Show me servers"
--   **Try Different Providers**: Each AI has strengths (Bedrock for AWS, OpenAI for code, etc.)
--   **Use Debug Mode**: Add `--debug` to understand what data is being analyzed
--   **Environment Awareness**: Use `--profile` to query specific AWS environments
--   **COMING SOON: Use Context Flags**: Combine `--aws --code` for infrastructure-code relationship analysis
-
 ## Static Commands
 
 For direct queries without AI interpretation:
@@ -381,16 +371,6 @@ clanker config show
 clanker ask "test" --ai-profile openai --debug
 ```
 
-### Debug Mode
-
-Add `--debug` to any command for detailed logging:
-
-```bash
-clanker ask "show me my lambdas" --aws --debug
-```
-
-## Troubleshooting
-
 ### AWS Authentication Issues
 
 Make sure your AWS credentials are properly configured:
@@ -504,35 +484,6 @@ Get raw AWS data without AI interpretation:
 ```bash
 ./clanker config init    # Create default config
 ./clanker config show    # Show current configuration
-```
-
-## Configuration
-
-The configuration file is located at `~/.clanker.yaml`:
-
-```yaml
-# AI Provider Configuration
-ai:
-    provider: "openai" # Options: openai, anthropic
-    api_key: "your-api-key-here"
-
-# AWS Configuration
-aws:
-    profile: "default" # AWS profile to use
-    region: "us-east-1" # Default AWS region
-
-# Codebase Analysis
-codebase:
-    paths: # Paths to scan
-        - "."
-    exclude: # Patterns to exclude
-        - "node_modules"
-        - ".git"
-        - "vendor"
-        - "__pycache__"
-
-# Logging
-verbose: false
 ```
 
 ## Examples

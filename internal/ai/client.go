@@ -17,6 +17,7 @@ import (
 	// "github.com/aws/aws-sdk-go-v2/config"
 	// "github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 
+	"github.com/bgdnvk/clanker/internal/agent"
 	awsclient "github.com/bgdnvk/clanker/internal/aws"
 	ghclient "github.com/bgdnvk/clanker/internal/github"
 	"github.com/spf13/viper"
@@ -906,15 +907,15 @@ func (c *Client) askWithAgentInvestigation(ctx context.Context, question, awsCon
 		return c.askWithDynamicAnalysis(ctx, question, awsContext, codeContext, profileInfraAnalysis, githubContext...)
 	}
 
-	// Create and run the agent
-	agent := awsclient.NewAgent(c.awsClient, c.debug)
+	// Create and run the investigative agent
+	investigator := agent.NewAgent(c.awsClient, c.debug)
 
 	// Set AI decision function so agent can make intelligent decisions
-	agent.SetAIDecisionFunction(func(ctx context.Context, prompt string) (string, error) {
+	investigator.SetAIDecisionFunction(func(ctx context.Context, prompt string) (string, error) {
 		return c.Ask(ctx, prompt, "", "")
 	})
 
-	agentContext, err := agent.InvestigateQuery(ctx, question)
+	agentContext, err := investigator.InvestigateQuery(ctx, question)
 	if err != nil {
 		if c.debug {
 			fmt.Printf("⚠️  Agent investigation failed: %v, falling back to standard approach\n", err)
@@ -923,7 +924,7 @@ func (c *Client) askWithAgentInvestigation(ctx context.Context, question, awsCon
 	}
 
 	// Build final context with agent's findings
-	finalContext := agent.BuildFinalContext(agentContext)
+	finalContext := investigator.BuildFinalContext(agentContext)
 
 	if c.debug {
 		fmt.Printf("🎯 Agent gathered %d chars of context in %d steps\n", len(finalContext), agentContext.CurrentStep)

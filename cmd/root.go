@@ -33,6 +33,7 @@ func init() {
 	rootCmd.PersistentFlags().Bool("local-mode", true, "enable local mode with rate limiting to prevent system overload (default: true)")
 	rootCmd.PersistentFlags().Int("local-delay", 100, "delay in milliseconds between calls in local mode (default 100ms)")
 
+	// TODO: add error return here
 	viper.BindPFlag("verbose", rootCmd.PersistentFlags().Lookup("verbose"))
 	viper.BindPFlag("local_mode", rootCmd.PersistentFlags().Lookup("local-mode"))
 	viper.BindPFlag("local_delay_ms", rootCmd.PersistentFlags().Lookup("local-delay"))
