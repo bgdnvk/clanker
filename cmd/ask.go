@@ -258,7 +258,7 @@ Format as a professional compliance table suitable for government security docum
 				// Use the default provider from config
 				provider = viper.GetString("ai.default_provider")
 				if provider == "" {
-					provider = "bedrock" // fallback
+					provider = "openai" // fallback
 				}
 			}
 
@@ -305,7 +305,7 @@ Format as a professional compliance table suitable for government security docum
 				// Use the default provider from config
 				provider = viper.GetString("ai.default_provider")
 				if provider == "" {
-					provider = "bedrock" // fallback
+					provider = "openai" // fallback
 				}
 			}
 
