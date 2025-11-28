@@ -316,7 +316,7 @@ ai:
 
 ### Setting the Default AI Provider (e.g., Gemini API)
 
-Clanker always picks its provider from `ai.default_provider`. Update `~/.clanker.yaml` to point at the profile you want to use by default:
+Clanker always picks its provider from `ai.default_provider` (and falls back to OpenAI if you omit it). Update `~/.clanker.yaml` to point at the profile you want to use by default:
 
 ```yaml
 ai:
@@ -327,7 +327,7 @@ ai:
             api_key: YOUR_GEMINI_KEY # or set api_key_env: GEMINI_API_KEY
 ````
 
--   `default_provider` controls what runs when you omit `--ai-profile`.
+-   `default_provider` controls what runs when you omit `--ai-profile` (defaults to `openai`).
 -   `providers.gemini-api.model` is what `--gemini-model` overrides at runtime.
 -   You can still temporarily switch providers with `--ai-profile openai`, `--ai-profile bedrock`, etc.
 
