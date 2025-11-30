@@ -39,7 +39,7 @@ var configInitCmd = &cobra.Command{
 
 # AI Providers Configuration
 ai:
-  default_provider: bedrock  # Default AI provider to use
+  default_provider: openai  # Default AI provider to use
   
   providers:
     bedrock:

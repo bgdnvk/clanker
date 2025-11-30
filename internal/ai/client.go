@@ -128,32 +128,33 @@ func NewClient(provider, apiKey string, debug bool, aiProfile ...string) *Client
 		})
 		if err == nil {
 			client.geminiClient = geminiClient
+		} else {
+			client.tryFallbackToOpenAI(err)
 		}
 	case "gemini-api":
 		// For Gemini API (requires API key from Google AI Studio)
-		if apiKey != "" {
-			ctx := context.Background()
-			geminiClient, err := genai.NewClient(ctx, &genai.ClientConfig{
-				APIKey: apiKey,
-			})
-			if err == nil {
-				client.geminiClient = geminiClient
-			}
+		if apiKey == "" {
+			client.tryFallbackToOpenAI(fmt.Errorf("gemini-api provider configured without API key"))
+			break
+		}
+
+		ctx := context.Background()
+		geminiClient, err := genai.NewClient(ctx, &genai.ClientConfig{
+			APIKey: apiKey,
+		})
+		if err == nil {
+			client.geminiClient = geminiClient
+		} else {
+			client.tryFallbackToOpenAI(err)
 		}
 	case "openai":
 		client.baseURL = "https://api.openai.com/v1"
 	case "anthropic":
 		client.baseURL = "https://api.anthropic.com/v1"
 	default:
-		// Default to Bedrock (currently uses AWS CLI, but AWS SDK was working before)
-		// AWS SDK approach:
-		// cfg, err := config.LoadDefaultConfig(context.Background(), config.WithSharedConfigProfile("commercial-dev"))
-		// if err == nil {
-		//     client.provider = "bedrock"
-		//     client.awsConfig = cfg
-		//     client.bedrockClient = bedrockruntime.NewFromConfig(cfg)
-		// }
-		client.provider = "bedrock"
+		// Default to OpenAI for best compatibility when no provider specified
+		client.provider = "openai"
+		client.baseURL = "https://api.openai.com/v1"
 	}
 
 	return client
@@ -651,6 +652,43 @@ func (c *Client) askGemini(ctx context.Context, prompt string) (string, error) {
 	}
 
 	return result.String(), nil
+}
+
+func (c *Client) tryFallbackToOpenAI(reason error) {
+	fallbackKey := resolveFallbackOpenAIKey(c.apiKey)
+	if fallbackKey == "" {
+		if c.debug {
+			fmt.Printf("Gemini unavailable (%v) and no OpenAI key available for fallback\n", reason)
+		}
+		return
+	}
+
+	if c.debug {
+		fmt.Printf("Gemini unavailable (%v). Falling back to OpenAI.\n", reason)
+	}
+
+	c.provider = "openai"
+	c.apiKey = fallbackKey
+	c.baseURL = "https://api.openai.com/v1"
+	c.geminiClient = nil
+}
+
+func resolveFallbackOpenAIKey(existing string) string {
+	if existing != "" {
+		return existing
+	}
+	if key := viper.GetString("ai.providers.openai.api_key"); key != "" {
+		return key
+	}
+	if envName := viper.GetString("ai.providers.openai.api_key_env"); envName != "" {
+		if envVal := os.Getenv(envName); envVal != "" {
+			return envVal
+		}
+	}
+	if envVal := os.Getenv("OPENAI_API_KEY"); envVal != "" {
+		return envVal
+	}
+	return ""
 }
 
 func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
