@@ -14,9 +14,9 @@ var cfgFile string
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use:   "clanker",
-	Short: "AI-powered terminal for AWS and codebase queries",
-	Long: `Clanker is an AI-powered CLI tool that helps you query your AWS infrastructure
-and analyze your codebase using natural language. Ask questions about your systems,
+	Short: "AI-powered terminal for Cloud queries",
+	Long: `Clanker is an AI-powered CLI tool that helps you query your cloud infrastructure
+using natural language. Ask questions about your systems,
 get insights, and perform operations through an intelligent interface.`,
 }
 
@@ -29,12 +29,12 @@ func init() {
 	cobra.OnInitialize(initConfig)
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.clanker.yaml)")
-	rootCmd.PersistentFlags().Bool("verbose", false, "verbose output")
+	rootCmd.PersistentFlags().Bool("debug", false, "enable debug output (shows progress + internal diagnostics)")
 	rootCmd.PersistentFlags().Bool("local-mode", true, "enable local mode with rate limiting to prevent system overload (default: true)")
 	rootCmd.PersistentFlags().Int("local-delay", 100, "delay in milliseconds between calls in local mode (default 100ms)")
 
 	// TODO: add error return here
-	viper.BindPFlag("verbose", rootCmd.PersistentFlags().Lookup("verbose"))
+	viper.BindPFlag("debug", rootCmd.PersistentFlags().Lookup("debug"))
 	viper.BindPFlag("local_mode", rootCmd.PersistentFlags().Lookup("local-mode"))
 	viper.BindPFlag("local_delay_ms", rootCmd.PersistentFlags().Lookup("local-delay"))
 
@@ -66,7 +66,7 @@ func initConfig() {
 	viper.AutomaticEnv()
 
 	if err := viper.ReadInConfig(); err == nil {
-		if viper.GetBool("verbose") {
+		if viper.GetBool("debug") {
 			fmt.Println("Using config file:", viper.ConfigFileUsed())
 		}
 	}

@@ -12,7 +12,7 @@ import (
 
 // discoverLogGroups dynamically discovers relevant log groups based on service name and query
 func (a *Agent) discoverLogGroups(ctx context.Context, serviceName, originalQuery string) ([]string, error) {
-	verbose := viper.GetBool("verbose")
+	verbose := viper.GetBool("debug")
 
 	allLogGroups, err := a.getAllLogGroups(ctx)
 	if err != nil {
