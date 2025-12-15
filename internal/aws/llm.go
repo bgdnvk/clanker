@@ -2117,6 +2117,10 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		args := []string{"iam", "list-roles", "--output", "table", "--query", "Roles[*].{RoleName:RoleName,CreateDate:CreateDate}"}
 		return c.execAWSCLI(ctx, args, profile)
 
+	case "list_iam_groups":
+		args := []string{"iam", "list-groups", "--output", "table", "--query", "Groups[*].{GroupName:GroupName,CreateDate:CreateDate}"}
+		return c.execAWSCLI(ctx, args, profile)
+
 	case "list_iam_users":
 		args := []string{"iam", "list-users", "--output", "table", "--query", "Users[*].{UserName:UserName,CreateDate:CreateDate}"}
 		return c.execAWSCLI(ctx, args, profile)

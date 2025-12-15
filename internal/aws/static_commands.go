@@ -64,6 +64,7 @@ Supported resources:
     
   SECURITY:
     iam-roles            - IAM roles
+		iam-groups           - IAM groups
     iam-users            - IAM users
     kms, keys            - KMS keys
     certificates, acm    - ACM certificates
@@ -344,6 +345,12 @@ Supported resources:
 			// SECURITY
 			case "iam-roles":
 				result, err := executeOp("list_iam_roles")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "iam-groups":
+				result, err := executeOp("list_iam_groups")
 				if err != nil {
 					return err
 				}

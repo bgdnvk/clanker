@@ -25,10 +25,10 @@ Copy the example config and edit it for your environments/providers:
 
 ```bash
 cp .clanker.example.yaml ~/.clanker.yaml
-```  
-alternatively you can do 
-``` clanker config init ```
+```
 
+alternatively you can do
+`clanker config init`
 
 Most providers use env vars for keys (see [.clanker.example.yaml](.clanker.example.yaml)), e.g.:
 
