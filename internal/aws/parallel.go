@@ -16,7 +16,7 @@ func (c *Client) executeOperationsWithProfile(ctx context.Context, operations []
 	// Check if local rate limiting is enabled (default: true)
 	localMode := viper.GetBool("local_mode")
 	delayMs := viper.GetInt("local_delay_ms")
-	verbose := viper.GetBool("verbose")
+	verbose := viper.GetBool("debug")
 
 	// Default to local mode if not explicitly set
 	if !viper.IsSet("local_mode") {

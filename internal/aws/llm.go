@@ -68,7 +68,7 @@ func GetAIProfile(providerName string) (*AIProfile, error) {
 
 // executeAWSOperation executes a specific AWS operation with the given parameters
 func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input map[string]interface{}, profile *AIProfile) (string, error) {
-	verbose := viper.GetBool("verbose")
+	verbose := viper.GetBool("debug")
 
 	if verbose {
 		fmt.Printf("🔍 %s: Starting AWS operation with profile: %s, region: %s\n", toolName, profile.AWSProfile, profile.Region)
@@ -2117,6 +2117,10 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		args := []string{"iam", "list-roles", "--output", "table", "--query", "Roles[*].{RoleName:RoleName,CreateDate:CreateDate}"}
 		return c.execAWSCLI(ctx, args, profile)
 
+	case "list_iam_groups":
+		args := []string{"iam", "list-groups", "--output", "table", "--query", "Groups[*].{GroupName:GroupName,CreateDate:CreateDate}"}
+		return c.execAWSCLI(ctx, args, profile)
+
 	case "list_iam_users":
 		args := []string{"iam", "list-users", "--output", "table", "--query", "Users[*].{UserName:UserName,CreateDate:CreateDate}"}
 		return c.execAWSCLI(ctx, args, profile)
@@ -2454,7 +2458,7 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 
 // execAWSCLI executes AWS CLI commands directly
 func (c *Client) execAWSCLI(ctx context.Context, args []string, profile *AIProfile) (string, error) {
-	verbose := viper.GetBool("verbose")
+	verbose := viper.GetBool("debug")
 
 	// Build AWS CLI command
 	cmd := exec.CommandContext(ctx, "aws")

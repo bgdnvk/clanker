@@ -8,7 +8,6 @@ import (
 
 	"github.com/bgdnvk/clanker/internal/ai"
 	"github.com/bgdnvk/clanker/internal/aws"
-	"github.com/bgdnvk/clanker/internal/codebase"
 	ghclient "github.com/bgdnvk/clanker/internal/github"
 	tfclient "github.com/bgdnvk/clanker/internal/terraform"
 	"github.com/spf13/cobra"
@@ -20,13 +19,12 @@ const defaultGeminiModel = "gemini-3-pro-preview"
 
 var askCmd = &cobra.Command{
 	Use:   "ask [question]",
-	Short: "Ask AI about your AWS infrastructure, codebase, or GitHub repository",
-	Long: `Ask natural language questions about your AWS infrastructure, codebase, or GitHub repository.
+	Short: "Ask AI about your AWS infrastructure or GitHub repository",
+	Long: `Ask natural language questions about your AWS infrastructure or GitHub repository.
 	
 Examples:
   clanker ask "What EC2 instances are running?"
   clanker ask "Show me lambda functions with high error rates"
-  clanker ask "Find all functions that use the user service"
   clanker ask "What's the current RDS instance status?"
   clanker ask "Show me GitHub Actions workflow status"
   clanker ask "What pull requests are open?"`,
@@ -36,14 +34,11 @@ Examples:
 
 		// Get context from flags
 		includeAWS, _ := cmd.Flags().GetBool("aws")
-		includeCode, _ := cmd.Flags().GetBool("code")
 		includeGitHub, _ := cmd.Flags().GetBool("github")
 		includeTerraform, _ := cmd.Flags().GetBool("terraform")
-		verbose, _ := cmd.Flags().GetBool("verbose")
-		debug, _ := cmd.Flags().GetBool("debug")
+		debug := viper.GetBool("debug")
 		discovery, _ := cmd.Flags().GetBool("discovery")
 		compliance, _ := cmd.Flags().GetBool("compliance")
-		codebasePath, _ := cmd.Flags().GetString("codebase-path")
 		profile, _ := cmd.Flags().GetString("profile")
 		workspace, _ := cmd.Flags().GetString("workspace")
 		aiProfile, _ := cmd.Flags().GetString("ai-profile")
@@ -84,7 +79,7 @@ For each active AWS service with resources, identify:
 Include all active services: compute, storage, database, networking, security, ML/AI, analytics, and management services. Focus on services that actually have active resources deployed.
 
 Format as a professional compliance table suitable for government security documentation.`
-			if verbose {
+			if debug {
 				fmt.Println("Compliance mode enabled: Full infrastructure discovery for comprehensive SSP documentation")
 			}
 		}
@@ -93,18 +88,20 @@ Format as a professional compliance table suitable for government security docum
 		if discovery {
 			includeAWS = true
 			includeTerraform = true
-			if verbose {
+			if debug {
 				fmt.Println("Discovery mode enabled: AWS and Terraform contexts activated")
 			}
 		}
 
 		// If no specific context is requested, try to infer from the question
-		if !includeAWS && !includeCode && !includeGitHub && !includeTerraform {
+		if !includeAWS && !includeGitHub && !includeTerraform {
 			var inferredTerraform bool
-			includeAWS, includeCode, includeGitHub, inferredTerraform = inferContext(question)
+			var inferredCode bool
+			includeAWS, inferredCode, includeGitHub, inferredTerraform = inferContext(question)
+			_ = inferredCode
 
-			if verbose {
-				fmt.Printf("Inferred context: AWS=%v, Code=%v, GitHub=%v, Terraform=%v\n", includeAWS, includeCode, includeGitHub, inferredTerraform)
+			if debug {
+				fmt.Printf("Inferred context: AWS=%v, GitHub=%v, Terraform=%v\n", includeAWS, includeGitHub, inferredTerraform)
 			}
 
 			// Handle inferred Terraform context
@@ -117,7 +114,6 @@ Format as a professional compliance table suitable for government security docum
 
 		// Gather context
 		var awsContext string
-		var codeContext string
 		var githubContext string
 		var terraformContext string
 
@@ -153,19 +149,6 @@ Format as a professional compliance table suitable for government security docum
 			}
 		}
 
-		if includeCode {
-			if codebasePath == "" {
-				codebasePath = "."
-			}
-
-			analyzer := codebase.NewAnalyzer(codebasePath)
-			var err error
-			codeContext, err = analyzer.GetRelevantContext(question)
-			if err != nil {
-				return fmt.Errorf("failed to get codebase context: %w", err)
-			}
-		}
-
 		if includeGitHub {
 			// Get GitHub configuration
 			token := viper.GetString("github.token")
@@ -195,7 +178,7 @@ Format as a professional compliance table suitable for government security docum
 				if err != nil {
 					return fmt.Errorf("failed to get Terraform context: %w", err)
 				}
-			} else if verbose {
+			} else if debug {
 				fmt.Println("Terraform context requested but no workspaces configured, skipping")
 			}
 		}
@@ -204,7 +187,7 @@ Format as a professional compliance table suitable for government security docum
 		var aiClient *ai.Client
 		var err error
 
-		if verbose {
+		if debug {
 			fmt.Printf("Tool calling check: includeAWS=%v, includeGitHub=%v\n", includeAWS, includeGitHub)
 		}
 
@@ -235,7 +218,7 @@ Format as a professional compliance table suitable for government security docum
 				if err != nil {
 					return fmt.Errorf("failed to create AWS client with profile %s: %w", targetProfile, err)
 				}
-				if verbose {
+				if debug {
 					fmt.Printf("Successfully created AWS client with profile: %s\n", targetProfile)
 				}
 			}
@@ -291,8 +274,8 @@ Format as a professional compliance table suitable for government security docum
 				apiKey = viper.GetString("ai.api_key")
 			}
 
-			aiClient = ai.NewClientWithTools(provider, apiKey, awsClient, githubClient, verbose || debug, aiProfile)
-			if verbose {
+			aiClient = ai.NewClientWithTools(provider, apiKey, awsClient, githubClient, debug, aiProfile)
+			if debug {
 				fmt.Printf("Created AI client with tools: AWS=%v, GitHub=%v\n", awsClient != nil, githubClient != nil)
 			}
 		} else {
@@ -338,17 +321,24 @@ Format as a professional compliance table suitable for government security docum
 				apiKey = viper.GetString("ai.api_key")
 			}
 
-			aiClient = ai.NewClient(provider, apiKey, verbose || debug, aiProfile)
+			aiClient = ai.NewClient(provider, apiKey, debug, aiProfile)
 		}
 
-		// Combine code and terraform contexts
-		combinedCodeContext := codeContext
-		if terraformContext != "" {
-			if combinedCodeContext != "" {
-				combinedCodeContext += "\n\n" + terraformContext
-			} else {
-				combinedCodeContext = terraformContext
+		// Only Terraform context is supported here (code scanning disabled).
+		combinedCodeContext := terraformContext
+
+		// If no tools are enabled, skip the tool-calling pipeline entirely.
+		// This avoids confusing "selected operations" output that cannot execute.
+		if !includeAWS && !includeGitHub {
+			if debug {
+				fmt.Println("No tools enabled (AWS/GitHub). Skipping tool pipeline.")
 			}
+			response, err := aiClient.AskOriginal(ctx, question, awsContext, combinedCodeContext, githubContext)
+			if err != nil {
+				return fmt.Errorf("failed to get AI response: %w", err)
+			}
+			fmt.Println(response)
+			return nil
 		}
 
 		// Use the same AWS profile for both infrastructure queries and tool calls
@@ -358,7 +348,7 @@ Format as a professional compliance table suitable for government security docum
 			awsProfileForTools = ai.FindInfraAnalysisProfile()
 		}
 
-		if verbose {
+		if debug {
 			fmt.Printf("Calling AskWithTools with AWS profile: %s\n", awsProfileForTools)
 		}
 
@@ -376,13 +366,10 @@ func init() {
 	rootCmd.AddCommand(askCmd)
 
 	askCmd.Flags().Bool("aws", false, "Include AWS infrastructure context")
-	askCmd.Flags().Bool("code", false, "Include codebase context")
 	askCmd.Flags().Bool("github", false, "Include GitHub repository context")
 	askCmd.Flags().Bool("terraform", false, "Include Terraform workspace context")
-	askCmd.Flags().Bool("debug", false, "Enable debug logging")
 	askCmd.Flags().Bool("discovery", false, "Run comprehensive infrastructure discovery (all services)")
 	askCmd.Flags().Bool("compliance", false, "Generate compliance report showing all services, ports, and protocols")
-	askCmd.Flags().String("codebase-path", "", "Path to codebase (default: current directory)")
 	askCmd.Flags().String("profile", "", "AWS profile to use for infrastructure queries")
 	askCmd.Flags().String("workspace", "", "Terraform workspace to use for infrastructure queries")
 	askCmd.Flags().String("ai-profile", "", "AI profile to use (default: 'default')")
@@ -435,7 +422,8 @@ func resolveGeminiModel(provider, flagValue string) string {
 	return model
 }
 
-// inferContext tries to determine if the question is about AWS, code, GitHub, or Terraform
+// inferContext tries to determine if the question is about AWS, GitHub, or Terraform.
+// Code scanning is disabled, so this never infers code context.
 func inferContext(question string) (aws bool, code bool, github bool, terraform bool) {
 	awsKeywords := []string{
 		// Core services
@@ -452,19 +440,6 @@ func inferContext(question string) (aws bool, code bool, github bool, terraform 
 		"monitor", "trace", "debug", "performance", "latency", "throughput", "error-rate", "failure", "timeout", "retry",
 		// Infrastructure discovery
 		"services", "active", "deployed", "discovery", "overview", "summary", "list-all", "what's-running", "what-services", "infrastructure-overview",
-	}
-
-	codeKeywords := []string{
-		// Programming constructs
-		"function", "class", "method", "variable", "constant", "interface", "struct", "enum", "type", "namespace", "module", "package", "library", "framework",
-		// File and project structure
-		"file", "directory", "folder", "path", "import", "require", "include", "dependency", "dependencies", "package.json", "requirements.txt", "go.mod", "cargo.toml", "pom.xml",
-		// Code quality and patterns
-		"service", "api", "endpoint", "handler", "controller", "model", "view", "middleware", "decorator", "annotation", "comment", "documentation", "test", "unit-test", "integration-test",
-		// General programming terms
-		"code", "codebase", "source", "implementation", "algorithm", "logic", "syntax", "compile", "build", "debug", "refactor", "optimize", "performance",
-		// Languages and technologies
-		"python", "go", "golang", "javascript", "typescript", "java", "rust", "c++", "c#", "ruby", "php", "swift", "kotlin", "scala", "clojure",
 	}
 
 	githubKeywords := []string{
@@ -488,7 +463,7 @@ func inferContext(question string) (aws bool, code bool, github bool, terraform 
 		// State management
 		"tfstate", "state-file", "remote-state", "lock", "unlock", "drift", "refresh", "import", "taint", "untaint",
 		// Workspaces and environments
-		"dev", "stage", "staging", "prod", "production", "test", "qa", "environment", "workspace",
+		"dev", "stage", "staging", "prod", "production", "qa", "environment", "workspace",
 	}
 
 	questionLower := strings.ToLower(question)
@@ -496,13 +471,6 @@ func inferContext(question string) (aws bool, code bool, github bool, terraform 
 	for _, keyword := range awsKeywords {
 		if contains(questionLower, keyword) {
 			aws = true
-			break
-		}
-	}
-
-	for _, keyword := range codeKeywords {
-		if contains(questionLower, keyword) {
-			code = true
 			break
 		}
 	}
@@ -521,9 +489,9 @@ func inferContext(question string) (aws bool, code bool, github bool, terraform 
 		}
 	}
 
-	// If no specific context detected, include all
-	if !aws && !code && !github && !terraform {
-		aws, code, github, terraform = true, true, true, true
+	// If no specific context detected, include AWS + GitHub by default.
+	if !aws && !github && !terraform {
+		aws, github = true, true
 	}
 
 	return aws, code, github, terraform

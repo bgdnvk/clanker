@@ -91,6 +91,7 @@ MONITORING & LOGS:
 
 SECURITY & IAM:
 - list_iam_roles: List IAM roles (names only, no sensitive data)
+- list_iam_groups: List IAM groups (names only, no sensitive data)
 - list_iam_users: List IAM users (names only, no sensitive data)
 - describe_security_groups: Get security group rules and associations
 - list_kms_keys: List KMS encryption keys

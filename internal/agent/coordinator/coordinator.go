@@ -14,7 +14,7 @@ import (
 )
 
 func verboseAgents() bool {
-	return viper.GetBool("verbose") || viper.GetBool("agent.trace")
+	return viper.GetBool("debug") || viper.GetBool("agent.trace")
 }
 
 // ParallelAgent represents a running worker instance.

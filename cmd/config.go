@@ -34,6 +34,8 @@ var configInitCmd = &cobra.Command{
 		}
 
 		// Create default config
+		// TODO: service_keywords were removed from the default config to keep it minimal.
+		// If we want keyword-based log routing, reintroduce them under `aws.service_keywords`.
 		defaultConfig := `# Clanker Configuration
 # Copy this to ~/.clanker.yaml and customize for your setup
 
@@ -81,97 +83,6 @@ infra:
         profile: your-prod-profile
         region: us-east-1
         description: Production environment
-
-# Service keywords for log analysis and service identification
-service_keywords:
-  api:
-    - api
-    - gateway
-    - rest
-    - graphql
-    - endpoint
-    - service
-  web:
-    - web
-    - frontend
-    - ui
-    - webapp
-    - dashboard
-  auth:
-    - auth
-    - authentication
-    - authorization
-    - login
-    - cognito
-    - oauth
-    - jwt
-    - token
-  database:
-    - database
-    - db
-    - rds
-    - postgres
-    - mysql
-    - mongodb
-    - dynamodb
-    - redis
-  storage:
-    - storage
-    - s3
-    - bucket
-    - file
-    - blob
-    - object
-  compute:
-    - compute
-    - ec2
-    - lambda
-    - function
-    - container
-    - ecs
-    - fargate
-  networking:
-    - network
-    - vpc
-    - subnet
-    - route
-    - load-balancer
-    - alb
-    - nlb
-    - cloudfront
-    - cdn
-  monitoring:
-    - monitor
-    - logs
-    - metrics
-    - cloudwatch
-    - alerts
-    - dashboard
-  security:
-    - security
-    - waf
-    - shield
-    - firewall
-    - encryption
-    - kms
-    - secrets
-  cicd:
-    - ci
-    - cd
-    - pipeline
-    - build
-    - deploy
-    - github-actions
-    - codebuild
-    - codepipeline
-  ml:
-    - ml
-    - ai
-    - machine-learning
-    - bedrock
-    - sagemaker
-    - model
-    - inference
 
 github:
   token: ""                      # GitHub personal access token (optional for public repos)
@@ -230,7 +141,6 @@ codebase:
   max_files: 100          # Max number of files to analyze per query
 
 # General settings
-verbose: false
 timeout: 30  # Timeout for AI requests in seconds
 `
 

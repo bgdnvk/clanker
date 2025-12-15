@@ -11,7 +11,7 @@ import (
 )
 
 func (a *Agent) runSequentialPlanner(ctx context.Context, agentCtx *AgentContext) error {
-	verbose := viper.GetBool("verbose")
+	verbose := viper.GetBool("debug")
 
 	for agentCtx.CurrentStep < agentCtx.MaxSteps {
 		agentCtx.CurrentStep++
@@ -123,7 +123,7 @@ func (a *Agent) makeDecision(ctx context.Context, agentCtx *AgentContext) (*Agen
 }
 
 func (a *Agent) executeDecision(ctx context.Context, agentCtx *AgentContext, decision *AgentDecision) error {
-	verbose := viper.GetBool("verbose")
+	verbose := viper.GetBool("debug")
 
 	switch decision.Action {
 	case "gather_logs":
@@ -145,7 +145,7 @@ func (a *Agent) executeDecision(ctx context.Context, agentCtx *AgentContext, dec
 }
 
 func (a *Agent) gatherLogs(ctx context.Context, agentCtx *AgentContext, decision *AgentDecision) error {
-	verbose := viper.GetBool("verbose")
+	verbose := viper.GetBool("debug")
 
 	if verbose {
 		fmt.Printf("📋 Gathering logs for service: %s\n", decision.Service)
@@ -234,7 +234,7 @@ func (a *Agent) gatherLogs(ctx context.Context, agentCtx *AgentContext, decision
 }
 
 func (a *Agent) gatherMetrics(ctx context.Context, agentCtx *AgentContext, decision *AgentDecision) error {
-	verbose := viper.GetBool("verbose")
+	verbose := viper.GetBool("debug")
 
 	if verbose {
 		fmt.Printf("📊 Gathering metrics for service: %s\n", decision.Service)
@@ -252,7 +252,7 @@ func (a *Agent) gatherMetrics(ctx context.Context, agentCtx *AgentContext, decis
 }
 
 func (a *Agent) analyzeService(ctx context.Context, agentCtx *AgentContext, decision *AgentDecision) error {
-	verbose := viper.GetBool("verbose")
+	verbose := viper.GetBool("debug")
 
 	if verbose {
 		fmt.Printf("🔍 Analyzing service: %s\n", decision.Service)
@@ -270,7 +270,7 @@ func (a *Agent) analyzeService(ctx context.Context, agentCtx *AgentContext, deci
 }
 
 func (a *Agent) investigateErrors(ctx context.Context, agentCtx *AgentContext, decision *AgentDecision) error {
-	verbose := viper.GetBool("verbose")
+	verbose := viper.GetBool("debug")
 
 	if verbose {
 		fmt.Printf("🚨 Investigating errors for service: %s\n", decision.Service)
@@ -302,7 +302,7 @@ func (a *Agent) investigateErrors(ctx context.Context, agentCtx *AgentContext, d
 }
 
 func (a *Agent) executeAWSFunctionCalls(ctx context.Context, agentCtx *AgentContext, decision *AgentDecision) error {
-	verbose := viper.GetBool("verbose")
+	verbose := viper.GetBool("debug")
 
 	if verbose {
 		fmt.Printf("🔧 Executing %d AWS function calls\n", len(decision.AWSFunctions))

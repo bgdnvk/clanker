@@ -64,7 +64,7 @@ func (a *Agent) SetAIDecisionFunction(fn func(context.Context, string) (string, 
 
 // InvestigateQuery intelligently investigates a query using decision trees and parallel agents
 func (a *Agent) InvestigateQuery(ctx context.Context, query string) (*AgentContext, error) {
-	verbose := viper.GetBool("verbose")
+	verbose := viper.GetBool("debug")
 
 	// Perform semantic analysis on the query
 	semanticAnalyzer := semantic.NewAnalyzer()

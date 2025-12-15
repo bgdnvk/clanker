@@ -368,7 +368,11 @@ func (c *Client) askWithDynamicAnalysis(ctx context.Context, question, awsContex
 	} else {
 		if c.awsClient == nil {
 			if c.debug {
-				fmt.Printf("⚠️  AWS client is nil - cannot execute operations\n")
+				if len(analysis.Operations) > 0 {
+					fmt.Printf("⚠️  Selected %d AWS operation(s) but AWS is not enabled (no AWS client). Re-run with --aws to execute.\n", len(analysis.Operations))
+				} else {
+					fmt.Printf("⚠️  AWS client is nil - cannot execute operations\n")
+				}
 			}
 		} else {
 			if c.debug {
@@ -521,7 +525,7 @@ func (c *Client) AskOriginal(ctx context.Context, question, awsContext, codeCont
 func (c *Client) buildPrompt(question, awsContext, codeContext, githubContext string) string {
 	var prompt strings.Builder
 
-	prompt.WriteString("You are an AI assistant helping with AWS infrastructure, codebase analysis, and GitHub repository management. ")
+	prompt.WriteString("You are an AI assistant helping with AWS infrastructure and GitHub repository management. ")
 	prompt.WriteString("Answer the following question based on the provided context.\n\n")
 
 	if awsContext != "" {
