@@ -52,14 +52,14 @@ Set the default environment + profile in `~/.clanker.yaml`:
 
 ```yaml
 infra:
-	default_provider: aws
-	default_environment: clankercloud
+  default_provider: aws
+  default_environment: clankercloud
 
-	aws:
-		environments:
-			clankercloud:
-				profile: clankercloud-tekbog
-				region: us-east-1
+  aws:
+    environments:
+      clankercloud:
+        profile: clankercloud-tekbog
+        region: us-east-1
 ```
 
 Override for a single command:
@@ -69,6 +69,12 @@ clanker ask --aws --profile clankercloud-tekbog "what lambdas do we have?" | cat
 ```
 
 ## Usage
+
+Flags:
+
+- `--aws`: force AWS context/tooling for the question (uses the default env/profile from `~/.clanker.yaml` unless you pass `--profile`)
+- `--profile <name>`: override the AWS CLI profile for this run
+- `--debug`: print diagnostics (selected tools, AWS CLI calls, prompt sizes)
 
 ```bash
 clanker ask "what's the status of my chat service lambda?"
