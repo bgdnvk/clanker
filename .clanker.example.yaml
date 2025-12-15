@@ -89,5 +89,4 @@ infra:
 #       path: /path/to/infra
 
 # General settings:
-# verbose: false
 # timeout: 30
