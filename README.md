@@ -25,13 +25,47 @@ Copy the example config and edit it for your environments/providers:
 
 ```bash
 cp .clanker.example.yaml ~/.clanker.yaml
-```
+```  
+alternatively you can do 
+``` clanker config init ```
+
 
 Most providers use env vars for keys (see [.clanker.example.yaml](.clanker.example.yaml)), e.g.:
 
 ```bash
 export OPENAI_API_KEY="..."
 export GEMINI_API_KEY="..."
+```
+
+### AWS
+
+Clanker uses your local AWS CLI profiles (not raw access keys in the clanker config).
+
+Create a profile:
+
+```bash
+aws configure --profile clankercloud-tekbog | cat
+aws sts get-caller-identity --profile clankercloud-tekbog | cat
+```
+
+Set the default environment + profile in `~/.clanker.yaml`:
+
+```yaml
+infra:
+	default_provider: aws
+	default_environment: clankercloud
+
+	aws:
+		environments:
+			clankercloud:
+				profile: clankercloud-tekbog
+				region: us-east-1
+```
+
+Override for a single command:
+
+```bash
+clanker ask --aws --profile clankercloud-tekbog "what lambdas do we have?" | cat
 ```
 
 ## Usage

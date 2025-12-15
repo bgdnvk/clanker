@@ -368,7 +368,11 @@ func (c *Client) askWithDynamicAnalysis(ctx context.Context, question, awsContex
 	} else {
 		if c.awsClient == nil {
 			if c.debug {
-				fmt.Printf("⚠️  AWS client is nil - cannot execute operations\n")
+				if len(analysis.Operations) > 0 {
+					fmt.Printf("⚠️  Selected %d AWS operation(s) but AWS is not enabled (no AWS client). Re-run with --aws to execute.\n", len(analysis.Operations))
+				} else {
+					fmt.Printf("⚠️  AWS client is nil - cannot execute operations\n")
+				}
 			}
 		} else {
 			if c.debug {

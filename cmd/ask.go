@@ -327,6 +327,20 @@ Format as a professional compliance table suitable for government security docum
 		// Only Terraform context is supported here (code scanning disabled).
 		combinedCodeContext := terraformContext
 
+		// If no tools are enabled, skip the tool-calling pipeline entirely.
+		// This avoids confusing "selected operations" output that cannot execute.
+		if !includeAWS && !includeGitHub {
+			if debug {
+				fmt.Println("No tools enabled (AWS/GitHub). Skipping tool pipeline.")
+			}
+			response, err := aiClient.AskOriginal(ctx, question, awsContext, combinedCodeContext, githubContext)
+			if err != nil {
+				return fmt.Errorf("failed to get AI response: %w", err)
+			}
+			fmt.Println(response)
+			return nil
+		}
+
 		// Use the same AWS profile for both infrastructure queries and tool calls
 		awsProfileForTools := profile
 		if awsProfileForTools == "" {
@@ -449,7 +463,7 @@ func inferContext(question string) (aws bool, code bool, github bool, terraform 
 		// State management
 		"tfstate", "state-file", "remote-state", "lock", "unlock", "drift", "refresh", "import", "taint", "untaint",
 		// Workspaces and environments
-		"dev", "stage", "staging", "prod", "production", "test", "qa", "environment", "workspace",
+		"dev", "stage", "staging", "prod", "production", "qa", "environment", "workspace",
 	}
 
 	questionLower := strings.ToLower(question)
