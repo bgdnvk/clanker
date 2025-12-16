@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
+	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -29,6 +30,7 @@ type Client struct {
 	debug          bool
 	ec2            *ec2.Client
 	ecs            *ecs.Client
+	iam            *iam.Client
 	lambda         *lambda.Client
 	rds            *rds.Client
 	s3             *s3.Client
@@ -47,6 +49,7 @@ func NewClient(ctx context.Context) (*Client, error) {
 		cfg:            cfg,
 		ec2:            ec2.NewFromConfig(cfg),
 		ecs:            ecs.NewFromConfig(cfg),
+		iam:            iam.NewFromConfig(cfg),
 		lambda:         lambda.NewFromConfig(cfg),
 		rds:            rds.NewFromConfig(cfg),
 		s3:             s3.NewFromConfig(cfg),
@@ -104,6 +107,7 @@ func NewClientWithProfileAndDebug(ctx context.Context, profile string, debug boo
 			debug:          debug,
 			ec2:            ec2.NewFromConfig(cfg),
 			ecs:            ecs.NewFromConfig(cfg),
+			iam:            iam.NewFromConfig(cfg),
 			lambda:         lambda.NewFromConfig(cfg),
 			rds:            rds.NewFromConfig(cfg),
 			s3:             s3.NewFromConfig(cfg),
@@ -132,6 +136,7 @@ func NewClientWithProfileAndDebug(ctx context.Context, profile string, debug boo
 		debug:          debug,
 		ec2:            ec2.NewFromConfig(cfg),
 		ecs:            ecs.NewFromConfig(cfg),
+		iam:            iam.NewFromConfig(cfg),
 		lambda:         lambda.NewFromConfig(cfg),
 		rds:            rds.NewFromConfig(cfg),
 		s3:             s3.NewFromConfig(cfg),
@@ -197,6 +202,16 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 		context.WriteString("\n\n")
 	}
 
+	if strings.Contains(questionLower, "iam") || strings.Contains(questionLower, "role") {
+		rolesInfo, err := c.getIAMRolesInfo(ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed to get IAM roles info: %w", err)
+		}
+		context.WriteString("IAM Roles:\n")
+		context.WriteString(rolesInfo)
+		context.WriteString("\n\n")
+	}
+
 	if strings.Contains(questionLower, "log") || strings.Contains(questionLower, "cloudwatch") || strings.Contains(questionLower, "error") {
 		logsInfo, err := c.getCloudWatchLogsInfo(ctx)
 		if err != nil {
@@ -248,6 +263,45 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 	return context.String(), nil
 }
 
+func (c *Client) getIAMRolesInfo(ctx context.Context) (string, error) {
+	// IAM is global; this lists roles in the account. Keep output bounded.
+	const maxRoles = 100
+
+	var info strings.Builder
+	count := 0
+	var marker *string
+
+	for {
+		out, err := c.iam.ListRoles(ctx, &iam.ListRolesInput{Marker: marker})
+		if err != nil {
+			return "", err
+		}
+
+		for _, role := range out.Roles {
+			info.WriteString(fmt.Sprintf("- Role: %s, Arn: %s, Created: %s\n",
+				aws.ToString(role.RoleName),
+				aws.ToString(role.Arn),
+				aws.ToTime(role.CreateDate).Format(time.RFC3339)))
+			count++
+			if count >= maxRoles {
+				info.WriteString(fmt.Sprintf("(showing first %d roles)\n", maxRoles))
+				return info.String(), nil
+			}
+		}
+
+		if out.IsTruncated && out.Marker != nil {
+			marker = out.Marker
+			continue
+		}
+		break
+	}
+
+	if count == 0 {
+		return "(no roles found)\n", nil
+	}
+	return info.String(), nil
+}
+
 func (c *Client) getEC2Info(ctx context.Context) (string, error) {
 	result, err := c.ec2.DescribeInstances(ctx, &ec2.DescribeInstancesInput{})
 	if err != nil {
@@ -275,10 +329,29 @@ func (c *Client) getLambdaInfo(ctx context.Context) (string, error) {
 
 	var info strings.Builder
 	for _, function := range result.Functions {
-		info.WriteString(fmt.Sprintf("- Function: %s, Runtime: %s, Last Modified: %s\n",
-			aws.ToString(function.FunctionName),
-			string(function.Runtime),
-			aws.ToString(function.LastModified)))
+		url := ""
+		auth := ""
+		urlCfg, err := c.lambda.GetFunctionUrlConfig(ctx, &lambda.GetFunctionUrlConfigInput{
+			FunctionName: function.FunctionName,
+		})
+		if err == nil {
+			url = aws.ToString(urlCfg.FunctionUrl)
+			auth = string(urlCfg.AuthType)
+		}
+
+		if url != "" {
+			info.WriteString(fmt.Sprintf("- Function: %s, Runtime: %s, URL: %s, Auth: %s, Last Modified: %s\n",
+				aws.ToString(function.FunctionName),
+				string(function.Runtime),
+				url,
+				auth,
+				aws.ToString(function.LastModified)))
+		} else {
+			info.WriteString(fmt.Sprintf("- Function: %s, Runtime: %s, Last Modified: %s\n",
+				aws.ToString(function.FunctionName),
+				string(function.Runtime),
+				aws.ToString(function.LastModified)))
+		}
 	}
 
 	return info.String(), nil

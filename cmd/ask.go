@@ -2,13 +2,18 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/bgdnvk/clanker/internal/ai"
 	"github.com/bgdnvk/clanker/internal/aws"
 	ghclient "github.com/bgdnvk/clanker/internal/github"
+	"github.com/bgdnvk/clanker/internal/maker"
 	tfclient "github.com/bgdnvk/clanker/internal/terraform"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -28,9 +33,21 @@ Examples:
   clanker ask "What's the current RDS instance status?"
   clanker ask "Show me GitHub Actions workflow status"
   clanker ask "What pull requests are open?"`,
-	Args: cobra.MinimumNArgs(1),
+	Args: func(cmd *cobra.Command, args []string) error {
+		apply, _ := cmd.Flags().GetBool("apply")
+		if apply {
+			return nil
+		}
+		if len(args) < 1 {
+			return fmt.Errorf("requires a question")
+		}
+		return nil
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		question := args[0]
+		question := ""
+		if len(args) > 0 {
+			question = args[0]
+		}
 
 		// Get context from flags
 		includeAWS, _ := cmd.Flags().GetBool("aws")
@@ -46,9 +63,185 @@ Examples:
 		anthropicKey, _ := cmd.Flags().GetString("anthropic-key")
 		geminiKey, _ := cmd.Flags().GetString("gemini-key")
 		geminiModel, _ := cmd.Flags().GetString("gemini-model")
+		makerMode, _ := cmd.Flags().GetBool("maker")
+		applyMode, _ := cmd.Flags().GetBool("apply")
+		planFile, _ := cmd.Flags().GetString("plan-file")
+		destroyer, _ := cmd.Flags().GetBool("destroyer")
 		agentTrace, _ := cmd.Flags().GetBool("agent-trace")
 		if cmd.Flags().Changed("agent-trace") {
 			viper.Set("agent.trace", agentTrace)
+		}
+
+		if makerMode {
+			ctx := context.Background()
+
+			// Resolve provider the same way as normal ask.
+			var provider string
+			if aiProfile != "" {
+				provider = aiProfile
+			} else {
+				provider = viper.GetString("ai.default_provider")
+				if provider == "" {
+					provider = "openai"
+				}
+			}
+
+			maybeOverrideGeminiModel(provider, geminiModel)
+
+			// Resolve API key based on provider.
+			var apiKey string
+			switch provider {
+			case "gemini":
+				apiKey = ""
+			case "gemini-api":
+				apiKey = resolveGeminiAPIKey(geminiKey)
+			case "openai":
+				if openaiKey != "" {
+					apiKey = openaiKey
+				} else {
+					apiKey = viper.GetString("ai.providers.openai.api_key")
+				}
+			case "anthropic":
+				if anthropicKey != "" {
+					apiKey = anthropicKey
+				} else {
+					apiKey = viper.GetString("ai.providers.anthropic.api_key_env")
+				}
+			default:
+				apiKey = viper.GetString("ai.api_key")
+			}
+
+			if applyMode {
+				var rawPlan string
+				if planFile != "" {
+					data, err := os.ReadFile(planFile)
+					if err != nil {
+						return fmt.Errorf("failed to read plan file: %w", err)
+					}
+					rawPlan = string(data)
+				} else {
+					data, err := io.ReadAll(os.Stdin)
+					if err != nil {
+						return fmt.Errorf("failed to read plan from stdin: %w", err)
+					}
+					rawPlan = string(data)
+				}
+
+				plan, err := maker.ParsePlan(rawPlan)
+				if err != nil {
+					return fmt.Errorf("invalid plan: %w", err)
+				}
+
+				// Resolve AWS profile/region for execution.
+				targetProfile := profile
+				if targetProfile == "" {
+					defaultEnv := viper.GetString("infra.default_environment")
+					if defaultEnv == "" {
+						defaultEnv = "dev"
+					}
+					targetProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+					if targetProfile == "" {
+						targetProfile = viper.GetString("aws.default_profile")
+					}
+					if targetProfile == "" {
+						targetProfile = "default"
+					}
+				}
+
+				region := ""
+				if envRegion := strings.TrimSpace(os.Getenv("AWS_REGION")); envRegion != "" {
+					region = envRegion
+				} else if envRegion := strings.TrimSpace(os.Getenv("AWS_DEFAULT_REGION")); envRegion != "" {
+					region = envRegion
+				} else {
+					// Prefer the profile's configured region so maker apply and infra analysis query the same region.
+					cmd := exec.CommandContext(ctx, "aws", "configure", "get", "region", "--profile", targetProfile)
+					if out, err := cmd.CombinedOutput(); err == nil {
+						region = strings.TrimSpace(string(out))
+					}
+				}
+				if region == "" {
+					region = ai.FindInfraAnalysisRegion()
+				}
+				if region == "" {
+					region = "us-east-1"
+				}
+
+				return maker.ExecutePlan(ctx, plan, maker.ExecOptions{
+					Profile:   targetProfile,
+					Region:    region,
+					Writer:    os.Stdout,
+					Destroyer: destroyer,
+				})
+			}
+
+			if strings.TrimSpace(question) == "" {
+				return fmt.Errorf("requires a question")
+			}
+
+			aiClient := ai.NewClient(provider, apiKey, debug, aiProfile)
+			prompt := maker.PlanPromptWithMode(question, destroyer)
+			resp, err := aiClient.AskPrompt(ctx, prompt)
+			if err != nil {
+				return err
+			}
+
+			cleaned := aiClient.CleanJSONResponse(resp)
+			plan, err := maker.ParsePlan(cleaned)
+			if err != nil {
+				return fmt.Errorf("failed to parse maker plan: %w", err)
+			}
+
+			// Resolve AWS profile/region for planning-time dependency expansion.
+			targetProfile := profile
+			if targetProfile == "" {
+				defaultEnv := viper.GetString("infra.default_environment")
+				if defaultEnv == "" {
+					defaultEnv = "dev"
+				}
+				targetProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+				if targetProfile == "" {
+					targetProfile = viper.GetString("aws.default_profile")
+				}
+				if targetProfile == "" {
+					targetProfile = "default"
+				}
+			}
+
+			region := ""
+			if envRegion := strings.TrimSpace(os.Getenv("AWS_REGION")); envRegion != "" {
+				region = envRegion
+			} else if envRegion := strings.TrimSpace(os.Getenv("AWS_DEFAULT_REGION")); envRegion != "" {
+				region = envRegion
+			} else {
+				cmd := exec.CommandContext(ctx, "aws", "configure", "get", "region", "--profile", targetProfile)
+				if out, err := cmd.CombinedOutput(); err == nil {
+					region = strings.TrimSpace(string(out))
+				}
+			}
+			if region == "" {
+				region = ai.FindInfraAnalysisRegion()
+			}
+			if region == "" {
+				region = "us-east-1"
+			}
+
+			_ = maker.EnrichPlan(ctx, plan, maker.ExecOptions{Profile: targetProfile, Region: region, Writer: io.Discard, Destroyer: destroyer})
+
+			if plan.CreatedAt.IsZero() {
+				plan.CreatedAt = time.Now().UTC()
+			}
+			plan.Question = question
+			if plan.Version == 0 {
+				plan.Version = maker.CurrentPlanVersion
+			}
+
+			out, err := json.MarshalIndent(plan, "", "  ")
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(out))
+			return nil
 		}
 
 		// Compliance mode enables comprehensive service discovery with specific formatting
@@ -146,6 +339,16 @@ Format as a professional compliance table suitable for government security docum
 			awsContext, err = awsClient.GetRelevantContext(ctx, question)
 			if err != nil {
 				return fmt.Errorf("failed to get AWS context: %w", err)
+			}
+
+			if discovery {
+				rolesContext, err := awsClient.GetRelevantContext(ctx, "iam roles")
+				if err != nil {
+					return fmt.Errorf("failed to get AWS IAM roles context: %w", err)
+				}
+				if strings.TrimSpace(rolesContext) != "" {
+					awsContext = awsContext + rolesContext
+				}
 			}
 		}
 
@@ -378,6 +581,10 @@ func init() {
 	askCmd.Flags().String("gemini-key", "", "Gemini API key (overrides config and env vars)")
 	askCmd.Flags().String("gemini-model", "", "Gemini model to use (overrides config)")
 	askCmd.Flags().Bool("agent-trace", false, "Show detailed coordinator agent lifecycle logs (overrides config)")
+	askCmd.Flags().Bool("maker", false, "Generate an AWS CLI plan (JSON) for infrastructure changes")
+	askCmd.Flags().Bool("destroyer", false, "Allow destructive AWS CLI operations when using --maker (requires explicit confirmation in UI/workflow)")
+	askCmd.Flags().Bool("apply", false, "Apply an approved maker plan (reads from stdin unless --plan-file is provided)")
+	askCmd.Flags().String("plan-file", "", "Optional path to maker plan JSON file for --apply")
 }
 
 func resolveGeminiAPIKey(flagValue string) string {
