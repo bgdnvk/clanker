@@ -29,70 +29,36 @@ func EnrichPlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	var expanded []Command
 	var notes []string
 
+	deleteEverythingRelated := wantsDeleteEverythingRelated(plan.Question)
+
+	state := &enrichState{
+		roleCreated:        map[string]bool{},
+		roleTrustSet:       map[string]bool{},
+		rolePolicyAttached: map[string]bool{},
+	}
+
+	expanders := defaultExpanders(opts, deleteEverythingRelated, state)
+
 	for _, cmd := range plan.Commands {
 		args := normalizeArgs(cmd.Args)
-		deleteEverythingRelated := wantsDeleteEverythingRelated(plan.Question)
-
-		if len(args) >= 2 && args[0] == "lambda" && args[1] == "delete-function" {
-			fn := flagValue(args, "--function-name")
-			if fn != "" {
-				steps, stepNotes := expandDeleteLambdaFunction(ctx, opts, fn, deleteEverythingRelated)
-				if len(stepNotes) > 0 {
-					notes = append(notes, stepNotes...)
-				}
-				if len(steps) > 0 {
-					expanded = append(expanded, steps...)
-					continue
-				}
-			}
-		}
-
-		if len(args) >= 2 && args[0] == "iam" && args[1] == "delete-role" {
-			roleName := flagValue(args, "--role-name")
-			if roleName == "" {
-				expanded = append(expanded, cmd)
+		handled := false
+		for _, exp := range expanders {
+			if !exp.match(args) {
 				continue
 			}
-
-			steps, stepNotes := expandDeleteRole(ctx, opts, roleName)
+			didExpand, steps, stepNotes := exp.expand(ctx, cmd, args)
 			if len(stepNotes) > 0 {
 				notes = append(notes, stepNotes...)
 			}
-			if len(steps) > 0 {
+			if didExpand {
 				expanded = append(expanded, steps...)
-				continue
+				handled = true
+				break
 			}
 		}
-
-		if len(args) >= 2 && args[0] == "iam" && args[1] == "delete-policy" {
-			policyArn := flagValue(args, "--policy-arn")
-			if policyArn != "" {
-				steps, stepNotes := expandDeletePolicy(ctx, opts, policyArn)
-				if len(stepNotes) > 0 {
-					notes = append(notes, stepNotes...)
-				}
-				if len(steps) > 0 {
-					expanded = append(expanded, steps...)
-					continue
-				}
-			}
+		if !handled {
+			expanded = append(expanded, cmd)
 		}
-
-		if len(args) >= 2 && args[0] == "ec2" && args[1] == "delete-security-group" {
-			groupID := flagValue(args, "--group-id")
-			if groupID != "" {
-				steps, stepNotes := expandDeleteSecurityGroup(ctx, opts, groupID)
-				if len(stepNotes) > 0 {
-					notes = append(notes, stepNotes...)
-				}
-				if len(steps) > 0 {
-					expanded = append(expanded, steps...)
-					continue
-				}
-			}
-		}
-
-		expanded = append(expanded, cmd)
 	}
 
 	if len(expanded) > 0 {
@@ -103,6 +69,489 @@ func EnrichPlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	}
 
 	return nil
+}
+
+type enrichState struct {
+	roleCreated        map[string]bool
+	roleTrustSet       map[string]bool
+	rolePolicyAttached map[string]bool
+}
+
+type commandExpander struct {
+	name   string
+	match  func(args []string) bool
+	expand func(ctx context.Context, cmd Command, args []string) (bool, []Command, []string)
+}
+
+func defaultExpanders(opts ExecOptions, deleteEverythingRelated bool, state *enrichState) []commandExpander {
+	return []commandExpander{
+		{
+			name: "iam:ensure-roles",
+			match: func(args []string) bool {
+				// Only consider real AWS CLI commands with at least service/op.
+				return len(args) >= 2
+			},
+			expand: func(ctx context.Context, cmd Command, args []string) (bool, []Command, []string) {
+				// Avoid expanding IAM-mutating commands (prevents accidental loops).
+				if args[0] == "iam" {
+					return false, nil, nil
+				}
+
+				reqs, stepNotes := inferRoleRequirements(args)
+				if len(reqs) == 0 {
+					return false, nil, nil
+				}
+
+				var out []Command
+				agg := aggregateRoleRequirements(reqs)
+				for roleName, a := range agg {
+					ensureRoleForServices(&out, state, roleName, a.servicePrincipals)
+					for _, p := range a.managedPolicyArns {
+						reason := a.policyReason
+						if reason == "" {
+							reason = "Ensure service role has required managed policy"
+						}
+						ensureRoleHasManagedPolicy(&out, state, roleName, p, reason)
+					}
+				}
+
+				out = append(out, Command{Args: args, Reason: cmd.Reason})
+				return true, out, stepNotes
+			},
+		},
+		{
+			name: "lambda:delete-function",
+			match: func(args []string) bool {
+				return len(args) >= 2 && args[0] == "lambda" && args[1] == "delete-function"
+			},
+			expand: func(ctx context.Context, cmd Command, args []string) (bool, []Command, []string) {
+				fn := flagValue(args, "--function-name")
+				if fn == "" {
+					return false, nil, nil
+				}
+				steps, stepNotes := expandDeleteLambdaFunction(ctx, opts, fn, deleteEverythingRelated)
+				if len(steps) == 0 {
+					return false, nil, stepNotes
+				}
+				return true, steps, stepNotes
+			},
+		},
+		{
+			name: "iam:delete-role",
+			match: func(args []string) bool {
+				return len(args) >= 2 && args[0] == "iam" && args[1] == "delete-role"
+			},
+			expand: func(ctx context.Context, cmd Command, args []string) (bool, []Command, []string) {
+				roleName := flagValue(args, "--role-name")
+				if roleName == "" {
+					return false, nil, nil
+				}
+				steps, stepNotes := expandDeleteRole(ctx, opts, roleName)
+				if len(steps) == 0 {
+					return false, nil, stepNotes
+				}
+				return true, steps, stepNotes
+			},
+		},
+		{
+			name: "iam:delete-policy",
+			match: func(args []string) bool {
+				return len(args) >= 2 && args[0] == "iam" && args[1] == "delete-policy"
+			},
+			expand: func(ctx context.Context, cmd Command, args []string) (bool, []Command, []string) {
+				policyArn := flagValue(args, "--policy-arn")
+				if policyArn == "" {
+					return false, nil, nil
+				}
+				steps, stepNotes := expandDeletePolicy(ctx, opts, policyArn)
+				if len(steps) == 0 {
+					return false, nil, stepNotes
+				}
+				return true, steps, stepNotes
+			},
+		},
+		{
+			name: "ec2:delete-security-group",
+			match: func(args []string) bool {
+				return len(args) >= 2 && args[0] == "ec2" && args[1] == "delete-security-group"
+			},
+			expand: func(ctx context.Context, cmd Command, args []string) (bool, []Command, []string) {
+				groupID := flagValue(args, "--group-id")
+				if groupID == "" {
+					return false, nil, nil
+				}
+				steps, stepNotes := expandDeleteSecurityGroup(ctx, opts, groupID)
+				if len(steps) == 0 {
+					return false, nil, stepNotes
+				}
+				return true, steps, stepNotes
+			},
+		},
+	}
+}
+
+type roleRequirement struct {
+	roleName          string
+	servicePrincipal  string
+	managedPolicyArns []string
+	policyReason      string
+}
+
+func inferRoleRequirements(args []string) ([]roleRequirement, []string) {
+	service := ""
+	op := ""
+	if len(args) >= 1 {
+		service = strings.TrimSpace(args[0])
+	}
+	if len(args) >= 2 {
+		op = strings.TrimSpace(args[1])
+	}
+	if service == "" {
+		return nil, nil
+	}
+
+	// Collect common role flags used across AWS CLI.
+	// Note: If a service embeds RoleArn inside JSON (e.g., scheduler targets), we do not parse that here.
+	flagRoles := []struct {
+		flag string
+		kind string
+	}{
+		{"--role", "service"},
+		{"--role-arn", "service"},
+		{"--service-role-arn", "service"},
+		{"--execution-role-arn", "execution"},
+		{"--task-role-arn", "task"},
+		{"--job-role-arn", "execution"},
+		{"--node-role", "ec2"},
+	}
+
+	seen := map[string]bool{}
+	var out []roleRequirement
+	var notes []string
+	for _, fr := range flagRoles {
+		roleName := roleNameFromFlag(args, fr.flag)
+		if roleName == "" {
+			continue
+		}
+		key := fr.flag + "|" + roleName
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		req := roleRequirement{
+			roleName:         roleName,
+			servicePrincipal: guessServicePrincipal(service, op, fr.kind),
+		}
+
+		// Attach conservative baseline managed policies for known execution roles.
+		// This is intentionally NOT exhaustive; it's focused on "make it work" for common services.
+		switch service {
+		case "lambda":
+			if fr.flag == "--role" {
+				req.managedPolicyArns = append(req.managedPolicyArns, "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole")
+				req.policyReason = "Allow service to write operational logs"
+			}
+		case "ecs":
+			// ECS task definitions specify execution/task roles.
+			if fr.flag == "--execution-role-arn" {
+				req.managedPolicyArns = append(req.managedPolicyArns, "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy")
+				req.policyReason = "Allow ECS tasks to pull images and write logs"
+			}
+		case "states":
+			if fr.flag == "--role-arn" {
+				if hasFlag(args, "--logging-configuration") {
+					req.managedPolicyArns = append(req.managedPolicyArns, "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess")
+					req.policyReason = "Allow service to deliver logs to CloudWatch Logs"
+				}
+			}
+		case "batch":
+			// Batch service roles are used in compute environment setup.
+			if fr.kind == "service" {
+				req.managedPolicyArns = append(req.managedPolicyArns, "arn:aws:iam::aws:policy/service-role/AWSBatchServiceRole")
+				req.policyReason = "Allow AWS Batch to manage resources"
+			}
+		}
+
+		out = append(out, req)
+	}
+
+	jsonRoleArns := extractRoleArnsFromInlineJSONArgs(args)
+	for _, arn := range jsonRoleArns {
+		roleName := roleNameFromArn(arn)
+		if roleName == "" {
+			continue
+		}
+		key := "json|" + roleName
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, roleRequirement{
+			roleName:         roleName,
+			servicePrincipal: guessServicePrincipal(service, op, "service"),
+		})
+	}
+	if len(jsonRoleArns) > 0 {
+		notes = append(notes, "detected RoleArn values inside inline JSON args")
+	}
+
+	return out, notes
+}
+
+func guessServicePrincipal(service string, op string, roleKind string) string {
+	service = strings.TrimSpace(service)
+	op = strings.TrimSpace(op)
+	roleKind = strings.TrimSpace(roleKind)
+	if service == "" {
+		return ""
+	}
+	if roleKind == "ec2" {
+		return "ec2.amazonaws.com"
+	}
+
+	// Known exceptions where the principal is not simply "{service}.amazonaws.com".
+	switch service {
+	case "ecs":
+		if roleKind == "task" || roleKind == "execution" || op == "register-task-definition" {
+			return "ecs-tasks.amazonaws.com"
+		}
+		return "ecs.amazonaws.com"
+	case "states":
+		return "states.amazonaws.com"
+	case "lambda":
+		return "lambda.amazonaws.com"
+	case "batch":
+		return "batch.amazonaws.com"
+	case "events":
+		return "events.amazonaws.com"
+	case "scheduler":
+		return "scheduler.amazonaws.com"
+	case "pipes":
+		return "pipes.amazonaws.com"
+	}
+
+	return service + ".amazonaws.com"
+}
+
+type aggregatedRoleRequirement struct {
+	servicePrincipals []string
+	managedPolicyArns []string
+	policyReason      string
+}
+
+func aggregateRoleRequirements(reqs []roleRequirement) map[string]aggregatedRoleRequirement {
+	agg := map[string]aggregatedRoleRequirement{}
+	for _, r := range reqs {
+		roleName := strings.TrimSpace(r.roleName)
+		principal := strings.TrimSpace(r.servicePrincipal)
+		if roleName == "" || principal == "" {
+			continue
+		}
+		a := agg[roleName]
+		a.servicePrincipals = append(a.servicePrincipals, principal)
+		for _, p := range r.managedPolicyArns {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			a.managedPolicyArns = append(a.managedPolicyArns, p)
+		}
+		if a.policyReason == "" {
+			a.policyReason = strings.TrimSpace(r.policyReason)
+		}
+		agg[roleName] = a
+	}
+
+	for k, v := range agg {
+		v.servicePrincipals = normalizeNonEmpty(v.servicePrincipals)
+		v.managedPolicyArns = normalizeNonEmpty(v.managedPolicyArns)
+		agg[k] = v
+	}
+	return agg
+}
+
+func ensureRoleForServices(out *[]Command, state *enrichState, roleName string, servicePrincipals []string) {
+	roleName = strings.TrimSpace(roleName)
+	servicePrincipals = normalizeNonEmpty(servicePrincipals)
+	if roleName == "" || len(servicePrincipals) == 0 {
+		return
+	}
+	assumeDoc := assumeRolePolicyDocumentForPrincipals(servicePrincipals)
+	if assumeDoc == "" {
+		return
+	}
+
+	if state == nil {
+		*out = append(*out, Command{Args: []string{"iam", "create-role", "--role-name", roleName, "--assume-role-policy-document", assumeDoc}, Reason: "Ensure service execution role exists"})
+		*out = append(*out, Command{Args: []string{"iam", "update-assume-role-policy", "--role-name", roleName, "--policy-document", assumeDoc}, Reason: "Ensure role trust policy allows required services"})
+		return
+	}
+
+	if !state.roleCreated[roleName] {
+		*out = append(*out, Command{Args: []string{"iam", "create-role", "--role-name", roleName, "--assume-role-policy-document", assumeDoc}, Reason: "Ensure service execution role exists"})
+		state.roleCreated[roleName] = true
+	}
+
+	trustKey := roleName + "|" + strings.Join(servicePrincipals, ",")
+	if !state.roleTrustSet[trustKey] {
+		*out = append(*out, Command{Args: []string{"iam", "update-assume-role-policy", "--role-name", roleName, "--policy-document", assumeDoc}, Reason: "Ensure role trust policy allows required services"})
+		state.roleTrustSet[trustKey] = true
+	}
+}
+
+func assumeRolePolicyDocumentForPrincipals(servicePrincipals []string) string {
+	servicePrincipals = normalizeNonEmpty(servicePrincipals)
+	if len(servicePrincipals) == 0 {
+		return ""
+	}
+	principal := any(servicePrincipals[0])
+	if len(servicePrincipals) > 1 {
+		arr := make([]any, 0, len(servicePrincipals))
+		for _, p := range servicePrincipals {
+			arr = append(arr, p)
+		}
+		principal = arr
+	}
+	policy := map[string]any{
+		"Version": "2012-10-17",
+		"Statement": []any{
+			map[string]any{
+				"Effect":    "Allow",
+				"Principal": map[string]any{"Service": principal},
+				"Action":    "sts:AssumeRole",
+			},
+		},
+	}
+	b, err := json.Marshal(policy)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+func normalizeNonEmpty(items []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(items))
+	for _, s := range items {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+func extractRoleArnsFromInlineJSONArgs(args []string) []string {
+	var out []string
+	seen := map[string]bool{}
+
+	for i := 0; i < len(args); i++ {
+		candidate := strings.TrimSpace(args[i])
+		if candidate == "" {
+			continue
+		}
+
+		// Support --flag value and --flag=value.
+		if strings.HasPrefix(candidate, "--") {
+			if strings.Contains(candidate, "=") {
+				parts := strings.SplitN(candidate, "=", 2)
+				if len(parts) == 2 {
+					candidate = strings.TrimSpace(parts[1])
+				} else {
+					candidate = ""
+				}
+			} else if i+1 < len(args) {
+				candidate = strings.TrimSpace(args[i+1])
+			}
+		}
+		if candidate == "" {
+			continue
+		}
+		if !(strings.HasPrefix(candidate, "{") || strings.HasPrefix(candidate, "[")) {
+			continue
+		}
+
+		var v any
+		if err := json.Unmarshal([]byte(candidate), &v); err != nil {
+			continue
+		}
+		for _, arn := range findRoleArnsInJSON(v) {
+			arn = strings.TrimSpace(arn)
+			if arn == "" || seen[arn] {
+				continue
+			}
+			seen[arn] = true
+			out = append(out, arn)
+		}
+	}
+
+	return out
+}
+
+func findRoleArnsInJSON(v any) []string {
+	var out []string
+	switch t := v.(type) {
+	case map[string]any:
+		for k, vv := range t {
+			kl := strings.ToLower(strings.TrimSpace(k))
+			if strings.Contains(kl, "rolearn") {
+				if s, ok := vv.(string); ok {
+					ss := strings.TrimSpace(s)
+					if strings.HasPrefix(ss, "arn:") && strings.Contains(ss, ":role/") {
+						out = append(out, ss)
+					}
+				}
+			}
+			out = append(out, findRoleArnsInJSON(vv)...)
+		}
+	case []any:
+		for _, vv := range t {
+			out = append(out, findRoleArnsInJSON(vv)...)
+		}
+	}
+	return out
+}
+
+func ensureRoleHasManagedPolicy(out *[]Command, state *enrichState, roleName string, policyArn string, reason string) {
+	roleName = strings.TrimSpace(roleName)
+	policyArn = strings.TrimSpace(policyArn)
+	if roleName == "" || policyArn == "" {
+		return
+	}
+	key := roleName + "|" + policyArn
+	if state != nil && state.rolePolicyAttached[key] {
+		return
+	}
+	*out = append(*out, Command{Args: []string{"iam", "attach-role-policy", "--role-name", roleName, "--policy-arn", policyArn}, Reason: reason})
+	if state != nil {
+		state.rolePolicyAttached[key] = true
+	}
+}
+
+func roleNameFromFlag(args []string, flag string) string {
+	v := strings.TrimSpace(flagValue(args, flag))
+	if v == "" {
+		return ""
+	}
+	if parsed := roleNameFromArn(v); parsed != "" {
+		return parsed
+	}
+	return v
+}
+
+func hasFlag(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag {
+			return true
+		}
+		if strings.HasPrefix(a, flag+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 func wantsDeleteEverythingRelated(question string) bool {

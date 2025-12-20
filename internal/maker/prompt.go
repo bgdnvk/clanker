@@ -45,6 +45,11 @@ Rules for commands:
 AWS Lambda code packaging:
 - Prefer Python runtime "python3.12".
 - If you need to create a Lambda function, use "--zip-file fileb://-" (the runner will inline a minimal handler zip automatically; no local files required).
+- If you reference or create an IAM role for ANY AWS service, ensure:
+  - The role trust policy allows the correct service principal (sts:AssumeRole).
+  - The role has the minimum permissions required for the service to run and emit operational telemetry (logs/metrics/traces) as appropriate.
+  - If you use an existing role, include explicit aws iam attach-role-policy steps for any required AWS-managed execution/telemetry policies.
+  - For Lambda specifically, attaching arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole is usually required so it can write to CloudWatch Logs.
 - If you need to reference the AWS account id, use the literal token "<YOUR_ACCOUNT_ID>" in ARNs (the runner will substitute it).
 
 User request:
