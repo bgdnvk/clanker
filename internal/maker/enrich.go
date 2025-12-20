@@ -62,7 +62,7 @@ func EnrichPlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	}
 
 	if len(expanded) > 0 {
-		plan.Commands = expanded
+		plan.Commands = dedupeCommands(expanded)
 	}
 	if len(notes) > 0 {
 		plan.Notes = append(plan.Notes, notes...)
@@ -71,10 +71,28 @@ func EnrichPlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	return nil
 }
 
+func dedupeCommands(cmds []Command) []Command {
+	seen := map[string]bool{}
+	out := make([]Command, 0, len(cmds))
+	for _, c := range cmds {
+		if len(c.Args) == 0 {
+			continue
+		}
+		k := strings.Join(c.Args, "\x00")
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, c)
+	}
+	return out
+}
+
 type enrichState struct {
 	roleCreated        map[string]bool
 	roleTrustSet       map[string]bool
 	rolePolicyAttached map[string]bool
+	roleTrustCache     map[string][]string
 }
 
 type commandExpander struct {
@@ -105,7 +123,7 @@ func defaultExpanders(opts ExecOptions, deleteEverythingRelated bool, state *enr
 				var out []Command
 				agg := aggregateRoleRequirements(reqs)
 				for roleName, a := range agg {
-					ensureRoleForServices(&out, state, roleName, a.servicePrincipals)
+					ensureRoleForServices(ctx, opts, &out, state, roleName, a.servicePrincipals)
 					for _, p := range a.managedPolicyArns {
 						reason := a.policyReason
 						if reason == "" {
@@ -371,35 +389,6 @@ func aggregateRoleRequirements(reqs []roleRequirement) map[string]aggregatedRole
 	return agg
 }
 
-func ensureRoleForServices(out *[]Command, state *enrichState, roleName string, servicePrincipals []string) {
-	roleName = strings.TrimSpace(roleName)
-	servicePrincipals = normalizeNonEmpty(servicePrincipals)
-	if roleName == "" || len(servicePrincipals) == 0 {
-		return
-	}
-	assumeDoc := assumeRolePolicyDocumentForPrincipals(servicePrincipals)
-	if assumeDoc == "" {
-		return
-	}
-
-	if state == nil {
-		*out = append(*out, Command{Args: []string{"iam", "create-role", "--role-name", roleName, "--assume-role-policy-document", assumeDoc}, Reason: "Ensure service execution role exists"})
-		*out = append(*out, Command{Args: []string{"iam", "update-assume-role-policy", "--role-name", roleName, "--policy-document", assumeDoc}, Reason: "Ensure role trust policy allows required services"})
-		return
-	}
-
-	if !state.roleCreated[roleName] {
-		*out = append(*out, Command{Args: []string{"iam", "create-role", "--role-name", roleName, "--assume-role-policy-document", assumeDoc}, Reason: "Ensure service execution role exists"})
-		state.roleCreated[roleName] = true
-	}
-
-	trustKey := roleName + "|" + strings.Join(servicePrincipals, ",")
-	if !state.roleTrustSet[trustKey] {
-		*out = append(*out, Command{Args: []string{"iam", "update-assume-role-policy", "--role-name", roleName, "--policy-document", assumeDoc}, Reason: "Ensure role trust policy allows required services"})
-		state.roleTrustSet[trustKey] = true
-	}
-}
-
 func assumeRolePolicyDocumentForPrincipals(servicePrincipals []string) string {
 	servicePrincipals = normalizeNonEmpty(servicePrincipals)
 	if len(servicePrincipals) == 0 {
@@ -445,37 +434,49 @@ func normalizeNonEmpty(items []string) []string {
 }
 
 func extractRoleArnsFromInlineJSONArgs(args []string) []string {
+	jsonFlags := map[string]bool{
+		"--cli-input-json":              true,
+		"--target":                      true,
+		"--targets":                     true,
+		"--definition":                  true,
+		"--source":                      true,
+		"--destination":                 true,
+		"--logging-configuration":       true,
+		"--ip-permissions":              true,
+		"--policy-document":             true,
+		"--assume-role-policy-document": true,
+		"--parameters":                  true,
+		"--container-definitions":       true,
+		"--network-configuration":       true,
+	}
+
 	var out []string
 	seen := map[string]bool{}
-
 	for i := 0; i < len(args); i++ {
-		candidate := strings.TrimSpace(args[i])
-		if candidate == "" {
+		a := strings.TrimSpace(args[i])
+		if !strings.HasPrefix(a, "--") {
 			continue
 		}
-
-		// Support --flag value and --flag=value.
-		if strings.HasPrefix(candidate, "--") {
-			if strings.Contains(candidate, "=") {
-				parts := strings.SplitN(candidate, "=", 2)
-				if len(parts) == 2 {
-					candidate = strings.TrimSpace(parts[1])
-				} else {
-					candidate = ""
-				}
-			} else if i+1 < len(args) {
-				candidate = strings.TrimSpace(args[i+1])
+		flag := a
+		value := ""
+		if strings.Contains(a, "=") {
+			parts := strings.SplitN(a, "=", 2)
+			flag = strings.TrimSpace(parts[0])
+			if len(parts) == 2 {
+				value = strings.TrimSpace(parts[1])
 			}
+		} else if i+1 < len(args) {
+			value = strings.TrimSpace(args[i+1])
 		}
-		if candidate == "" {
+		if !jsonFlags[flag] {
 			continue
 		}
-		if !(strings.HasPrefix(candidate, "{") || strings.HasPrefix(candidate, "[")) {
+		if !(strings.HasPrefix(value, "{") || strings.HasPrefix(value, "[")) {
 			continue
 		}
 
 		var v any
-		if err := json.Unmarshal([]byte(candidate), &v); err != nil {
+		if err := json.Unmarshal([]byte(value), &v); err != nil {
 			continue
 		}
 		for _, arn := range findRoleArnsInJSON(v) {
@@ -487,8 +488,104 @@ func extractRoleArnsFromInlineJSONArgs(args []string) []string {
 			out = append(out, arn)
 		}
 	}
-
 	return out
+}
+
+func ensureRoleForServices(ctx context.Context, opts ExecOptions, out *[]Command, state *enrichState, roleName string, servicePrincipals []string) {
+	roleName = strings.TrimSpace(roleName)
+	servicePrincipals = normalizeNonEmpty(servicePrincipals)
+	if roleName == "" || len(servicePrincipals) == 0 {
+		return
+	}
+
+	// Merge existing trust principals to avoid clobbering shared roles.
+	if state != nil {
+		if existing, ok := state.roleTrustCache[roleName]; ok {
+			servicePrincipals = normalizeNonEmpty(append(servicePrincipals, existing...))
+		} else {
+			if existing, err := getExistingRoleTrustPrincipals(ctx, opts, roleName); err == nil {
+				state.roleTrustCache[roleName] = existing
+				servicePrincipals = normalizeNonEmpty(append(servicePrincipals, existing...))
+			}
+		}
+	} else {
+		if existing, err := getExistingRoleTrustPrincipals(ctx, opts, roleName); err == nil {
+			servicePrincipals = normalizeNonEmpty(append(servicePrincipals, existing...))
+		}
+	}
+
+	assumeDoc := assumeRolePolicyDocumentForPrincipals(servicePrincipals)
+	if assumeDoc == "" {
+		return
+	}
+
+	if state == nil {
+		*out = append(*out, Command{Args: []string{"iam", "create-role", "--role-name", roleName, "--assume-role-policy-document", assumeDoc}, Reason: "Ensure service execution role exists"})
+		*out = append(*out, Command{Args: []string{"iam", "update-assume-role-policy", "--role-name", roleName, "--policy-document", assumeDoc}, Reason: "Ensure role trust policy allows required services"})
+		return
+	}
+
+	if !state.roleCreated[roleName] {
+		*out = append(*out, Command{Args: []string{"iam", "create-role", "--role-name", roleName, "--assume-role-policy-document", assumeDoc}, Reason: "Ensure service execution role exists"})
+		state.roleCreated[roleName] = true
+	}
+
+	trustKey := roleName + "|" + strings.Join(servicePrincipals, ",")
+	if !state.roleTrustSet[trustKey] {
+		*out = append(*out, Command{Args: []string{"iam", "update-assume-role-policy", "--role-name", roleName, "--policy-document", assumeDoc}, Reason: "Ensure role trust policy allows required services"})
+		state.roleTrustSet[trustKey] = true
+	}
+}
+
+func getExistingRoleTrustPrincipals(ctx context.Context, opts ExecOptions, roleName string) ([]string, error) {
+	roleName = strings.TrimSpace(roleName)
+	if roleName == "" {
+		return nil, nil
+	}
+	args := []string{"iam", "get-role", "--role-name", roleName, "--output", "json"}
+	awsArgs := append(append([]string{}, args...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+	out, err := runAWSCommandStreaming(ctx, awsArgs, nil, io.Discard)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Role struct {
+			AssumeRolePolicyDocument any `json:"AssumeRolePolicyDocument"`
+		} `json:"Role"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil, err
+	}
+	return findServicePrincipalsInAssumeRolePolicy(resp.Role.AssumeRolePolicyDocument), nil
+}
+
+func findServicePrincipalsInAssumeRolePolicy(v any) []string {
+	var out []string
+	switch t := v.(type) {
+	case map[string]any:
+		if p, ok := t["Principal"].(map[string]any); ok {
+			if svc, ok := p["Service"]; ok {
+				switch s := svc.(type) {
+				case string:
+					out = append(out, strings.TrimSpace(s))
+				case []any:
+					for _, it := range s {
+						if ss, ok := it.(string); ok {
+							out = append(out, strings.TrimSpace(ss))
+						}
+					}
+				}
+			}
+		}
+		for _, vv := range t {
+			out = append(out, findServicePrincipalsInAssumeRolePolicy(vv)...)
+		}
+	case []any:
+		for _, vv := range t {
+			out = append(out, findServicePrincipalsInAssumeRolePolicy(vv)...)
+		}
+	}
+	return normalizeNonEmpty(out)
 }
 
 func findRoleArnsInJSON(v any) []string {

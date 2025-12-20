@@ -17,6 +17,29 @@ import (
 	"time"
 )
 
+var awsErrorCodeRe = regexp.MustCompile(`(?i)an error occurred \(([^)]+)\)`)
+var lambdaArnMissingRegionRe = regexp.MustCompile(`^arn:([^:]+):lambda:(\d{12}):function:(.+)$`)
+
+type AWSFailureCategory string
+
+const (
+	FailureUnknown       AWSFailureCategory = "unknown"
+	FailureNotFound      AWSFailureCategory = "not_found"
+	FailureAlreadyExists AWSFailureCategory = "already_exists"
+	FailureConflict      AWSFailureCategory = "conflict"
+	FailureAccessDenied  AWSFailureCategory = "access_denied"
+	FailureThrottled     AWSFailureCategory = "throttled"
+	FailureValidation    AWSFailureCategory = "validation"
+)
+
+type AWSFailure struct {
+	Service  string
+	Op       string
+	Code     string
+	Category AWSFailureCategory
+	Message  string
+}
+
 type ExecOptions struct {
 	Profile   string
 	Region    string
@@ -69,6 +92,8 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		awsArgs = append(awsArgs, args...)
 		awsArgs = append(awsArgs, "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
 
+		_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: %s\n", idx+1, len(plan.Commands), formatAWSArgsForLog(awsArgs))
+
 		out, runErr := runAWSCommandStreaming(ctx, awsArgs, zipBytes, opts.Writer)
 		if runErr != nil {
 			if handled, handleErr := handleAWSFailure(ctx, plan, opts, idx, args, awsArgs, zipBytes, out, runErr, remediationAttempted); handled {
@@ -84,6 +109,118 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	return nil
 }
 
+func parseAWSErrorCode(output string) string {
+	m := awsErrorCodeRe.FindStringSubmatch(output)
+	if len(m) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(m[1])
+}
+
+func classifyAWSFailure(args []string, output string) AWSFailure {
+	f := AWSFailure{Category: FailureUnknown}
+	if len(args) >= 1 {
+		f.Service = strings.TrimSpace(args[0])
+	}
+	if len(args) >= 2 {
+		f.Op = strings.TrimSpace(args[1])
+	}
+	msg := strings.TrimSpace(output)
+	if len(msg) > 900 {
+		msg = msg[:900]
+	}
+	f.Message = msg
+
+	code := parseAWSErrorCode(output)
+	f.Code = code
+
+	lower := strings.ToLower(output)
+
+	isNotFoundish := strings.Contains(lower, "nosuchentity") ||
+		strings.Contains(lower, "resourcenotfound") ||
+		strings.Contains(lower, "not found") ||
+		strings.Contains(lower, "does not exist")
+	if code == "NoSuchEntity" || code == "ResourceNotFoundException" {
+		isNotFoundish = true
+	}
+
+	isAlreadyExistsish := strings.Contains(lower, "entityalreadyexists") ||
+		strings.Contains(lower, "resourceconflictexception") ||
+		strings.Contains(lower, "already exists") ||
+		strings.Contains(lower, "alreadyownedbyyou") ||
+		strings.Contains(lower, "resourceinuse")
+	if code == "EntityAlreadyExists" || code == "ResourceConflictException" || code == "ResourceInUseException" || code == "BucketAlreadyOwnedByYou" {
+		isAlreadyExistsish = true
+	}
+
+	isConflictish := strings.Contains(lower, "deleteconflict") ||
+		strings.Contains(lower, "dependencyviolation") ||
+		strings.Contains(lower, "dependent object")
+	if code == "DeleteConflict" || code == "DependencyViolation" {
+		isConflictish = true
+	}
+
+	isAccessDeniedish := strings.Contains(lower, "accessdenied") ||
+		strings.Contains(lower, "unauthorizedoperation") ||
+		strings.Contains(lower, "not authorized")
+	if code == "AccessDenied" || code == "AccessDeniedException" || code == "UnauthorizedOperation" {
+		isAccessDeniedish = true
+	}
+
+	isThrottledish := strings.Contains(lower, "throttl") ||
+		strings.Contains(lower, "too many requests") ||
+		strings.Contains(lower, "requestlimitexceeded")
+	if code == "Throttling" || code == "TooManyRequestsException" || code == "RequestLimitExceeded" {
+		isThrottledish = true
+	}
+
+	isValidationish := strings.Contains(lower, "validation") ||
+		strings.Contains(lower, "invalidparameter") ||
+		strings.Contains(lower, "malformed")
+	if code == "ValidationException" || code == "InvalidParameterValueException" {
+		isValidationish = true
+	}
+
+	switch {
+	case isNotFoundish:
+		f.Category = FailureNotFound
+	case isAlreadyExistsish:
+		f.Category = FailureAlreadyExists
+	case isConflictish:
+		f.Category = FailureConflict
+	case isAccessDeniedish:
+		f.Category = FailureAccessDenied
+	case isThrottledish:
+		f.Category = FailureThrottled
+	case isValidationish:
+		f.Category = FailureValidation
+	default:
+		f.Category = FailureUnknown
+	}
+
+	return f
+}
+
+func formatAWSArgsForLog(awsArgs []string) string {
+	// Avoid spewing huge JSON blobs or embedded policy documents.
+	const maxArgLen = 160
+	const maxTotalLen = 700
+
+	parts := make([]string, 0, len(awsArgs)+1)
+	parts = append(parts, "aws")
+	for _, a := range awsArgs {
+		if len(a) > maxArgLen {
+			a = a[:maxArgLen] + "…"
+		}
+		parts = append(parts, a)
+	}
+	s := strings.Join(parts, " ")
+	if len(s) > maxTotalLen {
+		s = s[:maxTotalLen] + "…"
+	}
+	return s
+}
+
 func handleAWSFailure(
 	ctx context.Context,
 	plan *Plan,
@@ -96,23 +233,27 @@ func handleAWSFailure(
 	runErr error,
 	remediationAttempted map[int]bool,
 ) (handled bool, err error) {
-	if shouldIgnoreFailure(args, out) {
+	failure := classifyAWSFailure(args, out)
+	if failure.Code != "" {
+		_, _ = fmt.Fprintf(opts.Writer, "[maker] error classified service=%s op=%s code=%s category=%s\n", failure.Service, failure.Op, failure.Code, failure.Category)
+	} else {
+		_, _ = fmt.Fprintf(opts.Writer, "[maker] error classified service=%s op=%s category=%s\n", failure.Service, failure.Op, failure.Category)
+	}
+
+	if shouldIgnoreFailure(args, failure, out) {
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] note: ignoring non-fatal error for command %d\n", idx+1)
 		return true, nil
 	}
 
-	if isLambdaCreateFunction(args) && isLambdaAlreadyExists(out) {
-		if err := updateExistingLambda(ctx, opts, args, stdinBytes, opts.Writer); err != nil {
-			return true, fmt.Errorf("aws command %d failed and update fallback failed: %w", idx+1, err)
-		}
-		return true, nil
+	if handled, handleErr := maybeRewriteAndRetry(ctx, opts, args, awsArgs, stdinBytes, failure, out); handled {
+		return true, handleErr
 	}
 
 	if remediationAttempted[idx] {
 		return false, nil
 	}
 
-	if remediated, remErr := maybeAutoRemediateAndRetry(ctx, plan, opts, idx, args, awsArgs, stdinBytes, out); remErr == nil && remediated {
+	if remediated, remErr := maybeAutoRemediateAndRetry(ctx, plan, opts, idx, args, awsArgs, stdinBytes, out, failure); remErr == nil && remediated {
 		remediationAttempted[idx] = true
 		return true, nil
 	}
@@ -420,20 +561,62 @@ func isLambdaAlreadyExists(output string) bool {
 	return strings.Contains(lower, "resourceconflictexception") || strings.Contains(lower, "already exists")
 }
 
-func shouldIgnoreFailure(args []string, output string) bool {
+func shouldIgnoreFailure(args []string, failure AWSFailure, output string) bool {
 	if len(args) < 2 {
 		return false
 	}
 	lower := strings.ToLower(output)
+	code := failure.Code
+
+	// Common "safe to ignore" error fragments for best-effort prerequisite cleanup.
+	isNotFoundish := strings.Contains(lower, "nosuchentity") ||
+		strings.Contains(lower, "resourcenotfound") ||
+		strings.Contains(lower, "not found") ||
+		strings.Contains(lower, "does not exist")
+	isNotAttachedish := strings.Contains(lower, "not attached") ||
+		strings.Contains(lower, "is not attached") ||
+		strings.Contains(lower, "cannot detach")
+	if code != "" {
+		// Prefer error codes when available.
+		if code == "NoSuchEntity" || code == "ResourceNotFoundException" {
+			isNotFoundish = true
+		}
+	}
 
 	// IAM role creation is effectively idempotent for our use-case.
 	if args[0] == "iam" && args[1] == "create-role" {
 		return strings.Contains(lower, "entityalreadyexists") || strings.Contains(lower, "already exists")
 	}
 
+	// Creating already-existing resources should generally be non-fatal.
+	if failure.Category == FailureAlreadyExists {
+		// Many services treat create-as-upsert poorly; but for some APIs, already-exists is fine.
+		if args[0] == "logs" && args[1] == "create-log-group" {
+			return true
+		}
+		if args[0] == "s3" && args[1] == "create-bucket" {
+			return true
+		}
+	}
+
+	// IAM detach operations are best-effort prerequisites; missing policies/attachments should not block workflows.
+	if args[0] == "iam" {
+		switch args[1] {
+		case "detach-role-policy", "detach-user-policy", "detach-group-policy":
+			return isNotFoundish || isNotAttachedish || code == "NoSuchEntity"
+		case "delete-role-policy", "remove-role-from-instance-profile", "delete-role-permissions-boundary":
+			return isNotFoundish || code == "NoSuchEntity"
+		}
+	}
+
 	// Function URL config often already exists on re-apply.
 	if args[0] == "lambda" && args[1] == "create-function-url-config" {
 		return strings.Contains(lower, "resourceconflictexception") || strings.Contains(lower, "already exists")
+	}
+
+	// Deleting a function URL config is best-effort cleanup.
+	if args[0] == "lambda" && args[1] == "delete-function-url-config" {
+		return isNotFoundish || code == "ResourceNotFoundException"
 	}
 
 	// Re-adding a permission statement-id commonly conflicts; safe to ignore.
@@ -447,6 +630,92 @@ func shouldIgnoreFailure(args []string, output string) bool {
 	}
 
 	return false
+}
+
+func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, awsArgs []string, stdinBytes []byte, failure AWSFailure, output string) (bool, error) {
+	// Lambda create-function: create conflict -> update.
+	if isLambdaCreateFunction(args) && (failure.Category == FailureAlreadyExists || isLambdaAlreadyExists(output)) {
+		if err := updateExistingLambda(ctx, opts, args, stdinBytes, opts.Writer); err != nil {
+			return true, err
+		}
+		return true, nil
+	}
+
+	// API Gateway v2 quick create: model sometimes emits a Lambda ARN missing the region
+	// (e.g. arn:aws:lambda:<account>:function:<name>). Rewrite to include the configured region.
+	if len(args) >= 2 && args[0] == "apigatewayv2" && args[1] == "create-api" && failure.Code == "BadRequestException" {
+		lower := strings.ToLower(output)
+		if strings.Contains(lower, "invalid function arn") || strings.Contains(lower, "invalid uri") {
+			if rewritten, ok := rewriteAPIGatewayV2CreateApiLambdaTarget(args, opts.Region); ok {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: rewriting apigatewayv2 create-api --target lambda ARN to include region\n")
+				rewrittenAWSArgs := append(append([]string{}, rewritten...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+				if _, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, opts.Writer); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+	}
+
+	// When a create command fails due to already existing and it's safe to treat as idempotent,
+	// we skip further retries.
+	if failure.Category == FailureAlreadyExists {
+		if args[0] == "logs" && args[1] == "create-log-group" {
+			return true, nil
+		}
+		if args[0] == "s3" && args[1] == "create-bucket" {
+			return true, nil
+		}
+	}
+
+	// Nothing to rewrite.
+	return false, nil
+}
+
+func rewriteAPIGatewayV2CreateApiLambdaTarget(args []string, region string) ([]string, bool) {
+	if strings.TrimSpace(region) == "" {
+		return nil, false
+	}
+
+	out := append([]string{}, args...)
+	for i := 0; i < len(out); i++ {
+		var isTarget bool
+		val := ""
+		if out[i] == "--target" {
+			isTarget = true
+			if i+1 < len(out) {
+				val = out[i+1]
+			}
+		} else if strings.HasPrefix(out[i], "--target=") {
+			isTarget = true
+			val = strings.TrimPrefix(out[i], "--target=")
+		}
+
+		if !isTarget || strings.TrimSpace(val) == "" {
+			continue
+		}
+
+		m := lambdaArnMissingRegionRe.FindStringSubmatch(strings.TrimSpace(val))
+		if len(m) != 4 {
+			continue
+		}
+		partition := strings.TrimSpace(m[1])
+		acct := strings.TrimSpace(m[2])
+		fn := strings.TrimSpace(m[3])
+		if partition == "" || acct == "" || fn == "" {
+			continue
+		}
+
+		fixed := fmt.Sprintf("arn:%s:lambda:%s:%s:function:%s", partition, region, acct, fn)
+		if out[i] == "--target" {
+			out[i+1] = fixed
+			return out, true
+		}
+		out[i] = "--target=" + fixed
+		return out, true
+	}
+
+	return nil, false
 }
 
 func flagValue(args []string, flag string) string {

@@ -3,7 +3,12 @@ package maker
 import (
 	"context"
 	"fmt"
+	"strings"
 )
+
+func isEC2DeleteSecurityGroup(args []string) bool {
+	return len(args) >= 2 && args[0] == "ec2" && args[1] == "delete-security-group"
+}
 
 func maybeAutoRemediateAndRetry(
 	ctx context.Context,
@@ -14,11 +19,37 @@ func maybeAutoRemediateAndRetry(
 	awsArgs []string,
 	stdinBytes []byte,
 	out string,
+	failure AWSFailure,
 ) (bool, error) {
 	_ = plan
 	_ = idx
 
 	// Built-in remediations.
+	if isEC2DeleteSecurityGroup(args) && opts.Destroyer {
+		// Typical failure: DependencyViolation due to references/ENIs.
+		if failure.Code == "DependencyViolation" || failure.Category == FailureConflict || strings.Contains(strings.ToLower(out), "dependencyviolation") {
+			groupID := flagValue(args, "--group-id")
+			if groupID != "" {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: cleanup + delete security group\n")
+				steps, _ := expandDeleteSecurityGroup(ctx, opts, groupID)
+				for i, c := range steps {
+					if err := validateCommand(c.Args, opts.Destroyer); err != nil {
+						return false, fmt.Errorf("remediation command %d rejected: %w", i+1, err)
+					}
+					cmdArgs := append(append([]string{}, c.Args...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+					if _, err := runAWSCommandStreaming(ctx, cmdArgs, nil, opts.Writer); err != nil {
+						// Best-effort: some prereqs might already be gone.
+						continue
+					}
+				}
+				// Retry original.
+				if _, err := runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer); err == nil {
+					return true, nil
+				}
+			}
+		}
+	}
+
 	if isIAMDeleteRole(args) && isIAMDeleteConflict(out) && opts.Destroyer {
 		roleName := flagValue(args, "--role-name")
 		if roleName != "" {
