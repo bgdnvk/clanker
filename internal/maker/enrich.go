@@ -342,6 +342,16 @@ func guessServicePrincipal(service string, op string, roleKind string) string {
 		return "lambda.amazonaws.com"
 	case "batch":
 		return "batch.amazonaws.com"
+	case "bedrock":
+		return "bedrock.amazonaws.com"
+	case "bedrock-agent":
+		return "bedrock.amazonaws.com"
+	case "bedrock-runtime":
+		return "bedrock.amazonaws.com"
+	case "opensearch":
+		return "es.amazonaws.com"
+	case "es":
+		return "es.amazonaws.com"
 	case "events":
 		return "events.amazonaws.com"
 	case "scheduler":

@@ -12,8 +12,195 @@ import (
 )
 
 var lambdaArnMissingRegionRe = regexp.MustCompile(`^arn:([^:]+):lambda:(\d{12}):function:(.+)$`)
+var ec2InstanceIDRe = regexp.MustCompile(`\bi-[0-9a-f]{8,32}\b`)
 
-func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, awsArgs []string, stdinBytes []byte, failure AWSFailure, output string) (bool, error) {
+func extractAPIGatewayV2IDFromNotFound(output string) string {
+	lower := strings.ToLower(output)
+	idx := strings.Index(lower, "invalid api identifier specified")
+	if idx < 0 {
+		return ""
+	}
+	frag := strings.TrimSpace(output[idx+len("invalid api identifier specified"):])
+	// Expected forms:
+	// - "549955691027:allellp9mg"
+	// - "549955691027:allellp9mg\n..."
+	frag = strings.TrimSpace(strings.SplitN(frag, "\n", 2)[0])
+	frag = strings.Trim(frag, ": ")
+	if frag == "" {
+		return ""
+	}
+	parts := strings.Split(frag, ":")
+	id := strings.TrimSpace(parts[len(parts)-1])
+	// API Gateway API IDs are usually 10 chars; avoid being too strict.
+	if len(id) < 6 {
+		return ""
+	}
+	return id
+}
+
+func extractEC2InstanceIDs(s string) []string {
+	matches := ec2InstanceIDRe.FindAllString(s, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(matches))
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if _, ok := seen[m]; ok {
+			continue
+		}
+		seen[m] = struct{}{}
+		out = append(out, m)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func dropEC2TerminateInstanceIDs(args []string, drop map[string]bool) (rewritten []string, changed bool, remaining int) {
+	if len(args) < 2 {
+		return nil, false, 0
+	}
+	out := append([]string{}, args...)
+
+	for i := 0; i < len(out); i++ {
+		if out[i] == "--instance-ids" {
+			start := i + 1
+			end := start
+			for end < len(out) && !strings.HasPrefix(out[end], "--") {
+				end++
+			}
+			keep := make([]string, 0, end-start)
+			for _, id := range out[start:end] {
+				id = strings.TrimSpace(id)
+				if id == "" {
+					continue
+				}
+				if drop[id] {
+					changed = true
+					continue
+				}
+				keep = append(keep, id)
+			}
+			remaining = len(keep)
+			if remaining == 0 {
+				// Remove flag + values.
+				out = append(out[:i], out[end:]...)
+				return out, true, 0
+			}
+			out = append(append(out[:start], keep...), out[end:]...)
+			return out, changed, remaining
+		}
+		if strings.HasPrefix(out[i], "--instance-ids=") {
+			val := strings.TrimPrefix(out[i], "--instance-ids=")
+			parts := strings.FieldsFunc(val, func(r rune) bool {
+				return r == ',' || r == ' '
+			})
+			keep := make([]string, 0, len(parts))
+			for _, id := range parts {
+				id = strings.TrimSpace(id)
+				if id == "" {
+					continue
+				}
+				if drop[id] {
+					changed = true
+					continue
+				}
+				keep = append(keep, id)
+			}
+			remaining = len(keep)
+			if remaining == 0 {
+				// Remove the flag entirely.
+				out = append(out[:i], out[i+1:]...)
+				return out, true, 0
+			}
+			if len(keep) != len(parts) {
+				changed = true
+			}
+			out[i] = "--instance-ids=" + strings.Join(keep, ",")
+			return out, changed, remaining
+		}
+	}
+
+	return nil, false, 0
+}
+
+func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, awsArgs []string, stdinBytes []byte, failure AWSFailure, output string, bindings map[string]string) (bool, error) {
+	// EC2 subnet CIDR: plan may emit a CIDR not inside the target VPC (e.g. 10.0.0.0/16 against default 172.31.0.0/16).
+	// On InvalidSubnet.Range, pick a free /24 inside the VPC, rewrite --cidr-block, retry, and learn bindings.
+	if args0(args) == "ec2" && args1(args) == "create-subnet" {
+		lower := strings.ToLower(output)
+		if failure.Code == "InvalidSubnet.Range" || strings.Contains(lower, "invalidsubnet.range") || strings.Contains(lower, "is invalid") && strings.Contains(lower, "cidr") {
+			out2, rewritten, err := remediateEC2CreateSubnetInvalidRangeAndRetry(ctx, opts, args, stdinBytes, opts.Writer)
+			if err != nil {
+				return true, err
+			}
+			learnPlanBindings(rewritten, out2, bindings)
+			return true, nil
+		}
+	}
+
+	// EC2 route table placeholders: plans sometimes reference a private route table ID that was never created.
+	// If create-route/associate-route-table fails due to an invalid route-table-id, create one, bind it, and retry.
+	if args0(args) == "ec2" && (args1(args) == "create-route" || args1(args) == "associate-route-table") {
+		lower := strings.ToLower(output)
+		if strings.Contains(lower, "invalidroutetableid") || (strings.Contains(lower, "route table") && (strings.Contains(lower, "does not exist") || strings.Contains(lower, "not found") || strings.Contains(lower, "malformed"))) {
+			rtID := strings.TrimSpace(flagValue(args, "--route-table-id"))
+			// If it's already a real ID, don't create extra route tables.
+			if strings.HasPrefix(rtID, "rtb-") {
+				// no-op
+			} else {
+				vpcID := ""
+				if args1(args) == "create-route" {
+					natID := strings.TrimSpace(flagValue(args, "--nat-gateway-id"))
+					if natID != "" {
+						vpcID, _ = describeNatGatewayVpcID(ctx, opts, natID)
+					}
+				}
+				if vpcID == "" {
+					subnetID := strings.TrimSpace(flagValue(args, "--subnet-id"))
+					if subnetID != "" {
+						vpcID, _ = describeSubnetVpcID(ctx, opts, subnetID)
+					}
+				}
+				if vpcID != "" {
+					create := []string{"ec2", "create-route-table", "--vpc-id", vpcID}
+					createAWSArgs := append(append([]string{}, create...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+					_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: creating missing route table then retry (%s=%s)\n", "vpc", vpcID)
+					outRT, errRT := runAWSCommandStreaming(ctx, createAWSArgs, nil, opts.Writer)
+					if errRT != nil {
+						return true, errRT
+					}
+					// Prefer binding as private RT.
+					var obj map[string]any
+					if err := json.Unmarshal([]byte(outRT), &obj); err == nil {
+						newID := deepString(obj, "RouteTable", "RouteTableId")
+						if strings.HasPrefix(newID, "rtb-") {
+							if strings.TrimSpace(bindings["RT_PRIVATE_ID"]) == "" {
+								bindings["RT_PRIVATE_ID"] = newID
+							}
+							if strings.TrimSpace(bindings["RT_PRIV"]) == "" {
+								bindings["RT_PRIV"] = newID
+							}
+							if strings.TrimSpace(bindings["RT_PRIV_ID"]) == "" {
+								bindings["RT_PRIV_ID"] = newID
+							}
+							if strings.TrimSpace(bindings["RT_PRIVATE"]) == "" {
+								bindings["RT_PRIVATE"] = newID
+							}
+							// Rewrite the failing call to use the created route table.
+							rewritten := setFlagValue(args, "--route-table-id", newID)
+							rewrittenAWSArgs := append(append([]string{}, rewritten...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+							if _, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, opts.Writer); err != nil {
+								return true, err
+							}
+							return true, nil
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Generic service-role permission fix: if an AWS API reports that a ROLE (not the caller)
 	// lacks permission, add a minimal inline policy to the role and retry.
 	//
@@ -172,6 +359,66 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 	if args0(args) == "ec2" {
 		op := args1(args)
 		lower := strings.ToLower(output)
+
+		// attach-internet-gateway: if the VPC already has an IGW attached, detect the existing IGW,
+		// bind it for later commands, and continue.
+		if op == "attach-internet-gateway" && (strings.Contains(lower, "already has an internet gateway attached") || strings.Contains(lower, "has an internet gateway attached")) {
+			vpcID := strings.TrimSpace(flagValue(args, "--vpc-id"))
+			if vpcID != "" {
+				igwID, _ := findAttachedInternetGatewayForVPC(ctx, opts, vpcID)
+				if igwID != "" && bindings != nil {
+					bindings["IGW_ID"] = igwID
+					bindings["IGW"] = igwID
+				}
+				// Best-effort cleanup: if this attach used a newly created IGW that isn't the attached one, delete it.
+				created := strings.TrimSpace(flagValue(args, "--internet-gateway-id"))
+				if created != "" && igwID != "" && created != igwID {
+					del := []string{"ec2", "delete-internet-gateway", "--internet-gateway-id", created, "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+					_, _ = runAWSCommandStreaming(ctx, del, nil, io.Discard)
+				}
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: vpc already has igw attached; using existing igw and continuing (vpc=%s)\n", vpcID)
+				return true, nil
+			}
+		}
+
+		// Teardown: terminate-instances can fail if one of the instance IDs is already gone.
+		// Drop missing IDs and retry until the remaining instances are terminated (or none remain).
+		if opts.Destroyer && op == "terminate-instances" {
+			currentArgs := append([]string{}, args...)
+			currentOut := output
+			currentFailure := failure
+			for iter := 1; iter <= 6; iter++ {
+				curLower := strings.ToLower(currentOut)
+				if currentFailure.Code != "InvalidInstanceID.NotFound" && !strings.Contains(curLower, "invalidinstanceid.notfound") {
+					break
+				}
+				missingIDs := extractEC2InstanceIDs(currentOut)
+				if len(missingIDs) == 0 {
+					break
+				}
+				drop := make(map[string]bool, len(missingIDs))
+				for _, id := range missingIDs {
+					drop[id] = true
+				}
+				rewritten, changed, remaining := dropEC2TerminateInstanceIDs(currentArgs, drop)
+				if !changed {
+					break
+				}
+				if remaining == 0 {
+					_, _ = fmt.Fprintf(opts.Writer, "[maker] note: ec2 terminate-instances: all instance ids already gone; skipping\n")
+					return true, nil
+				}
+				currentArgs = rewritten
+				rewrittenAWSArgs := append(append([]string{}, currentArgs...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: ec2 terminate-instances dropping missing instance ids then retry\n")
+				out2, err2 := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, opts.Writer)
+				if err2 == nil {
+					return true, nil
+				}
+				currentOut = out2
+				currentFailure = classifyAWSFailure(currentArgs, currentOut)
+			}
+		}
 
 		// associate-vpc-cidr-block: if the chosen private range is restricted (wrong RFC1918 block),
 		// pick an additional CIDR in the same private range as the VPC and retry.
@@ -599,6 +846,79 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 		}
 	}
 
+	// AWS Batch: create-* operations are frequently re-applied; rewrite to update where supported,
+	// and ensure required service-linked role exists.
+	if args0(args) == "batch" {
+		op := args1(args)
+		lower := strings.ToLower(output)
+
+		// Missing service-linked role for Batch.
+		if strings.Contains(lower, "awsserviceroleforbatch") || strings.Contains(lower, "service-linked role") && strings.Contains(lower, "batch") {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: create batch service-linked role then retry\n")
+			slr := []string{"iam", "create-service-linked-role", "--aws-service-name", "batch.amazonaws.com", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+			_, _ = runAWSCommandStreaming(ctx, slr, nil, opts.Writer)
+			if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+				return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+			}); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+
+		// create-compute-environment already exists -> update-compute-environment.
+		if op == "create-compute-environment" {
+			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "already exists") {
+				rewritten := append([]string{}, args...)
+				rewritten[1] = "update-compute-environment"
+				rewrittenAWSArgs := append(append([]string{}, rewritten...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: batch create-compute-environment exists; using update-compute-environment\n")
+				if _, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, opts.Writer); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+
+		// create-job-queue already exists -> update-job-queue.
+		if op == "create-job-queue" {
+			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "already exists") {
+				rewritten := append([]string{}, args...)
+				rewritten[1] = "update-job-queue"
+				rewrittenAWSArgs := append(append([]string{}, rewritten...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: batch create-job-queue exists; using update-job-queue\n")
+				if _, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, opts.Writer); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+	}
+
+	// SageMaker: many create-* resources are immutable (model/endpoint-config), so "already exists" is effectively idempotent.
+	if args0(args) == "sagemaker" {
+		op := args1(args)
+		lower := strings.ToLower(output)
+		if strings.HasPrefix(op, "create-") {
+			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "already exists") {
+				// For endpoints, prefer update-endpoint if endpoint config is supplied.
+				if op == "create-endpoint" {
+					endpointName := strings.TrimSpace(flagValue(args, "--endpoint-name"))
+					endpointConfig := strings.TrimSpace(flagValue(args, "--endpoint-config-name"))
+					if endpointName != "" && endpointConfig != "" {
+						rewritten := []string{"sagemaker", "update-endpoint", "--endpoint-name", endpointName, "--endpoint-config-name", endpointConfig}
+						rewrittenAWSArgs := append(append([]string{}, rewritten...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+						_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: sagemaker create-endpoint exists; using update-endpoint\n")
+						if _, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, opts.Writer); err != nil {
+							return true, err
+						}
+						return true, nil
+					}
+				}
+				return true, nil
+			}
+		}
+	}
+
 	// ECS glue: service-linked role + execution role permissions + propagation retries.
 	if args0(args) == "ecs" {
 		op := args1(args)
@@ -696,9 +1016,15 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 	// Generic transient retry (service hiccups / in-progress / timeouts).
 	if isTransientFailure(failure, output) {
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry after transient failure\n")
-		if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+		out2, err := retryWithBackoffOutput(ctx, opts.Writer, 6, func() (string, error) {
 			return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
-		}); err != nil {
+		})
+		if err != nil {
+			f2 := classifyAWSFailure(args, out2)
+			if shouldIgnoreFailure(args, f2, out2) {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] note: ignoring non-fatal error after transient retries\n")
+				return true, nil
+			}
 			return true, err
 		}
 		return true, nil
@@ -707,9 +1033,45 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 	// Generic throttling retry.
 	if failure.Category == FailureThrottled {
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry after throttling\n")
-		if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+		out2, err := retryWithBackoffOutput(ctx, opts.Writer, 6, func() (string, error) {
 			return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
-		}); err != nil {
+		})
+		if err != nil {
+			// Special-case: API Gateway v2 APIs incorrectly deleted via v1 command can be hidden behind throttling.
+			// If the final error flips to v1 NotFound "Invalid API identifier specified", fall back to apigatewayv2 delete-api.
+			if opts.Destroyer && args0(args) == "apigateway" && args1(args) == "delete-rest-api" {
+				lower2 := strings.ToLower(out2)
+				if strings.Contains(lower2, "invalid api identifier specified") {
+					id := strings.TrimSpace(flagValue(args, "--rest-api-id"))
+					if id == "" {
+						id = strings.TrimSpace(flagValue(args, "--api-id"))
+					}
+					if id == "" {
+						id = strings.TrimSpace(extractAPIGatewayV2IDFromNotFound(out2))
+					}
+					if id != "" {
+						_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: throttled apigateway delete-rest-api ended notfound; trying apigatewayv2 delete-api (apiId=%s)\n", id)
+						del := []string{"apigatewayv2", "delete-api", "--api-id", id, "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+						out3, err3 := retryWithBackoffOutput(ctx, opts.Writer, 6, func() (string, error) {
+							return runAWSCommandStreaming(ctx, del, stdinBytes, opts.Writer)
+						})
+						if err3 != nil {
+							f3 := classifyAWSFailure([]string{"apigatewayv2", "delete-api"}, out3)
+							if f3.Category == FailureNotFound || f3.Code == "NotFoundException" {
+								return true, nil
+							}
+							return true, err3
+						}
+						return true, nil
+					}
+				}
+			}
+
+			f2 := classifyAWSFailure(args, out2)
+			if shouldIgnoreFailure(args, f2, out2) {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] note: ignoring non-fatal error after throttling retries\n")
+				return true, nil
+			}
 			return true, err
 		}
 		return true, nil
@@ -929,6 +1291,28 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 	// EKS readiness: cluster/nodegroup/addons can take time.
 	if args0(args) == "eks" {
 		lower := strings.ToLower(output)
+
+		// Teardown: delete-cluster fails when nodegroups are still attached.
+		// In destroyer mode, delete all nodegroups first, then retry cluster deletion.
+		if opts.Destroyer && args1(args) == "delete-cluster" {
+			clusterName := strings.TrimSpace(flagValue(args, "--name"))
+			if clusterName == "" {
+				clusterName = strings.TrimSpace(flagValue(args, "--cluster-name"))
+			}
+			if clusterName != "" && (failure.Code == "ResourceInUseException" || strings.Contains(lower, "nodegroups attached") || (strings.Contains(lower, "nodegroup") && strings.Contains(lower, "attached"))) {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: eks delete-cluster blocked by nodegroups; deleting nodegroups then retry\n")
+				if err := deleteAllEKSNodegroups(ctx, opts, clusterName, opts.Writer); err != nil {
+					return true, err
+				}
+				if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+					return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+				}); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+
 		// Do not run waiters if the request failed due to invalid network params.
 		if strings.Contains(lower, "invalidsubnetid.notfound") || (strings.Contains(lower, "subnet id") && strings.Contains(lower, "does not exist")) {
 			return false, nil
@@ -959,6 +1343,57 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 				if _, err := runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer); err == nil {
 					return true, nil
 				}
+			}
+		}
+	}
+
+	// API Gateway v1: model sometimes emits --api-id (v2-style) instead of --rest-api-id.
+	// Rewrite flag name and retry.
+	if args0(args) == "apigateway" && args1(args) == "delete-rest-api" {
+		rewritten, ok := rewriteFlagName(args, "--api-id", "--rest-api-id")
+		if ok {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: rewriting apigateway delete-rest-api --api-id -> --rest-api-id then retry\n")
+			rewrittenAWSArgs := append(append([]string{}, rewritten...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+			if _, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, opts.Writer); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+		// Some plans might use --api-id=... form.
+		rewritten2, ok2 := rewriteFlagName(args, "--api-id=", "--rest-api-id=")
+		if ok2 {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: rewriting apigateway delete-rest-api --api-id= -> --rest-api-id= then retry\n")
+			rewrittenAWSArgs := append(append([]string{}, rewritten2...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+			if _, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, opts.Writer); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+
+		// Teardown: sometimes plans try to delete an API Gateway v2 (HTTP/WebSocket) API with the v1 command.
+		// If we get NotFound + "Invalid API identifier specified", fall back to apigatewayv2 delete-api.
+		if opts.Destroyer && (failure.Category == FailureNotFound || failure.Code == "NotFoundException") {
+			id := strings.TrimSpace(flagValue(args, "--rest-api-id"))
+			if id == "" {
+				id = strings.TrimSpace(flagValue(args, "--api-id"))
+			}
+			if id == "" {
+				id = strings.TrimSpace(extractAPIGatewayV2IDFromNotFound(output))
+			}
+			if id != "" {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: apigateway delete-rest-api not found; trying apigatewayv2 delete-api (apiId=%s)\n", id)
+				del := []string{"apigatewayv2", "delete-api", "--api-id", id, "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+				out2, err := retryWithBackoffOutput(ctx, opts.Writer, 6, func() (string, error) {
+					return runAWSCommandStreaming(ctx, del, stdinBytes, opts.Writer)
+				})
+				if err != nil {
+					f2 := classifyAWSFailure([]string{"apigatewayv2", "delete-api"}, out2)
+					if f2.Category == FailureNotFound || f2.Code == "NotFoundException" {
+						return true, nil
+					}
+					return true, err
+				}
+				return true, nil
 			}
 		}
 	}
@@ -1075,6 +1510,160 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 
 	// Nothing to rewrite.
 	return false, nil
+}
+
+func rewriteFlagName(args []string, from string, to string) ([]string, bool) {
+	if len(args) == 0 {
+		return nil, false
+	}
+	out := append([]string{}, args...)
+	changed := false
+	for i := 0; i < len(out); i++ {
+		if out[i] == from {
+			out[i] = to
+			changed = true
+			continue
+		}
+		if strings.HasPrefix(out[i], from) {
+			out[i] = to + strings.TrimPrefix(out[i], from)
+			changed = true
+			continue
+		}
+	}
+	if !changed {
+		return nil, false
+	}
+	return out, true
+}
+
+func findAttachedInternetGatewayForVPC(ctx context.Context, opts ExecOptions, vpcID string) (string, error) {
+	vpcID = strings.TrimSpace(vpcID)
+	if vpcID == "" {
+		return "", nil
+	}
+	q := []string{"ec2", "describe-internet-gateways", "--filters", fmt.Sprintf("Name=attachment.vpc-id,Values=%s", vpcID), "--output", "json", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+	out, err := runAWSCommandStreaming(ctx, q, nil, io.Discard)
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		InternetGateways []struct {
+			InternetGatewayId string `json:"InternetGatewayId"`
+		} `json:"InternetGateways"`
+	}
+	if json.Unmarshal([]byte(out), &resp) != nil {
+		return "", nil
+	}
+	if len(resp.InternetGateways) == 0 {
+		return "", nil
+	}
+	return strings.TrimSpace(resp.InternetGateways[0].InternetGatewayId), nil
+}
+
+func deleteAllEKSNodegroups(ctx context.Context, opts ExecOptions, clusterName string, w io.Writer) error {
+	clusterName = strings.TrimSpace(clusterName)
+	if clusterName == "" {
+		return fmt.Errorf("empty cluster name")
+	}
+
+	listArgs := []string{"eks", "list-nodegroups", "--cluster-name", clusterName, "--output", "json", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+	out, err := runAWSCommandStreaming(ctx, listArgs, nil, io.Discard)
+	if err != nil {
+		return err
+	}
+	var resp struct {
+		Nodegroups []string `json:"nodegroups"`
+	}
+	if jsonErr := json.Unmarshal([]byte(out), &resp); jsonErr != nil {
+		return jsonErr
+	}
+	for _, ng := range resp.Nodegroups {
+		ng = strings.TrimSpace(ng)
+		if ng == "" {
+			continue
+		}
+		_, _ = fmt.Fprintf(w, "[maker] note: deleting eks nodegroup (cluster=%s nodegroup=%s)\n", clusterName, ng)
+		del := []string{"eks", "delete-nodegroup", "--cluster-name", clusterName, "--nodegroup-name", ng, "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+		_, _ = runAWSCommandStreaming(ctx, del, nil, w)
+		_ = waitForEKSNodegroupDeleted(ctx, opts, clusterName, ng, w)
+	}
+	_ = waitForEKSNodegroupsEmpty(ctx, opts, clusterName, w)
+	return nil
+}
+
+func waitForEKSNodegroupDeleted(ctx context.Context, opts ExecOptions, clusterName string, nodegroupName string, w io.Writer) error {
+	clusterName = strings.TrimSpace(clusterName)
+	nodegroupName = strings.TrimSpace(nodegroupName)
+	if clusterName == "" || nodegroupName == "" {
+		return nil
+	}
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		if attempt > 1 {
+			sleep := time.Duration(attempt) * 1200 * time.Millisecond
+			_, _ = fmt.Fprintf(w, "[maker] note: retrying eks nodegroup wait (attempt=%d sleep=%s)\n", attempt, sleep)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(sleep):
+			}
+		}
+
+		wait := []string{"eks", "wait", "nodegroup-deleted", "--cluster-name", clusterName, "--nodegroup-name", nodegroupName, "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+		out, err := runAWSCommandStreaming(ctx, wait, nil, w)
+		if err == nil {
+			return nil
+		}
+		lower := strings.ToLower(out)
+		if strings.Contains(lower, "resourcenotfound") || strings.Contains(lower, "not found") || strings.Contains(lower, "does not exist") {
+			return nil
+		}
+	}
+
+	return nil
+}
+
+func waitForEKSNodegroupsEmpty(ctx context.Context, opts ExecOptions, clusterName string, w io.Writer) error {
+	clusterName = strings.TrimSpace(clusterName)
+	if clusterName == "" {
+		return nil
+	}
+
+	start := time.Now()
+	for attempt := 1; attempt <= 30; attempt++ {
+		if attempt > 1 {
+			sleep := time.Duration(attempt) * 2 * time.Second
+			if sleep > 30*time.Second {
+				sleep = 30 * time.Second
+			}
+			_, _ = fmt.Fprintf(w, "[maker] note: waiting for eks nodegroups list to empty (attempt=%d sleep=%s)\n", attempt, sleep)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(sleep):
+			}
+		}
+
+		listArgs := []string{"eks", "list-nodegroups", "--cluster-name", clusterName, "--output", "json", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+		out, err := runAWSCommandStreaming(ctx, listArgs, nil, io.Discard)
+		if err != nil {
+			continue
+		}
+		var resp struct {
+			Nodegroups []string `json:"nodegroups"`
+		}
+		if jsonErr := json.Unmarshal([]byte(out), &resp); jsonErr != nil {
+			continue
+		}
+		if len(resp.Nodegroups) == 0 {
+			return nil
+		}
+		if time.Since(start) > 15*time.Minute {
+			return nil
+		}
+	}
+
+	return nil
 }
 
 func hasSubnetPlaceholders(args []string) bool {
@@ -1461,6 +2050,23 @@ func maybeFixRolePermissionAndRetry(ctx context.Context, opts ExecOptions, args 
 }
 
 func inferInlinePolicyForRolePermissionError(args []string, lowerOutput string) (policyName string, actions []string, resources []string) {
+	// Generic extraction: many services include the required IAM action(s) directly in the error.
+	// Example patterns include "is not authorized to perform: bedrock:InvokeModel" or
+	// "does not have permissions to call sns:Publish".
+	// If we can extract explicit actions, prefer that over service-specific heuristics.
+	if extracted, svc := extractIAMActionsFromOutput(lowerOutput); len(extracted) > 0 {
+		policyName = "ClankerAutoPerms" + strings.ToUpper(svc)
+		actions = extracted
+		// Best-effort: restrict resources if we can find ARNs for that service in args; otherwise use '*'.
+		if svc != "" {
+			resources = findServiceARNsInArgs(args, svc)
+		}
+		if len(resources) == 0 {
+			resources = []string{"*"}
+		}
+		return
+	}
+
 	// SQS-style phrasing: "permissions to call ReceiveMessage on SQS".
 	if strings.Contains(lowerOutput, " on sqs") || strings.Contains(lowerOutput, "sqs") {
 		if strings.Contains(lowerOutput, "receivemessage") || strings.Contains(lowerOutput, "delete") || strings.Contains(lowerOutput, "change") || strings.Contains(lowerOutput, "getqueueattributes") {
@@ -1564,6 +2170,54 @@ func inferInlinePolicyForRolePermissionError(args []string, lowerOutput string) 
 	}
 
 	return "", nil, nil
+}
+
+var iamActionTokenRe = regexp.MustCompile(`\b([a-z0-9-]+):([a-z0-9*]+)\b`)
+
+func extractIAMActionsFromOutput(lowerOutput string) (actions []string, service string) {
+	lowerOutput = strings.TrimSpace(lowerOutput)
+	if lowerOutput == "" {
+		return nil, ""
+	}
+
+	// Only attempt extraction when it looks like an authz/permissions error for an assumed role.
+	// (The caller already gated on role-permission style errors, but keep this extra guard cheap.)
+	if !(strings.Contains(lowerOutput, "not authorized") || strings.Contains(lowerOutput, "accessdenied") || strings.Contains(lowerOutput, "does not have permissions")) {
+		return nil, ""
+	}
+
+	seen := map[string]bool{}
+	var out []string
+	var svc string
+
+	for _, m := range iamActionTokenRe.FindAllStringSubmatch(lowerOutput, -1) {
+		if len(m) != 3 {
+			continue
+		}
+		s := strings.TrimSpace(m[1])
+		a := strings.TrimSpace(m[2])
+		if s == "" || a == "" {
+			continue
+		}
+		// Avoid accidental matches from ARNs like arn:aws:iam::aws:policy/...
+		if s == "arn" || s == "aws" {
+			continue
+		}
+		// Some messages include "sts:assumerole" etc; allow it, but keep the set minimal.
+		tok := s + ":" + a
+		if seen[tok] {
+			continue
+		}
+		seen[tok] = true
+		out = append(out, tok)
+		if svc == "" {
+			svc = s
+		}
+	}
+
+	// Keep output stable/predictable.
+	sort.Strings(out)
+	return out, svc
 }
 
 func ecsExecutionRoleArnForTaskDefinition(ctx context.Context, opts ExecOptions, taskDefinition string) (string, error) {
@@ -2601,28 +3255,35 @@ func rewriteAPIGatewayV2CreateApiLambdaTargetFunctionNameToArn(ctx context.Conte
 	return nil, false
 }
 
-func retryWithBackoff(ctx context.Context, w io.Writer, attempts int, fn func() (string, error)) error {
+func retryWithBackoffOutput(ctx context.Context, w io.Writer, attempts int, fn func() (string, error)) (string, error) {
 	if attempts < 1 {
 		attempts = 1
 	}
 	var lastErr error
+	lastOut := ""
 	for attempt := 1; attempt <= attempts; attempt++ {
 		if attempt > 1 {
 			sleep := time.Duration(1<<uint(attempt-1)) * time.Second
 			_, _ = fmt.Fprintf(w, "[maker] note: retrying after backoff (attempt=%d sleep=%s)\n", attempt, sleep)
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return lastOut, ctx.Err()
 			case <-time.After(sleep):
 			}
 		}
-		_, err := fn()
+		out, err := fn()
+		lastOut = out
 		if err == nil {
-			return nil
+			return out, nil
 		}
 		lastErr = err
 	}
-	return lastErr
+	return lastOut, lastErr
+}
+
+func retryWithBackoff(ctx context.Context, w io.Writer, attempts int, fn func() (string, error)) error {
+	_, err := retryWithBackoffOutput(ctx, w, attempts, fn)
+	return err
 }
 
 func remediateEC2InvalidInstanceProfileAndRetry(ctx context.Context, opts ExecOptions, args []string, stdinBytes []byte, w io.Writer) error {

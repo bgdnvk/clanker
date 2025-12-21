@@ -19,8 +19,9 @@ type Plan struct {
 }
 
 type Command struct {
-	Args   []string `json:"args"`
-	Reason string   `json:"reason,omitempty"`
+	Args     []string          `json:"args"`
+	Reason   string            `json:"reason,omitempty"`
+	Produces map[string]string `json:"produces,omitempty"`
 }
 
 func ParsePlan(raw string) (*Plan, error) {
@@ -46,6 +47,9 @@ func ParsePlan(raw string) (*Plan, error) {
 		p.Commands[i].Args = normalizeArgs(p.Commands[i].Args)
 		if len(p.Commands[i].Args) == 0 {
 			return nil, fmt.Errorf("command %d has empty args", i)
+		}
+		if len(p.Commands[i].Produces) == 0 {
+			p.Commands[i].Produces = nil
 		}
 	}
 

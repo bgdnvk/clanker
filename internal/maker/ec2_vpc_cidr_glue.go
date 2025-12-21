@@ -32,6 +32,13 @@ type subnetsDescribeResp struct {
 	} `json:"Subnets"`
 }
 
+type natGatewayDescribeResp struct {
+	NatGateways []struct {
+		NatGatewayId string `json:"NatGatewayId"`
+		VpcId        string `json:"VpcId"`
+	} `json:"NatGateways"`
+}
+
 func remediateEC2AssociateVpcCidrBlockInvalidRangeAndRetry(
 	ctx context.Context,
 	opts ExecOptions,
@@ -225,6 +232,38 @@ func describeSubnetCIDRs(ctx context.Context, opts ExecOptions, vpcID string) ([
 		}
 	}
 	return dedupeStrings(cidrs), nil
+}
+
+func describeSubnetVpcID(ctx context.Context, opts ExecOptions, subnetID string) (string, error) {
+	q := []string{"ec2", "describe-subnets", "--subnet-ids", subnetID, "--output", "json", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+	out, err := runAWSCommandStreaming(ctx, q, nil, io.Discard)
+	if err != nil {
+		return "", err
+	}
+	var resp subnetsDescribeResp
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return "", err
+	}
+	if len(resp.Subnets) == 0 {
+		return "", fmt.Errorf("subnet not found: %s", subnetID)
+	}
+	return strings.TrimSpace(resp.Subnets[0].VpcId), nil
+}
+
+func describeNatGatewayVpcID(ctx context.Context, opts ExecOptions, natGatewayID string) (string, error) {
+	q := []string{"ec2", "describe-nat-gateways", "--nat-gateway-ids", natGatewayID, "--output", "json", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+	out, err := runAWSCommandStreaming(ctx, q, nil, io.Discard)
+	if err != nil {
+		return "", err
+	}
+	var resp natGatewayDescribeResp
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return "", err
+	}
+	if len(resp.NatGateways) == 0 {
+		return "", fmt.Errorf("nat gateway not found: %s", natGatewayID)
+	}
+	return strings.TrimSpace(resp.NatGateways[0].VpcId), nil
 }
 
 func cidrPrefixLen(cidr string) (int, error) {
@@ -434,6 +473,72 @@ func pickTwoSubnetsCIDRs(vpcCIDRs []string, existingSubnetCIDRs []string, subnet
 		}
 	}
 	return "", "", false
+}
+
+func pickSubnetCIDR(vpcCIDRs []string, existingSubnetCIDRs []string, subnetPrefix int) (string, bool) {
+	if subnetPrefix < 16 {
+		subnetPrefix = 16
+	}
+	if subnetPrefix > 28 {
+		subnetPrefix = 28
+	}
+
+	for _, vpcCIDR := range vpcCIDRs {
+		vpcStart, vpcEnd, ok := cidrRange(vpcCIDR)
+		if !ok {
+			continue
+		}
+		step := uint32(1) << uint32(32-subnetPrefix)
+		for ip := vpcStart; ip <= vpcEnd; {
+			cand := fmt.Sprintf("%s/%d", uint32ToIPv4(ip).String(), subnetPrefix)
+			if !cidrOverlapsAny(cand, existingSubnetCIDRs) {
+				return cand, true
+			}
+			if vpcEnd-ip < step {
+				break
+			}
+			ip += step
+		}
+	}
+	return "", false
+}
+
+func remediateEC2CreateSubnetInvalidRangeAndRetry(
+	ctx context.Context,
+	opts ExecOptions,
+	args []string,
+	stdinBytes []byte,
+	w io.Writer,
+) (string, []string, error) {
+	vpcID := strings.TrimSpace(flagValue(args, "--vpc-id"))
+	desiredCIDR := strings.TrimSpace(flagValue(args, "--cidr-block"))
+	if vpcID == "" {
+		return "", nil, fmt.Errorf("cannot remediate create-subnet: missing --vpc-id")
+	}
+
+	prefix := 24
+	if desiredCIDR != "" {
+		if p, err := cidrPrefixLen(desiredCIDR); err == nil {
+			prefix = p
+		}
+	}
+
+	vpcCIDRs, _, err := describeVPCCIDRs(ctx, opts, vpcID)
+	if err != nil {
+		return "", nil, err
+	}
+	existingSubnetCIDRs, _ := describeSubnetCIDRs(ctx, opts, vpcID)
+
+	picked, ok := pickSubnetCIDR(vpcCIDRs, existingSubnetCIDRs, prefix)
+	if !ok {
+		return "", nil, fmt.Errorf("cannot pick replacement subnet cidr (vpc=%s desired=%s)", vpcID, desiredCIDR)
+	}
+
+	rewritten := setFlagValue(args, "--cidr-block", picked)
+	rewrittenAWSArgs := append(append([]string{}, rewritten...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+	_, _ = fmt.Fprintf(w, "[maker] remediation attempted: rewrite create-subnet cidr %s -> %s then retry\n", desiredCIDR, picked)
+	out, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, opts.Writer)
+	return out, rewritten, err
 }
 
 func setFlagValue(args []string, flag string, value string) []string {

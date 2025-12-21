@@ -19,6 +19,7 @@ Your job: produce a concrete, minimal AWS CLI execution plan to satisfy the user
 Constraints:
 - Output ONLY valid JSON.
 - Use this schema exactly:
+ - Use this schema exactly:
 {
   "version": 1,
   "createdAt": "RFC3339 timestamp",
@@ -27,7 +28,10 @@ Constraints:
   "commands": [
     {
       "args": ["aws", "<service>", "<operation>", "..."],
-      "reason": "why this command is needed"
+      "reason": "why this command is needed",
+      "produces": {
+        "OPTIONAL_BINDING_NAME": "$.Json.Path.To.Value"
+      }
     }
   ],
   "notes": ["optional notes"]
@@ -40,6 +44,22 @@ Rules for commands:
 - Do NOT include shell operators, pipes, redirects, or subshells.
 - Do NOT include --profile, --region, or --no-cli-pager (the runner injects them).
 - Prefer idempotent operations where possible.
+
+Placeholders and bindings:
+- You MAY use placeholder tokens inside args like "<IGW_ID>" or "<SUBNET_PUB_1_ID>".
+- If you use any placeholder token "<NAME>", you MUST ensure an earlier command includes:
+  - "produces": { "NAME": "$.some.json.path" }
+  and that earlier command returns JSON containing that path.
+- JSON paths must start with "$" and may include dot fields and array indices, e.g.
+  - "$.InternetGateway.InternetGatewayId"
+  - "$.Subnet.SubnetId"
+  - "$.LoadBalancers[0].LoadBalancerArn"
+
+Service guidance (when relevant to the user request):
+- Container images: use ECR (create repo, set lifecycle/policy if needed).
+- Queued/batch jobs: use AWS Batch (compute environment + job queue + job definition).
+- GenAI: use Amazon Bedrock (and Bedrock Agents if needed).
+- Traditional ML training/hosting: use SageMaker (model, endpoint config, endpoint) when requested.
 %s
 
 AWS Lambda code packaging:

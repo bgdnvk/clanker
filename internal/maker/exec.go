@@ -13,11 +13,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
 
 var awsErrorCodeRe = regexp.MustCompile(`(?i)an error occurred \(([^)]+)\)`)
+var planPlaceholderTokenRe = regexp.MustCompile(`<([A-Z0-9_]+)>`)
 
 type AWSFailureCategory string
 
@@ -71,6 +73,7 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	}
 
 	remediationAttempted := make(map[int]bool)
+	bindings := make(map[string]string)
 
 	for idx, cmdSpec := range plan.Commands {
 		if err := validateCommand(cmdSpec.Args, opts.Destroyer); err != nil {
@@ -80,6 +83,7 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		args := make([]string, 0, len(cmdSpec.Args)+6)
 		args = append(args, cmdSpec.Args...)
 		args = substituteAccountID(args, accountID)
+		args = applyPlanBindings(args, bindings)
 
 		zipBytes, updatedArgs, err := maybeInjectLambdaZipBytes(args, opts.Writer)
 		if err != nil {
@@ -95,7 +99,7 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 
 		out, runErr := runAWSCommandStreaming(ctx, awsArgs, zipBytes, opts.Writer)
 		if runErr != nil {
-			if handled, handleErr := handleAWSFailure(ctx, plan, opts, idx, args, awsArgs, zipBytes, out, runErr, remediationAttempted); handled {
+			if handled, handleErr := handleAWSFailure(ctx, plan, opts, idx, args, awsArgs, zipBytes, out, runErr, remediationAttempted, bindings); handled {
 				if handleErr != nil {
 					return handleErr
 				}
@@ -103,6 +107,10 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 			}
 			return fmt.Errorf("aws command %d failed: %w", idx+1, runErr)
 		}
+
+		// Learn placeholder bindings from successful command outputs.
+		learnPlanBindingsFromProduces(cmdSpec.Produces, out, bindings)
+		learnPlanBindings(args, out, bindings)
 
 		// CloudFormation is async. If we just created/updated a stack, wait for it to complete.
 		if len(args) >= 2 && args[0] == "cloudformation" && (args[1] == "create-stack" || args[1] == "update-stack") {
@@ -120,7 +128,7 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 					combined += fmt.Sprintf("cloudformation stack %s ended in %s%s", stackName, status, details)
 
 					synthErr := fmt.Errorf("cloudformation stack %s failed (status=%s)", stackName, status)
-					if handled, handleErr := handleAWSFailure(ctx, plan, opts, idx, args, awsArgs, zipBytes, combined, synthErr, remediationAttempted); handled {
+					if handled, handleErr := handleAWSFailure(ctx, plan, opts, idx, args, awsArgs, zipBytes, combined, synthErr, remediationAttempted, bindings); handled {
 						if handleErr != nil {
 							return handleErr
 						}
@@ -133,6 +141,397 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	}
 
 	return nil
+}
+
+func learnPlanBindingsFromProduces(produces map[string]string, output string, bindings map[string]string) {
+	if len(produces) == 0 {
+		return
+	}
+	if strings.TrimSpace(output) == "" {
+		return
+	}
+	var obj any
+	if err := json.Unmarshal([]byte(output), &obj); err != nil {
+		return
+	}
+	for key, path := range produces {
+		key = strings.TrimSpace(key)
+		path = strings.TrimSpace(path)
+		if key == "" || path == "" {
+			continue
+		}
+		if v, ok := jsonPathString(obj, path); ok {
+			bindings[key] = v
+		}
+	}
+}
+
+func jsonPathString(obj any, path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", false
+	}
+	if path == "$" {
+		// Not useful as a string.
+		return "", false
+	}
+	if strings.HasPrefix(path, "$") {
+		path = strings.TrimPrefix(path, "$")
+	}
+	path = strings.TrimPrefix(path, ".")
+
+	cur := obj
+	for len(path) > 0 {
+		// Consume one segment: name and optional [idx] parts.
+		seg := path
+		if i := strings.Index(seg, "."); i >= 0 {
+			seg = seg[:i]
+		}
+
+		name := seg
+		rest := ""
+		if i := strings.Index(name, "["); i >= 0 {
+			rest = name[i:]
+			name = name[:i]
+		}
+		name = strings.TrimSpace(name)
+		if name != "" {
+			m, ok := cur.(map[string]any)
+			if !ok {
+				return "", false
+			}
+			cur, ok = m[name]
+			if !ok {
+				return "", false
+			}
+		}
+
+		for strings.HasPrefix(rest, "[") {
+			end := strings.Index(rest, "]")
+			if end < 0 {
+				return "", false
+			}
+			idxStr := strings.TrimSpace(rest[1:end])
+			rest = rest[end+1:]
+			idx, err := strconv.Atoi(idxStr)
+			if err != nil {
+				return "", false
+			}
+			arr, ok := cur.([]any)
+			if !ok || idx < 0 || idx >= len(arr) {
+				return "", false
+			}
+			cur = arr[idx]
+		}
+
+		if len(path) == len(seg) {
+			path = ""
+		} else {
+			path = strings.TrimPrefix(path[len(seg):], ".")
+		}
+	}
+
+	switch v := cur.(type) {
+	case string:
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return "", false
+		}
+		return v, true
+	case float64:
+		// Only accept integral floats.
+		if v == float64(int64(v)) {
+			return strconv.FormatInt(int64(v), 10), true
+		}
+		return "", false
+	case bool:
+		if v {
+			return "true", true
+		}
+		return "false", true
+	default:
+		return "", false
+	}
+}
+
+func applyPlanBindings(args []string, bindings map[string]string) []string {
+	if len(args) == 0 || len(bindings) == 0 {
+		return args
+	}
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		if !strings.Contains(a, "<") || !strings.Contains(a, ">") {
+			out = append(out, a)
+			continue
+		}
+		rewritten := planPlaceholderTokenRe.ReplaceAllStringFunc(a, func(m string) string {
+			key := strings.TrimSuffix(strings.TrimPrefix(m, "<"), ">")
+			if v, ok := bindings[key]; ok && strings.TrimSpace(v) != "" {
+				return v
+			}
+			return m
+		})
+		out = append(out, rewritten)
+	}
+	return out
+}
+
+func learnPlanBindings(args []string, output string, bindings map[string]string) {
+	if len(args) < 2 {
+		return
+	}
+	if strings.TrimSpace(output) == "" {
+		return
+	}
+
+	service := strings.TrimSpace(args[0])
+	op := strings.TrimSpace(args[1])
+
+	// Most create operations we care about return JSON.
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(output), &obj); err != nil {
+		return
+	}
+
+	switch service {
+	case "ec2":
+		switch op {
+		case "describe-availability-zones":
+			// {"AvailabilityZones":[{"ZoneName":"us-east-1a"}, ...]}
+			az1 := deepString(obj, "AvailabilityZones", "0", "ZoneName")
+			az2 := deepString(obj, "AvailabilityZones", "1", "ZoneName")
+			if az1 != "" {
+				bindings["AZ_1"] = az1
+			}
+			if az2 != "" {
+				bindings["AZ_2"] = az2
+			}
+		case "create-internet-gateway":
+			// {"InternetGateway":{"InternetGatewayId":"igw-...","Tags":[{"Key":"Name","Value":"main-igw"}]}}
+			id := deepString(obj, "InternetGateway", "InternetGatewayId")
+			if id == "" {
+				return
+			}
+			name := deepTagValue(obj, "InternetGateway", "Tags", "Name")
+			if name == "main-igw" {
+				bindings["IGW_ID"] = id
+				bindings["IGW"] = id
+				return
+			}
+			// Best-effort default.
+			if _, ok := bindings["IGW_ID"]; !ok {
+				bindings["IGW_ID"] = id
+				bindings["IGW"] = id
+			}
+		case "create-subnet":
+			id := deepString(obj, "Subnet", "SubnetId")
+			if id == "" {
+				return
+			}
+			name := deepTagValue(obj, "Subnet", "Tags", "Name")
+			switch name {
+			case "public-subnet-1":
+				bindings["SUBNET_PUB_1_ID"] = id
+				bindings["SUB_PUB_1_ID"] = id
+				bindings["SUB_PUB_1"] = id
+			case "public-subnet-2":
+				bindings["SUBNET_PUB_2_ID"] = id
+				bindings["SUB_PUB_2_ID"] = id
+				bindings["SUB_PUB_2"] = id
+			case "private-subnet-1":
+				bindings["SUBNET_PRIV_1_ID"] = id
+				bindings["SUB_PRIV_ID"] = id
+				bindings["SUB_PRIV"] = id
+			default:
+				// Fallback: fill first missing slot in a stable order.
+				for _, k := range []string{"SUBNET_PUB_1_ID", "SUBNET_PUB_2_ID", "SUBNET_PRIV_1_ID", "SUB_PUB_1_ID", "SUB_PUB_2_ID", "SUB_PRIV_ID", "SUB_PUB_1", "SUB_PUB_2", "SUB_PRIV"} {
+					if strings.TrimSpace(bindings[k]) == "" {
+						bindings[k] = id
+						if k == "SUBNET_PUB_1_ID" {
+							bindings["SUB_PUB_1_ID"] = id
+							bindings["SUB_PUB_1"] = id
+						}
+						if k == "SUBNET_PUB_2_ID" {
+							bindings["SUB_PUB_2_ID"] = id
+							bindings["SUB_PUB_2"] = id
+						}
+						if k == "SUBNET_PRIV_1_ID" {
+							bindings["SUB_PRIV_ID"] = id
+							bindings["SUB_PRIV"] = id
+						}
+						if k == "SUB_PUB_1_ID" {
+							bindings["SUBNET_PUB_1_ID"] = id
+							bindings["SUB_PUB_1"] = id
+						}
+						if k == "SUB_PUB_2_ID" {
+							bindings["SUBNET_PUB_2_ID"] = id
+							bindings["SUB_PUB_2"] = id
+						}
+						if k == "SUB_PRIV_ID" {
+							bindings["SUBNET_PRIV_1_ID"] = id
+							bindings["SUB_PRIV"] = id
+						}
+						break
+					}
+				}
+			}
+		case "allocate-address":
+			alloc := deepString(obj, "AllocationId")
+			if alloc != "" {
+				bindings["EIP_ALLOC_ID"] = alloc
+				bindings["EIP_ID"] = alloc
+			}
+		case "create-nat-gateway":
+			ngw := deepString(obj, "NatGateway", "NatGatewayId")
+			if ngw != "" {
+				bindings["NAT_GW_ID"] = ngw
+				bindings["NAT_ID"] = ngw
+			}
+		case "create-route-table":
+			id := deepString(obj, "RouteTable", "RouteTableId")
+			if id == "" {
+				return
+			}
+			name := deepTagValue(obj, "RouteTable", "Tags", "Name")
+			switch name {
+			case "public-rt":
+				bindings["RT_PUBLIC_ID"] = id
+				bindings["RT_PUB_ID"] = id
+				bindings["RT_PUB"] = id
+			case "private-rt":
+				bindings["RT_PRIVATE_ID"] = id
+				bindings["RT_PRIV_ID"] = id
+				bindings["RT_PRIV"] = id
+			default:
+				for _, k := range []string{"RT_PUBLIC_ID", "RT_PRIVATE_ID", "RT_PUB_ID", "RT_PRIV_ID", "RT_PUB", "RT_PRIV"} {
+					if strings.TrimSpace(bindings[k]) == "" {
+						bindings[k] = id
+						if k == "RT_PUBLIC_ID" {
+							bindings["RT_PUB_ID"] = id
+							bindings["RT_PUB"] = id
+						}
+						if k == "RT_PRIVATE_ID" {
+							bindings["RT_PRIV_ID"] = id
+							bindings["RT_PRIV"] = id
+						}
+						if k == "RT_PUB_ID" {
+							bindings["RT_PUBLIC_ID"] = id
+							bindings["RT_PUB"] = id
+						}
+						if k == "RT_PRIV_ID" {
+							bindings["RT_PRIVATE_ID"] = id
+							bindings["RT_PRIV"] = id
+						}
+						break
+					}
+				}
+			}
+		case "create-security-group":
+			gid := deepString(obj, "GroupId")
+			if gid == "" {
+				return
+			}
+			groupName := strings.TrimSpace(flagValue(args, "--group-name"))
+			switch groupName {
+			case "alb-sg":
+				bindings["SG_ALB_ID"] = gid
+				bindings["SG_ALB"] = gid
+			case "web-sg":
+				bindings["SG_WEB_ID"] = gid
+				bindings["SG_WEB"] = gid
+			case "web-server-sg":
+				bindings["SG_WEB_ID"] = gid
+				bindings["SG_WEB"] = gid
+			default:
+				for _, k := range []string{"SG_ALB_ID", "SG_WEB_ID", "SG_ALB", "SG_WEB"} {
+					if strings.TrimSpace(bindings[k]) == "" {
+						bindings[k] = gid
+						break
+					}
+				}
+			}
+
+			// Common placeholder aliases used by planner output.
+			if strings.TrimSpace(bindings["SG_ALB_ID"]) != "" {
+				bindings["ALB_SG_ID"] = bindings["SG_ALB_ID"]
+			}
+			if strings.TrimSpace(bindings["SG_WEB_ID"]) != "" {
+				bindings["WEB_SG_ID"] = bindings["SG_WEB_ID"]
+			}
+		case "run-instances":
+			// {"Instances":[{"InstanceId":"i-..."}]}
+			inst := deepString(obj, "Instances", "0", "InstanceId")
+			if inst != "" {
+				bindings["INSTANCE_ID"] = inst
+			}
+		}
+	case "elbv2":
+		switch op {
+		case "create-load-balancer":
+			arn := deepString(obj, "LoadBalancers", "0", "LoadBalancerArn")
+			if arn != "" {
+				bindings["ALB_ARN"] = arn
+			}
+		case "create-target-group":
+			arn := deepString(obj, "TargetGroups", "0", "TargetGroupArn")
+			if arn != "" {
+				bindings["TG_ARN"] = arn
+			}
+		case "ssm":
+			if op == "get-parameters" {
+				// {"Parameters":[{"Name":"...","Value":"ami-..."}]}
+				val := deepString(obj, "Parameters", "0", "Value")
+				if val != "" && strings.HasPrefix(val, "ami-") {
+					bindings["AMI_ID"] = val
+				}
+			}
+		}
+	}
+}
+
+func deepString(obj any, path ...string) string {
+	cur := obj
+	for _, p := range path {
+		switch typed := cur.(type) {
+		case map[string]any:
+			cur = typed[p]
+		case []any:
+			idx, err := strconv.Atoi(strings.TrimSpace(p))
+			if err != nil || idx < 0 || idx >= len(typed) {
+				return ""
+			}
+			cur = typed[idx]
+		default:
+			return ""
+		}
+	}
+	if s, ok := cur.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return ""
+}
+
+func deepTagValue(obj map[string]any, rootKey string, tagsKey string, tagName string) string {
+	root, ok := obj[rootKey].(map[string]any)
+	if !ok {
+		return ""
+	}
+	tags, ok := root[tagsKey].([]any)
+	if !ok {
+		return ""
+	}
+	for _, t := range tags {
+		m, ok := t.(map[string]any)
+		if !ok {
+			continue
+		}
+		k, _ := m["Key"].(string)
+		v, _ := m["Value"].(string)
+		if strings.TrimSpace(k) == tagName {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 func parseAWSErrorCode(output string) string {
@@ -164,11 +563,15 @@ func classifyAWSFailure(args []string, output string) AWSFailure {
 
 	isNotFoundish := strings.Contains(lower, "nosuchentity") ||
 		strings.Contains(lower, "resourcenotfound") ||
+		strings.Contains(lower, "notfoundexception") ||
 		strings.Contains(lower, "nosuchbucket") ||
 		strings.Contains(lower, "nosuchkey") ||
 		strings.Contains(lower, "not found") ||
 		strings.Contains(lower, "does not exist")
 	if code == "NoSuchEntity" || code == "ResourceNotFoundException" || code == "NoSuchBucket" || code == "NoSuchKey" {
+		isNotFoundish = true
+	}
+	if code == "NotFoundException" {
 		isNotFoundish = true
 	}
 
@@ -182,10 +585,9 @@ func classifyAWSFailure(args []string, output string) AWSFailure {
 		strings.Contains(lower, "already exists") ||
 		strings.Contains(lower, "alreadyownedbyyou") ||
 		strings.Contains(lower, "invalidgroup.duplicate") ||
-		strings.Contains(lower, "resourceinuse")
+		false
 	if code == "EntityAlreadyExists" ||
 		code == "ResourceConflictException" ||
-		code == "ResourceInUseException" ||
 		code == "BucketAlreadyOwnedByYou" ||
 		code == "ResourceExistsException" ||
 		code == "RepositoryAlreadyExistsException" ||
@@ -199,8 +601,9 @@ func classifyAWSFailure(args []string, output string) AWSFailure {
 	isConflictish := strings.Contains(lower, "conflictexception") ||
 		strings.Contains(lower, "deleteconflict") ||
 		strings.Contains(lower, "dependencyviolation") ||
+		strings.Contains(lower, "resourceinuse") ||
 		strings.Contains(lower, "dependent object")
-	if code == "ConflictException" || code == "DeleteConflict" || code == "DependencyViolation" || code == "OperationAbortedException" {
+	if code == "ConflictException" || code == "DeleteConflict" || code == "DependencyViolation" || code == "OperationAbortedException" || code == "ResourceInUseException" {
 		isConflictish = true
 	}
 
@@ -280,6 +683,7 @@ func handleAWSFailure(
 	out string,
 	runErr error,
 	remediationAttempted map[int]bool,
+	bindings map[string]string,
 ) (handled bool, err error) {
 	failure := classifyAWSFailure(args, out)
 	if failure.Code != "" {
@@ -293,7 +697,7 @@ func handleAWSFailure(
 		return true, nil
 	}
 
-	if handled, handleErr := maybeRewriteAndRetry(ctx, opts, args, awsArgs, stdinBytes, failure, out); handled {
+	if handled, handleErr := maybeRewriteAndRetry(ctx, opts, args, awsArgs, stdinBytes, failure, out, bindings); handled {
 		return true, handleErr
 	}
 
@@ -619,6 +1023,7 @@ func shouldIgnoreFailure(args []string, failure AWSFailure, output string) bool 
 	// Common "safe to ignore" error fragments for best-effort prerequisite cleanup.
 	isNotFoundish := strings.Contains(lower, "nosuchentity") ||
 		strings.Contains(lower, "resourcenotfound") ||
+		strings.Contains(lower, "notfoundexception") ||
 		strings.Contains(lower, "not found") ||
 		strings.Contains(lower, "does not exist")
 	isNotAttachedish := strings.Contains(lower, "not attached") ||
@@ -626,8 +1031,23 @@ func shouldIgnoreFailure(args []string, failure AWSFailure, output string) bool 
 		strings.Contains(lower, "cannot detach")
 	if code != "" {
 		// Prefer error codes when available.
-		if code == "NoSuchEntity" || code == "ResourceNotFoundException" {
+		if code == "NoSuchEntity" || code == "ResourceNotFoundException" || code == "NotFoundException" {
 			isNotFoundish = true
+		}
+	}
+
+	// Generic idempotency: delete/remove/detach/disassociate operations should not fail if the
+	// target is already gone.
+	// (This is especially important during teardown when partial deletion has already happened.)
+	if failure.Category == FailureNotFound || isNotFoundish {
+		op := strings.ToLower(strings.TrimSpace(args[1]))
+		if strings.HasPrefix(op, "delete") || strings.HasPrefix(op, "remove") || strings.HasPrefix(op, "detach") || strings.HasPrefix(op, "disassociate") {
+			// Special-case: API Gateway v2 IDs deleted via v1 command show up as "Invalid API identifier specified".
+			// Don't ignore this; let resources glue fall back to apigatewayv2 delete-api.
+			if args[0] == "apigateway" && args[1] == "delete-rest-api" && strings.Contains(lower, "invalid api identifier specified") {
+				return false
+			}
+			return true
 		}
 	}
 
