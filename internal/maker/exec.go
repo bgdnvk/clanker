@@ -103,6 +103,33 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 			}
 			return fmt.Errorf("aws command %d failed: %w", idx+1, runErr)
 		}
+
+		// CloudFormation is async. If we just created/updated a stack, wait for it to complete.
+		if len(args) >= 2 && args[0] == "cloudformation" && (args[1] == "create-stack" || args[1] == "update-stack") {
+			stackName := strings.TrimSpace(flagValue(args, "--stack-name"))
+			if stackName != "" {
+				status, details, waitErr := waitForCloudFormationStackTerminal(ctx, opts, stackName, opts.Writer)
+				if waitErr != nil {
+					return fmt.Errorf("cloudformation wait failed for %s: %w", stackName, waitErr)
+				}
+				if !isCloudFormationStackSuccess(status) {
+					combined := strings.TrimSpace(out)
+					if combined != "" {
+						combined += "\n"
+					}
+					combined += fmt.Sprintf("cloudformation stack %s ended in %s%s", stackName, status, details)
+
+					synthErr := fmt.Errorf("cloudformation stack %s failed (status=%s)", stackName, status)
+					if handled, handleErr := handleAWSFailure(ctx, plan, opts, idx, args, awsArgs, zipBytes, combined, synthErr, remediationAttempted); handled {
+						if handleErr != nil {
+							return handleErr
+						}
+						continue
+					}
+					return fmt.Errorf("aws command %d failed: %w", idx+1, synthErr)
+				}
+			}
+		}
 	}
 
 	return nil
@@ -609,15 +636,16 @@ func shouldIgnoreFailure(args []string, failure AWSFailure, output string) bool 
 		return strings.Contains(lower, "entityalreadyexists") || strings.Contains(lower, "already exists")
 	}
 
-	// Creating already-existing resources should generally be non-fatal.
+	// Already-exists is typically idempotent for maker runs.
+	// Exception: S3 BucketAlreadyExists means the name is taken by someone else.
 	if failure.Category == FailureAlreadyExists {
-		// Many services treat create-as-upsert poorly; but for some APIs, already-exists is fine.
-		if args[0] == "logs" && args[1] == "create-log-group" {
-			return true
+		if args[0] == "cloudformation" && len(args) >= 2 && args[1] == "create-stack" {
+			return false
 		}
-		if args[0] == "s3" && args[1] == "create-bucket" {
-			return true
+		if code == "BucketAlreadyExists" {
+			return false
 		}
+		return true
 	}
 
 	// IAM detach operations are best-effort prerequisites; missing policies/attachments should not block workflows.
@@ -648,6 +676,11 @@ func shouldIgnoreFailure(args []string, failure AWSFailure, output string) bool 
 	// Deleting log groups is best-effort cleanup.
 	if args[0] == "logs" && args[1] == "delete-log-group" {
 		return strings.Contains(lower, "resourcenotfound") || strings.Contains(lower, "not found")
+	}
+
+	// EC2 security group rule authorization is often re-applied; duplicates are safe to ignore.
+	if args[0] == "ec2" && (args[1] == "authorize-security-group-ingress" || args[1] == "authorize-security-group-egress") {
+		return code == "InvalidPermission.Duplicate" || strings.Contains(lower, "invalidpermission.duplicate") || strings.Contains(lower, "already exists")
 	}
 
 	return false

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -20,6 +21,676 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 	// recognizable action/resource family.
 	if ok, err := maybeFixRolePermissionAndRetry(ctx, opts, args, awsArgs, stdinBytes, failure, output); ok {
 		return true, err
+	}
+
+	// CloudWatch Logs prerequisites + idempotency.
+	// Many operations fail if the log group doesn't exist yet; create it and retry.
+	if args0(args) == "logs" {
+		op := args1(args)
+		lower := strings.ToLower(output)
+
+		// Idempotency: create-log-stream already exists.
+		if op == "create-log-stream" {
+			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict ||
+				strings.Contains(lower, "resourcealreadyexistsexception") ||
+				(strings.Contains(lower, "already exists") && strings.Contains(lower, "log stream")) {
+				return true, nil
+			}
+		}
+
+		// Missing log group: create it, then retry.
+		if op == "create-log-stream" || op == "put-retention-policy" || op == "put-subscription-filter" || op == "put-metric-filter" {
+			missingGroup := failure.Category == FailureNotFound || failure.Category == FailureValidation ||
+				strings.Contains(lower, "resourcenotfoundexception") ||
+				(strings.Contains(lower, "log group") && (strings.Contains(lower, "does not exist") || strings.Contains(lower, "not found")))
+			if missingGroup {
+				lg := strings.TrimSpace(flagValue(args, "--log-group-name"))
+				if lg != "" {
+					create := []string{"logs", "create-log-group", "--log-group-name", lg, "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+					_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: create log group then retry (logGroup=%s)\n", lg)
+					// Best-effort: create-log-group is effectively idempotent.
+					_, _ = runAWSCommandStreaming(ctx, create, nil, opts.Writer)
+					if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+						return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+					}); err != nil {
+						return true, err
+					}
+					return true, nil
+				}
+			}
+		}
+	}
+
+	// EventBridge / Scheduler / Pipes: common idempotency + propagation retries.
+	// These services frequently fail due to role propagation and cross-resource settling.
+	if args0(args) == "events" || args0(args) == "scheduler" || args0(args) == "pipes" {
+		lower := strings.ToLower(output)
+
+		// Scheduler create-schedule: already exists -> update-schedule.
+		if args0(args) == "scheduler" && args1(args) == "create-schedule" {
+			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "already exists") {
+				rewritten := append([]string{}, args...)
+				rewritten[1] = "update-schedule"
+				rewrittenAWSArgs := append(append([]string{}, rewritten...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: scheduler create-schedule exists; using update-schedule\n")
+				if _, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, opts.Writer); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+
+		// Pipes create-pipe: already exists -> update-pipe.
+		if args0(args) == "pipes" && args1(args) == "create-pipe" {
+			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "already exists") {
+				rewritten := append([]string{}, args...)
+				rewritten[1] = "update-pipe"
+				rewrittenAWSArgs := append(append([]string{}, rewritten...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: pipes create-pipe exists; using update-pipe\n")
+				if _, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, opts.Writer); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+
+		// EventBridge: targets/rules often race with IAM/service readiness.
+		if args0(args) == "events" {
+			op := args1(args)
+			if (op == "put-targets" || op == "put-rule" || op == "create-api-destination" || op == "create-connection") &&
+				(failure.Category == FailureNotFound || failure.Category == FailureConflict || failure.Category == FailureThrottled || strings.Contains(lower, "resourcenotfound") || strings.Contains(lower, "not found")) {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry events %s after propagation\n", op)
+				if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+					return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+				}); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+
+		// General propagation retry when these services say something doesn't exist yet.
+		if failure.Category == FailureNotFound || strings.Contains(lower, "not found") || strings.Contains(lower, "does not exist") {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry %s %s after propagation\n", args0(args), args1(args))
+			if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+				return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+			}); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+	}
+
+	// SNS: create-topic is naturally idempotent, but AWS can still return transient/not-found propagation errors.
+	if args0(args) == "sns" {
+		op := args1(args)
+		lower := strings.ToLower(output)
+
+		// Treat already-exists/conflict as idempotent success.
+		if op == "create-topic" || op == "subscribe" {
+			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "already exists") {
+				return true, nil
+			}
+		}
+
+		// Topic propagation: subscribe / set attributes can race right after create-topic.
+		if op == "subscribe" || op == "set-topic-attributes" {
+			if failure.Category == FailureNotFound || failure.Category == FailureThrottled || failure.Category == FailureConflict ||
+				strings.Contains(lower, "notfound") || strings.Contains(lower, "not found") || strings.Contains(lower, "does not exist") {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry sns %s after propagation\n", op)
+				if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+					return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+				}); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+	}
+
+	// CloudWatch alarms: put-metric-alarm / put-composite-alarm are upserts.
+	// Retry on throttling/transients and on dependency propagation.
+	if args0(args) == "cloudwatch" {
+		op := args1(args)
+		lower := strings.ToLower(output)
+		if op == "put-metric-alarm" || op == "put-composite-alarm" {
+			if failure.Category == FailureThrottled || isTransientFailure(failure, output) ||
+				failure.Category == FailureNotFound || failure.Category == FailureConflict ||
+				strings.Contains(lower, "resource not found") || strings.Contains(lower, "not found") || strings.Contains(lower, "does not exist") {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry cloudwatch %s after propagation\n", op)
+				if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+					return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+				}); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+	}
+
+	// EC2/VPC building blocks: handle eventual consistency + "already associated" + route replace.
+	if args0(args) == "ec2" {
+		op := args1(args)
+		lower := strings.ToLower(output)
+
+		// associate-vpc-cidr-block: if the chosen private range is restricted (wrong RFC1918 block),
+		// pick an additional CIDR in the same private range as the VPC and retry.
+		if op == "associate-vpc-cidr-block" {
+			if failure.Code == "InvalidVpc.Range" || strings.Contains(lower, "invalidvpc.range") || (strings.Contains(lower, "cidr") && strings.Contains(lower, "restricted")) {
+				if err := remediateEC2AssociateVpcCidrBlockInvalidRangeAndRetry(ctx, opts, args, stdinBytes, opts.Writer); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+
+		// create-route: RouteAlreadyExists -> replace-route.
+		if op == "create-route" {
+			if failure.Category == FailureAlreadyExists || strings.Contains(lower, "routealreadyexists") || strings.Contains(lower, "route already exists") {
+				rewritten := append([]string{}, args...)
+				rewritten[1] = "replace-route"
+				rewrittenAWSArgs := append(append([]string{}, rewritten...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: ec2 create-route exists; using replace-route\n")
+				if _, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, opts.Writer); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+
+		// Idempotency: attaching/associating something already associated.
+		if op == "attach-internet-gateway" || op == "associate-route-table" {
+			if failure.Category == FailureConflict || failure.Category == FailureAlreadyExists ||
+				strings.Contains(lower, "alreadyassociated") || strings.Contains(lower, "already associated") || strings.Contains(lower, "resource.alreadyassociated") {
+				return true, nil
+			}
+		}
+
+		// Ordering/propagation: many Invalid*NotFound errors right after create.
+		if op == "create-vpc" || op == "create-subnet" || op == "create-route-table" || op == "create-route" || op == "replace-route" ||
+			op == "associate-route-table" || op == "create-nat-gateway" || op == "allocate-address" || op == "create-internet-gateway" || op == "attach-internet-gateway" {
+			if failure.Category == FailureNotFound || failure.Category == FailureConflict || failure.Category == FailureThrottled ||
+				strings.Contains(lower, "invalidvpcid.notfound") || strings.Contains(lower, "invalidsubnetid.notfound") ||
+				strings.Contains(lower, "invalidroutetableid.notfound") || strings.Contains(lower, "invalidinternetgatewayid.notfound") ||
+				strings.Contains(lower, "invalidallocationid.notfound") || strings.Contains(lower, "not found") ||
+				strings.Contains(lower, "incorrectstate") || strings.Contains(lower, "dependencyviolation") {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry ec2 %s after propagation\n", op)
+				if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+					return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+				}); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+	}
+
+	// CloudFormation create-stack: if subnets in template are outside the VPC CIDR ranges,
+	// rewrite subnet CIDRs to free /24s inside the VPC and retry.
+	if args0(args) == "cloudformation" && args1(args) == "create-stack" {
+		lower := strings.ToLower(output)
+		// Idempotency: stack already exists -> update-stack.
+		if failure.Category == FailureAlreadyExists || strings.Contains(lower, "already exists") {
+			rewritten := append([]string{}, args...)
+			rewritten[1] = "update-stack"
+			rewrittenAWSArgs := append(append([]string{}, rewritten...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: cloudformation create-stack exists; using update-stack\n")
+			if _, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, opts.Writer); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+		if strings.Contains(lower, "cidr") && (strings.Contains(lower, "subnet") || strings.Contains(lower, "vpc")) {
+			if err := remediateCloudFormationTemplateSubnetCIDRsAndRetry(ctx, opts, args, stdinBytes, opts.Writer); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+	}
+
+	// CloudFormation update-stack: same CIDR remediation.
+	if args0(args) == "cloudformation" && args1(args) == "update-stack" {
+		lower := strings.ToLower(output)
+		if strings.Contains(lower, "cidr") && (strings.Contains(lower, "subnet") || strings.Contains(lower, "vpc")) {
+			if err := remediateCloudFormationTemplateSubnetCIDRsAndRetry(ctx, opts, args, stdinBytes, opts.Writer); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+	}
+
+	// ACM: describe can race right after request-certificate, and many follow-ons need time.
+	if args0(args) == "acm" {
+		lower := strings.ToLower(output)
+		if failure.Category == FailureNotFound || failure.Category == FailureConflict || failure.Category == FailureThrottled ||
+			strings.Contains(lower, "resourcenotfound") || strings.Contains(lower, "not found") || strings.Contains(lower, "does not exist") {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry acm %s after propagation\n", args1(args))
+			if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+				return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+			}); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+	}
+
+	// WAFv2: duplicate items and optimistic locks happen frequently; retry on locks/unavailable.
+	if args0(args) == "wafv2" {
+		lower := strings.ToLower(output)
+		if failure.Category == FailureAlreadyExists || strings.Contains(lower, "wafduplicateitem") || strings.Contains(lower, "duplicate") {
+			return true, nil
+		}
+		if failure.Category == FailureThrottled || isTransientFailure(failure, output) ||
+			strings.Contains(lower, "wafoptimisticlock") || strings.Contains(lower, "wafunavailableentity") || strings.Contains(lower, "wafinternalerror") {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry wafv2 %s after lock/propagation\n", args1(args))
+			if err := retryWithBackoff(ctx, opts.Writer, 7, func() (string, error) {
+				return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+			}); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+	}
+
+	// EFS: file systems and mount targets are async.
+	if args0(args) == "efs" {
+		op := args1(args)
+		lower := strings.ToLower(output)
+
+		// Idempotency: mount target already exists.
+		if op == "create-mount-target" {
+			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "mounttargetconflict") || strings.Contains(lower, "already exists") {
+				return true, nil
+			}
+			fsID := strings.TrimSpace(flagValue(args, "--file-system-id"))
+			if fsID != "" && (failure.Category == FailureNotFound || failure.Category == FailureConflict ||
+				strings.Contains(lower, "filesystemnotfound") || strings.Contains(lower, "incorrectfilesystemlifecycle") || strings.Contains(lower, "incorrect file system") ||
+				strings.Contains(lower, "not found")) {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: wait for efs file system available then retry (fs=%s)\n", fsID)
+				_ = waitForEFSFileSystemAvailable(ctx, opts, fsID, opts.Writer)
+				if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+					return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+				}); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+		if failure.Category == FailureNotFound || failure.Category == FailureConflict || failure.Category == FailureThrottled || strings.Contains(lower, "not found") {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry efs %s after propagation\n", op)
+			if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+				return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+			}); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+	}
+
+	// OpenSearch: domains take time and many operations fail while processing.
+	if args0(args) == "opensearch" {
+		op := args1(args)
+		lower := strings.ToLower(output)
+		if op == "create-domain" {
+			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "already exists") {
+				return true, nil
+			}
+		}
+		domain := strings.TrimSpace(flagValue(args, "--domain-name"))
+		if domain == "" {
+			domain = strings.TrimSpace(flagValue(args, "--domain"))
+		}
+		if domain != "" && (failure.Category == FailureConflict || failure.Category == FailureThrottled || isTransientFailure(failure, output) ||
+			strings.Contains(lower, "processing") || strings.Contains(lower, "in progress") || strings.Contains(lower, "is currently being modified")) {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: wait for opensearch domain not processing then retry (domain=%s)\n", domain)
+			_ = waitForOpenSearchDomainReady(ctx, opts, domain, opts.Writer)
+			if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+				return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+			}); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+		if failure.Category == FailureNotFound || strings.Contains(lower, "not found") {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry opensearch %s after propagation\n", op)
+			if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+				return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+			}); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+	}
+
+	// MSK: clusters are slow; retry on in-progress states.
+	if args0(args) == "kafka" {
+		op := args1(args)
+		lower := strings.ToLower(output)
+		if op == "create-cluster" {
+			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "already exists") {
+				return true, nil
+			}
+		}
+		arn := strings.TrimSpace(flagValue(args, "--cluster-arn"))
+		if arn != "" && (failure.Category == FailureConflict || failure.Category == FailureThrottled || isTransientFailure(failure, output) ||
+			strings.Contains(lower, "in progress") || strings.Contains(lower, "conflict") || strings.Contains(lower, "resource is currently") || strings.Contains(lower, "badrequestexception")) {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: wait for msk cluster active then retry\n")
+			_ = waitForMSKClusterActive(ctx, opts, arn, opts.Writer)
+			if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+				return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+			}); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+		if failure.Category == FailureNotFound || strings.Contains(lower, "not found") {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry kafka %s after propagation\n", op)
+			if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+				return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+			}); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+	}
+
+	// Cognito: create calls don't upsert; treat already-exists as idempotent and retry propagation.
+	if args0(args) == "cognito-idp" {
+		op := args1(args)
+		lower := strings.ToLower(output)
+		if strings.HasPrefix(op, "create-") {
+			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "already exists") {
+				return true, nil
+			}
+		}
+		if failure.Category == FailureNotFound || failure.Category == FailureThrottled || failure.Category == FailureConflict || strings.Contains(lower, "not found") {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry cognito-idp %s after propagation\n", op)
+			if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+				return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+			}); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+	}
+
+	// Glue + Athena: database/table/workgroup creation often needs retries and should be idempotent.
+	if args0(args) == "glue" || args0(args) == "athena" {
+		lower := strings.ToLower(output)
+		if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "already exists") || strings.Contains(lower, "entityalreadyexists") {
+			return true, nil
+		}
+		if failure.Category == FailureNotFound || failure.Category == FailureThrottled || isTransientFailure(failure, output) ||
+			strings.Contains(lower, "not found") || strings.Contains(lower, "does not exist") {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry %s %s after propagation\n", args0(args), args1(args))
+			if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+				return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+			}); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+	}
+
+	// API Gateway v2: create-stage already exists -> update-stage.
+	if args0(args) == "apigatewayv2" && args1(args) == "create-stage" {
+		lower := strings.ToLower(output)
+		if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "already exists") {
+			rewritten := append([]string{}, args...)
+			rewritten[1] = "update-stage"
+			rewrittenAWSArgs := append(append([]string{}, rewritten...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: apigatewayv2 create-stage exists; using update-stage\n")
+			if _, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, opts.Writer); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+	}
+
+	// ELBv2: propagation and ordering hiccups (target group / load balancer not ready).
+	if args0(args) == "elbv2" {
+		op := args1(args)
+		lower := strings.ToLower(output)
+
+		// Idempotency: name already exists.
+		if op == "create-load-balancer" {
+			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "duplicateloadbalancername") || strings.Contains(lower, "already exists") {
+				return true, nil
+			}
+		}
+		if op == "create-target-group" {
+			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "duplicatetargetgroupname") || strings.Contains(lower, "already exists") {
+				return true, nil
+			}
+		}
+
+		if op == "create-listener" || op == "create-rule" || op == "register-targets" {
+			// If the LB is still provisioning, wait for it to be active.
+			lbArn := strings.TrimSpace(flagValue(args, "--load-balancer-arn"))
+			if lbArn != "" && (strings.Contains(lower, "loadbalancernotfound") || strings.Contains(lower, "not found") || strings.Contains(lower, "provisioning") || strings.Contains(lower, "incorrectstate")) {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: wait for elbv2 load balancer active then retry\n")
+				_ = waitForELBv2LoadBalancerActive(ctx, opts, lbArn, opts.Writer)
+			}
+
+			// If this is a TLS listener and the certificate isn't ready, wait for ISSUED.
+			if op == "create-listener" {
+				if strings.Contains(lower, "certificate") && (strings.Contains(lower, "not found") || strings.Contains(lower, "must be") || strings.Contains(lower, "not valid") || strings.Contains(lower, "pending")) {
+					if certArn := firstACMCertificateArnInArgs(args); certArn != "" {
+						_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: wait for acm certificate ISSUED then retry (cert=%s)\n", certArn)
+						if err := waitForACMCertificateIssued(ctx, opts, certArn, opts.Writer); err != nil {
+							return true, err
+						}
+					}
+				}
+			}
+
+			if failure.Category == FailureNotFound || failure.Category == FailureConflict || failure.Category == FailureThrottled ||
+				strings.Contains(lower, "targetgroupnotfound") || strings.Contains(lower, "loadbalancernotfound") || strings.Contains(lower, "not found") {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry elbv2 %s after propagation\n", op)
+				if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+					return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+				}); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+	}
+
+	// Route53: changes are async; retries help with eventual consistency.
+	if args0(args) == "route53" {
+		op := args1(args)
+		lower := strings.ToLower(output)
+
+		// create-hosted-zone can have propagation and occasional throttling.
+		if op == "create-hosted-zone" {
+			if failure.Category == FailureThrottled || isTransientFailure(failure, output) ||
+				failure.Category == FailureConflict || strings.Contains(lower, "priorrequestnotcomplete") {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry route53 create-hosted-zone after propagation\n")
+				if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+					return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+				}); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+
+		if op == "change-resource-record-sets" {
+			// If the batch tries to CREATE an RRset that already exists, rewrite to UPSERT and retry.
+			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict ||
+				strings.Contains(lower, "invalidchangebatch") || strings.Contains(lower, "already exists") {
+				if rewritten, ok := rewriteRoute53ChangeBatchCreateToUpsert(args, lower); ok {
+					rewrittenAWSArgs := append(append([]string{}, rewritten...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+					_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: rewrite route53 change-batch CREATE->UPSERT then retry\n")
+					if _, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, opts.Writer); err == nil {
+						return true, nil
+					}
+				}
+			}
+
+			if failure.Category == FailureNotFound || failure.Category == FailureConflict || failure.Category == FailureThrottled ||
+				strings.Contains(lower, "nosuchhostedzone") || strings.Contains(lower, "not found") || strings.Contains(lower, "priorrequestnotcomplete") {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry route53 change-resource-record-sets after propagation\n")
+				if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+					return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+				}); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+	}
+
+	// ECR: repository policy / lifecycle policy are upserts but can race with repo creation.
+	if args0(args) == "ecr" {
+		op := args1(args)
+		lower := strings.ToLower(output)
+		if op == "set-repository-policy" || op == "put-lifecycle-policy" {
+			if failure.Category == FailureNotFound || failure.Category == FailureConflict || failure.Category == FailureThrottled || isTransientFailure(failure, output) ||
+				strings.Contains(lower, "repositorynotfound") || strings.Contains(lower, "not found") || strings.Contains(lower, "does not exist") {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry ecr %s after propagation\n", op)
+				if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+					return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+				}); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+	}
+
+	// KMS: key state/propagation can lag across operations.
+	if args0(args) == "kms" {
+		lower := strings.ToLower(output)
+		if failure.Category == FailureNotFound || failure.Category == FailureConflict || failure.Category == FailureThrottled ||
+			strings.Contains(lower, "notfoundexception") || strings.Contains(lower, "invalidstate") || strings.Contains(lower, "pending") {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry kms %s after propagation\n", args1(args))
+			if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+				return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+			}); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+	}
+
+	// Secrets Manager: replication/creation can race with immediate follow-on operations.
+	if args0(args) == "secretsmanager" {
+		lower := strings.ToLower(output)
+		if failure.Category == FailureNotFound || failure.Category == FailureConflict || failure.Category == FailureThrottled ||
+			strings.Contains(lower, "resourcenotfound") || strings.Contains(lower, "not found") {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry secretsmanager %s after propagation\n", args1(args))
+			if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+				return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+			}); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+	}
+
+	// Bedrock idempotency: create-* may conflict on re-apply.
+	if (args0(args) == "bedrock" || args0(args) == "bedrock-agent") && strings.HasPrefix(args1(args), "create-") {
+		lower := strings.ToLower(output)
+		if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict ||
+			strings.Contains(lower, "already exists") || strings.Contains(lower, "conflictexception") || strings.Contains(lower, "resourceconflict") {
+			return true, nil
+		}
+	}
+
+	// ECS glue: service-linked role + execution role permissions + propagation retries.
+	if args0(args) == "ecs" {
+		op := args1(args)
+		lower := strings.ToLower(output)
+
+		// Missing ECS service-linked role: create it then retry.
+		if strings.Contains(lower, "service-linked role") &&
+			(strings.Contains(lower, "awsserviceroleforecs") || strings.Contains(lower, "ecs.amazonaws.com") || strings.Contains(lower, "has not been created") || strings.Contains(lower, "does not exist")) {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: create ecs service-linked role then retry\n")
+			slr := []string{"iam", "create-service-linked-role", "--aws-service-name", "ecs.amazonaws.com", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+			out2, err2 := runAWSCommandStreaming(ctx, slr, nil, opts.Writer)
+			if err2 != nil {
+				l2 := strings.ToLower(out2)
+				// Best-effort idempotency: role already exists.
+				if !(strings.Contains(l2, "has been taken") || strings.Contains(l2, "already exists") || strings.Contains(l2, "has been created") || strings.Contains(l2, "duplicate")) {
+					return true, err2
+				}
+			}
+			if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+				return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+			}); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+		if strings.Contains(lower, "unable to assume the service linked role") && strings.Contains(lower, "ecs") {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: create ecs service-linked role then retry\n")
+			slr := []string{"iam", "create-service-linked-role", "--aws-service-name", "ecs.amazonaws.com", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+			_, _ = runAWSCommandStreaming(ctx, slr, nil, opts.Writer)
+			if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+				return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+			}); err != nil {
+				return true, err
+			}
+			return true, nil
+		}
+
+		// ECS cluster/service propagation: immediate follow-on calls can race.
+		if (op == "create-service" || op == "run-task" || op == "update-service") && failure.Category == FailureNotFound {
+			if strings.Contains(lower, "clusternotfound") || strings.Contains(lower, "cluster not found") || strings.Contains(lower, "servicenotfound") || strings.Contains(lower, "service not found") {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry ecs %s after propagation\n", op)
+				if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+					return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+				}); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+
+		// Task execution role missing ECR/Logs permissions: attach managed execution policy then retry.
+		if (op == "create-service" || op == "run-task" || op == "update-service") && strings.Contains(lower, "execution role") && (strings.Contains(lower, "ecr") || strings.Contains(lower, "logs")) {
+			taskDef := strings.TrimSpace(flagValue(args, "--task-definition"))
+			if taskDef != "" {
+				execRoleArn, err := ecsExecutionRoleArnForTaskDefinition(ctx, opts, taskDef)
+				if err == nil {
+					roleName := strings.TrimSpace(roleNameFromArn(strings.TrimSpace(execRoleArn)))
+					if roleName != "" {
+						policyArn := "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+						_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: attach AmazonECSTaskExecutionRolePolicy then retry (role=%s)\n", roleName)
+						attach := []string{"iam", "attach-role-policy", "--role-name", roleName, "--policy-arn", policyArn, "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+						_, _ = runAWSCommandStreaming(ctx, attach, nil, opts.Writer)
+						if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+							return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+						}); err != nil {
+							return true, err
+						}
+						return true, nil
+					}
+				}
+			}
+		}
+	}
+
+	// EKS network placeholders: planner may emit <SUBNET_ID_*> tokens.
+	// Rewrite to real subnet IDs (inferred from provided SG VPC or default VPC) and retry.
+	if args0(args) == "eks" && (args1(args) == "create-cluster" || args1(args) == "create-nodegroup") {
+		lower := strings.ToLower(output)
+		if hasSubnetPlaceholders(args) || strings.Contains(lower, "invalidsubnetid.notfound") || (strings.Contains(lower, "subnet id") && strings.Contains(lower, "does not exist")) {
+			rewritten, ok, err := rewriteEKSSubnets(ctx, opts, args)
+			if err != nil {
+				return true, err
+			}
+			if ok {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: rewrite eks subnets to real subnet IDs then retry\n")
+				rewrittenAWSArgs := append(append([]string{}, rewritten...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+				if _, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, opts.Writer); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
 	}
 
 	// Generic transient retry (service hiccups / in-progress / timeouts).
@@ -258,6 +929,10 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 	// EKS readiness: cluster/nodegroup/addons can take time.
 	if args0(args) == "eks" {
 		lower := strings.ToLower(output)
+		// Do not run waiters if the request failed due to invalid network params.
+		if strings.Contains(lower, "invalidsubnetid.notfound") || (strings.Contains(lower, "subnet id") && strings.Contains(lower, "does not exist")) {
+			return false, nil
+		}
 		clusterName := flagValue(args, "--name")
 		if clusterName == "" {
 			clusterName = flagValue(args, "--cluster-name")
@@ -378,53 +1053,336 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 		return true, nil
 	}
 
-	// When a create command fails due to already existing and it's safe to treat as idempotent,
-	// we skip further retries.
-	if failure.Category == FailureAlreadyExists {
-		if args0(args) == "eks" && (args1(args) == "create-cluster" || args1(args) == "create-nodegroup" || args1(args) == "create-addon") {
-			return true, nil
-		}
-		if args0(args) == "ecs" && (args1(args) == "create-cluster" || args1(args) == "create-service") {
-			return true, nil
-		}
-		if args0(args) == "iam" && args1(args) == "create-instance-profile" {
-			return true, nil
-		}
-		if args0(args) == "logs" && args1(args) == "create-log-group" {
-			return true, nil
-		}
-		if args0(args) == "s3" && args1(args) == "create-bucket" {
-			return true, nil
-		}
-		if args0(args) == "ecr" && args1(args) == "create-repository" {
-			return true, nil
-		}
-		if args0(args) == "dynamodb" && args1(args) == "create-table" {
-			return true, nil
-		}
-		if args0(args) == "sqs" && args1(args) == "create-queue" {
-			return true, nil
-		}
-
-		// Secrets Manager: create-secret already exists -> put-secret-value (if secret-string provided).
-		if args0(args) == "secretsmanager" && args1(args) == "create-secret" {
-			name := flagValue(args, "--name")
-			secretString := flagValue(args, "--secret-string")
-			if strings.TrimSpace(name) != "" && strings.TrimSpace(secretString) != "" {
-				put := []string{"secretsmanager", "put-secret-value", "--secret-id", name, "--secret-string", secretString}
-				putAWSArgs := append(append([]string{}, put...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
-				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: secretsmanager create-secret exists; using put-secret-value\n")
-				if _, err := runAWSCommandStreaming(ctx, putAWSArgs, nil, opts.Writer); err != nil {
-					return true, err
-				}
-				return true, nil
+	// Secrets Manager: create-secret already exists -> put-secret-value (if secret-string provided).
+	if failure.Category == FailureAlreadyExists && args0(args) == "secretsmanager" && args1(args) == "create-secret" {
+		name := flagValue(args, "--name")
+		secretString := flagValue(args, "--secret-string")
+		if strings.TrimSpace(name) != "" && strings.TrimSpace(secretString) != "" {
+			put := []string{"secretsmanager", "put-secret-value", "--secret-id", name, "--secret-string", secretString}
+			putAWSArgs := append(append([]string{}, put...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: secretsmanager create-secret exists; using put-secret-value\n")
+			if _, err := runAWSCommandStreaming(ctx, putAWSArgs, nil, opts.Writer); err != nil {
+				return true, err
 			}
 			return true, nil
 		}
+		return true, nil
+	}
+
+	if ok, err := maybeGenericGlueAndRetry(ctx, opts, args, awsArgs, stdinBytes, failure, output); ok {
+		return true, err
 	}
 
 	// Nothing to rewrite.
 	return false, nil
+}
+
+func hasSubnetPlaceholders(args []string) bool {
+	for _, a := range args {
+		al := strings.ToLower(strings.TrimSpace(a))
+		if strings.Contains(al, "<subnet") {
+			return true
+		}
+		if strings.Contains(al, "subnetids=<subnet") {
+			return true
+		}
+	}
+	return false
+}
+
+func rewriteEKSSubnets(ctx context.Context, opts ExecOptions, args []string) ([]string, bool, error) {
+	service := args0(args)
+	op := args1(args)
+	if service != "eks" {
+		return nil, false, nil
+	}
+
+	vpcID, err := inferVPCForEKS(ctx, opts, args)
+	if err != nil {
+		return nil, false, err
+	}
+	vpcID = strings.TrimSpace(vpcID)
+	if vpcID == "" {
+		return nil, false, nil
+	}
+
+	subnets, err := pickSubnetsForVPC(ctx, opts, vpcID, 2)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(subnets) < 2 {
+		return nil, false, fmt.Errorf("not enough subnets found in vpc %s", vpcID)
+	}
+
+	rewritten := append([]string{}, args...)
+	changed := false
+
+	if op == "create-cluster" {
+		idx := indexOfExactFlag(rewritten, "--resources-vpc-config")
+		if idx >= 0 && idx+1 < len(rewritten) {
+			v := rewritten[idx+1]
+			vl := strings.ToLower(v)
+			if strings.Contains(vl, "subnetids=") {
+				newV, did := replaceSubnetIDsInVPCConfigValue(v, subnets)
+				if did {
+					rewritten[idx+1] = newV
+					changed = true
+				}
+			}
+		}
+	}
+
+	if op == "create-nodegroup" {
+		idx := indexOfExactFlag(rewritten, "--subnets")
+		if idx >= 0 {
+			start := idx + 1
+			end := start
+			for end < len(rewritten) {
+				if strings.HasPrefix(strings.TrimSpace(rewritten[end]), "--") {
+					break
+				}
+				end++
+			}
+			if start < len(rewritten) {
+				// If subnets are placeholders or empty, rewrite.
+				rewrite := false
+				if start == end {
+					rewrite = true
+				} else {
+					for i := start; i < end; i++ {
+						s := strings.TrimSpace(rewritten[i])
+						if s == "" || strings.HasPrefix(strings.ToLower(s), "<subnet") {
+							rewrite = true
+							break
+						}
+						if !strings.HasPrefix(s, "subnet-") {
+							rewrite = true
+							break
+						}
+					}
+				}
+				if rewrite {
+					// Replace the values after --subnets with our chosen ones.
+					newArgs := make([]string, 0, len(rewritten)+2)
+					newArgs = append(newArgs, rewritten[:start]...)
+					newArgs = append(newArgs, subnets...)
+					newArgs = append(newArgs, rewritten[end:]...)
+					rewritten = newArgs
+					changed = true
+				}
+			}
+		}
+	}
+
+	if !changed {
+		return nil, false, nil
+	}
+	return rewritten, true, nil
+}
+
+func replaceSubnetIDsInVPCConfigValue(v string, subnets []string) (string, bool) {
+	if len(subnets) < 2 {
+		return v, false
+	}
+	parts := strings.Split(v, ",")
+	changed := false
+
+	out := make([]string, 0, len(parts))
+	for i := 0; i < len(parts); i++ {
+		p := strings.TrimSpace(parts[i])
+		pl := strings.ToLower(p)
+		if strings.HasPrefix(pl, "subnetids=") {
+			out = append(out, "subnetIds="+strings.Join(subnets, ","))
+			changed = true
+
+			// Skip subsequent comma-separated subnet ids that belong to subnetIds=...
+			// until the next key=value segment.
+			j := i + 1
+			for j < len(parts) {
+				seg := strings.TrimSpace(parts[j])
+				if strings.Contains(seg, "=") {
+					break
+				}
+				j++
+			}
+			i = j - 1
+			continue
+		}
+		out = append(out, p)
+	}
+
+	if !changed {
+		return v, false
+	}
+	return strings.Join(out, ","), true
+}
+
+func inferVPCForEKS(ctx context.Context, opts ExecOptions, args []string) (string, error) {
+	// Prefer VPC inferred from security group passed to create-cluster.
+	if args1(args) == "create-cluster" {
+		idx := indexOfExactFlag(args, "--resources-vpc-config")
+		if idx >= 0 && idx+1 < len(args) {
+			v := args[idx+1]
+			if sgID := extractSecurityGroupIDFromVPCConfigValue(v); sgID != "" {
+				if vpc, err := vpcIDFromSecurityGroup(ctx, opts, sgID); err == nil && strings.TrimSpace(vpc) != "" {
+					return strings.TrimSpace(vpc), nil
+				}
+			}
+		}
+	}
+	// Fallback: default VPC.
+	return defaultVPCID(ctx, opts)
+}
+
+func extractSecurityGroupIDFromVPCConfigValue(v string) string {
+	for _, p := range strings.Split(v, ",") {
+		p = strings.TrimSpace(p)
+		pl := strings.ToLower(p)
+		if strings.HasPrefix(pl, "securitygroupids=") {
+			val := strings.TrimSpace(p[len("securityGroupIds="):])
+			for _, piece := range strings.Split(val, ";") {
+				piece = strings.TrimSpace(piece)
+				if strings.HasPrefix(piece, "sg-") {
+					return piece
+				}
+			}
+			for _, piece := range strings.Split(val, ",") {
+				piece = strings.TrimSpace(piece)
+				if strings.HasPrefix(piece, "sg-") {
+					return piece
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func defaultVPCID(ctx context.Context, opts ExecOptions) (string, error) {
+	q := []string{"ec2", "describe-vpcs", "--filters", "Name=isDefault,Values=true", "--output", "json", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+	out, err := runAWSCommandStreaming(ctx, q, nil, io.Discard)
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		Vpcs []struct {
+			VpcID string `json:"VpcId"`
+		} `json:"Vpcs"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return "", err
+	}
+	if len(resp.Vpcs) == 0 {
+		return "", nil
+	}
+	return strings.TrimSpace(resp.Vpcs[0].VpcID), nil
+}
+
+func vpcIDFromSecurityGroup(ctx context.Context, opts ExecOptions, sgID string) (string, error) {
+	sgID = strings.TrimSpace(sgID)
+	if sgID == "" {
+		return "", fmt.Errorf("empty security group id")
+	}
+	q := []string{"ec2", "describe-security-groups", "--group-ids", sgID, "--output", "json", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+	out, err := runAWSCommandStreaming(ctx, q, nil, io.Discard)
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		SecurityGroups []struct {
+			VpcID string `json:"VpcId"`
+		} `json:"SecurityGroups"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return "", err
+	}
+	if len(resp.SecurityGroups) == 0 {
+		return "", nil
+	}
+	return strings.TrimSpace(resp.SecurityGroups[0].VpcID), nil
+}
+
+func pickSubnetsForVPC(ctx context.Context, opts ExecOptions, vpcID string, want int) ([]string, error) {
+	vpcID = strings.TrimSpace(vpcID)
+	if vpcID == "" {
+		return nil, fmt.Errorf("empty vpc id")
+	}
+	if want <= 0 {
+		want = 2
+	}
+	q := []string{"ec2", "describe-subnets", "--filters", "Name=vpc-id,Values=" + vpcID, "--output", "json", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+	out, err := runAWSCommandStreaming(ctx, q, nil, io.Discard)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Subnets []struct {
+			SubnetID         string `json:"SubnetId"`
+			AvailabilityZone string `json:"AvailabilityZone"`
+		} `json:"Subnets"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil, err
+	}
+	type subnetInfo struct {
+		id string
+		az string
+	}
+	items := make([]subnetInfo, 0, len(resp.Subnets))
+	for _, s := range resp.Subnets {
+		id := strings.TrimSpace(s.SubnetID)
+		az := strings.TrimSpace(s.AvailabilityZone)
+		if id == "" {
+			continue
+		}
+		items = append(items, subnetInfo{id: id, az: az})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].az == items[j].az {
+			return items[i].id < items[j].id
+		}
+		return items[i].az < items[j].az
+	})
+
+	chosen := []string{}
+	seenAZ := map[string]bool{}
+	seenID := map[string]bool{}
+	for _, it := range items {
+		if len(chosen) >= want {
+			break
+		}
+		if it.az != "" && seenAZ[it.az] {
+			continue
+		}
+		if seenID[it.id] {
+			continue
+		}
+		seenID[it.id] = true
+		if it.az != "" {
+			seenAZ[it.az] = true
+		}
+		chosen = append(chosen, it.id)
+	}
+	// If we couldn't get distinct AZs, just fill from remaining.
+	for _, it := range items {
+		if len(chosen) >= want {
+			break
+		}
+		if seenID[it.id] {
+			continue
+		}
+		seenID[it.id] = true
+		chosen = append(chosen, it.id)
+	}
+	return chosen, nil
+}
+
+func indexOfExactFlag(args []string, flag string) int {
+	for i, a := range args {
+		if strings.TrimSpace(a) == flag {
+			return i
+		}
+	}
+	return -1
 }
 
 func maybeFixRolePermissionAndRetry(ctx context.Context, opts ExecOptions, args []string, awsArgs []string, stdinBytes []byte, failure AWSFailure, output string) (bool, error) {
@@ -563,7 +1521,70 @@ func inferInlinePolicyForRolePermissionError(args []string, lowerOutput string) 
 		}
 	}
 
+	// CloudWatch Logs common for execution roles.
+	if strings.Contains(lowerOutput, "logs") {
+		if strings.Contains(lowerOutput, "createlogstream") || strings.Contains(lowerOutput, "putlogevents") || strings.Contains(lowerOutput, "describe") {
+			policyName = "ClankerAutoPermsLogs"
+			actions = []string{
+				"logs:CreateLogGroup",
+				"logs:CreateLogStream",
+				"logs:PutLogEvents",
+				"logs:DescribeLogGroups",
+				"logs:DescribeLogStreams",
+			}
+			resources = findServiceARNsInArgs(args, "logs")
+			return
+		}
+	}
+
+	// EventBridge Scheduler / Events often need iam:PassRole and invocation of targets.
+	if strings.Contains(lowerOutput, "passrole") || strings.Contains(lowerOutput, "iam:passrole") {
+		policyName = "ClankerAutoPermsPassRole"
+		actions = []string{"iam:PassRole"}
+		resources = findRoleArnsInArgsJSON(args)
+		if len(resources) == 0 {
+			resources = []string{"*"}
+		}
+		return
+	}
+
+	// ECR common for ECS/Lambda execution roles.
+	if strings.Contains(lowerOutput, "ecr") {
+		if strings.Contains(lowerOutput, "getauthorizationtoken") || strings.Contains(lowerOutput, "batchgetimage") || strings.Contains(lowerOutput, "getdownloadurlforlayer") || strings.Contains(lowerOutput, "batchchecklayeravailability") {
+			policyName = "ClankerAutoPermsECR"
+			actions = []string{
+				"ecr:GetAuthorizationToken",
+				"ecr:BatchCheckLayerAvailability",
+				"ecr:GetDownloadUrlForLayer",
+				"ecr:BatchGetImage",
+			}
+			resources = findServiceARNsInArgs(args, "ecr")
+			return
+		}
+	}
+
 	return "", nil, nil
+}
+
+func ecsExecutionRoleArnForTaskDefinition(ctx context.Context, opts ExecOptions, taskDefinition string) (string, error) {
+	taskDefinition = strings.TrimSpace(taskDefinition)
+	if taskDefinition == "" {
+		return "", fmt.Errorf("empty task definition")
+	}
+	q := []string{"ecs", "describe-task-definition", "--task-definition", taskDefinition, "--output", "json", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+	out, err := runAWSCommandStreaming(ctx, q, nil, io.Discard)
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		TaskDefinition struct {
+			ExecutionRoleArn string `json:"executionRoleArn"`
+		} `json:"taskDefinition"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(resp.TaskDefinition.ExecutionRoleArn), nil
 }
 
 func findServiceARNsInArgs(args []string, service string) []string {
@@ -1017,6 +2038,381 @@ func waitForEKSClusterActive(ctx context.Context, opts ExecOptions, name string,
 	args := []string{"eks", "wait", "cluster-active", "--name", name, "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
 	_, err := runAWSCommandStreaming(ctx, args, nil, io.Discard)
 	return err
+}
+
+func waitForELBv2LoadBalancerActive(ctx context.Context, opts ExecOptions, loadBalancerArn string, w io.Writer) error {
+	loadBalancerArn = strings.TrimSpace(loadBalancerArn)
+	if loadBalancerArn == "" {
+		return fmt.Errorf("empty load balancer arn")
+	}
+	for attempt := 1; attempt <= 40; attempt++ {
+		q := []string{"elbv2", "describe-load-balancers", "--load-balancer-arns", loadBalancerArn, "--output", "json", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+		out, err := runAWSCommandStreaming(ctx, q, nil, io.Discard)
+		if err == nil {
+			var resp struct {
+				LoadBalancers []struct {
+					State struct {
+						Code string `json:"Code"`
+					} `json:"State"`
+				} `json:"LoadBalancers"`
+			}
+			if json.Unmarshal([]byte(out), &resp) == nil {
+				if len(resp.LoadBalancers) > 0 {
+					st := strings.ToLower(strings.TrimSpace(resp.LoadBalancers[0].State.Code))
+					if st == "active" {
+						return nil
+					}
+					if st == "failed" {
+						return fmt.Errorf("load balancer entered failed state")
+					}
+				}
+			}
+		}
+		_, _ = fmt.Fprintf(w, "[maker] note: waiting for load balancer active (attempt=%d)\n", attempt)
+		time.Sleep(time.Duration(attempt) * 650 * time.Millisecond)
+	}
+	return nil
+}
+
+func firstACMCertificateArnInArgs(args []string) string {
+	for _, a := range args {
+		a = strings.TrimSpace(a)
+		if strings.Contains(a, "arn:aws:acm:") {
+			idx := strings.Index(a, "arn:aws:acm:")
+			if idx >= 0 {
+				s := a[idx:]
+				// Truncate on obvious delimiters.
+				for _, d := range []string{",", "\"", "'", "]", "}", " ", "\t"} {
+					if j := strings.Index(s, d); j > 0 {
+						s = s[:j]
+					}
+				}
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	for _, arn := range findArnsInArgsJSON(args) {
+		if strings.Contains(arn, ":acm:") {
+			return strings.TrimSpace(arn)
+		}
+	}
+	return ""
+}
+
+func waitForACMCertificateIssued(ctx context.Context, opts ExecOptions, certificateArn string, w io.Writer) error {
+	certificateArn = strings.TrimSpace(certificateArn)
+	if certificateArn == "" {
+		return fmt.Errorf("empty certificate arn")
+	}
+	attemptedDNS := false
+	for attempt := 1; attempt <= 60; attempt++ {
+		q := []string{"acm", "describe-certificate", "--certificate-arn", certificateArn, "--output", "json", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+		out, err := runAWSCommandStreaming(ctx, q, nil, io.Discard)
+		if err == nil {
+			var resp struct {
+				Certificate struct {
+					Status                  string `json:"Status"`
+					DomainValidationOptions []struct {
+						DomainName       string `json:"DomainName"`
+						ValidationStatus string `json:"ValidationStatus"`
+						ResourceRecord   struct {
+							Name  string `json:"Name"`
+							Type  string `json:"Type"`
+							Value string `json:"Value"`
+						} `json:"ResourceRecord"`
+					} `json:"DomainValidationOptions"`
+				} `json:"Certificate"`
+			}
+			if json.Unmarshal([]byte(out), &resp) == nil {
+				st := strings.ToUpper(strings.TrimSpace(resp.Certificate.Status))
+				switch st {
+				case "ISSUED":
+					return nil
+				case "FAILED", "EXPIRED", "REVOKED":
+					return fmt.Errorf("certificate not usable (status=%s)", st)
+				case "PENDING_VALIDATION":
+					// Best-effort: try to UPSERT DNS validation records into Route53.
+					if !attemptedDNS {
+						attemptedDNS = true
+						if ok, _ := ensureACMDNSValidationRecords(ctx, opts, resp.Certificate.DomainValidationOptions, w); ok {
+							_, _ = fmt.Fprintf(w, "[maker] note: acm dns validation records upserted; continuing to wait\n")
+						}
+					}
+				}
+			}
+		}
+		_, _ = fmt.Fprintf(w, "[maker] note: waiting for acm certificate issued (attempt=%d)\n", attempt)
+		time.Sleep(time.Duration(attempt) * 700 * time.Millisecond)
+	}
+	return nil
+}
+
+func ensureACMDNSValidationRecords(ctx context.Context, opts ExecOptions, dvos []struct {
+	DomainName       string `json:"DomainName"`
+	ValidationStatus string `json:"ValidationStatus"`
+	ResourceRecord   struct {
+		Name  string `json:"Name"`
+		Type  string `json:"Type"`
+		Value string `json:"Value"`
+	} `json:"ResourceRecord"`
+}, w io.Writer) (bool, error) {
+	// Load all hosted zones once; choose best match per record.
+	zones, err := listRoute53HostedZones(ctx, opts)
+	if err != nil {
+		return false, err
+	}
+	if len(zones) == 0 {
+		return false, nil
+	}
+
+	changed := false
+	for _, dvo := range dvos {
+		rrName := strings.TrimSpace(dvo.ResourceRecord.Name)
+		rrType := strings.TrimSpace(dvo.ResourceRecord.Type)
+		rrValue := strings.TrimSpace(dvo.ResourceRecord.Value)
+		if rrName == "" || rrType == "" || rrValue == "" {
+			continue
+		}
+
+		zoneID, zoneName := chooseHostedZoneForRecord(zones, rrName)
+		if zoneID == "" {
+			continue
+		}
+
+		batch := map[string]any{
+			"Comment": "clanker: auto acm dns validation",
+			"Changes": []map[string]any{
+				{
+					"Action": "UPSERT",
+					"ResourceRecordSet": map[string]any{
+						"Name":            rrName,
+						"Type":            rrType,
+						"TTL":             300,
+						"ResourceRecords": []map[string]string{{"Value": rrValue}},
+					},
+				},
+			},
+		}
+		b, _ := json.Marshal(batch)
+
+		cmd := []string{"route53", "change-resource-record-sets", "--hosted-zone-id", zoneID, "--change-batch", string(b), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+		_, _ = fmt.Fprintf(w, "[maker] note: upserting acm dns validation record (zone=%s name=%s type=%s)\n", zoneName, rrName, rrType)
+		// Best-effort: UPSERT is idempotent.
+		_, _ = runAWSCommandStreaming(ctx, cmd, nil, w)
+		changed = true
+	}
+
+	return changed, nil
+}
+
+type route53HostedZone struct {
+	ID   string
+	Name string
+}
+
+func listRoute53HostedZones(ctx context.Context, opts ExecOptions) ([]route53HostedZone, error) {
+	q := []string{"route53", "list-hosted-zones", "--output", "json", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+	out, err := runAWSCommandStreaming(ctx, q, nil, io.Discard)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		HostedZones []struct {
+			ID   string `json:"Id"`
+			Name string `json:"Name"`
+		} `json:"HostedZones"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil, err
+	}
+	zones := make([]route53HostedZone, 0, len(resp.HostedZones))
+	for _, z := range resp.HostedZones {
+		id := strings.TrimSpace(z.ID)
+		name := strings.TrimSpace(z.Name)
+		if strings.HasPrefix(id, "/hostedzone/") {
+			id = strings.TrimPrefix(id, "/hostedzone/")
+		}
+		if id == "" || name == "" {
+			continue
+		}
+		zones = append(zones, route53HostedZone{ID: id, Name: name})
+	}
+	return zones, nil
+}
+
+func chooseHostedZoneForRecord(zones []route53HostedZone, recordName string) (zoneID string, zoneName string) {
+	rn := strings.ToLower(strings.TrimSpace(recordName))
+	rn = strings.TrimSuffix(rn, ".")
+	bestLen := -1
+	best := route53HostedZone{}
+	for _, z := range zones {
+		zn := strings.ToLower(strings.TrimSpace(z.Name))
+		zn = strings.TrimSuffix(zn, ".")
+		if zn == "" {
+			continue
+		}
+		if rn == zn || strings.HasSuffix(rn, "."+zn) {
+			if len(zn) > bestLen {
+				bestLen = len(zn)
+				best = z
+			}
+		}
+	}
+	if bestLen < 0 {
+		return "", ""
+	}
+	return strings.TrimSpace(best.ID), strings.TrimSpace(best.Name)
+}
+
+func rewriteRoute53ChangeBatchCreateToUpsert(args []string, lowerOutput string) ([]string, bool) {
+	// Only trigger when the error looks like an RRset already existing / invalid change batch.
+	if !(strings.Contains(lowerOutput, "already") && strings.Contains(lowerOutput, "exist")) && !strings.Contains(lowerOutput, "invalidchangebatch") {
+		return nil, false
+	}
+
+	idx := indexOfExactFlag(args, "--change-batch")
+	if idx < 0 || idx+1 >= len(args) {
+		return nil, false
+	}
+	raw := strings.TrimSpace(args[idx+1])
+	if raw == "" {
+		return nil, false
+	}
+	if len(raw) > 20000 {
+		return nil, false
+	}
+	if !(strings.HasPrefix(raw, "{") || strings.HasPrefix(raw, "[")) {
+		return nil, false
+	}
+	var v any
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return nil, false
+	}
+	changed := false
+	vv, ok := v.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	cb, ok := vv["Changes"].([]any)
+	if !ok {
+		// Some callers use lowercase keys.
+		cb, _ = vv["changes"].([]any)
+	}
+	for i := range cb {
+		m, ok := cb[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		act, _ := m["Action"].(string)
+		if strings.ToUpper(strings.TrimSpace(act)) == "CREATE" {
+			m["Action"] = "UPSERT"
+			changed = true
+		}
+		if act2, _ := m["action"].(string); strings.ToUpper(strings.TrimSpace(act2)) == "CREATE" {
+			m["action"] = "UPSERT"
+			changed = true
+		}
+	}
+	if !changed {
+		return nil, false
+	}
+	// Write back.
+	if vv["Changes"] != nil {
+		vv["Changes"] = cb
+	}
+	if vv["changes"] != nil {
+		vv["changes"] = cb
+	}
+	b, err := json.Marshal(vv)
+	if err != nil {
+		return nil, false
+	}
+	out := append([]string{}, args...)
+	out[idx+1] = string(b)
+	return out, true
+}
+
+func waitForEFSFileSystemAvailable(ctx context.Context, opts ExecOptions, fileSystemID string, w io.Writer) error {
+	fileSystemID = strings.TrimSpace(fileSystemID)
+	if fileSystemID == "" {
+		return fmt.Errorf("empty efs file system id")
+	}
+	for attempt := 1; attempt <= 30; attempt++ {
+		q := []string{"efs", "describe-file-systems", "--file-system-id", fileSystemID, "--output", "json", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+		out, err := runAWSCommandStreaming(ctx, q, nil, io.Discard)
+		if err == nil {
+			var resp struct {
+				FileSystems []struct {
+					LifeCycleState string `json:"LifeCycleState"`
+				} `json:"FileSystems"`
+			}
+			if json.Unmarshal([]byte(out), &resp) == nil {
+				if len(resp.FileSystems) > 0 {
+					st := strings.ToLower(strings.TrimSpace(resp.FileSystems[0].LifeCycleState))
+					if st == "available" {
+						return nil
+					}
+				}
+			}
+		}
+		_, _ = fmt.Fprintf(w, "[maker] note: waiting for efs file system available (attempt=%d)\n", attempt)
+		time.Sleep(time.Duration(attempt) * 700 * time.Millisecond)
+	}
+	return nil
+}
+
+func waitForOpenSearchDomainReady(ctx context.Context, opts ExecOptions, domainName string, w io.Writer) error {
+	domainName = strings.TrimSpace(domainName)
+	if domainName == "" {
+		return fmt.Errorf("empty opensearch domain name")
+	}
+	for attempt := 1; attempt <= 40; attempt++ {
+		q := []string{"opensearch", "describe-domain", "--domain-name", domainName, "--output", "json", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+		out, err := runAWSCommandStreaming(ctx, q, nil, io.Discard)
+		if err == nil {
+			var resp struct {
+				DomainStatus struct {
+					Processing bool `json:"Processing"`
+					Created    bool `json:"Created"`
+				} `json:"DomainStatus"`
+			}
+			if json.Unmarshal([]byte(out), &resp) == nil {
+				if resp.DomainStatus.Created && !resp.DomainStatus.Processing {
+					return nil
+				}
+			}
+		}
+		_, _ = fmt.Fprintf(w, "[maker] note: waiting for opensearch domain ready (attempt=%d)\n", attempt)
+		time.Sleep(time.Duration(attempt) * 800 * time.Millisecond)
+	}
+	return nil
+}
+
+func waitForMSKClusterActive(ctx context.Context, opts ExecOptions, clusterArn string, w io.Writer) error {
+	clusterArn = strings.TrimSpace(clusterArn)
+	if clusterArn == "" {
+		return fmt.Errorf("empty msk cluster arn")
+	}
+	for attempt := 1; attempt <= 50; attempt++ {
+		q := []string{"kafka", "describe-cluster", "--cluster-arn", clusterArn, "--output", "json", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+		out, err := runAWSCommandStreaming(ctx, q, nil, io.Discard)
+		if err == nil {
+			var resp struct {
+				ClusterInfo struct {
+					State string `json:"State"`
+				} `json:"ClusterInfo"`
+			}
+			if json.Unmarshal([]byte(out), &resp) == nil {
+				st := strings.ToLower(strings.TrimSpace(resp.ClusterInfo.State))
+				if st == "active" {
+					return nil
+				}
+			}
+		}
+		_, _ = fmt.Fprintf(w, "[maker] note: waiting for msk cluster active (attempt=%d)\n", attempt)
+		time.Sleep(time.Duration(attempt) * 900 * time.Millisecond)
+	}
+	return nil
 }
 
 func waitForEKSNodegroupActive(ctx context.Context, opts ExecOptions, clusterName string, nodegroupName string, w io.Writer) error {

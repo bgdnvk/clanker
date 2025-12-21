@@ -89,7 +89,9 @@ func maybeAutoRemediateAndRetry(
 	}
 
 	// Retry original command once.
-	if _, err := runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer); err != nil {
+	if err := retryWithBackoff(ctx, opts.Writer, 3, func() (string, error) {
+		return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+	}); err != nil {
 		return false, err
 	}
 
