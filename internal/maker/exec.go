@@ -18,7 +18,6 @@ import (
 )
 
 var awsErrorCodeRe = regexp.MustCompile(`(?i)an error occurred \(([^)]+)\)`)
-var lambdaArnMissingRegionRe = regexp.MustCompile(`^arn:([^:]+):lambda:(\d{12}):function:(.+)$`)
 
 type AWSFailureCategory string
 
@@ -138,25 +137,43 @@ func classifyAWSFailure(args []string, output string) AWSFailure {
 
 	isNotFoundish := strings.Contains(lower, "nosuchentity") ||
 		strings.Contains(lower, "resourcenotfound") ||
+		strings.Contains(lower, "nosuchbucket") ||
+		strings.Contains(lower, "nosuchkey") ||
 		strings.Contains(lower, "not found") ||
 		strings.Contains(lower, "does not exist")
-	if code == "NoSuchEntity" || code == "ResourceNotFoundException" {
+	if code == "NoSuchEntity" || code == "ResourceNotFoundException" || code == "NoSuchBucket" || code == "NoSuchKey" {
 		isNotFoundish = true
 	}
 
 	isAlreadyExistsish := strings.Contains(lower, "entityalreadyexists") ||
 		strings.Contains(lower, "resourceconflictexception") ||
+		strings.Contains(lower, "resourceexistsexception") ||
+		strings.Contains(lower, "repositoryalreadyexistsexception") ||
+		strings.Contains(lower, "alreadyexistsexception") ||
+		strings.Contains(lower, "parameteralreadyexists") ||
+		strings.Contains(lower, "queuealreadyexists") ||
 		strings.Contains(lower, "already exists") ||
 		strings.Contains(lower, "alreadyownedbyyou") ||
+		strings.Contains(lower, "invalidgroup.duplicate") ||
 		strings.Contains(lower, "resourceinuse")
-	if code == "EntityAlreadyExists" || code == "ResourceConflictException" || code == "ResourceInUseException" || code == "BucketAlreadyOwnedByYou" {
+	if code == "EntityAlreadyExists" ||
+		code == "ResourceConflictException" ||
+		code == "ResourceInUseException" ||
+		code == "BucketAlreadyOwnedByYou" ||
+		code == "ResourceExistsException" ||
+		code == "RepositoryAlreadyExistsException" ||
+		code == "AlreadyExistsException" ||
+		code == "ParameterAlreadyExists" ||
+		code == "QueueAlreadyExists" ||
+		code == "InvalidGroup.Duplicate" {
 		isAlreadyExistsish = true
 	}
 
-	isConflictish := strings.Contains(lower, "deleteconflict") ||
+	isConflictish := strings.Contains(lower, "conflictexception") ||
+		strings.Contains(lower, "deleteconflict") ||
 		strings.Contains(lower, "dependencyviolation") ||
 		strings.Contains(lower, "dependent object")
-	if code == "DeleteConflict" || code == "DependencyViolation" {
+	if code == "ConflictException" || code == "DeleteConflict" || code == "DependencyViolation" || code == "OperationAbortedException" {
 		isConflictish = true
 	}
 
@@ -169,15 +186,19 @@ func classifyAWSFailure(args []string, output string) AWSFailure {
 
 	isThrottledish := strings.Contains(lower, "throttl") ||
 		strings.Contains(lower, "too many requests") ||
-		strings.Contains(lower, "requestlimitexceeded")
-	if code == "Throttling" || code == "TooManyRequestsException" || code == "RequestLimitExceeded" {
+		strings.Contains(lower, "requestlimitexceeded") ||
+		strings.Contains(lower, "priorrequestnotcomplete")
+	if code == "Throttling" || code == "TooManyRequestsException" || code == "RequestLimitExceeded" || code == "PriorRequestNotComplete" {
 		isThrottledish = true
 	}
 
 	isValidationish := strings.Contains(lower, "validation") ||
 		strings.Contains(lower, "invalidparameter") ||
 		strings.Contains(lower, "malformed")
-	if code == "ValidationException" || code == "InvalidParameterValueException" {
+	if code == "ValidationException" ||
+		code == "InvalidParameterValueException" ||
+		code == "InvalidParameterValue" ||
+		code == "BadRequestException" {
 		isValidationish = true
 	}
 
@@ -630,92 +651,6 @@ func shouldIgnoreFailure(args []string, failure AWSFailure, output string) bool 
 	}
 
 	return false
-}
-
-func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, awsArgs []string, stdinBytes []byte, failure AWSFailure, output string) (bool, error) {
-	// Lambda create-function: create conflict -> update.
-	if isLambdaCreateFunction(args) && (failure.Category == FailureAlreadyExists || isLambdaAlreadyExists(output)) {
-		if err := updateExistingLambda(ctx, opts, args, stdinBytes, opts.Writer); err != nil {
-			return true, err
-		}
-		return true, nil
-	}
-
-	// API Gateway v2 quick create: model sometimes emits a Lambda ARN missing the region
-	// (e.g. arn:aws:lambda:<account>:function:<name>). Rewrite to include the configured region.
-	if len(args) >= 2 && args[0] == "apigatewayv2" && args[1] == "create-api" && failure.Code == "BadRequestException" {
-		lower := strings.ToLower(output)
-		if strings.Contains(lower, "invalid function arn") || strings.Contains(lower, "invalid uri") {
-			if rewritten, ok := rewriteAPIGatewayV2CreateApiLambdaTarget(args, opts.Region); ok {
-				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: rewriting apigatewayv2 create-api --target lambda ARN to include region\n")
-				rewrittenAWSArgs := append(append([]string{}, rewritten...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
-				if _, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, opts.Writer); err != nil {
-					return true, err
-				}
-				return true, nil
-			}
-		}
-	}
-
-	// When a create command fails due to already existing and it's safe to treat as idempotent,
-	// we skip further retries.
-	if failure.Category == FailureAlreadyExists {
-		if args[0] == "logs" && args[1] == "create-log-group" {
-			return true, nil
-		}
-		if args[0] == "s3" && args[1] == "create-bucket" {
-			return true, nil
-		}
-	}
-
-	// Nothing to rewrite.
-	return false, nil
-}
-
-func rewriteAPIGatewayV2CreateApiLambdaTarget(args []string, region string) ([]string, bool) {
-	if strings.TrimSpace(region) == "" {
-		return nil, false
-	}
-
-	out := append([]string{}, args...)
-	for i := 0; i < len(out); i++ {
-		var isTarget bool
-		val := ""
-		if out[i] == "--target" {
-			isTarget = true
-			if i+1 < len(out) {
-				val = out[i+1]
-			}
-		} else if strings.HasPrefix(out[i], "--target=") {
-			isTarget = true
-			val = strings.TrimPrefix(out[i], "--target=")
-		}
-
-		if !isTarget || strings.TrimSpace(val) == "" {
-			continue
-		}
-
-		m := lambdaArnMissingRegionRe.FindStringSubmatch(strings.TrimSpace(val))
-		if len(m) != 4 {
-			continue
-		}
-		partition := strings.TrimSpace(m[1])
-		acct := strings.TrimSpace(m[2])
-		fn := strings.TrimSpace(m[3])
-		if partition == "" || acct == "" || fn == "" {
-			continue
-		}
-
-		fixed := fmt.Sprintf("arn:%s:lambda:%s:%s:function:%s", partition, region, acct, fn)
-		if out[i] == "--target" {
-			out[i+1] = fixed
-			return out, true
-		}
-		out[i] = "--target=" + fixed
-		return out, true
-	}
-
-	return nil, false
 }
 
 func flagValue(args []string, flag string) string {

@@ -35,6 +35,7 @@ func EnrichPlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		roleCreated:        map[string]bool{},
 		roleTrustSet:       map[string]bool{},
 		rolePolicyAttached: map[string]bool{},
+		roleTrustCache:     map[string][]string{},
 	}
 
 	expanders := defaultExpanders(opts, deleteEverythingRelated, state)

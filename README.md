@@ -75,6 +75,10 @@ Flags:
 -   `--aws`: force AWS context/tooling for the question (uses the default env/profile from `~/.clanker.yaml` unless you pass `--profile`)
 -   `--profile <name>`: override the AWS CLI profile for this run
 -   `--ai-profile <name>`: select an AI provider profile from `ai.providers.<name>` (overrides `ai.default_provider`)
+-   `--maker`: generate an AWS CLI plan (JSON) for infrastructure changes
+-   `--destroyer`: allow destructive AWS CLI operations when using `--maker`
+-   `--apply`: apply an approved maker plan (reads from stdin unless `--plan-file` is provided)
+-   `--plan-file <path>`: optional path to maker plan JSON file for `--apply`
 -   `--debug`: print diagnostics (selected tools, AWS CLI calls, prompt sizes)
 -   `--agent-trace`: print detailed coordinator/agent lifecycle logs (tool selection + investigation steps)
 
@@ -86,6 +90,20 @@ clanker ask --profile dev "what's the last error from my big-api-service lambda?
 clanker ask --ai-profile openai "What are the latest logs for our dev Lambda functions?"
 
 clanker ask --agent-trace --profile dev "how can i create an additional lambda and link it to dev?"
+
+# Maker (plan + apply)
+
+# Generate a plan (prints JSON)
+clanker ask --aws --maker "create a small ec2 instance and a postgres rds" | cat
+
+# Apply an approved plan from stdin
+clanker ask --aws --maker --apply < plan.json | cat
+
+# Apply an approved plan from a file
+clanker ask --aws --maker --apply --plan-file plan.json | cat
+
+# Allow destructive operations (only with explicit intent)
+clanker ask --aws --maker --destroyer "delete the clanka-postgres rds instance" | cat
 ```
 
 ## Troubleshooting
