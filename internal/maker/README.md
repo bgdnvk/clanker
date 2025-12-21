@@ -24,6 +24,36 @@ This package turns a natural-language request into an AWS CLI plan, lets the use
 -   Remediation pipeline (built-in + optional AI prereqs): `remediate.go`, `remediate_ai.go`
 -   Retry/backoff helpers: `retry.go`
 
+## Plan placeholders + bindings (runtime)
+
+Plans may contain placeholder tokens like `<IGW_ID>` or `<SUB_PUB_1_ID>`.
+
+At runtime, the executor keeps a `bindings` map and rewrites args by replacing any `<TOKEN>` with `bindings[TOKEN]`.
+
+Bindings are learned from:
+
+-   **Explicit `produces`** on a command (preferred). This is a map of `bindingKey -> jsonPath` extracted from the command JSON output.
+    -   Example: `{"IGW_ID": "$.InternetGateway.InternetGatewayId"}`.
+    -   JSONPath is intentionally small: object field traversal + `[index]` (e.g. `$.Foo.Bar[0].Baz`).
+-   **Heuristics** from successful AWS CLI JSON outputs for common create operations (subnets/IGW/route tables/EIP/NAT/SG/instance/ALB/TG).
+-   **Glue updates**: some remediations discover “real” IDs (e.g. existing attached IGW) and populate/override bindings so the plan can continue.
+
+Common alias keys are supported because planner output varies:
+
+-   Subnets: `SUBNET_PUB_1_ID` / `SUB_PUB_1_ID` / `SUB_PUB_1`, `SUBNET_PUB_2_ID` / `SUB_PUB_2_ID` / `SUB_PUB_2`, `SUBNET_PRIV_1_ID` / `SUB_PRIV_ID` / `SUB_PRIV`
+-   Route tables: `RT_PUBLIC_ID` / `RT_PUB_ID` / `RT_PUB`, `RT_PRIVATE_ID` / `RT_PRIV_ID` / `RT_PRIV`
+-   Security groups: `SG_ALB_ID` / `ALB_SG_ID`, `SG_WEB_ID` / `WEB_SG_ID`
+
+## Runtime self-healing (examples)
+
+This is not an exhaustive list; it’s here to help maintainers understand the intended direction:
+
+-   **VPC subnet CIDR validity**: if `ec2 create-subnet` fails with `InvalidSubnet.Range`, pick a free CIDR inside the target VPC CIDR and retry.
+-   **Missing/invalid route table IDs**: if `create-route` / `associate-route-table` fails due to an invalid route table id, create one, bind it, rewrite `--route-table-id`, retry.
+-   **Existing IGW already attached**: if `attach-internet-gateway` says the VPC already has one, discover the attached IGW, bind it, and continue.
+-   **Async readiness**: waiters/backoff for long-lived resources (e.g. NAT gateway, CloudFormation).
+-   **API Gateway v1/v2 mismatch (destroyer)**: fall back to v2 deletes when a v2 API is deleted via v1 commands.
+
 ## Retry + AI escalation (runtime)
 
 -   The execution loop prefers deterministic, built-in glue first (rewrite/wait/retry).

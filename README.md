@@ -1,6 +1,7 @@
 # Clanker CLI
 
-Early alpha.
+Early alpha.  
+First agent powering https://clankercloud.ai
 
 Ask questions about your infra (and optionally GitHub/etc). Clanker is read-only: it calls CLIs/APIs and summarizes what it finds.
 
