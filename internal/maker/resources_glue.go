@@ -13,6 +13,15 @@ import (
 var lambdaArnMissingRegionRe = regexp.MustCompile(`^arn:([^:]+):lambda:(\d{12}):function:(.+)$`)
 
 func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, awsArgs []string, stdinBytes []byte, failure AWSFailure, output string) (bool, error) {
+	// Generic service-role permission fix: if an AWS API reports that a ROLE (not the caller)
+	// lacks permission, add a minimal inline policy to the role and retry.
+	//
+	// This is intentionally narrow: it only triggers when we can identify a role ARN and a
+	// recognizable action/resource family.
+	if ok, err := maybeFixRolePermissionAndRetry(ctx, opts, args, awsArgs, stdinBytes, failure, output); ok {
+		return true, err
+	}
+
 	// Generic transient retry (service hiccups / in-progress / timeouts).
 	if isTransientFailure(failure, output) {
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry after transient failure\n")
@@ -97,6 +106,62 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 				}
 				return true, nil
 			}
+		}
+	}
+
+	// Lambda create-event-source-mapping: common role permission propagation/mismatch issues.
+	// If AWS says the function execution role lacks event source permissions, attach the
+	// corresponding AWS-managed execution policy to the *actual* role configured on the function,
+	// then retry with backoff.
+	if args0(args) == "lambda" && args1(args) == "create-event-source-mapping" {
+		lower := strings.ToLower(output)
+		// Idempotency: mapping already exists.
+		if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "resourceconflictexception") {
+			return true, nil
+		}
+
+		if strings.Contains(lower, "function execution role") && strings.Contains(lower, "does not have permissions to call") {
+			policyArn := ""
+			switch {
+			case strings.Contains(lower, "receivemessage") && strings.Contains(lower, "sqs"):
+				policyArn = "arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole"
+			case strings.Contains(lower, "getrecords") && strings.Contains(lower, "kinesis"):
+				policyArn = "arn:aws:iam::aws:policy/service-role/AWSLambdaKinesisExecutionRole"
+			case strings.Contains(lower, "getrecords") && strings.Contains(lower, "dynamodb"):
+				policyArn = "arn:aws:iam::aws:policy/service-role/AWSLambdaDynamoDBExecutionRole"
+			}
+
+			fn := strings.TrimSpace(flagValue(args, "--function-name"))
+			if fn != "" && policyArn != "" {
+				conf, err := getFunctionConfiguration(ctx, opts, fn)
+				if err == nil && strings.TrimSpace(conf.Role) != "" {
+					roleName := roleNameFromArn(conf.Role)
+					if strings.TrimSpace(roleName) != "" {
+						_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: attach lambda event source execution policy then retry (function=%s role=%s)\n", fn, strings.TrimSpace(roleName))
+						attach := []string{"iam", "attach-role-policy", "--role-name", strings.TrimSpace(roleName), "--policy-arn", policyArn, "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+						// Best-effort: attach-role-policy is idempotent.
+						_, _ = runAWSCommandStreaming(ctx, attach, nil, opts.Writer)
+
+						if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+							return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+						}); err != nil {
+							return true, err
+						}
+						return true, nil
+					}
+				}
+			}
+		}
+
+		// Event source can exist, but IAM propagation can make it look like a validation failure.
+		if failure.Category == FailureNotFound {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry create-event-source-mapping after propagation\n")
+			if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+				return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+			}); err != nil {
+				return true, err
+			}
+			return true, nil
 		}
 	}
 
@@ -360,6 +425,308 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 
 	// Nothing to rewrite.
 	return false, nil
+}
+
+func maybeFixRolePermissionAndRetry(ctx context.Context, opts ExecOptions, args []string, awsArgs []string, stdinBytes []byte, failure AWSFailure, output string) (bool, error) {
+	lower := strings.ToLower(output)
+
+	// Only attempt for role-based errors; do not try to “fix” caller AccessDenied.
+	roleish := strings.Contains(lower, ":role/") || strings.Contains(lower, "execution role") || strings.Contains(lower, "assumed role")
+	if !roleish {
+		return false, nil
+	}
+
+	// Must look like a missing-permission error.
+	if !(failure.Category == FailureAccessDenied || strings.Contains(lower, "not authorized") || strings.Contains(lower, "does not have permissions") || strings.Contains(lower, "permissions to call")) {
+		return false, nil
+	}
+
+	roleArn := strings.TrimSpace(flagValue(args, "--role-arn"))
+	if roleArn == "" {
+		// Lambda: discover the actual execution role for the function.
+		if args0(args) == "lambda" {
+			fn := strings.TrimSpace(flagValue(args, "--function-name"))
+			if fn != "" {
+				if conf, err := getFunctionConfiguration(ctx, opts, fn); err == nil {
+					roleArn = strings.TrimSpace(conf.Role)
+				}
+			}
+		}
+	}
+	if roleArn == "" {
+		// Try inline JSON args (e.g. EventBridge targets, Pipes, Scheduler, etc.).
+		arns := findRoleArnsInArgsJSON(args)
+		if len(arns) > 0 {
+			roleArn = strings.TrimSpace(arns[0])
+		}
+	}
+	if roleArn == "" {
+		return false, nil
+	}
+
+	roleName := strings.TrimSpace(roleNameFromArn(roleArn))
+	if roleName == "" {
+		return false, nil
+	}
+
+	policyName, actions, resources := inferInlinePolicyForRolePermissionError(args, lower)
+	if policyName == "" || len(actions) == 0 {
+		return false, nil
+	}
+	if len(resources) == 0 {
+		resources = []string{"*"}
+	}
+
+	policyDoc := map[string]any{
+		"Version": "2012-10-17",
+		"Statement": []map[string]any{
+			{
+				"Effect":   "Allow",
+				"Action":   actions,
+				"Resource": resources,
+			},
+		},
+	}
+	b, _ := json.Marshal(policyDoc)
+	put := []string{"iam", "put-role-policy", "--role-name", roleName, "--policy-name", policyName, "--policy-document", string(b), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+
+	_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: add inline role policy then retry (role=%s policy=%s)\n", roleName, policyName)
+	// Best-effort: put-role-policy is upsert-like.
+	_, _ = runAWSCommandStreaming(ctx, put, nil, opts.Writer)
+
+	if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+		return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+	}); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func inferInlinePolicyForRolePermissionError(args []string, lowerOutput string) (policyName string, actions []string, resources []string) {
+	// SQS-style phrasing: "permissions to call ReceiveMessage on SQS".
+	if strings.Contains(lowerOutput, " on sqs") || strings.Contains(lowerOutput, "sqs") {
+		if strings.Contains(lowerOutput, "receivemessage") || strings.Contains(lowerOutput, "delete") || strings.Contains(lowerOutput, "change") || strings.Contains(lowerOutput, "getqueueattributes") {
+			policyName = "ClankerAutoPermsSQS"
+			actions = []string{
+				"sqs:ReceiveMessage",
+				"sqs:DeleteMessage",
+				"sqs:ChangeMessageVisibility",
+				"sqs:GetQueueAttributes",
+				"sqs:GetQueueUrl",
+				"sqs:ListQueues",
+			}
+			resources = findServiceARNsInArgs(args, "sqs")
+			return
+		}
+	}
+
+	// Kinesis / DynamoDB Streams commonly report GetRecords/GetShardIterator.
+	if strings.Contains(lowerOutput, "kinesis") {
+		if strings.Contains(lowerOutput, "getrecords") || strings.Contains(lowerOutput, "getsharditerator") || strings.Contains(lowerOutput, "listshards") || strings.Contains(lowerOutput, "describestream") {
+			policyName = "ClankerAutoPermsKinesis"
+			actions = []string{
+				"kinesis:GetRecords",
+				"kinesis:GetShardIterator",
+				"kinesis:DescribeStream",
+				"kinesis:DescribeStreamSummary",
+				"kinesis:ListShards",
+			}
+			resources = findServiceARNsInArgs(args, "kinesis")
+			return
+		}
+	}
+	if strings.Contains(lowerOutput, "dynamodb") {
+		if strings.Contains(lowerOutput, "getrecords") || strings.Contains(lowerOutput, "getsharditerator") || strings.Contains(lowerOutput, "describe") || strings.Contains(lowerOutput, "list") {
+			policyName = "ClankerAutoPermsDynamoDBStreams"
+			actions = []string{
+				"dynamodb:GetRecords",
+				"dynamodb:GetShardIterator",
+				"dynamodb:DescribeStream",
+				"dynamodb:ListStreams",
+			}
+			resources = findServiceARNsInArgs(args, "dynamodb")
+			return
+		}
+	}
+
+	// S3 common: List/Get/Put (best-effort when bucket ARN is visible in args).
+	if strings.Contains(lowerOutput, "s3") {
+		if strings.Contains(lowerOutput, "getobject") || strings.Contains(lowerOutput, "putobject") || strings.Contains(lowerOutput, "listbucket") {
+			policyName = "ClankerAutoPermsS3"
+			actions = []string{
+				"s3:GetObject",
+				"s3:PutObject",
+				"s3:ListBucket",
+			}
+			resources = findS3BucketARNsInArgs(args)
+			return
+		}
+	}
+
+	return "", nil, nil
+}
+
+func findServiceARNsInArgs(args []string, service string) []string {
+	service = strings.TrimSpace(service)
+	if service == "" {
+		return nil
+	}
+	out := []string{}
+	seen := map[string]bool{}
+
+	addArn := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || !strings.HasPrefix(s, "arn:") {
+			return
+		}
+		if !strings.Contains(s, ":"+service+":") {
+			return
+		}
+		if seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+
+	for _, a := range args {
+		addArn(a)
+	}
+	for _, arn := range findArnsInArgsJSON(args) {
+		addArn(arn)
+	}
+	return out
+}
+
+func findS3BucketARNsInArgs(args []string) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return
+		}
+		if !strings.HasPrefix(s, "arn:aws:s3:::") {
+			return
+		}
+		if seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	for _, a := range args {
+		add(a)
+	}
+	for _, arn := range findArnsInArgsJSON(args) {
+		add(arn)
+	}
+	return out
+}
+
+func findRoleArnsInArgsJSON(args []string) []string {
+	var out []string
+	for _, a := range args {
+		a = strings.TrimSpace(a)
+		if len(a) < 2 {
+			continue
+		}
+		if !(strings.HasPrefix(a, "{") || strings.HasPrefix(a, "[")) {
+			continue
+		}
+		if len(a) > 20000 {
+			continue
+		}
+		var v any
+		if err := json.Unmarshal([]byte(a), &v); err != nil {
+			continue
+		}
+		out = append(out, glueFindRoleArnsInJSON(v)...)
+	}
+	return dedupeStrings(out)
+}
+
+func findArnsInArgsJSON(args []string) []string {
+	var out []string
+	for _, a := range args {
+		a = strings.TrimSpace(a)
+		if len(a) < 2 {
+			continue
+		}
+		if !(strings.HasPrefix(a, "{") || strings.HasPrefix(a, "[")) {
+			continue
+		}
+		if len(a) > 20000 {
+			continue
+		}
+		var v any
+		if err := json.Unmarshal([]byte(a), &v); err != nil {
+			continue
+		}
+		out = append(out, findArnsInJSON(v)...)
+	}
+	return dedupeStrings(out)
+}
+
+func glueFindRoleArnsInJSON(v any) []string {
+	var out []string
+	switch vv := v.(type) {
+	case map[string]any:
+		for k, vvv := range vv {
+			kl := strings.ToLower(strings.TrimSpace(k))
+			if strings.Contains(kl, "rolearn") {
+				if ss, ok := vvv.(string); ok {
+					ss = strings.TrimSpace(ss)
+					if strings.HasPrefix(ss, "arn:") && strings.Contains(ss, ":role/") {
+						out = append(out, ss)
+					}
+				}
+			}
+			out = append(out, glueFindRoleArnsInJSON(vvv)...)
+		}
+	case []any:
+		for _, item := range vv {
+			out = append(out, glueFindRoleArnsInJSON(item)...)
+		}
+	}
+	return out
+}
+
+func findArnsInJSON(v any) []string {
+	var out []string
+	switch vv := v.(type) {
+	case map[string]any:
+		for _, vvv := range vv {
+			out = append(out, findArnsInJSON(vvv)...)
+		}
+	case []any:
+		for _, item := range vv {
+			out = append(out, findArnsInJSON(item)...)
+		}
+	case string:
+		s := strings.TrimSpace(vv)
+		if strings.HasPrefix(s, "arn:") {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func dedupeStrings(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 func extractS3BucketFromURI(args []string) string {
