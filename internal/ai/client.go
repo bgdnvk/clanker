@@ -913,6 +913,27 @@ findEnd:
 	return jsonStr
 }
 
+// AskPrompt sends a raw prompt to the configured provider without adding additional wrapper context.
+func (c *Client) AskPrompt(ctx context.Context, prompt string) (string, error) {
+	switch c.provider {
+	case "bedrock", "claude":
+		return c.askBedrock(ctx, prompt)
+	case "openai":
+		return c.askOpenAI(ctx, prompt)
+	case "anthropic":
+		return c.askAnthropic(ctx, prompt)
+	case "gemini", "gemini-api":
+		return c.askGemini(ctx, prompt)
+	default:
+		return c.askBedrock(ctx, prompt)
+	}
+}
+
+// CleanJSONResponse extracts the first JSON object from a response and applies minimal cleanup.
+func (c *Client) CleanJSONResponse(response string) string {
+	return c.extractAndCleanJSON(response)
+}
+
 // shouldUseAgent determines if the query would benefit from intelligent agent investigation
 func (c *Client) shouldUseAgent(question string) bool {
 	questionLower := strings.ToLower(question)
