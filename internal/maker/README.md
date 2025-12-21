@@ -18,8 +18,17 @@ This package turns a natural-language request into an AWS CLI plan, lets the use
 -   Planning-time expansion (explicit prereqs, role inference, dedupe): `enrich.go` (+ `enrich_sg.go`)
 -   Execution loop + classification + orchestration: `exec.go`
 -   Runtime glue (rewrites/waiters/create→update/idempotency): `resources_glue.go`
+-   Generic cross-service glue + LLM escalation (after retries): `generic_glue.go`
+-   CloudFormation terminal waiter + failure summarizer: `cloudformation_waiter.go`
+-   VPC/subnet CIDR remediation helpers: `ec2_vpc_cidr_glue.go`
 -   Remediation pipeline (built-in + optional AI prereqs): `remediate.go`, `remediate_ai.go`
 -   Retry/backoff helpers: `retry.go`
+
+## Retry + AI escalation (runtime)
+
+-   The execution loop prefers deterministic, built-in glue first (rewrite/wait/retry).
+-   If a command keeps failing after retries/glue, the runner can ask the AI for prerequisite AWS CLI commands.
+-   After running those prerequisites, the runner retries the original failing AWS CLI operation with exponential backoff (3 attempts).
 
 ## Adding support for a new AWS quirk
 

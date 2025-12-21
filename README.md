@@ -106,6 +106,15 @@ clanker ask --aws --maker --apply --plan-file plan.json | cat
 clanker ask --aws --maker --destroyer "delete the clanka-postgres rds instance" | cat
 ```
 
+### Maker apply behavior
+
+When you run with `--maker --apply`, the runner tries to be safe and repeatable:
+
+-   Idempotent “already exists” errors are treated as success when safe (e.g. duplicate SG rules).
+-   Some AWS async operations are waited to terminal state (e.g. CloudFormation create/update) so failures surface and can be remediated.
+-   If the runner detects common AWS runtime issues (CIDR/subnet/template mismatches), it may rewrite and retry the original AWS CLI command.
+-   If built-in retries/glue are exhausted, it can escalate to AI for prerequisite commands, then retry the original command with exponential backoff.
+
 ## Troubleshooting
 
 AWS auth:
