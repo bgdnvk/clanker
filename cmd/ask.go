@@ -168,10 +168,14 @@ Examples:
 				}
 
 				return maker.ExecutePlan(ctx, plan, maker.ExecOptions{
-					Profile:   targetProfile,
-					Region:    region,
-					Writer:    os.Stdout,
-					Destroyer: destroyer,
+					Profile:    targetProfile,
+					Region:     region,
+					Writer:     os.Stdout,
+					Destroyer:  destroyer,
+					AIProvider: provider,
+					AIAPIKey:   apiKey,
+					AIProfile:  aiProfile,
+					Debug:      debug,
 				})
 			}
 

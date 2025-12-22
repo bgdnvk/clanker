@@ -45,21 +45,188 @@ Rules for commands:
 - Do NOT include --profile, --region, or --no-cli-pager (the runner injects them).
 - Prefer idempotent operations where possible.
 
-Placeholders and bindings:
-- You MAY use placeholder tokens inside args like "<IGW_ID>" or "<SUBNET_PUB_1_ID>".
-- If you use any placeholder token "<NAME>", you MUST ensure an earlier command includes:
-  - "produces": { "NAME": "$.some.json.path" }
-  and that earlier command returns JSON containing that path.
-- JSON paths must start with "$" and may include dot fields and array indices, e.g.
-  - "$.InternetGateway.InternetGatewayId"
-  - "$.Subnet.SubnetId"
-  - "$.LoadBalancers[0].LoadBalancerArn"
+Placeholders and bindings (CRITICAL):
+- You MAY use placeholder tokens inside args like "<SG_RDS_ID>" or "<SUBNET_1>".
+- If you use ANY placeholder token "<NAME>", you MUST ensure an earlier command includes:
+  - "produces": { "NAME": "$.json.path.to.value" }
+- The produces mapping is REQUIRED for EVERY command that creates a resource used later.
+- Without produces, the placeholder will NOT be substituted and the command will fail.
+
+Common produces mappings (use these exact JSON paths):
+- ec2 create-security-group: { "SG_ID": "$.GroupId" }
+- ec2 create-vpc: { "VPC_ID": "$.Vpc.VpcId" }
+- ec2 create-subnet: { "SUBNET_ID": "$.Subnet.SubnetId" }
+- ec2 create-internet-gateway: { "IGW_ID": "$.InternetGateway.InternetGatewayId" }
+- ec2 create-route-table: { "RTB_ID": "$.RouteTable.RouteTableId" }
+- ec2 allocate-address: { "EIP_ALLOC": "$.AllocationId" }
+- ec2 create-nat-gateway: { "NAT_ID": "$.NatGateway.NatGatewayId" }
+- lambda create-function: { "LAMBDA_ARN": "$.FunctionArn" }
+- iam create-role: { "ROLE_ARN": "$.Role.Arn" }
+- rds create-db-subnet-group: { "DB_SUBNET_GROUP": "$.DBSubnetGroup.DBSubnetGroupName" }
+- apigatewayv2 create-api: { "API_ID": "$.ApiId" }
+- apigatewayv2 create-integration: { "INTEGRATION_ID": "$.IntegrationId" }
+- elbv2 create-load-balancer: { "ALB_ARN": "$.LoadBalancers[0].LoadBalancerArn" }
+- elbv2 create-target-group: { "TG_ARN": "$.TargetGroups[0].TargetGroupArn" }
+
+Example with multiple security groups:
+{
+  "args": ["aws", "ec2", "create-security-group", "--group-name", "rds-sg", "--description", "RDS SG", "--vpc-id", "vpc-xxx"],
+  "reason": "Create RDS security group",
+  "produces": { "SG_RDS": "$.GroupId" }
+},
+{
+  "args": ["aws", "ec2", "create-security-group", "--group-name", "lambda-sg", "--description", "Lambda SG", "--vpc-id", "vpc-xxx"],
+  "reason": "Create Lambda security group", 
+  "produces": { "SG_LAMBDA": "$.GroupId" }
+},
+{
+  "args": ["aws", "ec2", "authorize-security-group-ingress", "--group-id", "<SG_RDS>", "--ip-permissions", "IpProtocol=tcp,FromPort=5432,ToPort=5432,UserIdGroupPairs=[{GroupId=<SG_LAMBDA>}]"],
+  "reason": "Allow Lambda to access RDS on port 5432"
+}
 
 Service guidance (when relevant to the user request):
 - Container images: use ECR (create repo, set lifecycle/policy if needed).
 - Queued/batch jobs: use AWS Batch (compute environment + job queue + job definition).
 - GenAI: use Amazon Bedrock (and Bedrock Agents if needed).
 - Traditional ML training/hosting: use SageMaker (model, endpoint config, endpoint) when requested.
+
+AWS CLI syntax reference (use these exact patterns):
+
+EC2 Security Groups:
+- authorize-security-group-ingress with source SG: --ip-permissions IpProtocol=tcp,FromPort=5432,ToPort=5432,UserIdGroupPairs=[{GroupId=sg-xxx}]
+- authorize-security-group-ingress with CIDR: --ip-permissions IpProtocol=tcp,FromPort=80,ToPort=80,IpRanges=[{CidrIp=0.0.0.0/0}]
+- Do NOT use --source-group-id (invalid flag).
+
+Lambda:
+- VPC config: --vpc-config SubnetIds=subnet-aaa,subnet-bbb,SecurityGroupIds=sg-xxx,sg-yyy
+- Environment vars: --environment Variables={KEY1=value1,KEY2=value2}
+- Runtime: use python3.12 by default.
+
+RDS:
+- create-db-subnet-group: --subnet-ids subnet-aaa subnet-bbb (space-separated, not comma).
+- create-db-instance: --vpc-security-group-ids sg-xxx sg-yyy (space-separated).
+- Always include --no-publicly-accessible for private DBs.
+- Use --master-user-password for initial password (or --manage-master-user-password for Secrets Manager).
+
+API Gateway v2 (HTTP APIs):
+- create-api: --name myapi --protocol-type HTTP
+- create-integration for Lambda: --integration-type AWS_PROXY --integration-uri arn:aws:lambda:REGION:ACCOUNT:function:NAME --payload-format-version 2.0
+- create-route: --route-key "GET /path" --target integrations/INTEGRATION_ID
+- create-stage with auto-deploy: --stage-name \$default --auto-deploy
+
+ELBv2 (ALB/NLB):
+- create-load-balancer: --subnets subnet-aaa subnet-bbb --security-groups sg-xxx (space-separated).
+- create-target-group: --vpc-id vpc-xxx --protocol HTTP --port 80 --target-type instance
+- create-listener: --load-balancer-arn ARN --protocol HTTP --port 80 --default-actions Type=forward,TargetGroupArn=ARN
+
+CloudWatch Alarms:
+- put-metric-alarm: --dimensions Name=FunctionName,Value=myfunction (for Lambda errors).
+- Always include: --comparison-operator, --evaluation-periods, --threshold, --statistic, --period.
+
+IAM:
+- create-role: --assume-role-policy-document must be valid JSON with Version and Statement.
+- attach-role-policy: use full policy ARN like arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole.
+- put-role-policy for inline: --policy-document as JSON.
+
+ECS:
+- register-task-definition: use --cli-input-json with full task def JSON, or individual flags.
+- create-service: --network-configuration awsvpcConfiguration={subnets=[subnet-xxx],securityGroups=[sg-xxx],assignPublicIp=ENABLED}
+
+S3:
+- create-bucket in us-east-1: do NOT include --create-bucket-configuration (only needed for other regions).
+- put-bucket-policy: --policy as JSON string.
+
+VPC:
+- create-route: --destination-cidr-block 0.0.0.0/0 --gateway-id igw-xxx (or --nat-gateway-id nat-xxx).
+- associate-route-table: --subnet-id subnet-xxx --route-table-id rtb-xxx.
+
+SNS/SQS:
+- subscribe: --protocol lambda --notification-endpoint arn:aws:lambda:...
+- set-queue-attributes: --attributes as JSON like {"VisibilityTimeout":"30"}.
+
+DynamoDB:
+- create-table: --attribute-definitions AttributeName=pk,AttributeType=S --key-schema AttributeName=pk,KeyType=HASH
+- For GSI: --global-secondary-indexes IndexName=idx,KeySchema=[{AttributeName=sk,KeyType=HASH}],Projection={ProjectionType=ALL}
+- Billing: --billing-mode PAY_PER_REQUEST (or PROVISIONED with --provisioned-throughput).
+
+ElastiCache:
+- create-cache-subnet-group: --subnet-ids subnet-aaa subnet-bbb (space-separated).
+- create-cache-cluster (Redis): --engine redis --cache-node-type cache.t3.micro --num-cache-nodes 1
+- create-replication-group (Redis cluster): --replication-group-description "desc" --engine redis
+
+Secrets Manager:
+- create-secret: --name mysecret --secret-string '{"user":"admin","pass":"xxx"}'
+- get-secret-value: returns SecretString in JSON.
+
+CloudFront:
+- create-distribution: use --distribution-config as JSON (complex, prefer --cli-input-json).
+- Origins require Id, DomainName, S3OriginConfig or CustomOriginConfig.
+
+Route 53:
+- change-resource-record-sets: --hosted-zone-id Z123 --change-batch as JSON with Changes array.
+- Record types: A, AAAA, CNAME, ALIAS (use AliasTarget for ALB/CloudFront).
+
+Step Functions:
+- create-state-machine: --definition as JSON string (Amazon States Language).
+- --role-arn must allow states.amazonaws.com to assume it.
+
+EventBridge:
+- put-rule: --schedule-expression "rate(5 minutes)" or --event-pattern as JSON.
+- put-targets: --targets Id=1,Arn=arn:aws:lambda:... (use RoleArn for cross-service).
+
+Kinesis:
+- create-stream: --stream-name mystream --shard-count 1 (or --stream-mode-details StreamMode=ON_DEMAND).
+
+CloudWatch Logs:
+- create-log-group: --log-group-name /aws/lambda/myfunction
+- put-retention-policy: --retention-in-days 14
+- put-subscription-filter: --filter-pattern "" --destination-arn arn:aws:lambda:...
+
+ECR:
+- create-repository: --repository-name myrepo
+- get-login-password: outputs token for docker login.
+- put-lifecycle-policy: --lifecycle-policy-text as JSON.
+
+EKS:
+- create-cluster: --role-arn (cluster role) --resources-vpc-config subnetIds=subnet-aaa,subnet-bbb,securityGroupIds=sg-xxx
+- create-nodegroup: --node-role (node instance role) --subnets subnet-aaa subnet-bbb --instance-types t3.medium
+
+WAF v2:
+- create-web-acl: --scope REGIONAL (or CLOUDFRONT) --default-action Allow={} --visibility-config ...
+- associate-web-acl: --web-acl-arn ARN --resource-arn (ALB ARN).
+
+Cognito:
+- create-user-pool: --pool-name mypool
+- create-user-pool-client: --user-pool-id xxx --client-name myclient
+
+AppSync:
+- create-graphql-api: --name myapi --authentication-type API_KEY (or AMAZON_COGNITO_USER_POOLS).
+
+Batch:
+- create-compute-environment: --type MANAGED --compute-resources as JSON.
+- create-job-queue: --compute-environment-order order=1,computeEnvironment=arn...
+
+Glue:
+- create-database: --database-input Name=mydb
+- create-crawler: --role ARN --database-name mydb --targets S3Targets=[{Path=s3://bucket}]
+
+Athena:
+- start-query-execution: --query-string "SELECT..." --result-configuration OutputLocation=s3://bucket/results/
+
+Redshift:
+- create-cluster: --node-type dc2.large --master-username admin --master-user-password xxx --cluster-type single-node
+
+OpenSearch (Elasticsearch):
+- create-domain: --domain-name mydomain --engine-version OpenSearch_2.11 --cluster-config InstanceType=t3.small.search,InstanceCount=1
+
+IMPORTANT - Reuse existing resources:
+- If context shows existing subnets in the VPC, USE THEM instead of creating new ones.
+- If context shows existing security groups that match the purpose, USE THEM.
+- For RDS db-subnet-group, pick 2 subnets from DIFFERENT availability zones.
+- Always prefer using resources already listed in the context over creating duplicates.
+- Before creating a subnet, check the context for available subnets in the target VPC.
+- If you must create subnets, use CIDR blocks that don't conflict with existing ones (check context).
+
 %s
 
 AWS Lambda code packaging:

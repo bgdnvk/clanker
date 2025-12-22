@@ -85,6 +85,17 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		args = substituteAccountID(args, accountID)
 		args = applyPlanBindings(args, bindings)
 
+		// AI-powered placeholder resolution with exponential backoff
+		if hasUnresolvedPlaceholders(args) {
+			resolved, resolveErr := maybeResolvePlaceholdersWithAI(ctx, opts, args, bindings, "")
+			if resolveErr != nil {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: placeholder resolution failed: %v\n", resolveErr)
+			}
+			if resolved != nil {
+				args = resolved
+			}
+		}
+
 		zipBytes, updatedArgs, err := maybeInjectLambdaZipBytes(args, opts.Writer)
 		if err != nil {
 			return fmt.Errorf("command %d prepare failed: %w", idx+1, err)
@@ -273,7 +284,26 @@ func applyPlanBindings(args []string, bindings map[string]string) []string {
 		})
 		out = append(out, rewritten)
 	}
+	// fix: if --role-name got an ARN, extract just the role name
+	out = fixRoleNameArg(out)
 	return out
+}
+
+// fixRoleNameArg extracts role name from ARN if --role-name was given a full ARN
+func fixRoleNameArg(args []string) []string {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--role-name" {
+			val := args[i+1]
+			if strings.HasPrefix(val, "arn:") && strings.Contains(val, ":role/") {
+				// extract role name from arn:aws:iam::123456789012:role/RoleName
+				parts := strings.Split(val, ":role/")
+				if len(parts) == 2 {
+					args[i+1] = parts[1]
+				}
+			}
+		}
+	}
+	return args
 }
 
 func learnPlanBindings(args []string, output string, bindings map[string]string) {
@@ -328,6 +358,11 @@ func learnPlanBindings(args []string, output string, bindings map[string]string)
 			if id == "" {
 				return
 			}
+			az := deepString(obj, "Subnet", "AvailabilityZone")
+
+			// Dynamic bindings based on AZ and order
+			inferSubnetBindings(id, az, bindings)
+
 			name := deepTagValue(obj, "Subnet", "Tags", "Name")
 			switch name {
 			case "public-subnet-1":
@@ -432,26 +467,30 @@ func learnPlanBindings(args []string, output string, bindings map[string]string)
 				return
 			}
 			groupName := strings.TrimSpace(flagValue(args, "--group-name"))
+
+			// Dynamic binding: infer placeholder names from group name
+			// e.g., "lambdatron-rds-sg" -> SG_RDS_ID, SG_RDS, RdsSgId
+			inferSGBindings(groupName, gid, bindings)
+
+			// Fixed mappings for known names
 			switch groupName {
 			case "alb-sg":
 				bindings["SG_ALB_ID"] = gid
 				bindings["SG_ALB"] = gid
-			case "web-sg":
+			case "web-sg", "web-server-sg":
 				bindings["SG_WEB_ID"] = gid
 				bindings["SG_WEB"] = gid
-			case "web-server-sg":
-				bindings["SG_WEB_ID"] = gid
-				bindings["SG_WEB"] = gid
-			default:
-				for _, k := range []string{"SG_ALB_ID", "SG_WEB_ID", "SG_ALB", "SG_WEB"} {
-					if strings.TrimSpace(bindings[k]) == "" {
-						bindings[k] = gid
-						break
-					}
+			}
+
+			// Fill first empty slot in common placeholders
+			for _, k := range []string{"SG_ID", "SG_1", "SG_ALB_ID", "SG_WEB_ID", "SG_RDS_ID", "SG_LAMBDA_ID", "SG_CLIENT_ID"} {
+				if strings.TrimSpace(bindings[k]) == "" {
+					bindings[k] = gid
+					break
 				}
 			}
 
-			// Common placeholder aliases used by planner output.
+			// Common placeholder aliases
 			if strings.TrimSpace(bindings["SG_ALB_ID"]) != "" {
 				bindings["ALB_SG_ID"] = bindings["SG_ALB_ID"]
 			}
@@ -485,6 +524,154 @@ func learnPlanBindings(args []string, output string, bindings map[string]string)
 					bindings["AMI_ID"] = val
 				}
 			}
+		}
+	case "lambda":
+		switch op {
+		case "create-function":
+			// {"FunctionArn":"arn:aws:lambda:..."}
+			arn := deepString(obj, "FunctionArn")
+			if arn != "" {
+				inferLambdaBindings(arn, bindings)
+			}
+		}
+	case "apigatewayv2":
+		switch op {
+		case "create-api":
+			// {"ApiId":"abc123"}
+			apiID := deepString(obj, "ApiId")
+			if apiID != "" {
+				inferAPIGatewayBindings(apiID, bindings)
+			}
+		case "create-integration":
+			// {"IntegrationId":"abc123"}
+			intID := deepString(obj, "IntegrationId")
+			if intID != "" {
+				inferIntegrationBindings(intID, bindings)
+			}
+		case "create-route":
+			// {"RouteId":"abc123"}
+			routeID := deepString(obj, "RouteId")
+			if routeID != "" {
+				inferRouteBindings(routeID, bindings)
+			}
+		case "create-stage":
+			// {"StageName":"$default"}
+			stageName := deepString(obj, "StageName")
+			if stageName != "" {
+				inferStageBindings(stageName, bindings)
+			}
+		}
+	case "rds":
+		switch op {
+		case "create-db-instance":
+			// {"DBInstance":{"DBInstanceIdentifier":"...", "Endpoint":{"Address":"..."}}}
+			id := deepString(obj, "DBInstance", "DBInstanceIdentifier")
+			endpoint := deepString(obj, "DBInstance", "Endpoint", "Address")
+			arn := deepString(obj, "DBInstance", "DBInstanceArn")
+			inferRDSBindings(id, endpoint, arn, bindings)
+		case "create-db-cluster":
+			id := deepString(obj, "DBCluster", "DBClusterIdentifier")
+			endpoint := deepString(obj, "DBCluster", "Endpoint")
+			arn := deepString(obj, "DBCluster", "DBClusterArn")
+			inferRDSClusterBindings(id, endpoint, arn, bindings)
+		case "create-db-subnet-group":
+			name := deepString(obj, "DBSubnetGroup", "DBSubnetGroupName")
+			arn := deepString(obj, "DBSubnetGroup", "DBSubnetGroupArn")
+			inferDBSubnetGroupBindings(name, arn, bindings)
+		}
+	case "ecs":
+		switch op {
+		case "create-cluster":
+			arn := deepString(obj, "cluster", "clusterArn")
+			name := deepString(obj, "cluster", "clusterName")
+			inferECSClusterBindings(name, arn, bindings)
+		case "create-service":
+			arn := deepString(obj, "service", "serviceArn")
+			name := deepString(obj, "service", "serviceName")
+			inferECSServiceBindings(name, arn, bindings)
+		case "register-task-definition":
+			arn := deepString(obj, "taskDefinition", "taskDefinitionArn")
+			inferTaskDefBindings(arn, bindings)
+		}
+	case "ecr":
+		switch op {
+		case "create-repository":
+			uri := deepString(obj, "repository", "repositoryUri")
+			arn := deepString(obj, "repository", "repositoryArn")
+			name := deepString(obj, "repository", "repositoryName")
+			inferECRBindings(name, uri, arn, bindings)
+		}
+	case "sns":
+		switch op {
+		case "create-topic":
+			arn := deepString(obj, "TopicArn")
+			inferSNSBindings(arn, bindings)
+		}
+	case "sqs":
+		switch op {
+		case "create-queue":
+			url := deepString(obj, "QueueUrl")
+			inferSQSBindings(url, bindings)
+		}
+	case "dynamodb":
+		switch op {
+		case "create-table":
+			arn := deepString(obj, "TableDescription", "TableArn")
+			name := deepString(obj, "TableDescription", "TableName")
+			inferDynamoDBBindings(name, arn, bindings)
+		}
+	case "secretsmanager":
+		switch op {
+		case "create-secret":
+			arn := deepString(obj, "ARN")
+			name := deepString(obj, "Name")
+			inferSecretsBindings(name, arn, bindings)
+		}
+	case "s3api", "s3":
+		switch op {
+		case "create-bucket":
+			bucket := flagValue(args, "--bucket")
+			inferS3Bindings(bucket, bindings)
+		}
+	case "elasticache":
+		switch op {
+		case "create-cache-cluster":
+			id := deepString(obj, "CacheCluster", "CacheClusterId")
+			arn := deepString(obj, "CacheCluster", "ARN")
+			inferElastiCacheBindings(id, arn, bindings)
+		case "create-replication-group":
+			id := deepString(obj, "ReplicationGroup", "ReplicationGroupId")
+			arn := deepString(obj, "ReplicationGroup", "ARN")
+			endpoint := deepString(obj, "ReplicationGroup", "PrimaryEndpoint", "Address")
+			inferElastiCacheReplicationBindings(id, endpoint, arn, bindings)
+		}
+	case "events":
+		switch op {
+		case "put-rule":
+			arn := deepString(obj, "RuleArn")
+			inferEventBridgeBindings(arn, bindings)
+		}
+	case "stepfunctions", "sfn":
+		switch op {
+		case "create-state-machine":
+			arn := deepString(obj, "stateMachineArn")
+			inferStepFunctionBindings(arn, bindings)
+		}
+	case "cognito-idp":
+		switch op {
+		case "create-user-pool":
+			id := deepString(obj, "UserPool", "Id")
+			arn := deepString(obj, "UserPool", "Arn")
+			inferCognitoPoolBindings(id, arn, bindings)
+		case "create-user-pool-client":
+			clientID := deepString(obj, "UserPoolClient", "ClientId")
+			inferCognitoClientBindings(clientID, bindings)
+		}
+	case "logs":
+		switch op {
+		case "create-log-group":
+			name := flagValue(args, "--log-group-name")
+			inferLogGroupBindings(name, bindings)
 		}
 	}
 }
@@ -708,6 +895,12 @@ func handleAWSFailure(
 	if remediated, remErr := maybeAutoRemediateAndRetry(ctx, plan, opts, idx, args, awsArgs, stdinBytes, out, failure); remErr == nil && remediated {
 		remediationAttempted[idx] = true
 		return true, nil
+	}
+
+	// Agentic AI fallback: send error to AI, get fix, retry with exponential backoff
+	if handled, agentErr := maybeAgenticFix(ctx, opts, args, awsArgs, stdinBytes, out, bindings); handled {
+		remediationAttempted[idx] = true
+		return true, agentErr
 	}
 
 	return false, runErr
@@ -1101,6 +1294,21 @@ func shouldIgnoreFailure(args []string, failure AWSFailure, output string) bool 
 	// EC2 security group rule authorization is often re-applied; duplicates are safe to ignore.
 	if args[0] == "ec2" && (args[1] == "authorize-security-group-ingress" || args[1] == "authorize-security-group-egress") {
 		return code == "InvalidPermission.Duplicate" || strings.Contains(lower, "invalidpermission.duplicate") || strings.Contains(lower, "already exists")
+	}
+
+	// EC2 subnet conflict means subnet with that CIDR already exists - not fatal if we can find existing.
+	if args[0] == "ec2" && args[1] == "create-subnet" {
+		return code == "InvalidSubnet.Conflict" || strings.Contains(lower, "invalidsubnet.conflict") || strings.Contains(lower, "conflicts with another subnet")
+	}
+
+	// EC2 security group already exists.
+	if args[0] == "ec2" && args[1] == "create-security-group" {
+		return code == "InvalidGroup.Duplicate" || strings.Contains(lower, "invalidgroup.duplicate") || strings.Contains(lower, "already exists")
+	}
+
+	// RDS subnet group already exists.
+	if args[0] == "rds" && args[1] == "create-db-subnet-group" {
+		return code == "DBSubnetGroupAlreadyExists" || strings.Contains(lower, "dbsubnetgroupalreadyexists") || strings.Contains(lower, "already exists")
 	}
 
 	return false
@@ -1532,4 +1740,436 @@ func validateCommand(args []string, allowDestructive bool) error {
 	}
 
 	return nil
+}
+
+// inferSGBindings generates dynamic placeholder bindings from a security group name.
+// e.g., "lambdatron-rds-sg" -> SG_RDS, SG_RDS_ID, RdsSgId, etc.
+func inferSGBindings(groupName, groupID string, bindings map[string]string) {
+	if groupName == "" || groupID == "" {
+		return
+	}
+
+	// Normalize: remove common suffixes, lowercase, split on hyphens
+	name := strings.ToLower(groupName)
+	name = strings.TrimSuffix(name, "-sg")
+	name = strings.TrimSuffix(name, "-security-group")
+
+	parts := strings.Split(name, "-")
+
+	// Find meaningful keywords
+	keywords := []string{}
+	skipWords := map[string]bool{"sg": true, "security": true, "group": true, "new": true, "v2": true, "v3": true}
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" || skipWords[p] {
+			continue
+		}
+		keywords = append(keywords, p)
+	}
+
+	// Generate binding variations for each keyword
+	for _, kw := range keywords {
+		upper := strings.ToUpper(kw)
+		title := strings.Title(kw)
+
+		// SG_RDS, SG_RDS_ID, SG_LAMBDA, etc.
+		bindings["SG_"+upper] = groupID
+		bindings["SG_"+upper+"_ID"] = groupID
+
+		// RdsSgId, LambdaSgId (camelCase variants the LLM might use)
+		bindings[title+"SgId"] = groupID
+		bindings[title+"_SG_ID"] = groupID
+
+		// <Ec2SgId>, <RdsSgId> style
+		bindings[upper+"_SG_ID"] = groupID
+		bindings[upper+"_SG"] = groupID
+	}
+
+	// If multiple keywords, try combinations: "lambdatron-db" -> SG_LAMBDATRON_DB
+	if len(keywords) >= 2 {
+		combined := strings.ToUpper(strings.Join(keywords, "_"))
+		bindings["SG_"+combined] = groupID
+		bindings["SG_"+combined+"_ID"] = groupID
+	}
+}
+
+// inferSubnetBindings generates dynamic placeholder bindings from subnet creation.
+func inferSubnetBindings(subnetID, az string, bindings map[string]string) {
+	if subnetID == "" {
+		return
+	}
+
+	// Sequential: SUBNET_1, SUBNET_2, etc.
+	for i := 1; i <= 10; i++ {
+		k := fmt.Sprintf("SUBNET_%d", i)
+		if strings.TrimSpace(bindings[k]) == "" {
+			bindings[k] = subnetID
+			bindings[fmt.Sprintf("SUBNET_%d_ID", i)] = subnetID
+			break
+		}
+	}
+
+	// AZ-based: if AZ contains "a" -> SUBNET_A, etc.
+	if az != "" {
+		azLetter := strings.ToUpper(string(az[len(az)-1]))
+		if azLetter >= "A" && azLetter <= "F" {
+			bindings["SUBNET_"+azLetter] = subnetID
+			bindings["SUBNET_"+azLetter+"_ID"] = subnetID
+		}
+	}
+}
+
+// inferAPIGatewayBindings generates dynamic placeholder bindings for API Gateway.
+func inferAPIGatewayBindings(apiID string, bindings map[string]string) {
+	if apiID == "" {
+		return
+	}
+	bindings["API_ID"] = apiID
+	bindings["APIGW_ID"] = apiID
+	bindings["HTTP_API_ID"] = apiID
+}
+
+// inferLambdaBindings generates dynamic placeholder bindings for Lambda functions.
+func inferLambdaBindings(arn string, bindings map[string]string) {
+	if arn == "" {
+		return
+	}
+	bindings["LAMBDA_ARN"] = arn
+	bindings["FUNCTION_ARN"] = arn
+
+	// Extract function name from ARN
+	parts := strings.Split(arn, ":")
+	if len(parts) >= 7 {
+		fname := parts[len(parts)-1]
+		upper := strings.ToUpper(strings.ReplaceAll(fname, "-", "_"))
+		bindings[upper+"_ARN"] = arn
+		bindings["LAMBDA_"+upper+"_ARN"] = arn
+	}
+}
+
+// inferIntegrationBindings generates dynamic placeholder bindings for API Gateway integrations.
+func inferIntegrationBindings(integrationID string, bindings map[string]string) {
+	if integrationID == "" {
+		return
+	}
+	bindings["INTEGRATION_ID"] = integrationID
+	bindings["APIGW_INTEGRATION_ID"] = integrationID
+}
+
+// inferRouteBindings generates dynamic bindings for API Gateway routes.
+func inferRouteBindings(routeID string, bindings map[string]string) {
+	if routeID == "" {
+		return
+	}
+	bindings["ROUTE_ID"] = routeID
+	bindings["APIGW_ROUTE_ID"] = routeID
+}
+
+// inferStageBindings generates dynamic bindings for API Gateway stages.
+func inferStageBindings(stageName string, bindings map[string]string) {
+	if stageName == "" {
+		return
+	}
+	bindings["STAGE_NAME"] = stageName
+	bindings["APIGW_STAGE"] = stageName
+}
+
+// inferRDSBindings generates dynamic bindings for RDS instances.
+func inferRDSBindings(id, endpoint, arn string, bindings map[string]string) {
+	if id != "" {
+		bindings["RDS_INSTANCE_ID"] = id
+		bindings["DB_INSTANCE_ID"] = id
+		bindings["RDS_ID"] = id
+		upper := strings.ToUpper(strings.ReplaceAll(id, "-", "_"))
+		bindings["RDS_"+upper] = id
+	}
+	if endpoint != "" {
+		bindings["RDS_ENDPOINT"] = endpoint
+		bindings["DB_ENDPOINT"] = endpoint
+		bindings["DB_HOST"] = endpoint
+	}
+	if arn != "" {
+		bindings["RDS_ARN"] = arn
+		bindings["DB_INSTANCE_ARN"] = arn
+	}
+}
+
+// inferRDSClusterBindings generates dynamic bindings for RDS clusters (Aurora).
+func inferRDSClusterBindings(id, endpoint, arn string, bindings map[string]string) {
+	if id != "" {
+		bindings["RDS_CLUSTER_ID"] = id
+		bindings["DB_CLUSTER_ID"] = id
+		bindings["CLUSTER_ID"] = id
+	}
+	if endpoint != "" {
+		bindings["RDS_CLUSTER_ENDPOINT"] = endpoint
+		bindings["CLUSTER_ENDPOINT"] = endpoint
+		bindings["DB_HOST"] = endpoint
+	}
+	if arn != "" {
+		bindings["RDS_CLUSTER_ARN"] = arn
+		bindings["CLUSTER_ARN"] = arn
+	}
+}
+
+// inferDBSubnetGroupBindings generates dynamic bindings for RDS subnet groups.
+func inferDBSubnetGroupBindings(name, arn string, bindings map[string]string) {
+	if name != "" {
+		bindings["DB_SUBNET_GROUP"] = name
+		bindings["RDS_SUBNET_GROUP"] = name
+		bindings["DB_SUBNET_GROUP_NAME"] = name
+		upper := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+		bindings["DB_SUBNET_GROUP_"+upper] = name
+	}
+	if arn != "" {
+		bindings["DB_SUBNET_GROUP_ARN"] = arn
+	}
+}
+
+// inferECSClusterBindings generates dynamic bindings for ECS clusters.
+func inferECSClusterBindings(name, arn string, bindings map[string]string) {
+	if name != "" {
+		bindings["ECS_CLUSTER"] = name
+		bindings["ECS_CLUSTER_NAME"] = name
+		bindings["CLUSTER_NAME"] = name
+	}
+	if arn != "" {
+		bindings["ECS_CLUSTER_ARN"] = arn
+	}
+}
+
+// inferECSServiceBindings generates dynamic bindings for ECS services.
+func inferECSServiceBindings(name, arn string, bindings map[string]string) {
+	if name != "" {
+		bindings["ECS_SERVICE"] = name
+		bindings["ECS_SERVICE_NAME"] = name
+		bindings["SERVICE_NAME"] = name
+	}
+	if arn != "" {
+		bindings["ECS_SERVICE_ARN"] = arn
+		bindings["SERVICE_ARN"] = arn
+	}
+}
+
+// inferTaskDefBindings generates dynamic bindings for ECS task definitions.
+func inferTaskDefBindings(arn string, bindings map[string]string) {
+	if arn == "" {
+		return
+	}
+	bindings["TASK_DEF_ARN"] = arn
+	bindings["TASK_DEFINITION_ARN"] = arn
+	bindings["ECS_TASK_DEF_ARN"] = arn
+
+	// Extract family:revision from ARN
+	parts := strings.Split(arn, "/")
+	if len(parts) >= 2 {
+		familyRev := parts[len(parts)-1]
+		bindings["TASK_DEFINITION"] = familyRev
+		if idx := strings.LastIndex(familyRev, ":"); idx > 0 {
+			bindings["TASK_FAMILY"] = familyRev[:idx]
+		}
+	}
+}
+
+// inferECRBindings generates dynamic bindings for ECR repositories.
+func inferECRBindings(name, uri, arn string, bindings map[string]string) {
+	if name != "" {
+		bindings["ECR_REPO"] = name
+		bindings["ECR_REPO_NAME"] = name
+		bindings["REPO_NAME"] = name
+	}
+	if uri != "" {
+		bindings["ECR_URI"] = uri
+		bindings["ECR_REPO_URI"] = uri
+		bindings["REPOSITORY_URI"] = uri
+	}
+	if arn != "" {
+		bindings["ECR_ARN"] = arn
+	}
+}
+
+// inferSNSBindings generates dynamic bindings for SNS topics.
+func inferSNSBindings(arn string, bindings map[string]string) {
+	if arn == "" {
+		return
+	}
+	bindings["SNS_TOPIC_ARN"] = arn
+	bindings["TOPIC_ARN"] = arn
+	bindings["SNS_ARN"] = arn
+
+	// Extract topic name from ARN
+	parts := strings.Split(arn, ":")
+	if len(parts) >= 6 {
+		name := parts[len(parts)-1]
+		bindings["SNS_TOPIC_NAME"] = name
+		bindings["TOPIC_NAME"] = name
+		upper := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+		bindings["SNS_"+upper+"_ARN"] = arn
+	}
+}
+
+// inferSQSBindings generates dynamic bindings for SQS queues.
+func inferSQSBindings(url string, bindings map[string]string) {
+	if url == "" {
+		return
+	}
+	bindings["SQS_QUEUE_URL"] = url
+	bindings["QUEUE_URL"] = url
+	bindings["SQS_URL"] = url
+
+	// Extract queue name from URL
+	parts := strings.Split(url, "/")
+	if len(parts) >= 1 {
+		name := parts[len(parts)-1]
+		bindings["SQS_QUEUE_NAME"] = name
+		bindings["QUEUE_NAME"] = name
+		upper := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+		bindings["SQS_"+upper+"_URL"] = url
+	}
+}
+
+// inferDynamoDBBindings generates dynamic bindings for DynamoDB tables.
+func inferDynamoDBBindings(name, arn string, bindings map[string]string) {
+	if name != "" {
+		bindings["DYNAMODB_TABLE"] = name
+		bindings["TABLE_NAME"] = name
+		bindings["DDB_TABLE"] = name
+		upper := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+		bindings["DYNAMODB_"+upper] = name
+	}
+	if arn != "" {
+		bindings["DYNAMODB_TABLE_ARN"] = arn
+		bindings["TABLE_ARN"] = arn
+	}
+}
+
+// inferSecretsBindings generates dynamic bindings for Secrets Manager secrets.
+func inferSecretsBindings(name, arn string, bindings map[string]string) {
+	if name != "" {
+		bindings["SECRET_NAME"] = name
+		bindings["SECRETS_NAME"] = name
+		upper := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+		bindings["SECRET_"+upper] = name
+	}
+	if arn != "" {
+		bindings["SECRET_ARN"] = arn
+		bindings["SECRETS_ARN"] = arn
+	}
+}
+
+// inferS3Bindings generates dynamic bindings for S3 buckets.
+func inferS3Bindings(bucket string, bindings map[string]string) {
+	if bucket == "" {
+		return
+	}
+	bindings["S3_BUCKET"] = bucket
+	bindings["BUCKET_NAME"] = bucket
+	bindings["S3_BUCKET_NAME"] = bucket
+	upper := strings.ToUpper(strings.ReplaceAll(bucket, "-", "_"))
+	bindings["S3_"+upper] = bucket
+}
+
+// inferElastiCacheBindings generates dynamic bindings for ElastiCache clusters.
+func inferElastiCacheBindings(id, arn string, bindings map[string]string) {
+	if id != "" {
+		bindings["CACHE_CLUSTER_ID"] = id
+		bindings["ELASTICACHE_ID"] = id
+		bindings["REDIS_ID"] = id
+	}
+	if arn != "" {
+		bindings["CACHE_CLUSTER_ARN"] = arn
+		bindings["ELASTICACHE_ARN"] = arn
+	}
+}
+
+// inferElastiCacheReplicationBindings generates dynamic bindings for ElastiCache replication groups.
+func inferElastiCacheReplicationBindings(id, endpoint, arn string, bindings map[string]string) {
+	if id != "" {
+		bindings["REPLICATION_GROUP_ID"] = id
+		bindings["REDIS_CLUSTER_ID"] = id
+	}
+	if endpoint != "" {
+		bindings["REDIS_ENDPOINT"] = endpoint
+		bindings["CACHE_ENDPOINT"] = endpoint
+	}
+	if arn != "" {
+		bindings["REPLICATION_GROUP_ARN"] = arn
+	}
+}
+
+// inferEventBridgeBindings generates dynamic bindings for EventBridge rules.
+func inferEventBridgeBindings(arn string, bindings map[string]string) {
+	if arn == "" {
+		return
+	}
+	bindings["EVENTBRIDGE_RULE_ARN"] = arn
+	bindings["EVENTS_RULE_ARN"] = arn
+	bindings["RULE_ARN"] = arn
+
+	// Extract rule name from ARN
+	parts := strings.Split(arn, "/")
+	if len(parts) >= 2 {
+		name := parts[len(parts)-1]
+		bindings["RULE_NAME"] = name
+		bindings["EVENT_RULE_NAME"] = name
+	}
+}
+
+// inferStepFunctionBindings generates dynamic bindings for Step Functions state machines.
+func inferStepFunctionBindings(arn string, bindings map[string]string) {
+	if arn == "" {
+		return
+	}
+	bindings["STATE_MACHINE_ARN"] = arn
+	bindings["SFN_ARN"] = arn
+	bindings["STEP_FUNCTION_ARN"] = arn
+
+	// Extract name from ARN
+	parts := strings.Split(arn, ":")
+	if len(parts) >= 7 {
+		name := parts[len(parts)-1]
+		bindings["STATE_MACHINE_NAME"] = name
+		upper := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+		bindings["SFN_"+upper+"_ARN"] = arn
+	}
+}
+
+// inferCognitoPoolBindings generates dynamic bindings for Cognito user pools.
+func inferCognitoPoolBindings(id, arn string, bindings map[string]string) {
+	if id != "" {
+		bindings["USER_POOL_ID"] = id
+		bindings["COGNITO_POOL_ID"] = id
+		bindings["COGNITO_USER_POOL_ID"] = id
+	}
+	if arn != "" {
+		bindings["USER_POOL_ARN"] = arn
+		bindings["COGNITO_POOL_ARN"] = arn
+	}
+}
+
+// inferCognitoClientBindings generates dynamic bindings for Cognito user pool clients.
+func inferCognitoClientBindings(clientID string, bindings map[string]string) {
+	if clientID == "" {
+		return
+	}
+	bindings["USER_POOL_CLIENT_ID"] = clientID
+	bindings["COGNITO_CLIENT_ID"] = clientID
+	bindings["CLIENT_ID"] = clientID
+}
+
+// inferLogGroupBindings generates dynamic bindings for CloudWatch log groups.
+func inferLogGroupBindings(name string, bindings map[string]string) {
+	if name == "" {
+		return
+	}
+	bindings["LOG_GROUP_NAME"] = name
+	bindings["LOG_GROUP"] = name
+	bindings["CW_LOG_GROUP"] = name
+
+	// Extract key component for dynamic naming
+	parts := strings.Split(strings.TrimPrefix(name, "/aws/"), "/")
+	if len(parts) >= 1 {
+		upper := strings.ToUpper(strings.ReplaceAll(parts[len(parts)-1], "-", "_"))
+		bindings["LOG_GROUP_"+upper] = name
+	}
 }
