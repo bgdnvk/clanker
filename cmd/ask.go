@@ -96,11 +96,7 @@ Examples:
 			case "gemini-api":
 				apiKey = resolveGeminiAPIKey(geminiKey)
 			case "openai":
-				if openaiKey != "" {
-					apiKey = openaiKey
-				} else {
-					apiKey = viper.GetString("ai.providers.openai.api_key")
-				}
+				apiKey = resolveOpenAIKey(openaiKey)
 			case "anthropic":
 				if anthropicKey != "" {
 					apiKey = anthropicKey
@@ -463,12 +459,7 @@ Format as a professional compliance table suitable for government security docum
 			case "gemini-api":
 				apiKey = resolveGeminiAPIKey(geminiKey)
 			case "openai":
-				// Get OpenAI API key from flag or config
-				if openaiKey != "" {
-					apiKey = openaiKey
-				} else {
-					apiKey = viper.GetString("ai.providers.openai.api_key")
-				}
+				apiKey = resolveOpenAIKey(openaiKey)
 			case "anthropic":
 				// Get Anthropic API key from flag or config
 				if anthropicKey != "" {
@@ -510,12 +501,7 @@ Format as a professional compliance table suitable for government security docum
 			case "gemini-api":
 				apiKey = resolveGeminiAPIKey(geminiKey)
 			case "openai":
-				// Get OpenAI API key from flag or config
-				if openaiKey != "" {
-					apiKey = openaiKey
-				} else {
-					apiKey = viper.GetString("ai.providers.openai.api_key")
-				}
+				apiKey = resolveOpenAIKey(openaiKey)
 			case "anthropic":
 				// Get Anthropic API key from flag or config
 				if anthropicKey != "" {
@@ -604,6 +590,24 @@ func resolveGeminiAPIKey(flagValue string) string {
 		}
 	}
 	if envVal := os.Getenv("GEMINI_API_KEY"); envVal != "" {
+		return envVal
+	}
+	return ""
+}
+
+func resolveOpenAIKey(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if key := viper.GetString("ai.providers.openai.api_key"); key != "" {
+		return key
+	}
+	if envName := viper.GetString("ai.providers.openai.api_key_env"); envName != "" {
+		if envVal := os.Getenv(envName); envVal != "" {
+			return envVal
+		}
+	}
+	if envVal := os.Getenv("OPENAI_API_KEY"); envVal != "" {
 		return envVal
 	}
 	return ""
