@@ -60,7 +60,7 @@ func (c *Client) findLLMCallProfile() string {
 	}
 
 	// Ultimate fallback
-	return "bedrock"
+	return "openai"
 }
 
 // FindInfraAnalysisProfile finds the AWS profile from infrastructure config
