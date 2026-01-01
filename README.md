@@ -38,6 +38,15 @@ export OPENAI_API_KEY="..."
 export GEMINI_API_KEY="..."
 ```
 
+### No config file defaults
+
+If you run without `~/.clanker.yaml`:
+
+-   Default provider: `openai` (unless you pass `--ai-profile`).
+-   OpenAI key order: `--openai-key` → `OPENAI_API_KEY` (also supports `ai.providers.openai.api_key` and `ai.providers.openai.api_key_env` if config exists).
+-   Gemini API key order (when using `--ai-profile gemini-api`): `--gemini-key` → `GEMINI_API_KEY` (also supports `ai.providers.gemini-api.api_key` and `ai.providers.gemini-api.api_key_env` if config exists).
+-   Model: `gemini`/`gemini-api` defaults to `gemini-3-pro-preview`; `openai` requires `ai.providers.openai.model` (run `clanker config init` to generate a default config).
+
 ### AWS
 
 Clanker uses your local AWS CLI profiles (not raw access keys in the clanker config).
