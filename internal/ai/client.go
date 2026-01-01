@@ -589,13 +589,22 @@ func (c *Client) askBedrock(ctx context.Context, prompt string) (string, error) 
 	// Base64 encode to pass as inline body; ensures ASCII-only
 	encodedBody := base64.StdEncoding.EncodeToString(requestBody)
 
+	// Create a cross-platform temporary file for the response
+	tmpFile, err := os.CreateTemp("", "bedrock-response-*.json")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpFilePath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpFilePath)
+
 	// Call AWS CLI with LLM profile from config (for Bedrock API access)
 	cmd := exec.CommandContext(ctx, "aws", "bedrock-runtime", "invoke-model",
 		"--model-id", profileLLMCall.Model,
 		"--body", encodedBody,
 		"--profile", profileLLMCall.AWSProfile,
 		"--region", profileLLMCall.Region,
-		"/tmp/bedrock-response.json")
+		tmpFilePath)
 
 	cmd.Env = append(os.Environ(), fmt.Sprintf("AWS_PROFILE=%s", profileLLMCall.AWSProfile))
 
@@ -605,7 +614,7 @@ func (c *Client) askBedrock(ctx context.Context, prompt string) (string, error) 
 	}
 
 	// Read the response file
-	responseData, err := os.ReadFile("/tmp/bedrock-response.json")
+	responseData, err := os.ReadFile(tmpFilePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read response file: %w", err)
 	}
