@@ -509,7 +509,7 @@ func (c *Client) AskOriginal(ctx context.Context, question, awsContext, codeCont
 	switch c.provider {
 	case "bedrock", "claude":
 		return c.askBedrock(ctx, prompt)
-	case "gemini":
+	case "gemini", "gemini-api":
 		return c.askGemini(ctx, prompt)
 	case "anthropic":
 		return c.askAnthropic(ctx, prompt)
