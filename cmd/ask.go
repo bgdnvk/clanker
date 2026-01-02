@@ -13,6 +13,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/ai"
 	"github.com/bgdnvk/clanker/internal/aws"
 	ghclient "github.com/bgdnvk/clanker/internal/github"
+	"github.com/bgdnvk/clanker/internal/k8s"
 	"github.com/bgdnvk/clanker/internal/maker"
 	tfclient "github.com/bgdnvk/clanker/internal/terraform"
 	"github.com/spf13/cobra"
@@ -290,16 +291,22 @@ Format as a professional compliance table suitable for government security docum
 		if !includeAWS && !includeGitHub && !includeTerraform {
 			var inferredTerraform bool
 			var inferredCode bool
-			includeAWS, inferredCode, includeGitHub, inferredTerraform = inferContext(question)
+			var inferredK8s bool
+			includeAWS, inferredCode, includeGitHub, inferredTerraform, inferredK8s = inferContext(question)
 			_ = inferredCode
 
 			if debug {
-				fmt.Printf("Inferred context: AWS=%v, GitHub=%v, Terraform=%v\n", includeAWS, includeGitHub, inferredTerraform)
+				fmt.Printf("Inferred context: AWS=%v, GitHub=%v, Terraform=%v, K8s=%v\n", includeAWS, includeGitHub, inferredTerraform, inferredK8s)
 			}
 
 			// Handle inferred Terraform context
 			if inferredTerraform {
 				includeTerraform = true
+			}
+
+			// Handle K8s queries by delegating to K8s agent
+			if inferredK8s {
+				return handleK8sQuery(context.Background(), question, debug, viper.GetString("kubernetes.kubeconfig"))
 			}
 		}
 
@@ -637,9 +644,9 @@ func resolveGeminiModel(provider, flagValue string) string {
 	return model
 }
 
-// inferContext tries to determine if the question is about AWS, GitHub, or Terraform.
+// inferContext tries to determine if the question is about AWS, GitHub, Terraform, or Kubernetes.
 // Code scanning is disabled, so this never infers code context.
-func inferContext(question string) (aws bool, code bool, github bool, terraform bool) {
+func inferContext(question string) (aws bool, code bool, github bool, terraform bool, k8s bool) {
 	awsKeywords := []string{
 		// Core services
 		"ec2", "lambda", "rds", "s3", "ecs", "cloudwatch", "logs", "batch", "sqs", "sns", "dynamodb", "elasticache", "elb", "alb", "nlb", "route53", "cloudfront", "api-gateway", "cognito", "iam", "vpc", "subnet", "security-group", "nacl", "nat", "igw", "vpn", "direct-connect",
@@ -681,6 +688,27 @@ func inferContext(question string) (aws bool, code bool, github bool, terraform 
 		"dev", "stage", "staging", "prod", "production", "qa", "environment", "workspace",
 	}
 
+	k8sKeywords := []string{
+		// Core K8s terms
+		"kubernetes", "k8s", "kubectl", "kube",
+		// Workloads
+		"pod", "pods", "deployment", "deployments", "replicaset", "statefulset",
+		"daemonset", "job", "cronjob",
+		// Networking
+		"service", "services", "ingress", "loadbalancer", "nodeport", "clusterip",
+		"networkpolicy", "endpoint",
+		// Storage
+		"pv", "pvc", "persistentvolume", "storageclass", "configmap", "secret",
+		// Cluster
+		"node", "nodes", "namespace", "cluster", "kubeconfig", "context",
+		// Tools
+		"helm", "chart", "release", "tiller",
+		// Providers
+		"eks", "kubeadm", "kops", "k3s", "minikube",
+		// Operations
+		"rollout", "scale", "drain", "cordon", "taint",
+	}
+
 	questionLower := strings.ToLower(question)
 
 	for _, keyword := range awsKeywords {
@@ -704,12 +732,71 @@ func inferContext(question string) (aws bool, code bool, github bool, terraform 
 		}
 	}
 
+	for _, keyword := range k8sKeywords {
+		if contains(questionLower, keyword) {
+			k8s = true
+			break
+		}
+	}
+
 	// If no specific context detected, include AWS + GitHub by default.
-	if !aws && !github && !terraform {
+	if !aws && !github && !terraform && !k8s {
 		aws, github = true, true
 	}
 
-	return aws, code, github, terraform
+	return aws, code, github, terraform, k8s
+}
+
+// handleK8sQuery delegates a Kubernetes query to the K8s agent
+func handleK8sQuery(ctx context.Context, question string, debug bool, kubeconfig string) error {
+	if debug {
+		fmt.Println("Delegating query to K8s agent...")
+	}
+
+	// Create K8s agent
+	k8sAgent := k8s.NewAgent(debug)
+
+	// Configure query options
+	opts := k8s.QueryOptions{
+		ClusterName: viper.GetString("kubernetes.default_cluster"),
+		ClusterType: k8s.ClusterType(viper.GetString("kubernetes.default_type")),
+		Namespace:   viper.GetString("kubernetes.default_namespace"),
+		Kubeconfig:  kubeconfig,
+	}
+
+	if opts.Namespace == "" {
+		opts.Namespace = "default"
+	}
+	if opts.ClusterType == "" {
+		opts.ClusterType = k8s.ClusterTypeExisting
+	}
+
+	// Handle the query
+	response, err := k8sAgent.HandleQuery(ctx, question, opts)
+	if err != nil {
+		return fmt.Errorf("K8s agent error: %w", err)
+	}
+
+	// Output based on response type
+	switch response.Type {
+	case k8s.ResponseTypePlan:
+		// Output plan for user verification
+		planJSON, err := json.MarshalIndent(response.Plan, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to format plan: %w", err)
+		}
+		fmt.Println(string(planJSON))
+		fmt.Println("\n// To apply this plan, run:")
+		fmt.Println("// clanker ask --k8s-apply --plan-file <save-above-to-file.json>")
+
+	case k8s.ResponseTypeResult:
+		fmt.Println(response.Result)
+
+	case k8s.ResponseTypeError:
+		return response.Error
+	}
+
+	return nil
 }
 
 func contains(s, substr string) bool {
