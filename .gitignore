@@ -72,3 +72,8 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Local documentation and task tracking
+CLAUDE.md
+TODO.md
+PLANNING.md
