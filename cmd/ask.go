@@ -753,8 +753,36 @@ func handleK8sQuery(ctx context.Context, question string, debug bool, kubeconfig
 		fmt.Println("Delegating query to K8s agent...")
 	}
 
-	// Create K8s agent
-	k8sAgent := k8s.NewAgent(debug)
+	// Create K8s agent with AWS profile and region for EKS support
+	// Resolve profile using same pattern as AWS client
+	awsProfile := ""
+	defaultEnv := viper.GetString("infra.default_environment")
+	if defaultEnv == "" {
+		defaultEnv = "dev"
+	}
+	awsProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+	if awsProfile == "" {
+		awsProfile = viper.GetString("aws.default_profile")
+	}
+	if awsProfile == "" {
+		awsProfile = "default"
+	}
+
+	// Resolve region
+	awsRegion := viper.GetString(fmt.Sprintf("infra.aws.environments.%s.region", defaultEnv))
+	if awsRegion == "" {
+		awsRegion = viper.GetString("aws.default_region")
+	}
+	if awsRegion == "" {
+		awsRegion = "us-east-1"
+	}
+
+	k8sAgent := k8s.NewAgentWithOptions(k8s.AgentOptions{
+		Debug:      debug,
+		AWSProfile: awsProfile,
+		Region:     awsRegion,
+		Kubeconfig: kubeconfig,
+	})
 
 	// Configure query options
 	opts := k8s.QueryOptions{

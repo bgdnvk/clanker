@@ -237,12 +237,22 @@ systemctl enable kubelet
 }
 
 func kubeadmInitScript(config BootstrapConfig) string {
+	// Get the public IP dynamically for TLS SAN
 	return fmt.Sprintf(`
+# Get public IP for TLS certificate SAN
+PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4 || echo "")
+PRIVATE_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4 || hostname -I | awk '{print $1}')
+
 kubeadm init \
   --pod-network-cidr=%s \
   --service-cidr=%s \
   --kubernetes-version=v%s.0 \
+  --apiserver-cert-extra-sans=${PUBLIC_IP},${PRIVATE_IP} \
   --upload-certs
+
+# Print the join command for easy parsing
+echo "=== JOIN COMMAND ==="
+kubeadm token create --print-join-command
 `, config.PodCIDR, config.ServiceCIDR, config.KubernetesVersion)
 }
 
@@ -279,17 +289,38 @@ func parseKubeadmInitOutput(output string) *KubeadmInitOutput {
 	result := &KubeadmInitOutput{}
 
 	lines := strings.Split(output, "\n")
+	foundMarker := false
+
 	for i, line := range lines {
-		if strings.Contains(line, "kubeadm join") {
+		// Look for our marker first
+		if strings.Contains(line, "=== JOIN COMMAND ===") {
+			foundMarker = true
+			continue
+		}
+
+		// After marker, look for the join command
+		if foundMarker && strings.Contains(line, "kubeadm join") {
+			joinCmd := strings.TrimSpace(line)
+			result = parseJoinCommand(joinCmd)
+			break
+		}
+
+		// Also handle the original kubeadm init output format
+		if !foundMarker && strings.Contains(line, "kubeadm join") {
 			// Join command spans multiple lines
 			joinCmd := strings.TrimSpace(line)
-			if i+1 < len(lines) && strings.Contains(lines[i+1], "--token") {
-				joinCmd += " " + strings.TrimSpace(lines[i+1])
+			// Remove backslash continuation
+			joinCmd = strings.TrimSuffix(joinCmd, "\\")
+			joinCmd = strings.TrimSpace(joinCmd)
+
+			for j := i + 1; j < len(lines) && j <= i+3; j++ {
+				nextLine := strings.TrimSpace(lines[j])
+				nextLine = strings.TrimSuffix(nextLine, "\\")
+				nextLine = strings.TrimSpace(nextLine)
+				if nextLine != "" && !strings.HasPrefix(nextLine, "#") {
+					joinCmd += " " + nextLine
+				}
 			}
-			if i+2 < len(lines) && strings.Contains(lines[i+2], "--discovery-token-ca-cert-hash") {
-				joinCmd += " " + strings.TrimSpace(lines[i+2])
-			}
-			result.JoinCommand = joinCmd
 			result = parseJoinCommand(joinCmd)
 			break
 		}

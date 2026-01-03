@@ -596,9 +596,10 @@ func (p *KubeadmProvider) GetCluster(ctx context.Context, clusterName string) (*
 		return nil, &ErrClusterNotFound{ClusterName: clusterName}
 	}
 
-	// Get instance details
+	// Get instance details - use filter instead of --instance-ids to avoid formatting issues
 	output, err := p.runAWS(ctx, "ec2", "describe-instances",
-		"--instance-ids", strings.Join(instances, " "),
+		"--filters",
+		fmt.Sprintf("Name=instance-id,Values=%s", strings.Join(instances, ",")),
 		"--output", "json")
 	if err != nil {
 		return nil, fmt.Errorf("failed to describe instances: %w", err)

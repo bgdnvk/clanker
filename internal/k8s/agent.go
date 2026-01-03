@@ -171,6 +171,11 @@ func (a *Agent) RegisterClusterProvider(provider cluster.Provider) {
 	a.clusterMgr.RegisterProvider(provider)
 }
 
+// GetClusterProvider returns a cluster provider by type
+func (a *Agent) GetClusterProvider(clusterType ClusterType) (cluster.Provider, bool) {
+	return a.clusterMgr.GetProvider(clusterType)
+}
+
 // HandleQuery processes a K8s related query delegated from the main agent
 func (a *Agent) HandleQuery(ctx context.Context, query string, opts QueryOptions) (*K8sResponse, error) {
 	if a.debug {
