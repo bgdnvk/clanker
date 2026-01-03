@@ -16,17 +16,48 @@ type Agent struct {
 	aiDecisionFn AIDecisionFunc
 }
 
+// AgentOptions contains options for creating a K8s agent
+type AgentOptions struct {
+	Debug      bool
+	AWSProfile string
+	Region     string
+	Kubeconfig string
+}
+
 // NewAgent creates a K8s agent for handling delegated K8s queries
 func NewAgent(debug bool) *Agent {
-	mgr := cluster.NewManager(debug)
+	return NewAgentWithOptions(AgentOptions{Debug: debug})
+}
+
+// NewAgentWithOptions creates a K8s agent with full options
+func NewAgentWithOptions(opts AgentOptions) *Agent {
+	mgr := cluster.NewManager(opts.Debug)
 
 	// Register the existing cluster provider by default
-	mgr.RegisterProvider(cluster.NewExistingProvider("", debug))
+	mgr.RegisterProvider(cluster.NewExistingProvider(opts.Kubeconfig, opts.Debug))
+
+	// Register EKS provider if AWS profile or region is specified
+	if opts.AWSProfile != "" || opts.Region != "" {
+		mgr.RegisterProvider(cluster.NewEKSProvider(cluster.EKSProviderOptions{
+			AWSProfile: opts.AWSProfile,
+			Region:     opts.Region,
+			Debug:      opts.Debug,
+		}))
+	}
 
 	return &Agent{
 		clusterMgr: mgr,
-		debug:      debug,
+		debug:      opts.Debug,
 	}
+}
+
+// RegisterEKSProvider registers the EKS provider with the agent
+func (a *Agent) RegisterEKSProvider(profile, region string) {
+	a.clusterMgr.RegisterProvider(cluster.NewEKSProvider(cluster.EKSProviderOptions{
+		AWSProfile: profile,
+		Region:     region,
+		Debug:      a.debug,
+	}))
 }
 
 // SetAIDecisionFunction sets the function used for AI based decisions
@@ -364,6 +395,27 @@ func (a *Agent) executeReadOnly(ctx context.Context, query string, analysis Quer
 			}
 		}
 
+	case strings.Contains(queryLower, "eks") && (strings.Contains(queryLower, "list") || strings.Contains(queryLower, "cluster")):
+		clusters, err := a.ListEKSClusters(ctx)
+		if err != nil {
+			return nil, err
+		}
+		result.WriteString("EKS Clusters:\n")
+		if len(clusters) == 0 {
+			result.WriteString("  No EKS clusters found in this region\n")
+		} else {
+			for _, c := range clusters {
+				result.WriteString(fmt.Sprintf("  %s (%s) - %s [K8s %s]\n",
+					c.Name, c.Status, c.Region, c.KubernetesVersion))
+				if c.Endpoint != "" {
+					result.WriteString(fmt.Sprintf("    Endpoint: %s\n", c.Endpoint))
+				}
+				if len(c.WorkerNodes) > 0 {
+					result.WriteString(fmt.Sprintf("    Worker Nodes: %d\n", len(c.WorkerNodes)))
+				}
+			}
+		}
+
 	case strings.Contains(queryLower, "health") || strings.Contains(queryLower, "status"):
 		health, err := a.clusterMgr.HealthCheck(ctx, opts.ClusterType, opts.ClusterName)
 		if err != nil {
@@ -581,6 +633,69 @@ func extractPodName(query string) string {
 		}
 	}
 	return ""
+}
+
+// ListEKSClusters lists all EKS clusters
+func (a *Agent) ListEKSClusters(ctx context.Context) ([]ClusterInfo, error) {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeEKS)
+	if !ok {
+		return nil, fmt.Errorf("EKS provider not registered; call RegisterEKSProvider first")
+	}
+	return provider.ListClusters(ctx)
+}
+
+// GetEKSCluster gets information about a specific EKS cluster
+func (a *Agent) GetEKSCluster(ctx context.Context, clusterName string) (*ClusterInfo, error) {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeEKS)
+	if !ok {
+		return nil, fmt.Errorf("EKS provider not registered; call RegisterEKSProvider first")
+	}
+	return provider.GetCluster(ctx, clusterName)
+}
+
+// CreateEKSCluster creates a new EKS cluster
+func (a *Agent) CreateEKSCluster(ctx context.Context, opts cluster.CreateOptions) (*ClusterInfo, error) {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeEKS)
+	if !ok {
+		return nil, fmt.Errorf("EKS provider not registered; call RegisterEKSProvider first")
+	}
+	return provider.Create(ctx, opts)
+}
+
+// DeleteEKSCluster deletes an EKS cluster
+func (a *Agent) DeleteEKSCluster(ctx context.Context, clusterName string) error {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeEKS)
+	if !ok {
+		return fmt.Errorf("EKS provider not registered; call RegisterEKSProvider first")
+	}
+	return provider.Delete(ctx, clusterName)
+}
+
+// ScaleEKSCluster scales an EKS cluster node group
+func (a *Agent) ScaleEKSCluster(ctx context.Context, clusterName string, opts cluster.ScaleOptions) error {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeEKS)
+	if !ok {
+		return fmt.Errorf("EKS provider not registered; call RegisterEKSProvider first")
+	}
+	return provider.Scale(ctx, clusterName, opts)
+}
+
+// GetEKSKubeconfig updates kubeconfig for an EKS cluster
+func (a *Agent) GetEKSKubeconfig(ctx context.Context, clusterName string) (string, error) {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeEKS)
+	if !ok {
+		return "", fmt.Errorf("EKS provider not registered; call RegisterEKSProvider first")
+	}
+	return provider.GetKubeconfig(ctx, clusterName)
+}
+
+// CheckEKSHealth checks the health of an EKS cluster
+func (a *Agent) CheckEKSHealth(ctx context.Context, clusterName string) (*HealthStatus, error) {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeEKS)
+	if !ok {
+		return nil, fmt.Errorf("EKS provider not registered; call RegisterEKSProvider first")
+	}
+	return provider.Health(ctx, clusterName)
 }
 
 // IsK8sQuery determines if a query is K8s related
