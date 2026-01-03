@@ -1,10 +1,114 @@
 package plan
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
 const CurrentPlanVersion = 1
+
+// MakerPlan represents a plan in AWS maker-compatible format
+type MakerPlan struct {
+	Version   int             `json:"version"`
+	CreatedAt time.Time       `json:"createdAt"`
+	Question  string          `json:"question"`
+	Summary   string          `json:"summary"`
+	Commands  []MakerCommand  `json:"commands"`
+	Notes     []string        `json:"notes,omitempty"`
+}
+
+// MakerCommand represents a command in AWS maker-compatible format
+type MakerCommand struct {
+	Args     []string          `json:"args"`
+	Reason   string            `json:"reason,omitempty"`
+	Produces map[string]string `json:"produces,omitempty"`
+}
+
+// ToMakerPlan converts a K8sPlan to AWS maker-compatible format
+func (p *K8sPlan) ToMakerPlan(question string) *MakerPlan {
+	mp := &MakerPlan{
+		Version:   p.Version,
+		CreatedAt: p.CreatedAt,
+		Question:  question,
+		Summary:   p.Summary,
+		Notes:     p.Notes,
+		Commands:  make([]MakerCommand, 0, len(p.Steps)),
+	}
+
+	for _, step := range p.Steps {
+		// Build the full command args
+		args := []string{step.Command}
+		args = append(args, step.Args...)
+
+		cmd := MakerCommand{
+			Args:     args,
+			Reason:   step.Reason,
+			Produces: step.Produces,
+		}
+
+		// Add description as reason if reason is empty
+		if cmd.Reason == "" && step.Description != "" {
+			cmd.Reason = step.Description
+		}
+
+		mp.Commands = append(mp.Commands, cmd)
+	}
+
+	return mp
+}
+
+// SavePlan saves the plan to a JSON file in ~/.clanker/plans/
+func (p *K8sPlan) SavePlan(question string) (string, error) {
+	// Create plans directory
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	plansDir := filepath.Join(home, ".clanker", "plans")
+	if err := os.MkdirAll(plansDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create plans directory: %w", err)
+	}
+
+	// Generate filename with timestamp
+	timestamp := time.Now().Format("20060102-150405")
+	filename := fmt.Sprintf("k8s-%s-%s.json", sanitizeFilename(p.ClusterName), timestamp)
+	planPath := filepath.Join(plansDir, filename)
+
+	// Convert to maker format
+	makerPlan := p.ToMakerPlan(question)
+
+	// Marshal to JSON
+	data, err := json.MarshalIndent(makerPlan, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal plan: %w", err)
+	}
+
+	// Write to file
+	if err := os.WriteFile(planPath, data, 0644); err != nil {
+		return "", fmt.Errorf("failed to write plan file: %w", err)
+	}
+
+	return planPath, nil
+}
+
+// sanitizeFilename removes or replaces characters that aren't safe for filenames
+func sanitizeFilename(name string) string {
+	name = strings.ReplaceAll(name, "/", "-")
+	name = strings.ReplaceAll(name, "\\", "-")
+	name = strings.ReplaceAll(name, ":", "-")
+	name = strings.ReplaceAll(name, "*", "-")
+	name = strings.ReplaceAll(name, "?", "-")
+	name = strings.ReplaceAll(name, "\"", "-")
+	name = strings.ReplaceAll(name, "<", "-")
+	name = strings.ReplaceAll(name, ">", "-")
+	name = strings.ReplaceAll(name, "|", "-")
+	return name
+}
 
 // K8sPlan represents an execution plan for K8s operations
 type K8sPlan struct {
