@@ -61,6 +61,29 @@ func (a *Agent) RegisterEKSProvider(profile, region string) {
 	}))
 }
 
+// RegisterKubeadmProvider registers the kubeadm provider with the agent
+func (a *Agent) RegisterKubeadmProvider(opts KubeadmProviderOptions) {
+	a.clusterMgr.RegisterProvider(cluster.NewKubeadmProvider(cluster.KubeadmProviderOptions{
+		AWSProfile:  opts.AWSProfile,
+		Region:      opts.Region,
+		VPCID:       opts.VPCID,
+		SubnetID:    opts.SubnetID,
+		KeyPairName: opts.KeyPairName,
+		SSHKeyPath:  opts.SSHKeyPath,
+		Debug:       a.debug,
+	}))
+}
+
+// KubeadmProviderOptions contains options for registering a kubeadm provider
+type KubeadmProviderOptions struct {
+	AWSProfile  string
+	Region      string
+	VPCID       string
+	SubnetID    string
+	KeyPairName string
+	SSHKeyPath  string
+}
+
 // SetAIDecisionFunction sets the function used for AI based decisions
 func (a *Agent) SetAIDecisionFunction(fn AIDecisionFunc) {
 	a.aiDecisionFn = fn
