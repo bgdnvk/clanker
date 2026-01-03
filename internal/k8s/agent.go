@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/bgdnvk/clanker/internal/cli"
 	"github.com/bgdnvk/clanker/internal/k8s/cluster"
 )
 
@@ -68,6 +69,78 @@ func (a *Agent) SetAIDecisionFunction(fn AIDecisionFunc) {
 // SetClient sets the kubectl client
 func (a *Agent) SetClient(client *Client) {
 	a.client = client
+}
+
+// EnsureDependencies checks and optionally installs missing CLI tools
+func (a *Agent) EnsureDependencies(ctx context.Context) error {
+	checker := cli.NewDependencyChecker(a.debug)
+	missing := checker.CheckMissing()
+
+	if len(missing) == 0 {
+		if a.debug {
+			fmt.Println("[k8s-agent] All CLI dependencies are satisfied")
+		}
+		return nil
+	}
+
+	// Print current status
+	cli.PrintDependencyStatus(checker.CheckAll())
+
+	// Prompt user for permission to install
+	install, err := cli.PromptForInstall(missing)
+	if err != nil {
+		return fmt.Errorf("failed to prompt for installation: %w", err)
+	}
+
+	if !install {
+		// User declined, check if we can continue with what we have
+		hasKubectl := true
+		for _, dep := range missing {
+			if dep.Name == "kubectl" && dep.Required {
+				hasKubectl = false
+				break
+			}
+		}
+
+		if !hasKubectl {
+			return fmt.Errorf("kubectl is required but not installed")
+		}
+
+		fmt.Println("\nProceeding with available tools. Some features may be limited.")
+		return nil
+	}
+
+	// Install missing dependencies
+	installer := cli.NewInstaller(a.debug)
+	opts := cli.DefaultInstallOptions()
+
+	for _, dep := range missing {
+		cli.PrintInstallationStart(dep.Name)
+
+		if err := installer.Install(ctx, dep.Name, opts); err != nil {
+			cli.PrintInstallationError(dep.Name, err)
+			if dep.Required {
+				return fmt.Errorf("failed to install required dependency %s: %w", dep.Name, err)
+			}
+			// Continue with optional dependencies
+			continue
+		}
+
+		cli.PrintInstallationSuccess(dep.Name)
+	}
+
+	// Verify installations
+	fmt.Println("\nVerifying installations...")
+	finalStatus := checker.CheckAll()
+	cli.PrintDependencyStatus(finalStatus)
+
+	return nil
+}
+
+// CheckDependencies returns the status of CLI dependencies without installing
+func (a *Agent) CheckDependencies() []cli.DependencyStatus {
+	checker := cli.NewDependencyChecker(a.debug)
+	return checker.CheckAll()
 }
 
 // RegisterClusterProvider registers a cluster provider
