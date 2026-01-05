@@ -1,6 +1,31 @@
 package workloads
 
-import "time"
+import (
+	"context"
+	"time"
+)
+
+// K8sClient defines the interface for kubectl operations
+// This interface is satisfied by k8s.Client
+type K8sClient interface {
+	Run(ctx context.Context, args ...string) (string, error)
+	RunWithNamespace(ctx context.Context, namespace string, args ...string) (string, error)
+	GetJSON(ctx context.Context, resourceType, name, namespace string) ([]byte, error)
+	Describe(ctx context.Context, resourceType, name, namespace string) (string, error)
+	Scale(ctx context.Context, resourceType, name, namespace string, replicas int) (string, error)
+	Rollout(ctx context.Context, action, resourceType, name, namespace string) (string, error)
+	Delete(ctx context.Context, resourceType, name, namespace string) (string, error)
+	Logs(ctx context.Context, podName, namespace string, opts LogOptionsInternal) (string, error)
+}
+
+// LogOptionsInternal is used to avoid import cycles with k8s.LogOptions
+type LogOptionsInternal struct {
+	Container string
+	Follow    bool
+	Previous  bool
+	TailLines int
+	Since     string
+}
 
 // WorkloadType identifies the type of Kubernetes workload
 type WorkloadType string

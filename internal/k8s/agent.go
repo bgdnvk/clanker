@@ -7,12 +7,57 @@ import (
 
 	"github.com/bgdnvk/clanker/internal/cli"
 	"github.com/bgdnvk/clanker/internal/k8s/cluster"
+	"github.com/bgdnvk/clanker/internal/k8s/workloads"
 )
+
+// clientAdapter wraps Client to implement workloads.K8sClient interface
+type clientAdapter struct {
+	client *Client
+}
+
+func (a *clientAdapter) Run(ctx context.Context, args ...string) (string, error) {
+	return a.client.Run(ctx, args...)
+}
+
+func (a *clientAdapter) RunWithNamespace(ctx context.Context, namespace string, args ...string) (string, error) {
+	return a.client.RunWithNamespace(ctx, namespace, args...)
+}
+
+func (a *clientAdapter) GetJSON(ctx context.Context, resourceType, name, namespace string) ([]byte, error) {
+	return a.client.GetJSON(ctx, resourceType, name, namespace)
+}
+
+func (a *clientAdapter) Describe(ctx context.Context, resourceType, name, namespace string) (string, error) {
+	return a.client.Describe(ctx, resourceType, name, namespace)
+}
+
+func (a *clientAdapter) Scale(ctx context.Context, resourceType, name, namespace string, replicas int) (string, error) {
+	return a.client.Scale(ctx, resourceType, name, namespace, replicas)
+}
+
+func (a *clientAdapter) Rollout(ctx context.Context, action, resourceType, name, namespace string) (string, error) {
+	return a.client.Rollout(ctx, action, resourceType, name, namespace)
+}
+
+func (a *clientAdapter) Delete(ctx context.Context, resourceType, name, namespace string) (string, error) {
+	return a.client.Delete(ctx, resourceType, name, namespace)
+}
+
+func (a *clientAdapter) Logs(ctx context.Context, podName, namespace string, opts workloads.LogOptionsInternal) (string, error) {
+	return a.client.Logs(ctx, podName, namespace, LogOptions{
+		Container: opts.Container,
+		Follow:    opts.Follow,
+		Previous:  opts.Previous,
+		TailLines: opts.TailLines,
+		Since:     opts.Since,
+	})
+}
 
 // Agent is the main K8s orchestrator that receives delegated queries from the main agent
 type Agent struct {
 	client       *Client
 	clusterMgr   *cluster.Manager
+	workloads    *workloads.SubAgent
 	debug        bool
 	aiDecisionFn AIDecisionFunc
 }
@@ -187,12 +232,22 @@ func (a *Agent) HandleQuery(ctx context.Context, query string, opts QueryOptions
 		a.client = NewClient(opts.Kubeconfig, "", a.debug)
 	}
 
+	// Initialize workloads sub-agent if needed
+	if a.workloads == nil {
+		a.workloads = workloads.NewSubAgent(&clientAdapter{client: a.client}, a.debug)
+	}
+
 	// Analyze the query
 	analysis := a.analyzeQuery(query)
 
 	if a.debug {
 		fmt.Printf("[k8s-agent] analysis: readonly=%v, category=%s, resources=%v\n",
 			analysis.IsReadOnly, analysis.Category, analysis.Resources)
+	}
+
+	// Delegate workload queries to the workloads sub-agent
+	if analysis.Category == "workloads" {
+		return a.handleWorkloadQuery(ctx, query, analysis, opts)
 	}
 
 	// For read only operations, execute immediately
@@ -545,6 +600,80 @@ func (a *Agent) executeReadOnly(ctx context.Context, query string, analysis Quer
 		Result:        result.String(),
 		NeedsApproval: false,
 	}, nil
+}
+
+// handleWorkloadQuery delegates workload queries to the workloads sub-agent
+func (a *Agent) handleWorkloadQuery(ctx context.Context, query string, analysis QueryAnalysis, opts QueryOptions) (*K8sResponse, error) {
+	if a.debug {
+		fmt.Printf("[k8s-agent] delegating to workloads sub-agent\n")
+	}
+
+	// Convert QueryOptions to workloads.QueryOptions
+	workloadOpts := workloads.QueryOptions{
+		Namespace:     opts.Namespace,
+		AllNamespaces: analysis.ClusterScope,
+	}
+
+	response, err := a.workloads.HandleQuery(ctx, query, workloadOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert workloads.Response to K8sResponse
+	k8sResponse := &K8sResponse{
+		NeedsApproval: false,
+	}
+
+	switch response.Type {
+	case workloads.ResponseTypeResult:
+		k8sResponse.Type = ResponseTypeResult
+		if str, ok := response.Data.(string); ok {
+			k8sResponse.Result = str
+		} else {
+			k8sResponse.Result = response.Message
+		}
+	case workloads.ResponseTypePlan:
+		k8sResponse.Type = ResponseTypePlan
+		k8sResponse.NeedsApproval = true
+		k8sResponse.Summary = response.Message
+		// Convert workloads.WorkloadPlan to K8sPlan
+		if response.Plan != nil {
+			k8sResponse.Plan = convertWorkloadPlanToK8sPlan(response.Plan)
+		}
+	}
+
+	return k8sResponse, nil
+}
+
+// convertWorkloadPlanToK8sPlan converts a workloads plan to a K8s plan
+func convertWorkloadPlanToK8sPlan(wp *workloads.WorkloadPlan) *K8sPlan {
+	plan := &K8sPlan{
+		Version:  wp.Version,
+		Question: wp.Summary,
+		Summary:  wp.Summary,
+		Notes:    wp.Notes,
+		Bindings: make(map[string]string),
+	}
+
+	// Convert steps to kubectl commands
+	for _, step := range wp.Steps {
+		if step.Command == "kubectl" {
+			cmd := KubectlCmd{
+				Args:   step.Args,
+				Reason: step.Reason,
+			}
+			if step.WaitFor != nil {
+				cmd.WaitFor = &WaitCondition{
+					Resource:  step.WaitFor.Resource,
+					Condition: step.WaitFor.Condition,
+					Timeout:   step.WaitFor.Timeout,
+				}
+			}
+			plan.KubectlCmds = append(plan.KubectlCmds, cmd)
+		}
+	}
+
+	return plan
 }
 
 // generatePlan creates a K8s execution plan

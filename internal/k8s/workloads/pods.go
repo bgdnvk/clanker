@@ -5,18 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
-
-	"github.com/bgdnvk/clanker/internal/k8s"
 )
 
 // PodManager handles pod-specific operations
 type PodManager struct {
-	client *k8s.Client
+	client K8sClient
 	debug  bool
 }
 
 // NewPodManager creates a new pod manager
-func NewPodManager(client *k8s.Client, debug bool) *PodManager {
+func NewPodManager(client K8sClient, debug bool) *PodManager {
 	return &PodManager{
 		client: client,
 		debug:  debug,
@@ -70,7 +68,7 @@ func (m *PodManager) DescribePod(ctx context.Context, name, namespace string) (s
 
 // GetLogs retrieves logs from a pod
 func (m *PodManager) GetLogs(ctx context.Context, name, namespace string, opts LogOptions) (string, error) {
-	return m.client.Logs(ctx, name, namespace, k8s.LogOptions{
+	return m.client.Logs(ctx, name, namespace, LogOptionsInternal{
 		Container: opts.Container,
 		Follow:    opts.Follow,
 		Previous:  opts.Previous,
@@ -81,7 +79,7 @@ func (m *PodManager) GetLogs(ctx context.Context, name, namespace string, opts L
 
 // GetPreviousLogs retrieves logs from a previous container instance
 func (m *PodManager) GetPreviousLogs(ctx context.Context, name, namespace, container string, tailLines int) (string, error) {
-	return m.client.Logs(ctx, name, namespace, k8s.LogOptions{
+	return m.client.Logs(ctx, name, namespace, LogOptionsInternal{
 		Container: container,
 		Previous:  true,
 		TailLines: tailLines,

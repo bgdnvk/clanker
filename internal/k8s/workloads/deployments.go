@@ -5,18 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
-
-	"github.com/bgdnvk/clanker/internal/k8s"
 )
 
 // DeploymentManager handles deployment-specific operations
 type DeploymentManager struct {
-	client *k8s.Client
+	client K8sClient
 	debug  bool
 }
 
 // NewDeploymentManager creates a new deployment manager
-func NewDeploymentManager(client *k8s.Client, debug bool) *DeploymentManager {
+func NewDeploymentManager(client K8sClient, debug bool) *DeploymentManager {
 	return &DeploymentManager{
 		client: client,
 		debug:  debug,

@@ -5,18 +5,16 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/bgdnvk/clanker/internal/k8s"
 )
 
 // SubAgent handles workload-related operations
 type SubAgent struct {
-	client *k8s.Client
+	client K8sClient
 	debug  bool
 }
 
 // NewSubAgent creates a new workloads sub-agent
-func NewSubAgent(client *k8s.Client, debug bool) *SubAgent {
+func NewSubAgent(client K8sClient, debug bool) *SubAgent {
 	return &SubAgent{
 		client: client,
 		debug:  debug,
@@ -296,7 +294,7 @@ func (s *SubAgent) handleDescribe(ctx context.Context, workloadType WorkloadType
 
 // handleLogs retrieves logs from a pod
 func (s *SubAgent) handleLogs(ctx context.Context, podName, namespace string, opts LogOptions) (*Response, error) {
-	output, err := s.client.Logs(ctx, podName, namespace, k8s.LogOptions{
+	output, err := s.client.Logs(ctx, podName, namespace, LogOptionsInternal{
 		Container: opts.Container,
 		Follow:    opts.Follow,
 		Previous:  opts.Previous,
