@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // SubAgent handles networking-related queries delegated from the main K8s agent
