@@ -9,6 +9,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/k8s/cluster"
 	"github.com/bgdnvk/clanker/internal/k8s/helm"
 	"github.com/bgdnvk/clanker/internal/k8s/networking"
+	"github.com/bgdnvk/clanker/internal/k8s/sre"
 	"github.com/bgdnvk/clanker/internal/k8s/storage"
 	"github.com/bgdnvk/clanker/internal/k8s/workloads"
 )
@@ -129,6 +130,23 @@ func (a *helmClientAdapter) RunWithNamespace(ctx context.Context, namespace stri
 	return a.client.RunHelmWithNamespace(ctx, namespace, args...)
 }
 
+// sreClientAdapter wraps Client to implement sre.K8sClient interface
+type sreClientAdapter struct {
+	client *Client
+}
+
+func (a *sreClientAdapter) Run(ctx context.Context, args ...string) (string, error) {
+	return a.client.Run(ctx, args...)
+}
+
+func (a *sreClientAdapter) RunWithNamespace(ctx context.Context, namespace string, args ...string) (string, error) {
+	return a.client.RunWithNamespace(ctx, namespace, args...)
+}
+
+func (a *sreClientAdapter) RunJSON(ctx context.Context, args ...string) ([]byte, error) {
+	return a.client.RunJSON(ctx, args...)
+}
+
 // Agent is the main K8s orchestrator that receives delegated queries from the main agent
 type Agent struct {
 	client       *Client
@@ -137,6 +155,7 @@ type Agent struct {
 	networking   *networking.SubAgent
 	storage      *storage.SubAgent
 	helm         *helm.SubAgent
+	sre          *sre.SubAgent
 	debug        bool
 	aiDecisionFn AIDecisionFunc
 }
@@ -331,6 +350,11 @@ func (a *Agent) HandleQuery(ctx context.Context, query string, opts QueryOptions
 		a.helm = helm.NewSubAgent(&helmClientAdapter{client: a.client}, a.debug)
 	}
 
+	// Initialize sre sub-agent if needed
+	if a.sre == nil {
+		a.sre = sre.NewSubAgent(&sreClientAdapter{client: a.client}, a.debug)
+	}
+
 	// Analyze the query
 	analysis := a.analyzeQuery(query)
 
@@ -357,6 +381,11 @@ func (a *Agent) HandleQuery(ctx context.Context, query string, opts QueryOptions
 	// Delegate helm queries to the helm sub-agent
 	if analysis.Category == "helm" {
 		return a.handleHelmQuery(ctx, query, analysis, opts)
+	}
+
+	// Delegate sre queries to the sre sub-agent
+	if analysis.Category == "sre" {
+		return a.handleSREQuery(ctx, query, analysis, opts)
 	}
 
 	// For read only operations, execute immediately
@@ -554,9 +583,12 @@ func (a *Agent) categorizeQuery(query string, analysis QueryAnalysis) string {
 		return "helm"
 	}
 
-	// Troubleshooting
-	if containsAny(query, []string{"error", "issue", "debug", "logs", "troubleshoot", "problem"}) {
-		return "troubleshooting"
+	// SRE and Troubleshooting
+	if containsAny(query, []string{"health", "healthy", "diagnose", "diagnostic", "troubleshoot",
+		"error", "issue", "problem", "crash", "failing", "failed",
+		"why is", "why are", "what is wrong", "what's wrong",
+		"fix", "remediate", "analyze", "investigate"}) {
+		return "sre"
 	}
 
 	return "general"
@@ -1060,6 +1092,134 @@ func extractHelmArgsInfo(args []string) (action, release, chart, namespace strin
 	}
 
 	return
+}
+
+// handleSREQuery delegates SRE queries to the sre sub-agent
+func (a *Agent) handleSREQuery(ctx context.Context, query string, analysis QueryAnalysis, opts QueryOptions) (*K8sResponse, error) {
+	if a.debug {
+		fmt.Printf("[k8s-agent] delegating to sre sub-agent\n")
+	}
+
+	// Convert QueryOptions to sre.QueryOptions
+	sreOpts := sre.QueryOptions{
+		Namespace:     opts.Namespace,
+		AllNamespaces: analysis.ClusterScope,
+	}
+
+	response, err := a.sre.HandleQuery(ctx, query, sreOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert sre.Response to K8sResponse
+	k8sResponse := &K8sResponse{
+		NeedsApproval: false,
+	}
+
+	switch response.Type {
+	case sre.ResponseTypeResult:
+		k8sResponse.Type = ResponseTypeResult
+		if str, ok := response.Data.(string); ok {
+			k8sResponse.Result = str
+		} else {
+			k8sResponse.Result = response.Message
+		}
+	case sre.ResponseTypeReport:
+		k8sResponse.Type = ResponseTypeResult
+		k8sResponse.Result = response.Message
+		// Include the diagnostic report as additional data
+		if response.Report != nil {
+			k8sResponse.Result = formatDiagnosticReport(response.Report)
+		}
+	case sre.ResponseTypePlan:
+		k8sResponse.Type = ResponseTypePlan
+		k8sResponse.NeedsApproval = true
+		k8sResponse.Summary = response.Message
+		// Convert sre.SREPlan to K8sPlan
+		if response.Plan != nil {
+			k8sResponse.Plan = convertSREPlanToK8sPlan(response.Plan)
+		}
+	}
+
+	return k8sResponse, nil
+}
+
+// convertSREPlanToK8sPlan converts an SRE plan to a K8s plan
+func convertSREPlanToK8sPlan(sp *sre.SREPlan) *K8sPlan {
+	plan := &K8sPlan{
+		Version:  sp.Version,
+		Question: sp.Summary,
+		Summary:  sp.Summary,
+		Notes:    sp.Notes,
+		Bindings: make(map[string]string),
+	}
+
+	// Convert remediation steps to kubectl commands
+	for _, step := range sp.Steps {
+		if step.Command == "kubectl" {
+			cmd := KubectlCmd{
+				Args:   step.Args,
+				Reason: step.Description,
+			}
+			plan.KubectlCmds = append(plan.KubectlCmds, cmd)
+		}
+	}
+
+	return plan
+}
+
+// formatDiagnosticReport formats a diagnostic report as a readable string
+func formatDiagnosticReport(report *sre.DiagnosticReport) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("Diagnostic Report: %s\n", report.Summary))
+	sb.WriteString(fmt.Sprintf("Scope: %s\n", report.Scope))
+
+	if report.ResourceType != "" {
+		sb.WriteString(fmt.Sprintf("Resource: %s/%s\n", report.ResourceType, report.ResourceName))
+	}
+	if report.Namespace != "" {
+		sb.WriteString(fmt.Sprintf("Namespace: %s\n", report.Namespace))
+	}
+
+	sb.WriteString(fmt.Sprintf("Generated: %s\n\n", report.GeneratedAt.Format("2006-01-02 15:04:05")))
+
+	if len(report.Issues) > 0 {
+		sb.WriteString("Issues Found:\n")
+		for i, issue := range report.Issues {
+			sb.WriteString(fmt.Sprintf("  %d. [%s] %s: %s\n", i+1, issue.Severity, issue.Category, issue.Message))
+			if issue.Details != "" {
+				sb.WriteString(fmt.Sprintf("     Details: %s\n", issue.Details))
+			}
+			if len(issue.Suggestions) > 0 {
+				sb.WriteString("     Suggestions:\n")
+				for _, s := range issue.Suggestions {
+					sb.WriteString(fmt.Sprintf("       - %s\n", s))
+				}
+			}
+		}
+	} else {
+		sb.WriteString("No issues found.\n")
+	}
+
+	if len(report.Events) > 0 {
+		sb.WriteString("\nRecent Events:\n")
+		for _, event := range report.Events {
+			sb.WriteString(fmt.Sprintf("  [%s] %s: %s\n", event.Type, event.Reason, event.Message))
+		}
+	}
+
+	if len(report.Remediation) > 0 {
+		sb.WriteString("\nRemediation Steps:\n")
+		for _, step := range report.Remediation {
+			sb.WriteString(fmt.Sprintf("  %d. %s: %s\n", step.Order, step.Action, step.Description))
+			if step.Command != "" {
+				sb.WriteString(fmt.Sprintf("     Command: %s %s\n", step.Command, strings.Join(step.Args, " ")))
+			}
+		}
+	}
+
+	return sb.String()
 }
 
 // generatePlan creates a K8s execution plan
