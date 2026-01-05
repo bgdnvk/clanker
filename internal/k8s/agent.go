@@ -931,6 +931,9 @@ func (a *Agent) handleStorageQuery(ctx context.Context, query string, analysis Q
 		k8sResponse.Type = ResponseTypeResult
 		if str, ok := response.Data.(string); ok {
 			k8sResponse.Result = str
+		} else if response.Data != nil {
+			// Format structured data as readable output
+			k8sResponse.Result = formatStorageData(response.Data)
 		} else {
 			k8sResponse.Result = response.Message
 		}
@@ -1297,6 +1300,114 @@ func formatNetworkingData(data interface{}) string {
 		}
 		if policies, ok := v["networkPolicies"].([]networking.NetworkPolicyInfo); ok && len(policies) > 0 {
 			sb.WriteString(formatNetworkingData(policies))
+		}
+	default:
+		// Fallback to JSON representation
+		jsonBytes, err := json.MarshalIndent(data, "", "  ")
+		if err != nil {
+			return fmt.Sprintf("%v", data)
+		}
+		return string(jsonBytes)
+	}
+
+	return sb.String()
+}
+
+// formatStorageData formats storage structured data for display
+func formatStorageData(data interface{}) string {
+	var sb strings.Builder
+
+	switch v := data.(type) {
+	case []storage.PVInfo:
+		if len(v) == 0 {
+			return "No persistent volumes found"
+		}
+		sb.WriteString("Persistent Volumes:\n")
+		sb.WriteString(fmt.Sprintf("%-30s %-10s %-15s %-10s %-20s %s\n", "NAME", "CAPACITY", "ACCESS MODES", "STATUS", "CLAIM", "STORAGECLASS"))
+		for _, pv := range v {
+			claim := pv.Claim
+			if claim == "" {
+				claim = "<none>"
+			}
+			sb.WriteString(fmt.Sprintf("%-30s %-10s %-15s %-10s %-20s %s\n",
+				pv.Name, pv.Capacity, strings.Join(pv.AccessModes, ","), pv.Status, claim, pv.StorageClassName))
+		}
+	case []storage.PVCInfo:
+		if len(v) == 0 {
+			return "No persistent volume claims found"
+		}
+		sb.WriteString("Persistent Volume Claims:\n")
+		sb.WriteString(fmt.Sprintf("%-30s %-15s %-10s %-15s %-15s %s\n", "NAME", "NAMESPACE", "STATUS", "VOLUME", "CAPACITY", "STORAGECLASS"))
+		for _, pvc := range v {
+			volume := pvc.Volume
+			if volume == "" {
+				volume = "<pending>"
+			}
+			capacity := pvc.Capacity
+			if capacity == "" {
+				capacity = pvc.RequestedStorage
+			}
+			sb.WriteString(fmt.Sprintf("%-30s %-15s %-10s %-15s %-15s %s\n",
+				pvc.Name, pvc.Namespace, pvc.Status, volume, capacity, pvc.StorageClassName))
+		}
+	case []storage.StorageClassInfo:
+		if len(v) == 0 {
+			return "No storage classes found"
+		}
+		sb.WriteString("Storage Classes:\n")
+		sb.WriteString(fmt.Sprintf("%-30s %-40s %-15s %-10s %s\n", "NAME", "PROVISIONER", "RECLAIM POLICY", "EXPAND", "DEFAULT"))
+		for _, sc := range v {
+			expand := "false"
+			if sc.AllowVolumeExpansion {
+				expand = "true"
+			}
+			isDefault := ""
+			if sc.IsDefault {
+				isDefault = "(default)"
+			}
+			sb.WriteString(fmt.Sprintf("%-30s %-40s %-15s %-10s %s\n",
+				sc.Name, sc.Provisioner, sc.ReclaimPolicy, expand, isDefault))
+		}
+	case []storage.ConfigMapInfo:
+		if len(v) == 0 {
+			return "No configmaps found"
+		}
+		sb.WriteString("ConfigMaps:\n")
+		sb.WriteString(fmt.Sprintf("%-40s %-15s %-10s %s\n", "NAME", "NAMESPACE", "DATA", "AGE"))
+		for _, cm := range v {
+			sb.WriteString(fmt.Sprintf("%-40s %-15s %-10d %s\n",
+				cm.Name, cm.Namespace, cm.DataCount, cm.Age))
+		}
+	case []storage.SecretInfo:
+		if len(v) == 0 {
+			return "No secrets found"
+		}
+		sb.WriteString("Secrets:\n")
+		sb.WriteString(fmt.Sprintf("%-40s %-15s %-25s %-10s %s\n", "NAME", "NAMESPACE", "TYPE", "DATA", "AGE"))
+		for _, secret := range v {
+			sb.WriteString(fmt.Sprintf("%-40s %-15s %-25s %-10d %s\n",
+				secret.Name, secret.Namespace, secret.Type, secret.DataCount, secret.Age))
+		}
+	case map[string]interface{}:
+		// Handle combined resources output
+		if pvs, ok := v["persistentVolumes"].([]storage.PVInfo); ok && len(pvs) > 0 {
+			sb.WriteString(formatStorageData(pvs))
+			sb.WriteString("\n")
+		}
+		if pvcs, ok := v["persistentVolumeClaims"].([]storage.PVCInfo); ok && len(pvcs) > 0 {
+			sb.WriteString(formatStorageData(pvcs))
+			sb.WriteString("\n")
+		}
+		if scs, ok := v["storageClasses"].([]storage.StorageClassInfo); ok && len(scs) > 0 {
+			sb.WriteString(formatStorageData(scs))
+			sb.WriteString("\n")
+		}
+		if cms, ok := v["configMaps"].([]storage.ConfigMapInfo); ok && len(cms) > 0 {
+			sb.WriteString(formatStorageData(cms))
+			sb.WriteString("\n")
+		}
+		if secrets, ok := v["secrets"].([]storage.SecretInfo); ok && len(secrets) > 0 {
+			sb.WriteString(formatStorageData(secrets))
 		}
 	default:
 		// Fallback to JSON representation
