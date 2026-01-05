@@ -793,9 +793,18 @@ func handleK8sQuery(ctx context.Context, question string, debug bool, kubeconfig
 		return handleK8sClusterProvisioning(ctx, question, questionLower, awsProfile, awsRegion, debug)
 	}
 
-	// Check if this is a deployment request
+	// Check if this is a deployment request (creating a deployment, not listing)
+	// Exclude read-only queries that mention "deployment" or "deployments"
+	isReadOnlyQuery := strings.Contains(questionLower, "list") ||
+		strings.Contains(questionLower, "get") ||
+		strings.Contains(questionLower, "show") ||
+		strings.Contains(questionLower, "describe") ||
+		strings.Contains(questionLower, "what")
+
 	isDeployRequest := (strings.Contains(questionLower, "deploy") || strings.Contains(questionLower, "run")) &&
-		!strings.Contains(questionLower, "cluster")
+		!strings.Contains(questionLower, "cluster") &&
+		!strings.Contains(questionLower, "deployments") &&
+		!isReadOnlyQuery
 
 	if isDeployRequest {
 		return handleK8sDeployment(ctx, question, questionLower, debug)

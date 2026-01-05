@@ -117,25 +117,44 @@ func (s *SubAgent) detectWorkloadType(query string) WorkloadType {
 
 // detectOperation identifies the operation from the query
 func (s *SubAgent) detectOperation(query string) string {
-	operations := map[string][]string{
-		"list":     {"list", "show all", "get all", "what"},
-		"get":      {"get", "show", "describe", "details"},
-		"describe": {"describe", "info about"},
-		"logs":     {"logs", "log"},
-		"status":   {"status", "health", "state"},
-		"events":   {"events", "event"},
-		"create":   {"create", "deploy", "run", "launch"},
-		"scale":    {"scale", "resize"},
-		"update":   {"update", "set image", "change image"},
-		"restart":  {"restart", "rollout restart"},
-		"rollback": {"rollback", "undo", "revert"},
-		"delete":   {"delete", "remove", "destroy"},
+	// Check read-only operations first (in priority order)
+	readOnlyOps := []struct {
+		op       string
+		patterns []string
+	}{
+		{"list", []string{"list", "show all", "get all", "what"}},
+		{"get", []string{"get", "show", "describe", "details"}},
+		{"describe", []string{"describe", "info about"}},
+		{"logs", []string{"logs", "log"}},
+		{"status", []string{"status", "health", "state"}},
+		{"events", []string{"events", "event"}},
 	}
 
-	for op, patterns := range operations {
-		for _, pattern := range patterns {
+	for _, item := range readOnlyOps {
+		for _, pattern := range item.patterns {
 			if strings.Contains(query, pattern) {
-				return op
+				return item.op
+			}
+		}
+	}
+
+	// Then check modify operations
+	modifyOps := []struct {
+		op       string
+		patterns []string
+	}{
+		{"delete", []string{"delete", "remove", "destroy"}},
+		{"rollback", []string{"rollback", "undo", "revert"}},
+		{"restart", []string{"restart", "rollout restart"}},
+		{"update", []string{"update", "set image", "change image"}},
+		{"scale", []string{"scale", "resize"}},
+		{"create", []string{"create", "deploy ", "run ", "launch"}}, // Note: "deploy " with space to avoid matching "deployments"
+	}
+
+	for _, item := range modifyOps {
+		for _, pattern := range item.patterns {
+			if strings.Contains(query, pattern) {
+				return item.op
 			}
 		}
 	}
