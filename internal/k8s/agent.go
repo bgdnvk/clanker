@@ -8,6 +8,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/cli"
 	"github.com/bgdnvk/clanker/internal/k8s/cluster"
 	"github.com/bgdnvk/clanker/internal/k8s/networking"
+	"github.com/bgdnvk/clanker/internal/k8s/storage"
 	"github.com/bgdnvk/clanker/internal/k8s/workloads"
 )
 
@@ -84,12 +85,43 @@ func (a *networkingClientAdapter) Apply(ctx context.Context, manifest string) (s
 	return a.client.Apply(ctx, manifest, "")
 }
 
+// storageClientAdapter wraps Client to implement storage.K8sClient interface
+type storageClientAdapter struct {
+	client *Client
+}
+
+func (a *storageClientAdapter) Run(ctx context.Context, args ...string) (string, error) {
+	return a.client.Run(ctx, args...)
+}
+
+func (a *storageClientAdapter) RunWithNamespace(ctx context.Context, namespace string, args ...string) (string, error) {
+	return a.client.RunWithNamespace(ctx, namespace, args...)
+}
+
+func (a *storageClientAdapter) GetJSON(ctx context.Context, resourceType, name, namespace string) ([]byte, error) {
+	return a.client.GetJSON(ctx, resourceType, name, namespace)
+}
+
+func (a *storageClientAdapter) Describe(ctx context.Context, resourceType, name, namespace string) (string, error) {
+	return a.client.Describe(ctx, resourceType, name, namespace)
+}
+
+func (a *storageClientAdapter) Delete(ctx context.Context, resourceType, name, namespace string) (string, error) {
+	return a.client.Delete(ctx, resourceType, name, namespace)
+}
+
+func (a *storageClientAdapter) Apply(ctx context.Context, manifest string) (string, error) {
+	// Pass empty namespace - kubectl will use the namespace from the manifest
+	return a.client.Apply(ctx, manifest, "")
+}
+
 // Agent is the main K8s orchestrator that receives delegated queries from the main agent
 type Agent struct {
 	client       *Client
 	clusterMgr   *cluster.Manager
 	workloads    *workloads.SubAgent
 	networking   *networking.SubAgent
+	storage      *storage.SubAgent
 	debug        bool
 	aiDecisionFn AIDecisionFunc
 }
@@ -274,6 +306,11 @@ func (a *Agent) HandleQuery(ctx context.Context, query string, opts QueryOptions
 		a.networking = networking.NewSubAgent(&networkingClientAdapter{client: a.client}, a.debug)
 	}
 
+	// Initialize storage sub-agent if needed
+	if a.storage == nil {
+		a.storage = storage.NewSubAgent(&storageClientAdapter{client: a.client}, a.debug)
+	}
+
 	// Analyze the query
 	analysis := a.analyzeQuery(query)
 
@@ -290,6 +327,11 @@ func (a *Agent) HandleQuery(ctx context.Context, query string, opts QueryOptions
 	// Delegate networking queries to the networking sub-agent
 	if analysis.Category == "networking" {
 		return a.handleNetworkingQuery(ctx, query, analysis, opts)
+	}
+
+	// Delegate storage queries to the storage sub-agent
+	if analysis.Category == "storage" {
+		return a.handleStorageQuery(ctx, query, analysis, opts)
 	}
 
 	// For read only operations, execute immediately
@@ -773,6 +815,89 @@ func convertNetworkingPlanToK8sPlan(np *networking.NetworkingPlan) *K8sPlan {
 
 	// Convert steps to kubectl commands or manifests
 	for _, step := range np.Steps {
+		if step.Command == "kubectl" {
+			cmd := KubectlCmd{
+				Args:   step.Args,
+				Reason: step.Reason,
+			}
+			if step.WaitFor != nil {
+				cmd.WaitFor = &WaitCondition{
+					Resource:  step.WaitFor.Resource,
+					Condition: step.WaitFor.Condition,
+					Timeout:   step.WaitFor.Timeout,
+				}
+			}
+			plan.KubectlCmds = append(plan.KubectlCmds, cmd)
+		}
+
+		// Handle manifest-based steps
+		if step.Manifest != "" {
+			plan.Manifests = append(plan.Manifests, Manifest{
+				Name:    step.ID,
+				Content: step.Manifest,
+				Reason:  step.Reason,
+			})
+		}
+	}
+
+	return plan
+}
+
+// handleStorageQuery delegates storage queries to the storage sub-agent
+func (a *Agent) handleStorageQuery(ctx context.Context, query string, analysis QueryAnalysis, opts QueryOptions) (*K8sResponse, error) {
+	if a.debug {
+		fmt.Printf("[k8s-agent] delegating to storage sub-agent\n")
+	}
+
+	// Convert QueryOptions to storage.QueryOptions
+	storageOpts := storage.QueryOptions{
+		Namespace:     opts.Namespace,
+		AllNamespaces: analysis.ClusterScope,
+	}
+
+	response, err := a.storage.HandleQuery(ctx, query, storageOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert storage.Response to K8sResponse
+	k8sResponse := &K8sResponse{
+		NeedsApproval: false,
+	}
+
+	switch response.Type {
+	case storage.ResponseTypeResult:
+		k8sResponse.Type = ResponseTypeResult
+		if str, ok := response.Data.(string); ok {
+			k8sResponse.Result = str
+		} else {
+			k8sResponse.Result = response.Message
+		}
+	case storage.ResponseTypePlan:
+		k8sResponse.Type = ResponseTypePlan
+		k8sResponse.NeedsApproval = true
+		k8sResponse.Summary = response.Message
+		// Convert storage.StoragePlan to K8sPlan
+		if response.Plan != nil {
+			k8sResponse.Plan = convertStoragePlanToK8sPlan(response.Plan)
+		}
+	}
+
+	return k8sResponse, nil
+}
+
+// convertStoragePlanToK8sPlan converts a storage plan to a K8s plan
+func convertStoragePlanToK8sPlan(sp *storage.StoragePlan) *K8sPlan {
+	plan := &K8sPlan{
+		Version:  sp.Version,
+		Question: sp.Summary,
+		Summary:  sp.Summary,
+		Notes:    sp.Notes,
+		Bindings: make(map[string]string),
+	}
+
+	// Convert steps to kubectl commands or manifests
+	for _, step := range sp.Steps {
 		if step.Command == "kubectl" {
 			cmd := KubectlCmd{
 				Args:   step.Args,
