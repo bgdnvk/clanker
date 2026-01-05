@@ -7,6 +7,7 @@ import (
 
 	"github.com/bgdnvk/clanker/internal/cli"
 	"github.com/bgdnvk/clanker/internal/k8s/cluster"
+	"github.com/bgdnvk/clanker/internal/k8s/networking"
 	"github.com/bgdnvk/clanker/internal/k8s/workloads"
 )
 
@@ -53,11 +54,42 @@ func (a *clientAdapter) Logs(ctx context.Context, podName, namespace string, opt
 	})
 }
 
+// networkingClientAdapter wraps Client to implement networking.K8sClient interface
+type networkingClientAdapter struct {
+	client *Client
+}
+
+func (a *networkingClientAdapter) Run(ctx context.Context, args ...string) (string, error) {
+	return a.client.Run(ctx, args...)
+}
+
+func (a *networkingClientAdapter) RunWithNamespace(ctx context.Context, namespace string, args ...string) (string, error) {
+	return a.client.RunWithNamespace(ctx, namespace, args...)
+}
+
+func (a *networkingClientAdapter) GetJSON(ctx context.Context, resourceType, name, namespace string) ([]byte, error) {
+	return a.client.GetJSON(ctx, resourceType, name, namespace)
+}
+
+func (a *networkingClientAdapter) Describe(ctx context.Context, resourceType, name, namespace string) (string, error) {
+	return a.client.Describe(ctx, resourceType, name, namespace)
+}
+
+func (a *networkingClientAdapter) Delete(ctx context.Context, resourceType, name, namespace string) (string, error) {
+	return a.client.Delete(ctx, resourceType, name, namespace)
+}
+
+func (a *networkingClientAdapter) Apply(ctx context.Context, manifest string) (string, error) {
+	// Pass empty namespace - kubectl will use the namespace from the manifest
+	return a.client.Apply(ctx, manifest, "")
+}
+
 // Agent is the main K8s orchestrator that receives delegated queries from the main agent
 type Agent struct {
 	client       *Client
 	clusterMgr   *cluster.Manager
 	workloads    *workloads.SubAgent
+	networking   *networking.SubAgent
 	debug        bool
 	aiDecisionFn AIDecisionFunc
 }
@@ -237,6 +269,11 @@ func (a *Agent) HandleQuery(ctx context.Context, query string, opts QueryOptions
 		a.workloads = workloads.NewSubAgent(&clientAdapter{client: a.client}, a.debug)
 	}
 
+	// Initialize networking sub-agent if needed
+	if a.networking == nil {
+		a.networking = networking.NewSubAgent(&networkingClientAdapter{client: a.client}, a.debug)
+	}
+
 	// Analyze the query
 	analysis := a.analyzeQuery(query)
 
@@ -248,6 +285,11 @@ func (a *Agent) HandleQuery(ctx context.Context, query string, opts QueryOptions
 	// Delegate workload queries to the workloads sub-agent
 	if analysis.Category == "workloads" {
 		return a.handleWorkloadQuery(ctx, query, analysis, opts)
+	}
+
+	// Delegate networking queries to the networking sub-agent
+	if analysis.Category == "networking" {
+		return a.handleNetworkingQuery(ctx, query, analysis, opts)
 	}
 
 	// For read only operations, execute immediately
@@ -670,6 +712,89 @@ func convertWorkloadPlanToK8sPlan(wp *workloads.WorkloadPlan) *K8sPlan {
 				}
 			}
 			plan.KubectlCmds = append(plan.KubectlCmds, cmd)
+		}
+	}
+
+	return plan
+}
+
+// handleNetworkingQuery delegates networking queries to the networking sub-agent
+func (a *Agent) handleNetworkingQuery(ctx context.Context, query string, analysis QueryAnalysis, opts QueryOptions) (*K8sResponse, error) {
+	if a.debug {
+		fmt.Printf("[k8s-agent] delegating to networking sub-agent\n")
+	}
+
+	// Convert QueryOptions to networking.QueryOptions
+	networkingOpts := networking.QueryOptions{
+		Namespace:     opts.Namespace,
+		AllNamespaces: analysis.ClusterScope,
+	}
+
+	response, err := a.networking.HandleQuery(ctx, query, networkingOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert networking.Response to K8sResponse
+	k8sResponse := &K8sResponse{
+		NeedsApproval: false,
+	}
+
+	switch response.Type {
+	case networking.ResponseTypeResult:
+		k8sResponse.Type = ResponseTypeResult
+		if str, ok := response.Data.(string); ok {
+			k8sResponse.Result = str
+		} else {
+			k8sResponse.Result = response.Message
+		}
+	case networking.ResponseTypePlan:
+		k8sResponse.Type = ResponseTypePlan
+		k8sResponse.NeedsApproval = true
+		k8sResponse.Summary = response.Message
+		// Convert networking.NetworkingPlan to K8sPlan
+		if response.Plan != nil {
+			k8sResponse.Plan = convertNetworkingPlanToK8sPlan(response.Plan)
+		}
+	}
+
+	return k8sResponse, nil
+}
+
+// convertNetworkingPlanToK8sPlan converts a networking plan to a K8s plan
+func convertNetworkingPlanToK8sPlan(np *networking.NetworkingPlan) *K8sPlan {
+	plan := &K8sPlan{
+		Version:  np.Version,
+		Question: np.Summary,
+		Summary:  np.Summary,
+		Notes:    np.Notes,
+		Bindings: make(map[string]string),
+	}
+
+	// Convert steps to kubectl commands or manifests
+	for _, step := range np.Steps {
+		if step.Command == "kubectl" {
+			cmd := KubectlCmd{
+				Args:   step.Args,
+				Reason: step.Reason,
+			}
+			if step.WaitFor != nil {
+				cmd.WaitFor = &WaitCondition{
+					Resource:  step.WaitFor.Resource,
+					Condition: step.WaitFor.Condition,
+					Timeout:   step.WaitFor.Timeout,
+				}
+			}
+			plan.KubectlCmds = append(plan.KubectlCmds, cmd)
+		}
+
+		// Handle manifest-based steps
+		if step.Manifest != "" {
+			plan.Manifests = append(plan.Manifests, Manifest{
+				Name:    step.ID,
+				Content: step.Manifest,
+				Reason:  step.Reason,
+			})
 		}
 	}
 
