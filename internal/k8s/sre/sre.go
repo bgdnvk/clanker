@@ -36,8 +36,8 @@ func (s *SubAgent) HandleQuery(ctx context.Context, query string, opts QueryOpti
 			analysis.ResourceType, analysis.Operation, analysis.ResourceName, analysis.Namespace, analysis.IsReadOnly)
 	}
 
-	// Override namespace from options if provided
-	if opts.Namespace != "" {
+	// Use options namespace as fallback if not extracted from query
+	if analysis.Namespace == "" && opts.Namespace != "" {
 		analysis.Namespace = opts.Namespace
 	}
 
@@ -174,6 +174,14 @@ func (s *SubAgent) extractNamespace(query string) string {
 		re := regexp.MustCompile(pattern)
 		if matches := re.FindStringSubmatch(query); len(matches) > 1 {
 			return matches[1]
+		}
+	}
+
+	// Check for common namespaces mentioned directly
+	commonNamespaces := []string{"kube-system", "kube-public", "default"}
+	for _, ns := range commonNamespaces {
+		if strings.Contains(query, ns) {
+			return ns
 		}
 	}
 
