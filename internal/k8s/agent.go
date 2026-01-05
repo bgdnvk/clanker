@@ -7,6 +7,7 @@ import (
 
 	"github.com/bgdnvk/clanker/internal/cli"
 	"github.com/bgdnvk/clanker/internal/k8s/cluster"
+	"github.com/bgdnvk/clanker/internal/k8s/helm"
 	"github.com/bgdnvk/clanker/internal/k8s/networking"
 	"github.com/bgdnvk/clanker/internal/k8s/storage"
 	"github.com/bgdnvk/clanker/internal/k8s/workloads"
@@ -115,6 +116,19 @@ func (a *storageClientAdapter) Apply(ctx context.Context, manifest string) (stri
 	return a.client.Apply(ctx, manifest, "")
 }
 
+// helmClientAdapter wraps Client to implement helm.HelmClient interface
+type helmClientAdapter struct {
+	client *Client
+}
+
+func (a *helmClientAdapter) Run(ctx context.Context, args ...string) (string, error) {
+	return a.client.RunHelm(ctx, args...)
+}
+
+func (a *helmClientAdapter) RunWithNamespace(ctx context.Context, namespace string, args ...string) (string, error) {
+	return a.client.RunHelmWithNamespace(ctx, namespace, args...)
+}
+
 // Agent is the main K8s orchestrator that receives delegated queries from the main agent
 type Agent struct {
 	client       *Client
@@ -122,6 +136,7 @@ type Agent struct {
 	workloads    *workloads.SubAgent
 	networking   *networking.SubAgent
 	storage      *storage.SubAgent
+	helm         *helm.SubAgent
 	debug        bool
 	aiDecisionFn AIDecisionFunc
 }
@@ -311,6 +326,11 @@ func (a *Agent) HandleQuery(ctx context.Context, query string, opts QueryOptions
 		a.storage = storage.NewSubAgent(&storageClientAdapter{client: a.client}, a.debug)
 	}
 
+	// Initialize helm sub-agent if needed
+	if a.helm == nil {
+		a.helm = helm.NewSubAgent(&helmClientAdapter{client: a.client}, a.debug)
+	}
+
 	// Analyze the query
 	analysis := a.analyzeQuery(query)
 
@@ -332,6 +352,11 @@ func (a *Agent) HandleQuery(ctx context.Context, query string, opts QueryOptions
 	// Delegate storage queries to the storage sub-agent
 	if analysis.Category == "storage" {
 		return a.handleStorageQuery(ctx, query, analysis, opts)
+	}
+
+	// Delegate helm queries to the helm sub-agent
+	if analysis.Category == "helm" {
+		return a.handleHelmQuery(ctx, query, analysis, opts)
 	}
 
 	// For read only operations, execute immediately
@@ -924,6 +949,117 @@ func convertStoragePlanToK8sPlan(sp *storage.StoragePlan) *K8sPlan {
 	}
 
 	return plan
+}
+
+// handleHelmQuery delegates helm queries to the helm sub-agent
+func (a *Agent) handleHelmQuery(ctx context.Context, query string, analysis QueryAnalysis, opts QueryOptions) (*K8sResponse, error) {
+	if a.debug {
+		fmt.Printf("[k8s-agent] delegating to helm sub-agent\n")
+	}
+
+	// Convert QueryOptions to helm.QueryOptions
+	helmOpts := helm.QueryOptions{
+		Namespace:     opts.Namespace,
+		AllNamespaces: analysis.ClusterScope,
+	}
+
+	response, err := a.helm.HandleQuery(ctx, query, helmOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert helm.Response to K8sResponse
+	k8sResponse := &K8sResponse{
+		NeedsApproval: false,
+	}
+
+	switch response.Type {
+	case helm.ResponseTypeResult:
+		k8sResponse.Type = ResponseTypeResult
+		if str, ok := response.Data.(string); ok {
+			k8sResponse.Result = str
+		} else {
+			k8sResponse.Result = response.Message
+		}
+	case helm.ResponseTypePlan:
+		k8sResponse.Type = ResponseTypePlan
+		k8sResponse.NeedsApproval = true
+		k8sResponse.Summary = response.Message
+		// Convert helm.HelmPlan to K8sPlan
+		if response.Plan != nil {
+			k8sResponse.Plan = convertHelmPlanToK8sPlan(response.Plan)
+		}
+	}
+
+	return k8sResponse, nil
+}
+
+// convertHelmPlanToK8sPlan converts a helm plan to a K8s plan
+func convertHelmPlanToK8sPlan(hp *helm.HelmPlan) *K8sPlan {
+	plan := &K8sPlan{
+		Version:  hp.Version,
+		Question: hp.Summary,
+		Summary:  hp.Summary,
+		Notes:    hp.Notes,
+		Bindings: make(map[string]string),
+	}
+
+	// Convert steps to helm commands
+	for _, step := range hp.Steps {
+		if step.Command == "helm" {
+			action, release, chart, namespace := extractHelmArgsInfo(step.Args)
+			cmd := HelmCmd{
+				Action:    action,
+				Release:   release,
+				Chart:     chart,
+				Namespace: namespace,
+			}
+			plan.HelmCmds = append(plan.HelmCmds, cmd)
+		}
+	}
+
+	return plan
+}
+
+// extractHelmArgsInfo extracts action, release, chart and namespace from helm command args
+func extractHelmArgsInfo(args []string) (action, release, chart, namespace string) {
+	if len(args) == 0 {
+		return
+	}
+
+	action = args[0]
+
+	// Parse based on action
+	switch action {
+	case "install", "upgrade":
+		// helm install <release> <chart> [-n namespace]
+		if len(args) > 1 {
+			release = args[1]
+		}
+		if len(args) > 2 {
+			chart = args[2]
+		}
+	case "uninstall", "rollback", "status", "history":
+		// helm uninstall <release> [-n namespace]
+		if len(args) > 1 {
+			release = args[1]
+		}
+	case "repo":
+		// helm repo add/remove/update
+		if len(args) > 2 {
+			release = args[2] // Repo name is stored in release field for repo commands
+		}
+	}
+
+	// Extract namespace from args
+	for i, arg := range args {
+		if (arg == "-n" || arg == "--namespace") && i+1 < len(args) {
+			namespace = args[i+1]
+			break
+		}
+	}
+
+	return
 }
 
 // generatePlan creates a K8s execution plan

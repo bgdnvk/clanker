@@ -417,3 +417,72 @@ func GetKubectlVersion(ctx context.Context) (string, error) {
 	}
 	return strings.TrimSpace(string(output)), nil
 }
+
+// RunHelm executes a helm command and returns the output
+func (c *Client) RunHelm(ctx context.Context, args ...string) (string, error) {
+	return c.RunHelmWithNamespace(ctx, "", args...)
+}
+
+// RunHelmWithNamespace executes a helm command in a specific namespace
+func (c *Client) RunHelmWithNamespace(ctx context.Context, namespace string, args ...string) (string, error) {
+	cmdArgs := c.buildHelmArgs(namespace, args)
+
+	if c.debug {
+		fmt.Printf("[helm] %s\n", strings.Join(cmdArgs, " "))
+	}
+
+	cmd := exec.CommandContext(ctx, "helm", cmdArgs...)
+	cmd.Env = os.Environ()
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf("helm command failed: %w, stderr: %s", err, stderr.String())
+	}
+
+	return stdout.String(), nil
+}
+
+// buildHelmArgs builds the helm command arguments
+func (c *Client) buildHelmArgs(namespace string, args []string) []string {
+	cmdArgs := make([]string, 0, len(args)+4)
+
+	if c.kubeconfig != "" {
+		cmdArgs = append(cmdArgs, "--kubeconfig", c.kubeconfig)
+	}
+
+	if c.context != "" {
+		cmdArgs = append(cmdArgs, "--kube-context", c.context)
+	}
+
+	// Add namespace if specified
+	ns := namespace
+	if ns == "" {
+		ns = c.namespace
+	}
+	if ns != "" && ns != "all" {
+		cmdArgs = append(cmdArgs, "-n", ns)
+	}
+
+	cmdArgs = append(cmdArgs, args...)
+	return cmdArgs
+}
+
+// IsHelmAvailable checks if helm is installed
+func IsHelmAvailable() bool {
+	_, err := exec.LookPath("helm")
+	return err == nil
+}
+
+// GetHelmVersion returns the helm client version
+func GetHelmVersion(ctx context.Context) (string, error) {
+	cmd := exec.CommandContext(ctx, "helm", "version", "--short")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get helm version: %w", err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
