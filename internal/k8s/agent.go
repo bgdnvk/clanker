@@ -1017,6 +1017,9 @@ func (a *Agent) handleHelmQuery(ctx context.Context, query string, analysis Quer
 		k8sResponse.Type = ResponseTypeResult
 		if str, ok := response.Data.(string); ok {
 			k8sResponse.Result = str
+		} else if response.Data != nil {
+			// Format structured data as readable output
+			k8sResponse.Result = formatHelmData(response.Data)
 		} else {
 			k8sResponse.Result = response.Message
 		}
@@ -1408,6 +1411,66 @@ func formatStorageData(data interface{}) string {
 		}
 		if secrets, ok := v["secrets"].([]storage.SecretInfo); ok && len(secrets) > 0 {
 			sb.WriteString(formatStorageData(secrets))
+		}
+	default:
+		// Fallback to JSON representation
+		jsonBytes, err := json.MarshalIndent(data, "", "  ")
+		if err != nil {
+			return fmt.Sprintf("%v", data)
+		}
+		return string(jsonBytes)
+	}
+
+	return sb.String()
+}
+
+// formatHelmData formats helm structured data for display
+func formatHelmData(data interface{}) string {
+	var sb strings.Builder
+
+	switch v := data.(type) {
+	case []helm.RepoInfo:
+		if len(v) == 0 {
+			return "No repositories configured"
+		}
+		sb.WriteString("Helm Repositories:\n")
+		sb.WriteString(fmt.Sprintf("%-20s %s\n", "NAME", "URL"))
+		for _, repo := range v {
+			sb.WriteString(fmt.Sprintf("%-20s %s\n", repo.Name, repo.URL))
+		}
+	case []helm.ReleaseInfo:
+		if len(v) == 0 {
+			return "No releases found"
+		}
+		sb.WriteString("Helm Releases:\n")
+		sb.WriteString(fmt.Sprintf("%-20s %-15s %-10s %-10s %-25s %s\n", "NAME", "NAMESPACE", "REVISION", "STATUS", "CHART", "APP VERSION"))
+		for _, rel := range v {
+			sb.WriteString(fmt.Sprintf("%-20s %-15s %-10d %-10s %-25s %s\n",
+				rel.Name, rel.Namespace, rel.Revision, rel.Status, rel.Chart, rel.AppVersion))
+		}
+	case []helm.ChartInfo:
+		if len(v) == 0 {
+			return "No charts found"
+		}
+		sb.WriteString("Helm Charts:\n")
+		sb.WriteString(fmt.Sprintf("%-30s %-15s %-15s %s\n", "NAME", "VERSION", "APP VERSION", "DESCRIPTION"))
+		for _, chart := range v {
+			desc := chart.Description
+			if len(desc) > 50 {
+				desc = desc[:47] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("%-30s %-15s %-15s %s\n",
+				chart.Name, chart.Version, chart.AppVersion, desc))
+		}
+	case []helm.ReleaseHistoryEntry:
+		if len(v) == 0 {
+			return "No history found"
+		}
+		sb.WriteString("Release History:\n")
+		sb.WriteString(fmt.Sprintf("%-10s %-10s %-25s %-15s %s\n", "REVISION", "STATUS", "CHART", "APP VERSION", "DESCRIPTION"))
+		for _, entry := range v {
+			sb.WriteString(fmt.Sprintf("%-10d %-10s %-25s %-15s %s\n",
+				entry.Revision, entry.Status, entry.Chart, entry.AppVersion, entry.Description))
 		}
 	default:
 		// Fallback to JSON representation
