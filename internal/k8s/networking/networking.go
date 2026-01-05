@@ -490,6 +490,14 @@ func (s *SubAgent) extractNamespace(query string) string {
 		}
 	}
 
+	// Check for common namespaces mentioned directly
+	commonNamespaces := []string{"kube-system", "kube-public", "default"}
+	for _, ns := range commonNamespaces {
+		if strings.Contains(query, ns) {
+			return ns
+		}
+	}
+
 	return ""
 }
 

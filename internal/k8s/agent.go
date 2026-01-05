@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -569,7 +570,7 @@ func (a *Agent) categorizeQuery(query string, analysis QueryAnalysis) string {
 	}
 
 	// Networking
-	if containsAny(query, []string{"service", "ingress", "loadbalancer", "network"}) {
+	if containsAny(query, []string{"service", "ingress", "loadbalancer", "network", "endpoint"}) {
 		return "networking"
 	}
 
@@ -844,6 +845,9 @@ func (a *Agent) handleNetworkingQuery(ctx context.Context, query string, analysi
 		k8sResponse.Type = ResponseTypeResult
 		if str, ok := response.Data.(string); ok {
 			k8sResponse.Result = str
+		} else if response.Data != nil {
+			// Format structured data as readable output
+			k8sResponse.Result = formatNetworkingData(response.Data)
 		} else {
 			k8sResponse.Result = response.Message
 		}
@@ -1217,6 +1221,90 @@ func formatDiagnosticReport(report *sre.DiagnosticReport) string {
 				sb.WriteString(fmt.Sprintf("     Command: %s %s\n", step.Command, strings.Join(step.Args, " ")))
 			}
 		}
+	}
+
+	return sb.String()
+}
+
+// formatNetworkingData formats networking structured data for display
+func formatNetworkingData(data interface{}) string {
+	var sb strings.Builder
+
+	switch v := data.(type) {
+	case []networking.ServiceInfo:
+		if len(v) == 0 {
+			return "No services found"
+		}
+		sb.WriteString("Services:\n")
+		sb.WriteString(fmt.Sprintf("%-30s %-15s %-15s %-20s %s\n", "NAME", "TYPE", "CLUSTER-IP", "EXTERNAL-IP", "PORTS"))
+		for _, svc := range v {
+			externalIP := svc.ExternalIP
+			if externalIP == "" {
+				externalIP = "<none>"
+			}
+			var ports []string
+			for _, p := range svc.Ports {
+				ports = append(ports, fmt.Sprintf("%d/%s", p.Port, p.Protocol))
+			}
+			sb.WriteString(fmt.Sprintf("%-30s %-15s %-15s %-20s %s\n",
+				svc.Name, svc.Type, svc.ClusterIP, externalIP, strings.Join(ports, ",")))
+		}
+	case []networking.IngressInfo:
+		if len(v) == 0 {
+			return "No ingresses found"
+		}
+		sb.WriteString("Ingresses:\n")
+		sb.WriteString(fmt.Sprintf("%-30s %-30s %-15s %s\n", "NAME", "HOSTS", "ADDRESS", "PORTS"))
+		for _, ing := range v {
+			var hosts []string
+			for _, rule := range ing.Rules {
+				hosts = append(hosts, rule.Host)
+			}
+			sb.WriteString(fmt.Sprintf("%-30s %-30s %-15s %s\n",
+				ing.Name, strings.Join(hosts, ","), ing.Address, "80, 443"))
+		}
+	case []networking.NetworkPolicyInfo:
+		if len(v) == 0 {
+			return "No network policies found"
+		}
+		sb.WriteString("Network Policies:\n")
+		for _, np := range v {
+			sb.WriteString(fmt.Sprintf("  %s (namespace: %s)\n", np.Name, np.Namespace))
+		}
+	case []networking.EndpointInfo:
+		if len(v) == 0 {
+			return "No endpoints found"
+		}
+		sb.WriteString("Endpoints:\n")
+		for _, ep := range v {
+			var addresses []string
+			for _, subset := range ep.Subsets {
+				for _, addr := range subset.Addresses {
+					addresses = append(addresses, addr.IP)
+				}
+			}
+			sb.WriteString(fmt.Sprintf("  %s: %v\n", ep.Name, addresses))
+		}
+	case map[string]interface{}:
+		// Handle combined resources output
+		if services, ok := v["services"].([]networking.ServiceInfo); ok && len(services) > 0 {
+			sb.WriteString(formatNetworkingData(services))
+			sb.WriteString("\n")
+		}
+		if ingresses, ok := v["ingresses"].([]networking.IngressInfo); ok && len(ingresses) > 0 {
+			sb.WriteString(formatNetworkingData(ingresses))
+			sb.WriteString("\n")
+		}
+		if policies, ok := v["networkPolicies"].([]networking.NetworkPolicyInfo); ok && len(policies) > 0 {
+			sb.WriteString(formatNetworkingData(policies))
+		}
+	default:
+		// Fallback to JSON representation
+		jsonBytes, err := json.MarshalIndent(data, "", "  ")
+		if err != nil {
+			return fmt.Sprintf("%v", data)
+		}
+		return string(jsonBytes)
 	}
 
 	return sb.String()
