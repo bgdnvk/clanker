@@ -341,10 +341,11 @@ func (s *SubAgent) detectOperation(query string) string {
 		{"values", []string{"values", "configuration of", "config of"}},
 		{"search", []string{"search", "find chart", "look for"}},
 		{"show", []string{"show chart", "chart info", "describe chart"}},
+		// Check uninstall before install since "uninstall" contains "install"
+		{"uninstall", []string{"uninstall", "remove release", "delete release"}},
 		{"install", []string{"install", "deploy chart", "add release"}},
 		{"upgrade", []string{"upgrade", "update release"}},
 		{"rollback", []string{"rollback", "revert", "go back to"}},
-		{"uninstall", []string{"uninstall", "remove release", "delete release"}},
 		{"add", []string{"add repo", "add repository"}},
 		{"update", []string{"update repo", "update repositories", "refresh repo"}},
 		{"remove", []string{"remove repo", "delete repo"}},
