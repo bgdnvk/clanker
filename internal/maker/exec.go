@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -1172,8 +1173,223 @@ func streamMerged(w io.Writer, readers ...io.Reader) (string, error) {
 	return captured.String(), scanner.Err()
 }
 
+const envAWSCLIPath = "CLANKER_AWS_CLI_PATH"
+
+func setEnvVar(env []string, key string, value string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env)+1)
+	replaced := false
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			out = append(out, prefix+value)
+			replaced = true
+			continue
+		}
+		out = append(out, kv)
+	}
+	if !replaced {
+		out = append(out, prefix+value)
+	}
+	return out
+}
+
+func pathKey(p string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(p)
+	}
+	return p
+}
+
+func awsExecutableNames() []string {
+	if runtime.GOOS == "windows" {
+		// Support common Windows launcher formats.
+		return []string{"aws.exe", "aws.cmd", "aws.bat"}
+	}
+	return []string{"aws"}
+}
+
+func fileIsUsableExecutable(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	if info.IsDir() {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	return info.Mode()&0o111 != 0
+}
+
+func preferredPathsForOS() []string {
+	home, _ := os.UserHomeDir()
+
+	switch runtime.GOOS {
+	case "windows":
+		return preferredWindowsPaths()
+	case "darwin":
+		paths := []string{
+			"/opt/homebrew/bin",
+			"/usr/local/bin",
+			"/usr/local/aws-cli/v2/current/bin",
+			"/usr/bin",
+			"/bin",
+			"/usr/sbin",
+			"/sbin",
+		}
+		if home != "" {
+			paths = append(paths,
+				filepath.Join(home, ".local", "bin"),
+				filepath.Join(home, "bin"),
+			)
+		}
+		return paths
+	default:
+		// Linux and other Unix-like targets.
+		paths := []string{
+			"/home/linuxbrew/.linuxbrew/bin",
+			"/usr/local/aws-cli/v2/current/bin",
+			"/snap/bin",
+			"/usr/local/bin",
+			"/usr/bin",
+			"/bin",
+			"/usr/sbin",
+			"/sbin",
+		}
+		if home != "" {
+			paths = append(paths,
+				filepath.Join(home, ".local", "bin"),
+				filepath.Join(home, "bin"),
+			)
+		}
+		return paths
+	}
+}
+
+func preferredWindowsPaths() []string {
+	paths := []string{}
+
+	// Common system locations.
+	if systemRoot := strings.TrimSpace(os.Getenv("SystemRoot")); systemRoot != "" {
+		paths = append(paths, filepath.Join(systemRoot, "System32"))
+	}
+	if localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localAppData != "" {
+		paths = append(paths, filepath.Join(localAppData, "Microsoft", "WindowsApps"))
+	}
+
+	// AWS CLI v2 MSI installer path.
+	if programFiles := strings.TrimSpace(os.Getenv("ProgramFiles")); programFiles != "" {
+		paths = append(paths,
+			filepath.Join(programFiles, "Amazon", "AWSCLIV2"),
+			filepath.Join(programFiles, "Amazon", "AWSCLIV2", "bin"),
+			filepath.Join(programFiles, "Git", "bin"),
+		)
+	}
+	if programFilesX86 := strings.TrimSpace(os.Getenv("ProgramFiles(x86)")); programFilesX86 != "" {
+		paths = append(paths,
+			filepath.Join(programFilesX86, "Amazon", "AWSCLIV2"),
+			filepath.Join(programFilesX86, "Amazon", "AWSCLIV2", "bin"),
+		)
+	}
+
+	// Chocolatey.
+	if programData := strings.TrimSpace(os.Getenv("ProgramData")); programData != "" {
+		paths = append(paths, filepath.Join(programData, "chocolatey", "bin"))
+	}
+
+	// Scoop.
+	if userProfile := strings.TrimSpace(os.Getenv("USERPROFILE")); userProfile != "" {
+		paths = append(paths, filepath.Join(userProfile, "scoop", "shims"))
+	}
+
+	return paths
+}
+
+func augmentedPATH() string {
+	base := strings.TrimSpace(os.Getenv("PATH"))
+	dirs := preferredPathsForOS()
+	if base != "" {
+		dirs = append(dirs, strings.Split(base, string(os.PathListSeparator))...)
+	}
+
+	seen := map[string]bool{}
+	out := make([]string, 0, len(dirs)+8)
+	for _, d := range dirs {
+		d = strings.TrimSpace(d)
+		k := pathKey(d)
+		if d == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, d)
+	}
+	return strings.Join(out, string(os.PathListSeparator))
+}
+
+func resolveAWSBinary() (string, []string, error) {
+	attempts := []string{}
+
+	if override := strings.TrimSpace(os.Getenv(envAWSCLIPath)); override != "" {
+		// If it's a bare command name, resolve it via PATH.
+		if !strings.ContainsAny(override, "\\/") {
+			p, err := exec.LookPath(override)
+			if err == nil {
+				return p, []string{"env:" + envAWSCLIPath + " -> " + p}, nil
+			}
+			return "", []string{"env:" + envAWSCLIPath + " -> " + override}, fmt.Errorf("%s set but not found in PATH: %w", envAWSCLIPath, err)
+		}
+		attempts = append(attempts, "env:"+envAWSCLIPath+" -> "+override)
+		if fileIsUsableExecutable(override) {
+			return override, attempts, nil
+		}
+		return "", attempts, fmt.Errorf("%s points to a missing or non-executable file", envAWSCLIPath)
+	}
+
+	if p, err := exec.LookPath("aws"); err == nil {
+		return p, []string{"PATH -> " + p}, nil
+	}
+
+	// Manual search to be resilient when PATH is sparse (common for GUI apps).
+	searchDirs := preferredPathsForOS()
+	if base := strings.TrimSpace(os.Getenv("PATH")); base != "" {
+		searchDirs = append(searchDirs, strings.Split(base, string(os.PathListSeparator))...)
+	}
+
+	seen := map[string]bool{}
+	for _, dir := range searchDirs {
+		dir = strings.TrimSpace(dir)
+		k := pathKey(dir)
+		if dir == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		for _, name := range awsExecutableNames() {
+			candidate := filepath.Join(dir, name)
+			attempts = append(attempts, candidate)
+			if fileIsUsableExecutable(candidate) {
+				return candidate, attempts, nil
+			}
+		}
+	}
+
+	// Avoid dumping huge PATH/attempt lists.
+	maxAttempts := 25
+	if len(attempts) > maxAttempts {
+		attempts = append(attempts[:maxAttempts], fmt.Sprintf("... (%d more)", len(attempts)-maxAttempts))
+	}
+
+	return "", attempts, fmt.Errorf("aws CLI not found")
+}
+
 func runAWSCommandStreaming(ctx context.Context, args []string, stdinBytes []byte, w io.Writer) (string, error) {
-	cmd := exec.CommandContext(ctx, "aws", args...)
+	awsBin, attempts, resolveErr := resolveAWSBinary()
+	if resolveErr != nil {
+		return "", fmt.Errorf("%v; install AWS CLI v2 or set %s. Tried: %s", resolveErr, envAWSCLIPath, strings.Join(attempts, ", "))
+	}
+
+	cmd := exec.CommandContext(ctx, awsBin, args...)
+	cmd.Env = setEnvVar(os.Environ(), "PATH", augmentedPATH())
 	if len(stdinBytes) > 0 {
 		cmd.Stdin = bytes.NewReader(stdinBytes)
 	}
@@ -1181,7 +1397,7 @@ func runAWSCommandStreaming(ctx context.Context, args []string, stdinBytes []byt
 	stderr, _ := cmd.StderrPipe()
 
 	if err := cmd.Start(); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to start aws CLI (%s): %w", awsBin, err)
 	}
 
 	out, streamErr := streamMerged(w, stdout, stderr)
