@@ -799,11 +799,19 @@ func handleK8sQuery(ctx context.Context, question string, debug bool, kubeconfig
 		strings.Contains(questionLower, "get") ||
 		strings.Contains(questionLower, "show") ||
 		strings.Contains(questionLower, "describe") ||
-		strings.Contains(questionLower, "what")
+		strings.Contains(questionLower, "what") ||
+		strings.Contains(questionLower, "how") ||
+		strings.Contains(questionLower, "scale") ||
+		strings.Contains(questionLower, "rollout") ||
+		strings.Contains(questionLower, "status")
 
-	isDeployRequest := (strings.Contains(questionLower, "deploy") || strings.Contains(questionLower, "run")) &&
+	// Check for actual deploy action words (not just substring match on "deployment")
+	hasDeployAction := strings.Contains(questionLower, "deploy ") ||
+		strings.HasPrefix(questionLower, "deploy") ||
+		strings.Contains(questionLower, "run ")
+
+	isDeployRequest := hasDeployAction &&
 		!strings.Contains(questionLower, "cluster") &&
-		!strings.Contains(questionLower, "deployments") &&
 		!isReadOnlyQuery
 
 	if isDeployRequest {
