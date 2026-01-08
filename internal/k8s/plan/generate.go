@@ -367,7 +367,7 @@ func GenerateKubeadmCreatePlan(opts KubeadmCreateOptions) *K8sPlan {
 		Args: []string{
 			"-o", "StrictHostKeyChecking=no",
 			"-i", opts.SSHKeyPath,
-			fmt.Sprintf("ubuntu@<CONTROL_PLANE_IP>:.kube/config"),
+			"ubuntu@<CONTROL_PLANE_IP>:.kube/config",
 			fmt.Sprintf("~/.kube/config-%s", opts.ClusterName),
 		},
 		ConfigChange: &ConfigChange{

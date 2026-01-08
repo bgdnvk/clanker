@@ -5,6 +5,9 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 // ProgressWriter handles progress output during plan execution
@@ -272,6 +275,6 @@ func formatOperation(op string) string {
 	case "scale":
 		return "Scale"
 	default:
-		return strings.Title(strings.ReplaceAll(op, "-", " "))
+		return cases.Title(language.English).String(strings.ReplaceAll(op, "-", " "))
 	}
 }

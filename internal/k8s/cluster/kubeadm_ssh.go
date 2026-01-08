@@ -169,7 +169,7 @@ func (c *SSHClient) Run(ctx context.Context, command string) (string, error) {
 		}
 		return stdout.String(), nil
 	case <-ctx.Done():
-		session.Signal(ssh.SIGKILL)
+		_ = session.Signal(ssh.SIGKILL)
 		return "", ctx.Err()
 	}
 }
@@ -227,9 +227,9 @@ func (c *SSHClient) UploadBytes(ctx context.Context, data []byte, remotePath str
 	go func() {
 		w, _ := session.StdinPipe()
 		defer w.Close()
-		fmt.Fprintf(w, "C0644 %d %s\n", len(data), filepath.Base(remotePath))
-		w.Write(data)
-		fmt.Fprint(w, "\x00")
+		_, _ = fmt.Fprintf(w, "C0644 %d %s\n", len(data), filepath.Base(remotePath))
+		_, _ = w.Write(data)
+		_, _ = fmt.Fprint(w, "\x00")
 	}()
 
 	dir := filepath.Dir(remotePath)

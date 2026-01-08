@@ -104,7 +104,7 @@ func (p *KubeadmProvider) Create(ctx context.Context, opts CreateOptions) (*Clus
 
 	cpInstance, err := p.launchInstance(ctx, opts.Name, "control-plane", cpInstanceType, sgID, opts.Tags)
 	if err != nil {
-		p.deleteSecurityGroup(ctx, sgID)
+		_ = p.deleteSecurityGroup(ctx, sgID)
 		return nil, fmt.Errorf("failed to launch control plane: %w", err)
 	}
 
@@ -114,8 +114,8 @@ func (p *KubeadmProvider) Create(ctx context.Context, opts CreateOptions) (*Clus
 
 	// Wait for SSH to be available
 	if err := WaitForSSH(ctx, cpInstance.PublicIP, 22, 5*time.Minute); err != nil {
-		p.terminateInstance(ctx, cpInstance.InstanceID)
-		p.deleteSecurityGroup(ctx, sgID)
+		_ = p.terminateInstance(ctx, cpInstance.InstanceID)
+		_ = p.deleteSecurityGroup(ctx, sgID)
 		return nil, fmt.Errorf("control plane SSH not available: %w", err)
 	}
 
@@ -127,14 +127,14 @@ func (p *KubeadmProvider) Create(ctx context.Context, opts CreateOptions) (*Clus
 		Debug:          p.debug,
 	})
 	if err != nil {
-		p.terminateInstance(ctx, cpInstance.InstanceID)
-		p.deleteSecurityGroup(ctx, sgID)
+		_ = p.terminateInstance(ctx, cpInstance.InstanceID)
+		_ = p.deleteSecurityGroup(ctx, sgID)
 		return nil, fmt.Errorf("failed to create SSH client: %w", err)
 	}
 
 	if err := ssh.Connect(ctx); err != nil {
-		p.terminateInstance(ctx, cpInstance.InstanceID)
-		p.deleteSecurityGroup(ctx, sgID)
+		_ = p.terminateInstance(ctx, cpInstance.InstanceID)
+		_ = p.deleteSecurityGroup(ctx, sgID)
 		return nil, fmt.Errorf("failed to connect to control plane: %w", err)
 	}
 	defer ssh.Close()
@@ -151,8 +151,8 @@ func (p *KubeadmProvider) Create(ctx context.Context, opts CreateOptions) (*Clus
 	}
 
 	if err := BootstrapNode(ctx, ssh, bootstrapConfig); err != nil {
-		p.terminateInstance(ctx, cpInstance.InstanceID)
-		p.deleteSecurityGroup(ctx, sgID)
+		_ = p.terminateInstance(ctx, cpInstance.InstanceID)
+		_ = p.deleteSecurityGroup(ctx, sgID)
 		return nil, fmt.Errorf("failed to bootstrap control plane: %w", err)
 	}
 
@@ -163,8 +163,8 @@ func (p *KubeadmProvider) Create(ctx context.Context, opts CreateOptions) (*Clus
 
 	initOutput, err := InitializeControlPlane(ctx, ssh, bootstrapConfig)
 	if err != nil {
-		p.terminateInstance(ctx, cpInstance.InstanceID)
-		p.deleteSecurityGroup(ctx, sgID)
+		_ = p.terminateInstance(ctx, cpInstance.InstanceID)
+		_ = p.deleteSecurityGroup(ctx, sgID)
 		return nil, fmt.Errorf("kubeadm init failed: %w", err)
 	}
 
@@ -174,8 +174,8 @@ func (p *KubeadmProvider) Create(ctx context.Context, opts CreateOptions) (*Clus
 	}
 
 	if err := InstallCNI(ctx, ssh, bootstrapConfig.CNI); err != nil {
-		p.terminateInstance(ctx, cpInstance.InstanceID)
-		p.deleteSecurityGroup(ctx, sgID)
+		_ = p.terminateInstance(ctx, cpInstance.InstanceID)
+		_ = p.deleteSecurityGroup(ctx, sgID)
 		return nil, fmt.Errorf("failed to install CNI: %w", err)
 	}
 
@@ -197,10 +197,10 @@ func (p *KubeadmProvider) Create(ctx context.Context, opts CreateOptions) (*Clus
 		if err != nil {
 			// Clean up on failure
 			for _, w := range workerNodes {
-				p.terminateInstance(ctx, w.InternalIP) // Using InternalIP to store instance ID temporarily
+				_ = p.terminateInstance(ctx, w.InternalIP) // Using InternalIP to store instance ID temporarily
 			}
-			p.terminateInstance(ctx, cpInstance.InstanceID)
-			p.deleteSecurityGroup(ctx, sgID)
+			_ = p.terminateInstance(ctx, cpInstance.InstanceID)
+			_ = p.deleteSecurityGroup(ctx, sgID)
 			return nil, fmt.Errorf("failed to launch worker %d: %w", i, err)
 		}
 
@@ -350,7 +350,7 @@ func (p *KubeadmProvider) Delete(ctx context.Context, clusterName string) error 
 		if p.debug {
 			fmt.Printf("[kubeadm] deleting security group %s\n", sgID)
 		}
-		p.deleteSecurityGroup(ctx, sgID)
+		_ = p.deleteSecurityGroup(ctx, sgID)
 	}
 
 	if p.debug {
@@ -1035,7 +1035,7 @@ func (p *KubeadmProvider) scaleDown(ctx context.Context, cluster *ClusterInfo, c
 				"--output", "text")
 
 			if strings.TrimSpace(output) == worker.InternalIP {
-				p.terminateInstance(ctx, instanceID)
+				_ = p.terminateInstance(ctx, instanceID)
 				break
 			}
 		}

@@ -609,7 +609,7 @@ func (s *SubAgent) extractPort(query string) int {
 	portPattern := regexp.MustCompile(`port\s+(\d+)`)
 	if matches := portPattern.FindStringSubmatch(strings.ToLower(query)); len(matches) > 1 {
 		var port int
-		fmt.Sscanf(matches[1], "%d", &port)
+		_, _ = fmt.Sscanf(matches[1], "%d", &port)
 		return port
 	}
 	return 0

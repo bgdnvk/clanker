@@ -379,7 +379,7 @@ func (m *ReleaseManager) parseReleaseJSON(data []byte) (*ReleaseInfo, error) {
 
 	// Parse revision
 	var revision int
-	fmt.Sscanf(raw.Revision, "%d", &revision)
+	_, _ = fmt.Sscanf(raw.Revision, "%d", &revision)
 
 	// Parse chart name and version
 	chartName := raw.Chart
