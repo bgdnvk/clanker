@@ -12,6 +12,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/k8s/plan"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 )
 
 var k8sCmd = &cobra.Command{
@@ -98,20 +99,33 @@ Example:
 	RunE: runGetKubeconfig,
 }
 
+var k8sResourcesCmd = &cobra.Command{
+	Use:   "resources",
+	Short: "Get all Kubernetes resources from a cluster",
+	Long: `Fetch all Kubernetes resources (nodes, pods, services, PVs, ConfigMaps) for visualization.
+
+Example:
+  clanker k8s resources --cluster my-cluster
+  clanker k8s resources --cluster my-cluster --output json`,
+	RunE: runGetResources,
+}
+
 // Flags
 var (
-	k8sNodes      int
-	k8sNodeType   string
-	k8sWorkers    int
-	k8sKeyPair    string
-	k8sSSHKeyPath string
-	k8sK8sVersion string
-	k8sPlanOnly   bool
-	k8sApply      bool
-	k8sDeployName string
-	k8sDeployPort int
-	k8sReplicas   int
-	k8sNamespace  string
+	k8sNodes         int
+	k8sNodeType      string
+	k8sWorkers       int
+	k8sKeyPair       string
+	k8sSSHKeyPath    string
+	k8sK8sVersion    string
+	k8sPlanOnly      bool
+	k8sApply         bool
+	k8sDeployName    string
+	k8sDeployPort    int
+	k8sReplicas      int
+	k8sNamespace     string
+	k8sClusterName   string
+	k8sOutputFormat  string
 )
 
 func init() {
@@ -123,6 +137,7 @@ func init() {
 	k8sCmd.AddCommand(k8sListCmd)
 	k8sCmd.AddCommand(k8sDeployCmd)
 	k8sCmd.AddCommand(k8sGetKubeconfigCmd)
+	k8sCmd.AddCommand(k8sResourcesCmd)
 
 	k8sCreateCmd.AddCommand(k8sCreateEKSCmd)
 	k8sCreateCmd.AddCommand(k8sCreateKubeadmCmd)
@@ -150,6 +165,10 @@ func init() {
 	k8sDeployCmd.Flags().StringVar(&k8sNamespace, "namespace", "default", "Kubernetes namespace")
 	k8sDeployCmd.Flags().BoolVar(&k8sPlanOnly, "plan", false, "Show plan without applying")
 	k8sDeployCmd.Flags().BoolVar(&k8sApply, "apply", false, "Apply the plan (default prompts for confirmation)")
+
+	// Resources flags
+	k8sResourcesCmd.Flags().StringVar(&k8sClusterName, "cluster", "", "Cluster name (optional, uses current context if not specified)")
+	k8sResourcesCmd.Flags().StringVarP(&k8sOutputFormat, "output", "o", "json", "Output format (json or yaml)")
 }
 
 func getK8sAgent() (*k8s.Agent, string, string) {
@@ -670,5 +689,40 @@ func runGetKubeconfig(cmd *cobra.Command, args []string) error {
 	fmt.Println("or")
 	fmt.Printf("  kubectl --kubeconfig %s get nodes\n", kubeconfigPath)
 
+	return nil
+}
+
+func runGetResources(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+	debug := viper.GetBool("debug")
+
+	agent := k8s.NewAgent(debug)
+
+	clusterName := k8sClusterName
+	if clusterName == "" {
+		clusterName = "current-context"
+	}
+
+	opts := k8s.QueryOptions{
+		ClusterName: clusterName,
+	}
+
+	resources, err := agent.GetClusterResources(ctx, clusterName, opts)
+	if err != nil {
+		return fmt.Errorf("failed to get cluster resources: %w", err)
+	}
+
+	var output []byte
+	if k8sOutputFormat == "yaml" {
+		output, err = yaml.Marshal(resources)
+	} else {
+		output, err = json.MarshalIndent(resources, "", "  ")
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to marshal resources: %w", err)
+	}
+
+	fmt.Println(string(output))
 	return nil
 }

@@ -1736,6 +1736,553 @@ func (a *Agent) CheckEKSHealth(ctx context.Context, clusterName string) (*Health
 	return provider.Health(ctx, clusterName)
 }
 
+// GetClusterResources fetches all K8s resources from the current cluster for visualization
+func (a *Agent) GetClusterResources(ctx context.Context, clusterName string, opts QueryOptions) (*ClusterResources, error) {
+	if a.debug {
+		fmt.Printf("[k8s-agent] getting cluster resources for: %s\n", clusterName)
+	}
+
+	// Initialize client if needed
+	if a.client == nil {
+		a.client = NewClient(opts.Kubeconfig, "", a.debug)
+	}
+
+	result := &ClusterResources{
+		ClusterName: clusterName,
+	}
+
+	// Get nodes
+	nodes, err := a.client.GetNodes(ctx)
+	if err != nil {
+		if a.debug {
+			fmt.Printf("[k8s-agent] warning: failed to get nodes: %v\n", err)
+		}
+	} else {
+		for _, n := range nodes {
+			result.Nodes = append(result.Nodes, ClusterNodeInfo{
+				Name:       n.Name,
+				Role:       n.Role,
+				Status:     n.Status,
+				InternalIP: n.InternalIP,
+				ExternalIP: n.ExternalIP,
+				InstanceID: n.InstanceID,
+				Labels:     n.Labels,
+			})
+		}
+	}
+
+	// Get pods from all namespaces
+	pods, err := a.getPodsJSON(ctx)
+	if err != nil {
+		if a.debug {
+			fmt.Printf("[k8s-agent] warning: failed to get pods: %v\n", err)
+		}
+	} else {
+		result.Pods = pods
+	}
+
+	// Get services from all namespaces
+	services, err := a.getServicesJSON(ctx)
+	if err != nil {
+		if a.debug {
+			fmt.Printf("[k8s-agent] warning: failed to get services: %v\n", err)
+		}
+	} else {
+		result.Services = services
+	}
+
+	// Get PVs (cluster scoped)
+	pvs, err := a.getPVsJSON(ctx)
+	if err != nil {
+		if a.debug {
+			fmt.Printf("[k8s-agent] warning: failed to get PVs: %v\n", err)
+		}
+	} else {
+		result.PVs = pvs
+	}
+
+	// Get PVCs from all namespaces
+	pvcs, err := a.getPVCsJSON(ctx)
+	if err != nil {
+		if a.debug {
+			fmt.Printf("[k8s-agent] warning: failed to get PVCs: %v\n", err)
+		}
+	} else {
+		result.PVCs = pvcs
+	}
+
+	// Get ConfigMaps from all namespaces
+	configMaps, err := a.getConfigMapsJSON(ctx)
+	if err != nil {
+		if a.debug {
+			fmt.Printf("[k8s-agent] warning: failed to get ConfigMaps: %v\n", err)
+		}
+	} else {
+		result.ConfigMaps = configMaps
+	}
+
+	// Get Ingresses from all namespaces
+	ingresses, err := a.getIngressesJSON(ctx)
+	if err != nil {
+		if a.debug {
+			fmt.Printf("[k8s-agent] warning: failed to get Ingresses: %v\n", err)
+		}
+	} else {
+		result.Ingresses = ingresses
+	}
+
+	return result, nil
+}
+
+// getPodsJSON fetches pods as structured data
+func (a *Agent) getPodsJSON(ctx context.Context) ([]ClusterPodInfo, error) {
+	output, err := a.client.RunJSON(ctx, "get", "pods", "--all-namespaces")
+	if err != nil {
+		return nil, err
+	}
+
+	var podList struct {
+		Items []struct {
+			Metadata struct {
+				Name      string            `json:"name"`
+				Namespace string            `json:"namespace"`
+				Labels    map[string]string `json:"labels"`
+			} `json:"metadata"`
+			Spec struct {
+				NodeName string `json:"nodeName"`
+				Volumes  []struct {
+					Name                  string `json:"name"`
+					ConfigMap             *struct{ Name string } `json:"configMap,omitempty"`
+					Secret                *struct{ SecretName string } `json:"secret,omitempty"`
+					PersistentVolumeClaim *struct{ ClaimName string } `json:"persistentVolumeClaim,omitempty"`
+					EmptyDir              *struct{} `json:"emptyDir,omitempty"`
+				} `json:"volumes"`
+				Containers []struct {
+					Name  string `json:"name"`
+					Image string `json:"image"`
+				} `json:"containers"`
+			} `json:"spec"`
+			Status struct {
+				Phase             string `json:"phase"`
+				PodIP             string `json:"podIP"`
+				ContainerStatuses []struct {
+					Name         string `json:"name"`
+					Ready        bool   `json:"ready"`
+					RestartCount int    `json:"restartCount"`
+					State        struct {
+						Running    *struct{} `json:"running,omitempty"`
+						Waiting    *struct{ Reason string } `json:"waiting,omitempty"`
+						Terminated *struct{ Reason string } `json:"terminated,omitempty"`
+					} `json:"state"`
+				} `json:"containerStatuses"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+
+	if err := json.Unmarshal(output, &podList); err != nil {
+		return nil, fmt.Errorf("failed to parse pods: %w", err)
+	}
+
+	pods := make([]ClusterPodInfo, 0, len(podList.Items))
+	for _, item := range podList.Items {
+		pod := ClusterPodInfo{
+			Name:      item.Metadata.Name,
+			Namespace: item.Metadata.Namespace,
+			Phase:     item.Status.Phase,
+			IP:        item.Status.PodIP,
+			Node:      item.Spec.NodeName,
+			Labels:    item.Metadata.Labels,
+		}
+
+		// Calculate ready status
+		readyCount := 0
+		totalCount := len(item.Status.ContainerStatuses)
+		totalRestarts := 0
+
+		for _, cs := range item.Status.ContainerStatuses {
+			state := "unknown"
+			if cs.State.Running != nil {
+				state = "running"
+			} else if cs.State.Waiting != nil {
+				state = cs.State.Waiting.Reason
+			} else if cs.State.Terminated != nil {
+				state = cs.State.Terminated.Reason
+			}
+
+			pod.Containers = append(pod.Containers, ClusterContainerInfo{
+				Name:         cs.Name,
+				Image:        getContainerImage(item.Spec.Containers, cs.Name),
+				Ready:        cs.Ready,
+				RestartCount: cs.RestartCount,
+				State:        state,
+			})
+
+			if cs.Ready {
+				readyCount++
+			}
+			totalRestarts += cs.RestartCount
+		}
+
+		pod.Ready = fmt.Sprintf("%d/%d", readyCount, totalCount)
+		pod.Restarts = totalRestarts
+		pod.Status = item.Status.Phase
+
+		// Extract volume info
+		for _, vol := range item.Spec.Volumes {
+			volInfo := ClusterPodVolumeInfo{Name: vol.Name}
+			if vol.ConfigMap != nil {
+				volInfo.Type = "configMap"
+				volInfo.Source = vol.ConfigMap.Name
+			} else if vol.Secret != nil {
+				volInfo.Type = "secret"
+				volInfo.Source = vol.Secret.SecretName
+			} else if vol.PersistentVolumeClaim != nil {
+				volInfo.Type = "pvc"
+				volInfo.Source = vol.PersistentVolumeClaim.ClaimName
+			} else if vol.EmptyDir != nil {
+				volInfo.Type = "emptyDir"
+			} else {
+				continue // skip other volume types
+			}
+			pod.Volumes = append(pod.Volumes, volInfo)
+		}
+
+		pods = append(pods, pod)
+	}
+
+	return pods, nil
+}
+
+// getContainerImage finds the image for a container by name
+func getContainerImage(containers []struct {
+	Name  string `json:"name"`
+	Image string `json:"image"`
+}, name string) string {
+	for _, c := range containers {
+		if c.Name == name {
+			return c.Image
+		}
+	}
+	return ""
+}
+
+// getServicesJSON fetches services as structured data
+func (a *Agent) getServicesJSON(ctx context.Context) ([]ClusterServiceInfo, error) {
+	output, err := a.client.RunJSON(ctx, "get", "services", "--all-namespaces")
+	if err != nil {
+		return nil, err
+	}
+
+	var svcList struct {
+		Items []struct {
+			Metadata struct {
+				Name      string            `json:"name"`
+				Namespace string            `json:"namespace"`
+				Labels    map[string]string `json:"labels"`
+			} `json:"metadata"`
+			Spec struct {
+				Type       string            `json:"type"`
+				ClusterIP  string            `json:"clusterIP"`
+				Selector   map[string]string `json:"selector"`
+				Ports      []struct {
+					Name       string      `json:"name"`
+					Protocol   string      `json:"protocol"`
+					Port       int         `json:"port"`
+					TargetPort interface{} `json:"targetPort"`
+					NodePort   int         `json:"nodePort,omitempty"`
+				} `json:"ports"`
+			} `json:"spec"`
+			Status struct {
+				LoadBalancer struct {
+					Ingress []struct {
+						Hostname string `json:"hostname,omitempty"`
+						IP       string `json:"ip,omitempty"`
+					} `json:"ingress"`
+				} `json:"loadBalancer"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+
+	if err := json.Unmarshal(output, &svcList); err != nil {
+		return nil, fmt.Errorf("failed to parse services: %w", err)
+	}
+
+	services := make([]ClusterServiceInfo, 0, len(svcList.Items))
+	for _, item := range svcList.Items {
+		svc := ClusterServiceInfo{
+			Name:      item.Metadata.Name,
+			Namespace: item.Metadata.Namespace,
+			Type:      item.Spec.Type,
+			ClusterIP: item.Spec.ClusterIP,
+			Selector:  item.Spec.Selector,
+			Labels:    item.Metadata.Labels,
+		}
+
+		for _, p := range item.Spec.Ports {
+			targetPort := ""
+			switch v := p.TargetPort.(type) {
+			case float64:
+				targetPort = fmt.Sprintf("%d", int(v))
+			case string:
+				targetPort = v
+			}
+			svc.Ports = append(svc.Ports, ClusterServicePortInfo{
+				Name:       p.Name,
+				Protocol:   p.Protocol,
+				Port:       p.Port,
+				TargetPort: targetPort,
+				NodePort:   p.NodePort,
+			})
+		}
+
+		// Extract load balancer ingress
+		for _, ing := range item.Status.LoadBalancer.Ingress {
+			if ing.Hostname != "" {
+				svc.LoadBalancerIngress = append(svc.LoadBalancerIngress, ing.Hostname)
+			} else if ing.IP != "" {
+				svc.LoadBalancerIngress = append(svc.LoadBalancerIngress, ing.IP)
+			}
+		}
+
+		services = append(services, svc)
+	}
+
+	return services, nil
+}
+
+// getPVsJSON fetches persistent volumes as structured data
+func (a *Agent) getPVsJSON(ctx context.Context) ([]ClusterPVInfo, error) {
+	output, err := a.client.RunJSON(ctx, "get", "pv")
+	if err != nil {
+		return nil, err
+	}
+
+	var pvList struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Spec struct {
+				Capacity struct {
+					Storage string `json:"storage"`
+				} `json:"capacity"`
+				AccessModes                   []string `json:"accessModes"`
+				PersistentVolumeReclaimPolicy string   `json:"persistentVolumeReclaimPolicy"`
+				StorageClassName              string   `json:"storageClassName"`
+				ClaimRef                      *struct {
+					Name      string `json:"name"`
+					Namespace string `json:"namespace"`
+				} `json:"claimRef,omitempty"`
+			} `json:"spec"`
+			Status struct {
+				Phase string `json:"phase"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+
+	if err := json.Unmarshal(output, &pvList); err != nil {
+		return nil, fmt.Errorf("failed to parse PVs: %w", err)
+	}
+
+	pvs := make([]ClusterPVInfo, 0, len(pvList.Items))
+	for _, item := range pvList.Items {
+		pv := ClusterPVInfo{
+			Name:          item.Metadata.Name,
+			Capacity:      item.Spec.Capacity.Storage,
+			AccessModes:   item.Spec.AccessModes,
+			ReclaimPolicy: item.Spec.PersistentVolumeReclaimPolicy,
+			Status:        item.Status.Phase,
+			StorageClass:  item.Spec.StorageClassName,
+		}
+		if item.Spec.ClaimRef != nil {
+			pv.Claim = fmt.Sprintf("%s/%s", item.Spec.ClaimRef.Namespace, item.Spec.ClaimRef.Name)
+		}
+		pvs = append(pvs, pv)
+	}
+
+	return pvs, nil
+}
+
+// getPVCsJSON fetches persistent volume claims as structured data
+func (a *Agent) getPVCsJSON(ctx context.Context) ([]ClusterPVCInfo, error) {
+	output, err := a.client.RunJSON(ctx, "get", "pvc", "--all-namespaces")
+	if err != nil {
+		return nil, err
+	}
+
+	var pvcList struct {
+		Items []struct {
+			Metadata struct {
+				Name      string `json:"name"`
+				Namespace string `json:"namespace"`
+			} `json:"metadata"`
+			Spec struct {
+				AccessModes      []string `json:"accessModes"`
+				StorageClassName *string  `json:"storageClassName,omitempty"`
+				VolumeName       string   `json:"volumeName"`
+				Resources        struct {
+					Requests struct {
+						Storage string `json:"storage"`
+					} `json:"requests"`
+				} `json:"resources"`
+			} `json:"spec"`
+			Status struct {
+				Phase    string `json:"phase"`
+				Capacity struct {
+					Storage string `json:"storage"`
+				} `json:"capacity"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+
+	if err := json.Unmarshal(output, &pvcList); err != nil {
+		return nil, fmt.Errorf("failed to parse PVCs: %w", err)
+	}
+
+	pvcs := make([]ClusterPVCInfo, 0, len(pvcList.Items))
+	for _, item := range pvcList.Items {
+		pvc := ClusterPVCInfo{
+			Name:        item.Metadata.Name,
+			Namespace:   item.Metadata.Namespace,
+			Status:      item.Status.Phase,
+			Volume:      item.Spec.VolumeName,
+			Capacity:    item.Status.Capacity.Storage,
+			AccessModes: item.Spec.AccessModes,
+		}
+		if item.Spec.StorageClassName != nil {
+			pvc.StorageClass = *item.Spec.StorageClassName
+		}
+		pvcs = append(pvcs, pvc)
+	}
+
+	return pvcs, nil
+}
+
+// getConfigMapsJSON fetches config maps as structured data
+func (a *Agent) getConfigMapsJSON(ctx context.Context) ([]ClusterConfigMapInfo, error) {
+	output, err := a.client.RunJSON(ctx, "get", "configmaps", "--all-namespaces")
+	if err != nil {
+		return nil, err
+	}
+
+	var cmList struct {
+		Items []struct {
+			Metadata struct {
+				Name      string `json:"name"`
+				Namespace string `json:"namespace"`
+			} `json:"metadata"`
+			Data map[string]string `json:"data"`
+		} `json:"items"`
+	}
+
+	if err := json.Unmarshal(output, &cmList); err != nil {
+		return nil, fmt.Errorf("failed to parse ConfigMaps: %w", err)
+	}
+
+	configMaps := make([]ClusterConfigMapInfo, 0, len(cmList.Items))
+	for _, item := range cmList.Items {
+		keys := make([]string, 0, len(item.Data))
+		for k := range item.Data {
+			keys = append(keys, k)
+		}
+		configMaps = append(configMaps, ClusterConfigMapInfo{
+			Name:      item.Metadata.Name,
+			Namespace: item.Metadata.Namespace,
+			DataKeys:  keys,
+			DataCount: len(item.Data),
+		})
+	}
+
+	return configMaps, nil
+}
+
+// getIngressesJSON fetches ingresses as structured data
+func (a *Agent) getIngressesJSON(ctx context.Context) ([]ClusterIngressInfo, error) {
+	output, err := a.client.RunJSON(ctx, "get", "ingress", "--all-namespaces")
+	if err != nil {
+		return nil, err
+	}
+
+	var ingList struct {
+		Items []struct {
+			Metadata struct {
+				Name      string `json:"name"`
+				Namespace string `json:"namespace"`
+			} `json:"metadata"`
+			Spec struct {
+				IngressClassName *string `json:"ingressClassName,omitempty"`
+				Rules            []struct {
+					Host string `json:"host,omitempty"`
+					HTTP *struct {
+						Paths []struct {
+							Path    string `json:"path"`
+							Backend struct {
+								Service struct {
+									Name string `json:"name"`
+									Port struct {
+										Number int `json:"number"`
+									} `json:"port"`
+								} `json:"service"`
+							} `json:"backend"`
+						} `json:"paths"`
+					} `json:"http,omitempty"`
+				} `json:"rules"`
+			} `json:"spec"`
+			Status struct {
+				LoadBalancer struct {
+					Ingress []struct {
+						Hostname string `json:"hostname,omitempty"`
+						IP       string `json:"ip,omitempty"`
+					} `json:"ingress"`
+				} `json:"loadBalancer"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+
+	if err := json.Unmarshal(output, &ingList); err != nil {
+		return nil, fmt.Errorf("failed to parse Ingresses: %w", err)
+	}
+
+	ingresses := make([]ClusterIngressInfo, 0, len(ingList.Items))
+	for _, item := range ingList.Items {
+		ing := ClusterIngressInfo{
+			Name:      item.Metadata.Name,
+			Namespace: item.Metadata.Namespace,
+		}
+		if item.Spec.IngressClassName != nil {
+			ing.IngressClassName = *item.Spec.IngressClassName
+		}
+
+		for _, rule := range item.Spec.Rules {
+			if rule.Host != "" {
+				ing.Hosts = append(ing.Hosts, rule.Host)
+			}
+			if rule.HTTP != nil {
+				for _, path := range rule.HTTP.Paths {
+					ing.Rules = append(ing.Rules, ClusterIngressRuleInfo{
+						Host:        rule.Host,
+						Path:        path.Path,
+						ServiceName: path.Backend.Service.Name,
+						ServicePort: fmt.Sprintf("%d", path.Backend.Service.Port.Number),
+					})
+				}
+			}
+		}
+
+		for _, lb := range item.Status.LoadBalancer.Ingress {
+			if lb.Hostname != "" {
+				ing.Address = append(ing.Address, lb.Hostname)
+			} else if lb.IP != "" {
+				ing.Address = append(ing.Address, lb.IP)
+			}
+		}
+
+		ingresses = append(ingresses, ing)
+	}
+
+	return ingresses, nil
+}
+
 // IsK8sQuery determines if a query is K8s related
 func IsK8sQuery(question string) bool {
 	questionLower := strings.ToLower(question)

@@ -195,3 +195,129 @@ type QueryAnalysis struct {
 
 // AIDecisionFunc is a function type for making AI decisions
 type AIDecisionFunc func(ctx context.Context, prompt string) (string, error)
+
+// ClusterResources contains all K8s resources for a cluster for visualization
+type ClusterResources struct {
+	ClusterName string                 `json:"clusterName"`
+	ClusterARN  string                 `json:"clusterArn,omitempty"`
+	Nodes       []ClusterNodeInfo      `json:"nodes"`
+	Pods        []ClusterPodInfo       `json:"pods"`
+	Services    []ClusterServiceInfo   `json:"services"`
+	PVs         []ClusterPVInfo        `json:"persistentVolumes"`
+	PVCs        []ClusterPVCInfo       `json:"persistentVolumeClaims"`
+	ConfigMaps  []ClusterConfigMapInfo `json:"configMaps"`
+	Ingresses   []ClusterIngressInfo   `json:"ingresses,omitempty"`
+}
+
+// ClusterNodeInfo contains node information for visualization
+type ClusterNodeInfo struct {
+	Name       string            `json:"name"`
+	Role       string            `json:"role"` // "control-plane" or "worker"
+	Status     string            `json:"status"`
+	InternalIP string            `json:"internalIP"`
+	ExternalIP string            `json:"externalIP,omitempty"`
+	InstanceID string            `json:"instanceId,omitempty"`
+	Labels     map[string]string `json:"labels,omitempty"`
+}
+
+// ClusterPodInfo contains pod information for visualization
+type ClusterPodInfo struct {
+	Name       string                   `json:"name"`
+	Namespace  string                   `json:"namespace"`
+	Status     string                   `json:"status"`
+	Phase      string                   `json:"phase"`
+	Ready      string                   `json:"ready"`
+	Restarts   int                      `json:"restarts"`
+	IP         string                   `json:"ip"`
+	Node       string                   `json:"node"`
+	Labels     map[string]string        `json:"labels"`
+	Containers []ClusterContainerInfo   `json:"containers"`
+	Volumes    []ClusterPodVolumeInfo   `json:"volumes,omitempty"`
+}
+
+// ClusterContainerInfo contains container information
+type ClusterContainerInfo struct {
+	Name         string `json:"name"`
+	Image        string `json:"image"`
+	Ready        bool   `json:"ready"`
+	RestartCount int    `json:"restartCount"`
+	State        string `json:"state"`
+}
+
+// ClusterPodVolumeInfo contains pod volume mount information
+type ClusterPodVolumeInfo struct {
+	Name          string `json:"name"`
+	Type          string `json:"type"` // "configMap", "secret", "pvc", "emptyDir", etc.
+	Source        string `json:"source,omitempty"`
+	MountPath     string `json:"mountPath,omitempty"`
+}
+
+// ClusterServiceInfo contains service information for visualization
+type ClusterServiceInfo struct {
+	Name                string                   `json:"name"`
+	Namespace           string                   `json:"namespace"`
+	Type                string                   `json:"type"`
+	ClusterIP           string                   `json:"clusterIP"`
+	ExternalIP          string                   `json:"externalIP,omitempty"`
+	LoadBalancerIngress []string                 `json:"loadBalancerIngress,omitempty"`
+	Ports               []ClusterServicePortInfo `json:"ports"`
+	Selector            map[string]string        `json:"selector"`
+	Labels              map[string]string        `json:"labels"`
+}
+
+// ClusterServicePortInfo contains service port information
+type ClusterServicePortInfo struct {
+	Name       string `json:"name,omitempty"`
+	Protocol   string `json:"protocol"`
+	Port       int    `json:"port"`
+	TargetPort string `json:"targetPort"`
+	NodePort   int    `json:"nodePort,omitempty"`
+}
+
+// ClusterPVInfo contains PersistentVolume information for visualization
+type ClusterPVInfo struct {
+	Name          string   `json:"name"`
+	Capacity      string   `json:"capacity"`
+	AccessModes   []string `json:"accessModes"`
+	ReclaimPolicy string   `json:"reclaimPolicy"`
+	Status        string   `json:"status"`
+	Claim         string   `json:"claim,omitempty"`
+	StorageClass  string   `json:"storageClass,omitempty"`
+}
+
+// ClusterPVCInfo contains PersistentVolumeClaim information for visualization
+type ClusterPVCInfo struct {
+	Name         string   `json:"name"`
+	Namespace    string   `json:"namespace"`
+	Status       string   `json:"status"`
+	Volume       string   `json:"volume,omitempty"`
+	Capacity     string   `json:"capacity,omitempty"`
+	AccessModes  []string `json:"accessModes"`
+	StorageClass string   `json:"storageClass,omitempty"`
+}
+
+// ClusterConfigMapInfo contains ConfigMap information for visualization
+type ClusterConfigMapInfo struct {
+	Name      string   `json:"name"`
+	Namespace string   `json:"namespace"`
+	DataKeys  []string `json:"dataKeys"`
+	DataCount int      `json:"dataCount"`
+}
+
+// ClusterIngressInfo contains Ingress information for visualization
+type ClusterIngressInfo struct {
+	Name             string                    `json:"name"`
+	Namespace        string                    `json:"namespace"`
+	IngressClassName string                    `json:"ingressClassName,omitempty"`
+	Hosts            []string                  `json:"hosts"`
+	Address          []string                  `json:"address,omitempty"`
+	Rules            []ClusterIngressRuleInfo  `json:"rules"`
+}
+
+// ClusterIngressRuleInfo contains ingress rule information
+type ClusterIngressRuleInfo struct {
+	Host        string `json:"host,omitempty"`
+	Path        string `json:"path"`
+	ServiceName string `json:"serviceName"`
+	ServicePort string `json:"servicePort"`
+}
