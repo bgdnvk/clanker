@@ -1749,6 +1749,13 @@ func (a *Agent) GetClusterResources(ctx context.Context, clusterName string, opt
 
 	result := &ClusterResources{
 		ClusterName: clusterName,
+		Nodes:       []ClusterNodeInfo{},
+		Pods:        []ClusterPodInfo{},
+		Services:    []ClusterServiceInfo{},
+		PVs:         []ClusterPVInfo{},
+		PVCs:        []ClusterPVCInfo{},
+		ConfigMaps:  []ClusterConfigMapInfo{},
+		Ingresses:   []ClusterIngressInfo{},
 	}
 
 	// Get nodes
