@@ -41,11 +41,11 @@ type QueryOptions struct {
 
 // ApplyOptions contains options for applying K8s plans
 type ApplyOptions struct {
-	Debug      bool
-	DryRun     bool
-	Force      bool
-	Wait       bool
-	Timeout    time.Duration
+	Debug   bool
+	DryRun  bool
+	Force   bool
+	Wait    bool
+	Timeout time.Duration
 }
 
 // K8sResponse represents the response from the K8s agent
@@ -222,17 +222,17 @@ type ClusterNodeInfo struct {
 
 // ClusterPodInfo contains pod information for visualization
 type ClusterPodInfo struct {
-	Name       string                   `json:"name"`
-	Namespace  string                   `json:"namespace"`
-	Status     string                   `json:"status"`
-	Phase      string                   `json:"phase"`
-	Ready      string                   `json:"ready"`
-	Restarts   int                      `json:"restarts"`
-	IP         string                   `json:"ip"`
-	Node       string                   `json:"node"`
-	Labels     map[string]string        `json:"labels"`
-	Containers []ClusterContainerInfo   `json:"containers"`
-	Volumes    []ClusterPodVolumeInfo   `json:"volumes,omitempty"`
+	Name       string                 `json:"name"`
+	Namespace  string                 `json:"namespace"`
+	Status     string                 `json:"status"`
+	Phase      string                 `json:"phase"`
+	Ready      string                 `json:"ready"`
+	Restarts   int                    `json:"restarts"`
+	IP         string                 `json:"ip"`
+	Node       string                 `json:"node"`
+	Labels     map[string]string      `json:"labels"`
+	Containers []ClusterContainerInfo `json:"containers"`
+	Volumes    []ClusterPodVolumeInfo `json:"volumes,omitempty"`
 }
 
 // ClusterContainerInfo contains container information
@@ -246,10 +246,10 @@ type ClusterContainerInfo struct {
 
 // ClusterPodVolumeInfo contains pod volume mount information
 type ClusterPodVolumeInfo struct {
-	Name          string `json:"name"`
-	Type          string `json:"type"` // "configMap", "secret", "pvc", "emptyDir", etc.
-	Source        string `json:"source,omitempty"`
-	MountPath     string `json:"mountPath,omitempty"`
+	Name      string `json:"name"`
+	Type      string `json:"type"` // "configMap", "secret", "pvc", "emptyDir", etc.
+	Source    string `json:"source,omitempty"`
+	MountPath string `json:"mountPath,omitempty"`
 }
 
 // ClusterServiceInfo contains service information for visualization
@@ -306,12 +306,12 @@ type ClusterConfigMapInfo struct {
 
 // ClusterIngressInfo contains Ingress information for visualization
 type ClusterIngressInfo struct {
-	Name             string                    `json:"name"`
-	Namespace        string                    `json:"namespace"`
-	IngressClassName string                    `json:"ingressClassName,omitempty"`
-	Hosts            []string                  `json:"hosts"`
-	Address          []string                  `json:"address,omitempty"`
-	Rules            []ClusterIngressRuleInfo  `json:"rules"`
+	Name             string                   `json:"name"`
+	Namespace        string                   `json:"namespace"`
+	IngressClassName string                   `json:"ingressClassName,omitempty"`
+	Hosts            []string                 `json:"hosts"`
+	Address          []string                 `json:"address,omitempty"`
+	Rules            []ClusterIngressRuleInfo `json:"rules"`
 }
 
 // ClusterIngressRuleInfo contains ingress rule information

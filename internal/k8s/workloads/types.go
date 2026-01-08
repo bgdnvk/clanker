@@ -66,11 +66,11 @@ type Response struct {
 
 // WorkloadPlan represents a plan for workload modifications
 type WorkloadPlan struct {
-	Version   int             `json:"version"`
-	CreatedAt time.Time       `json:"createdAt"`
-	Summary   string          `json:"summary"`
-	Steps     []WorkloadStep  `json:"steps"`
-	Notes     []string        `json:"notes,omitempty"`
+	Version   int            `json:"version"`
+	CreatedAt time.Time      `json:"createdAt"`
+	Summary   string         `json:"summary"`
+	Steps     []WorkloadStep `json:"steps"`
+	Notes     []string       `json:"notes,omitempty"`
 }
 
 // WorkloadStep represents a single step in a workload plan
@@ -93,36 +93,36 @@ type WaitCondition struct {
 
 // WorkloadInfo contains common workload information
 type WorkloadInfo struct {
-	Name       string            `json:"name"`
-	Namespace  string            `json:"namespace"`
-	Type       WorkloadType      `json:"type"`
-	Replicas   int               `json:"replicas"`
-	Ready      int               `json:"ready"`
-	Available  int               `json:"available"`
-	Status     string            `json:"status"`
-	Age        string            `json:"age"`
-	Images     []string          `json:"images"`
-	Labels     map[string]string `json:"labels"`
-	Selector   map[string]string `json:"selector"`
-	CreatedAt  time.Time         `json:"createdAt"`
+	Name      string            `json:"name"`
+	Namespace string            `json:"namespace"`
+	Type      WorkloadType      `json:"type"`
+	Replicas  int               `json:"replicas"`
+	Ready     int               `json:"ready"`
+	Available int               `json:"available"`
+	Status    string            `json:"status"`
+	Age       string            `json:"age"`
+	Images    []string          `json:"images"`
+	Labels    map[string]string `json:"labels"`
+	Selector  map[string]string `json:"selector"`
+	CreatedAt time.Time         `json:"createdAt"`
 }
 
 // PodInfo contains pod-specific information
 type PodInfo struct {
-	Name         string          `json:"name"`
-	Namespace    string          `json:"namespace"`
-	Status       string          `json:"status"`
-	Phase        string          `json:"phase"`
-	Ready        string          `json:"ready"`
-	Restarts     int             `json:"restarts"`
-	Age          string          `json:"age"`
-	IP           string          `json:"ip"`
-	Node         string          `json:"node"`
-	Containers   []ContainerInfo `json:"containers"`
-	Labels       map[string]string `json:"labels"`
-	Owners       []OwnerRef      `json:"owners,omitempty"`
-	CreatedAt    time.Time       `json:"createdAt"`
-	StartedAt    *time.Time      `json:"startedAt,omitempty"`
+	Name       string            `json:"name"`
+	Namespace  string            `json:"namespace"`
+	Status     string            `json:"status"`
+	Phase      string            `json:"phase"`
+	Ready      string            `json:"ready"`
+	Restarts   int               `json:"restarts"`
+	Age        string            `json:"age"`
+	IP         string            `json:"ip"`
+	Node       string            `json:"node"`
+	Containers []ContainerInfo   `json:"containers"`
+	Labels     map[string]string `json:"labels"`
+	Owners     []OwnerRef        `json:"owners,omitempty"`
+	CreatedAt  time.Time         `json:"createdAt"`
+	StartedAt  *time.Time        `json:"startedAt,omitempty"`
 }
 
 // ContainerInfo contains container details
@@ -145,13 +145,13 @@ type OwnerRef struct {
 // DeploymentInfo contains deployment-specific information
 type DeploymentInfo struct {
 	WorkloadInfo
-	Strategy           string `json:"strategy"`
-	MaxSurge           string `json:"maxSurge"`
-	MaxUnavailable     string `json:"maxUnavailable"`
-	UpdatedReplicas    int    `json:"updatedReplicas"`
-	ReadyReplicas      int    `json:"readyReplicas"`
-	AvailableReplicas  int    `json:"availableReplicas"`
-	UnavailableReplicas int   `json:"unavailableReplicas"`
+	Strategy            string `json:"strategy"`
+	MaxSurge            string `json:"maxSurge"`
+	MaxUnavailable      string `json:"maxUnavailable"`
+	UpdatedReplicas     int    `json:"updatedReplicas"`
+	ReadyReplicas       int    `json:"readyReplicas"`
+	AvailableReplicas   int    `json:"availableReplicas"`
+	UnavailableReplicas int    `json:"unavailableReplicas"`
 }
 
 // StatefulSetInfo contains statefulset-specific information
@@ -178,38 +178,38 @@ type DaemonSetInfo struct {
 // JobInfo contains job-specific information
 type JobInfo struct {
 	WorkloadInfo
-	Completions   *int      `json:"completions,omitempty"`
-	Parallelism   *int      `json:"parallelism,omitempty"`
-	Succeeded     int       `json:"succeeded"`
-	Failed        int       `json:"failed"`
-	Active        int       `json:"active"`
-	StartTime     *time.Time `json:"startTime,omitempty"`
+	Completions    *int       `json:"completions,omitempty"`
+	Parallelism    *int       `json:"parallelism,omitempty"`
+	Succeeded      int        `json:"succeeded"`
+	Failed         int        `json:"failed"`
+	Active         int        `json:"active"`
+	StartTime      *time.Time `json:"startTime,omitempty"`
 	CompletionTime *time.Time `json:"completionTime,omitempty"`
-	Duration      string    `json:"duration,omitempty"`
+	Duration       string     `json:"duration,omitempty"`
 }
 
 // CronJobInfo contains cronjob-specific information
 type CronJobInfo struct {
 	WorkloadInfo
-	Schedule          string     `json:"schedule"`
-	Suspend           bool       `json:"suspend"`
-	LastScheduleTime  *time.Time `json:"lastScheduleTime,omitempty"`
+	Schedule           string     `json:"schedule"`
+	Suspend            bool       `json:"suspend"`
+	LastScheduleTime   *time.Time `json:"lastScheduleTime,omitempty"`
 	LastSuccessfulTime *time.Time `json:"lastSuccessfulTime,omitempty"`
-	ActiveJobs        int        `json:"activeJobs"`
+	ActiveJobs         int        `json:"activeJobs"`
 }
 
 // CreateDeploymentOptions contains options for creating a deployment
 type CreateDeploymentOptions struct {
-	Name        string
-	Namespace   string
-	Image       string
-	Replicas    int
-	Port        int
-	Labels      map[string]string
-	Env         map[string]string
-	Command     []string
-	Args        []string
-	Resources   *ResourceRequirements
+	Name      string
+	Namespace string
+	Image     string
+	Replicas  int
+	Port      int
+	Labels    map[string]string
+	Env       map[string]string
+	Command   []string
+	Args      []string
+	Resources *ResourceRequirements
 }
 
 // ResourceRequirements specifies compute resources

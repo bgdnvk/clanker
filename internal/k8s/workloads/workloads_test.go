@@ -9,22 +9,22 @@ import (
 
 // mockClient implements K8sClient for testing
 type mockClient struct {
-	runResponse           string
-	runError              error
-	runWithNSResponse     string
-	runWithNSError        error
-	getJSONResponse       []byte
-	getJSONError          error
-	describeResponse      string
-	describeError         error
-	scaleResponse         string
-	scaleError            error
-	rolloutResponse       string
-	rolloutError          error
-	deleteResponse        string
-	deleteError           error
-	logsResponse          string
-	logsError             error
+	runResponse       string
+	runError          error
+	runWithNSResponse string
+	runWithNSError    error
+	getJSONResponse   []byte
+	getJSONError      error
+	describeResponse  string
+	describeError     error
+	scaleResponse     string
+	scaleError        error
+	rolloutResponse   string
+	rolloutError      error
+	deleteResponse    string
+	deleteError       error
+	logsResponse      string
+	logsError         error
 }
 
 func (m *mockClient) Run(ctx context.Context, args ...string) (string, error) {
@@ -82,12 +82,12 @@ func TestAnalyzeQueryWorkloadType(t *testing.T) {
 		expectedType WorkloadType
 	}{
 		{"list all deployment resources", WorkloadDeployment},
-		{"list pod items", WorkloadPod},                 // "pod " avoids "ds" match from "pods"
-		{"get sts resources", WorkloadStatefulSet},      // "sts" is unique to statefulset
-		{"describe ds config", WorkloadDaemonSet},       // "ds" is unique to daemonset
+		{"list pod items", WorkloadPod},            // "pod " avoids "ds" match from "pods"
+		{"get sts resources", WorkloadStatefulSet}, // "sts" is unique to statefulset
+		{"describe ds config", WorkloadDaemonSet},  // "ds" is unique to daemonset
 		{"get job info", WorkloadJob},
-		{"list cj tasks", WorkloadCronJob},              // "cj" is unique to cronjob
-		{"list rs resources", WorkloadReplicaSet},       // "rs" is unique to replicaset
+		{"list cj tasks", WorkloadCronJob},        // "cj" is unique to cronjob
+		{"list rs resources", WorkloadReplicaSet}, // "rs" is unique to replicaset
 	}
 
 	for _, tt := range tests {
@@ -108,21 +108,21 @@ func TestAnalyzeQueryOperation(t *testing.T) {
 	// Use unique keywords that only appear in one operation pattern.
 	// Avoid overlapping patterns like: "get" (appears in get, logs), "show" (get, logs), "run" (create).
 	tests := []struct {
-		query         string
-		expectedOp    string
-		expectedRead  bool
+		query        string
+		expectedOp   string
+		expectedRead bool
 	}{
-		{"list all resources", "list", true},         // "list" is unique to list
-		{"info about resource", "describe", true},    // "info about" is unique to describe
-		{"view log entries", "logs", true},           // "log" is unique to logs
-		{"health check", "status", true},             // "health" is unique to status
-		{"events for pod", "events", true},           // "events" is unique
-		{"launch new service", "create", false},      // "launch" is unique to create
-		{"resize replicas", "scale", false},          // "resize" is unique to scale
-		{"remove resource", "delete", false},         // "remove" is unique to delete
-		{"restart service", "restart", false},        // "restart" is unique
-		{"undo changes", "rollback", false},          // "undo" is unique to rollback
-		{"set image version", "update", false},       // "set image" is unique to update
+		{"list all resources", "list", true},      // "list" is unique to list
+		{"info about resource", "describe", true}, // "info about" is unique to describe
+		{"view log entries", "logs", true},        // "log" is unique to logs
+		{"health check", "status", true},          // "health" is unique to status
+		{"events for pod", "events", true},        // "events" is unique
+		{"launch new service", "create", false},   // "launch" is unique to create
+		{"resize replicas", "scale", false},       // "resize" is unique to scale
+		{"remove resource", "delete", false},      // "remove" is unique to delete
+		{"restart service", "restart", false},     // "restart" is unique
+		{"undo changes", "rollback", false},       // "undo" is unique to rollback
+		{"set image version", "update", false},    // "set image" is unique to update
 	}
 
 	for _, tt := range tests {
@@ -143,8 +143,8 @@ func TestAnalyzeQueryNamespace(t *testing.T) {
 	agent := NewSubAgent(client, false)
 
 	tests := []struct {
-		query            string
-		expectedNS       string
+		query      string
+		expectedNS string
 	}{
 		{"list pods in namespace kube-system", "kube-system"},
 		{"get pods -n default", "default"},

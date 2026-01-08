@@ -785,11 +785,11 @@ func (p *EKSProvider) describeCluster(ctx context.Context, clusterName string) (
 
 	var result struct {
 		Cluster struct {
-			Name                 string    `json:"name"`
-			Status               string    `json:"status"`
-			Version              string    `json:"version"`
-			Endpoint             string    `json:"endpoint"`
-			ResourcesVpcConfig   struct {
+			Name               string `json:"name"`
+			Status             string `json:"status"`
+			Version            string `json:"version"`
+			Endpoint           string `json:"endpoint"`
+			ResourcesVpcConfig struct {
 				VpcId string `json:"vpcId"`
 			} `json:"resourcesVpcConfig"`
 			CreatedAt string `json:"createdAt"`

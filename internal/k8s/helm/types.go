@@ -134,21 +134,21 @@ type InstallOptions struct {
 
 // UpgradeOptions contains options for upgrading a Helm release
 type UpgradeOptions struct {
-	ReleaseName     string
-	Chart           string
-	Namespace       string
-	Version         string
-	Values          map[string]interface{}
-	ValuesFiles     []string
-	Set             []string
-	Wait            bool
-	Timeout         time.Duration
-	DryRun          bool
-	ReuseValues     bool
-	ResetValues     bool
-	Force           bool
-	Install         bool
-	Description     string
+	ReleaseName string
+	Chart       string
+	Namespace   string
+	Version     string
+	Values      map[string]interface{}
+	ValuesFiles []string
+	Set         []string
+	Wait        bool
+	Timeout     time.Duration
+	DryRun      bool
+	ReuseValues bool
+	ResetValues bool
+	Force       bool
+	Install     bool
+	Description string
 }
 
 // RollbackOptions contains options for rolling back a Helm release
@@ -164,13 +164,13 @@ type RollbackOptions struct {
 
 // UninstallOptions contains options for uninstalling a Helm release
 type UninstallOptions struct {
-	ReleaseName   string
-	Namespace     string
-	KeepHistory   bool
-	DryRun        bool
-	Wait          bool
-	Timeout       time.Duration
-	Description   string
+	ReleaseName string
+	Namespace   string
+	KeepHistory bool
+	DryRun      bool
+	Wait        bool
+	Timeout     time.Duration
+	Description string
 }
 
 // AddRepoOptions contains options for adding a Helm repository
@@ -189,10 +189,10 @@ type AddRepoOptions struct {
 type ReleaseStatus string
 
 const (
-	StatusDeployed   ReleaseStatus = "deployed"
-	StatusFailed     ReleaseStatus = "failed"
-	StatusPending    ReleaseStatus = "pending-install"
+	StatusDeployed     ReleaseStatus = "deployed"
+	StatusFailed       ReleaseStatus = "failed"
+	StatusPending      ReleaseStatus = "pending-install"
 	StatusUninstalling ReleaseStatus = "uninstalling"
-	StatusSuperseded ReleaseStatus = "superseded"
-	StatusUnknown    ReleaseStatus = "unknown"
+	StatusSuperseded   ReleaseStatus = "superseded"
+	StatusUnknown      ReleaseStatus = "unknown"
 )

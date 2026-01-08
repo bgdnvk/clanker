@@ -112,20 +112,20 @@ Example:
 
 // Flags
 var (
-	k8sNodes         int
-	k8sNodeType      string
-	k8sWorkers       int
-	k8sKeyPair       string
-	k8sSSHKeyPath    string
-	k8sK8sVersion    string
-	k8sPlanOnly      bool
-	k8sApply         bool
-	k8sDeployName    string
-	k8sDeployPort    int
-	k8sReplicas      int
-	k8sNamespace     string
-	k8sClusterName   string
-	k8sOutputFormat  string
+	k8sNodes        int
+	k8sNodeType     string
+	k8sWorkers      int
+	k8sKeyPair      string
+	k8sSSHKeyPath   string
+	k8sK8sVersion   string
+	k8sPlanOnly     bool
+	k8sApply        bool
+	k8sDeployName   string
+	k8sDeployPort   int
+	k8sReplicas     int
+	k8sNamespace    string
+	k8sClusterName  string
+	k8sOutputFormat string
 )
 
 func init() {

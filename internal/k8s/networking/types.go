@@ -62,11 +62,11 @@ type Response struct {
 
 // NetworkingPlan represents a plan for networking modifications
 type NetworkingPlan struct {
-	Version   int               `json:"version"`
-	CreatedAt time.Time         `json:"createdAt"`
-	Summary   string            `json:"summary"`
-	Steps     []NetworkingStep  `json:"steps"`
-	Notes     []string          `json:"notes,omitempty"`
+	Version   int              `json:"version"`
+	CreatedAt time.Time        `json:"createdAt"`
+	Summary   string           `json:"summary"`
+	Steps     []NetworkingStep `json:"steps"`
+	Notes     []string         `json:"notes,omitempty"`
 }
 
 // NetworkingStep represents a single step in a networking plan
@@ -103,8 +103,8 @@ type ServiceInfo struct {
 	CreatedAt    time.Time         `json:"createdAt"`
 
 	// LoadBalancer specific
-	LoadBalancerIP       string   `json:"loadBalancerIP,omitempty"`
-	LoadBalancerIngress  []string `json:"loadBalancerIngress,omitempty"`
+	LoadBalancerIP      string   `json:"loadBalancerIP,omitempty"`
+	LoadBalancerIngress []string `json:"loadBalancerIngress,omitempty"`
 
 	// Session affinity
 	SessionAffinity string `json:"sessionAffinity,omitempty"`
@@ -212,9 +212,9 @@ type EndpointSubset struct {
 
 // EndpointAddress contains endpoint address details
 type EndpointAddress struct {
-	IP       string `json:"ip"`
-	Hostname string `json:"hostname,omitempty"`
-	NodeName string `json:"nodeName,omitempty"`
+	IP        string           `json:"ip"`
+	Hostname  string           `json:"hostname,omitempty"`
+	NodeName  string           `json:"nodeName,omitempty"`
 	TargetRef *ObjectReference `json:"targetRef,omitempty"`
 }
 
@@ -294,13 +294,13 @@ type IngressTLSSpec struct {
 
 // CreateNetworkPolicyOptions contains options for creating a network policy
 type CreateNetworkPolicyOptions struct {
-	Name        string
-	Namespace   string
-	PodSelector map[string]string
-	PolicyTypes []string
+	Name         string
+	Namespace    string
+	PodSelector  map[string]string
+	PolicyTypes  []string
 	IngressRules []NetworkPolicyRuleSpec
 	EgressRules  []NetworkPolicyRuleSpec
-	Labels      map[string]string
+	Labels       map[string]string
 }
 
 // NetworkPolicyRuleSpec specifies a rule for network policy creation

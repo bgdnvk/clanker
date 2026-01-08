@@ -7,10 +7,10 @@ import (
 
 // mockK8sClient implements K8sClient for testing
 type mockK8sClient struct {
-	runOutput    string
-	runErr       error
+	runOutput     string
+	runErr        error
 	runJSONOutput []byte
-	runCalls     [][]string
+	runCalls      [][]string
 }
 
 func (m *mockK8sClient) Run(ctx context.Context, args ...string) (string, error) {

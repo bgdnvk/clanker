@@ -407,8 +407,8 @@ func (m *ReleaseManager) parseReleaseJSON(data []byte) (*ReleaseInfo, error) {
 // parseReleaseStatus parses release status JSON
 func (m *ReleaseManager) parseReleaseStatus(data []byte) (*ReleaseInfo, error) {
 	var raw struct {
-		Name  string `json:"name"`
-		Info  struct {
+		Name string `json:"name"`
+		Info struct {
 			Status      string `json:"status"`
 			Description string `json:"description"`
 			Notes       string `json:"notes"`

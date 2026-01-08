@@ -450,9 +450,9 @@ func (m *NetworkPolicyManager) parseNetworkPolicy(data []byte) (*NetworkPolicyIn
 					} `json:"ipBlock,omitempty"`
 				} `json:"from,omitempty"`
 				Ports []struct {
-					Protocol string `json:"protocol,omitempty"`
+					Protocol string      `json:"protocol,omitempty"`
 					Port     interface{} `json:"port,omitempty"`
-					EndPort  int    `json:"endPort,omitempty"`
+					EndPort  int         `json:"endPort,omitempty"`
 				} `json:"ports,omitempty"`
 			} `json:"ingress,omitempty"`
 			Egress []struct {
@@ -469,9 +469,9 @@ func (m *NetworkPolicyManager) parseNetworkPolicy(data []byte) (*NetworkPolicyIn
 					} `json:"ipBlock,omitempty"`
 				} `json:"to,omitempty"`
 				Ports []struct {
-					Protocol string `json:"protocol,omitempty"`
+					Protocol string      `json:"protocol,omitempty"`
 					Port     interface{} `json:"port,omitempty"`
-					EndPort  int    `json:"endPort,omitempty"`
+					EndPort  int         `json:"endPort,omitempty"`
 				} `json:"ports,omitempty"`
 			} `json:"egress,omitempty"`
 		} `json:"spec"`

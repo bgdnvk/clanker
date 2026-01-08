@@ -104,13 +104,13 @@ func TestAnalyzeQueryOperation(t *testing.T) {
 		expectedOp   string
 		expectedRead bool
 	}{
-		{"list all resources", "list", true},         // "list" is unique
-		{"retrieve resource data", "get", true},      // "retrieve" is unique to get
-		{"info about resource", "describe", true},    // "info about" is unique to describe
-		{"add new resource", "create", false},        // "add" is unique to create
-		{"drop resource", "delete", false},           // "drop" is unique to delete
-		{"expose workload", "expose", false},         // "expose" is unique
-		{"modify resource", "update", false},         // "modify" is unique to update
+		{"list all resources", "list", true},      // "list" is unique
+		{"retrieve resource data", "get", true},   // "retrieve" is unique to get
+		{"info about resource", "describe", true}, // "info about" is unique to describe
+		{"add new resource", "create", false},     // "add" is unique to create
+		{"drop resource", "delete", false},        // "drop" is unique to delete
+		{"expose workload", "expose", false},      // "expose" is unique
+		{"modify resource", "update", false},      // "modify" is unique to update
 	}
 
 	for _, tt := range tests {

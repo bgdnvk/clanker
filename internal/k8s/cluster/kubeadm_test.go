@@ -55,10 +55,10 @@ func TestDefaultBootstrapConfig(t *testing.T) {
 
 func TestParseJoinCommand(t *testing.T) {
 	tests := []struct {
-		name        string
-		joinCmd     string
-		wantToken   string
-		wantCAHash  string
+		name       string
+		joinCmd    string
+		wantToken  string
+		wantCAHash string
 	}{
 		{
 			name:       "valid join command",

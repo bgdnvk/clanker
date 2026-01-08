@@ -7,10 +7,10 @@ import (
 
 // mockHelmClient implements HelmClient for testing
 type mockHelmClient struct {
-	runOutput    string
-	runErr       error
-	runCalls     [][]string
-	runNsCalls   []struct {
+	runOutput  string
+	runErr     error
+	runCalls   [][]string
+	runNsCalls []struct {
 		namespace string
 		args      []string
 	}

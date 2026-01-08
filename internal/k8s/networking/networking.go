@@ -431,13 +431,13 @@ func (s *SubAgent) detectResourceType(query string) ResourceType {
 // detectOperation determines the operation from the query
 func (s *SubAgent) detectOperation(query string) string {
 	operations := map[string][]string{
-		"list":     {"list", "show", "what", "which", "all"},
-		"get":      {"get", "fetch", "retrieve"},
-		"describe": {"describe", "details", "info about"},
-		"create":   {"create", "add", "new", "make"},
-		"delete":   {"delete", "remove", "drop"},
-		"expose":   {"expose"},
-		"update":   {"update", "modify", "change", "edit"},
+		"list":      {"list", "show", "what", "which", "all"},
+		"get":       {"get", "fetch", "retrieve"},
+		"describe":  {"describe", "details", "info about"},
+		"create":    {"create", "add", "new", "make"},
+		"delete":    {"delete", "remove", "drop"},
+		"expose":    {"expose"},
+		"update":    {"update", "modify", "change", "edit"},
 		"endpoints": {"endpoints", "endpoint"},
 	}
 

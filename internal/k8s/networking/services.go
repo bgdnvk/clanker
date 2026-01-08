@@ -291,18 +291,18 @@ func (m *ServiceManager) parseService(data []byte) (*ServiceInfo, error) {
 			CreationTimestamp string            `json:"creationTimestamp"`
 		} `json:"metadata"`
 		Spec struct {
-			Type                  string `json:"type"`
-			ClusterIP             string `json:"clusterIP"`
-			ExternalName          string `json:"externalName"`
-			SessionAffinity       string `json:"sessionAffinity"`
-			LoadBalancerIP        string `json:"loadBalancerIP"`
-			Selector              map[string]string `json:"selector"`
-			Ports                 []struct {
-				Name       string `json:"name"`
-				Protocol   string `json:"protocol"`
-				Port       int    `json:"port"`
+			Type            string            `json:"type"`
+			ClusterIP       string            `json:"clusterIP"`
+			ExternalName    string            `json:"externalName"`
+			SessionAffinity string            `json:"sessionAffinity"`
+			LoadBalancerIP  string            `json:"loadBalancerIP"`
+			Selector        map[string]string `json:"selector"`
+			Ports           []struct {
+				Name       string      `json:"name"`
+				Protocol   string      `json:"protocol"`
+				Port       int         `json:"port"`
 				TargetPort interface{} `json:"targetPort"`
-				NodePort   int    `json:"nodePort,omitempty"`
+				NodePort   int         `json:"nodePort,omitempty"`
 			} `json:"ports"`
 		} `json:"spec"`
 		Status struct {

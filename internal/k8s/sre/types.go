@@ -103,13 +103,13 @@ type PodCondition struct {
 
 // DeploymentStatus represents the status of a deployment
 type DeploymentStatus struct {
-	Name                string `json:"name"`
-	Namespace           string `json:"namespace"`
-	Replicas            int    `json:"replicas"`
-	ReadyReplicas       int    `json:"ready_replicas"`
-	AvailableReplicas   int    `json:"available_replicas"`
-	UnavailableReplicas int    `json:"unavailable_replicas"`
-	UpdatedReplicas     int    `json:"updated_replicas"`
+	Name                string                `json:"name"`
+	Namespace           string                `json:"namespace"`
+	Replicas            int                   `json:"replicas"`
+	ReadyReplicas       int                   `json:"ready_replicas"`
+	AvailableReplicas   int                   `json:"available_replicas"`
+	UnavailableReplicas int                   `json:"unavailable_replicas"`
+	UpdatedReplicas     int                   `json:"updated_replicas"`
 	Conditions          []DeploymentCondition `json:"conditions,omitempty"`
 }
 
@@ -166,28 +166,28 @@ type EventInfo struct {
 
 // HealthCheckResult represents the result of a health check
 type HealthCheckResult struct {
-	Healthy     bool     `json:"healthy"`
-	Score       int      `json:"score"` // 0-100
+	Healthy     bool      `json:"healthy"`
+	Score       int       `json:"score"` // 0-100
 	CheckedAt   time.Time `json:"checked_at"`
-	Summary     string   `json:"summary"`
-	Issues      []Issue  `json:"issues,omitempty"`
-	Suggestions []string `json:"suggestions,omitempty"`
+	Summary     string    `json:"summary"`
+	Issues      []Issue   `json:"issues,omitempty"`
+	Suggestions []string  `json:"suggestions,omitempty"`
 }
 
 // ClusterHealthSummary represents overall cluster health
 type ClusterHealthSummary struct {
-	OverallHealth   string            `json:"overall_health"` // healthy, degraded, critical
-	Score           int               `json:"score"`          // 0-100
-	NodeHealth      ComponentHealth   `json:"node_health"`
-	WorkloadHealth  ComponentHealth   `json:"workload_health"`
-	StorageHealth   ComponentHealth   `json:"storage_health"`
-	NetworkHealth   ComponentHealth   `json:"network_health"`
-	CriticalIssues  int               `json:"critical_issues"`
-	WarningIssues   int               `json:"warning_issues"`
-	TotalPods       int               `json:"total_pods"`
-	RunningPods     int               `json:"running_pods"`
-	PendingPods     int               `json:"pending_pods"`
-	FailedPods      int               `json:"failed_pods"`
+	OverallHealth  string          `json:"overall_health"` // healthy, degraded, critical
+	Score          int             `json:"score"`          // 0-100
+	NodeHealth     ComponentHealth `json:"node_health"`
+	WorkloadHealth ComponentHealth `json:"workload_health"`
+	StorageHealth  ComponentHealth `json:"storage_health"`
+	NetworkHealth  ComponentHealth `json:"network_health"`
+	CriticalIssues int             `json:"critical_issues"`
+	WarningIssues  int             `json:"warning_issues"`
+	TotalPods      int             `json:"total_pods"`
+	RunningPods    int             `json:"running_pods"`
+	PendingPods    int             `json:"pending_pods"`
+	FailedPods     int             `json:"failed_pods"`
 }
 
 // ComponentHealth represents health of a cluster component
@@ -199,25 +199,25 @@ type ComponentHealth struct {
 
 // DiagnosticReport represents a diagnostic analysis
 type DiagnosticReport struct {
-	GeneratedAt   time.Time `json:"generated_at"`
-	Scope         string    `json:"scope"` // cluster, namespace, resource
-	ResourceType  string    `json:"resource_type,omitempty"`
-	ResourceName  string    `json:"resource_name,omitempty"`
-	Namespace     string    `json:"namespace,omitempty"`
-	Summary       string    `json:"summary"`
-	Issues        []Issue   `json:"issues"`
-	Events        []EventInfo `json:"events,omitempty"`
-	Logs          []LogEntry  `json:"logs,omitempty"`
-	Remediation   []RemediationStep `json:"remediation,omitempty"`
+	GeneratedAt  time.Time         `json:"generated_at"`
+	Scope        string            `json:"scope"` // cluster, namespace, resource
+	ResourceType string            `json:"resource_type,omitempty"`
+	ResourceName string            `json:"resource_name,omitempty"`
+	Namespace    string            `json:"namespace,omitempty"`
+	Summary      string            `json:"summary"`
+	Issues       []Issue           `json:"issues"`
+	Events       []EventInfo       `json:"events,omitempty"`
+	Logs         []LogEntry        `json:"logs,omitempty"`
+	Remediation  []RemediationStep `json:"remediation,omitempty"`
 }
 
 // LogEntry represents a log line with metadata
 type LogEntry struct {
-	Timestamp   time.Time `json:"timestamp"`
-	Container   string    `json:"container"`
-	Message     string    `json:"message"`
-	Level       string    `json:"level,omitempty"` // error, warn, info
-	IsError     bool      `json:"is_error"`
+	Timestamp time.Time `json:"timestamp"`
+	Container string    `json:"container"`
+	Message   string    `json:"message"`
+	Level     string    `json:"level,omitempty"` // error, warn, info
+	IsError   bool      `json:"is_error"`
 }
 
 // RemediationStep represents a suggested fix

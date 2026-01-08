@@ -13,12 +13,12 @@ const CurrentPlanVersion = 1
 
 // MakerPlan represents a plan in AWS maker-compatible format
 type MakerPlan struct {
-	Version   int             `json:"version"`
-	CreatedAt time.Time       `json:"createdAt"`
-	Question  string          `json:"question"`
-	Summary   string          `json:"summary"`
-	Commands  []MakerCommand  `json:"commands"`
-	Notes     []string        `json:"notes,omitempty"`
+	Version   int            `json:"version"`
+	CreatedAt time.Time      `json:"createdAt"`
+	Question  string         `json:"question"`
+	Summary   string         `json:"summary"`
+	Commands  []MakerCommand `json:"commands"`
+	Notes     []string       `json:"notes,omitempty"`
 }
 
 // MakerCommand represents a command in AWS maker-compatible format

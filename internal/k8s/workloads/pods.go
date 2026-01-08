@@ -262,10 +262,10 @@ func (m *PodManager) parsePod(data []byte) (*PodInfo, error) {
 			} `json:"containers"`
 		} `json:"spec"`
 		Status struct {
-			Phase     string `json:"phase"`
-			PodIP     string `json:"podIP"`
-			HostIP    string `json:"hostIP"`
-			StartTime string `json:"startTime"`
+			Phase      string `json:"phase"`
+			PodIP      string `json:"podIP"`
+			HostIP     string `json:"hostIP"`
+			StartTime  string `json:"startTime"`
 			Conditions []struct {
 				Type   string `json:"type"`
 				Status string `json:"status"`
@@ -276,8 +276,8 @@ func (m *PodManager) parsePod(data []byte) (*PodInfo, error) {
 				RestartCount int    `json:"restartCount"`
 				Image        string `json:"image"`
 				State        struct {
-					Running    *struct{} `json:"running"`
-					Waiting    *struct {
+					Running *struct{} `json:"running"`
+					Waiting *struct {
 						Reason  string `json:"reason"`
 						Message string `json:"message"`
 					} `json:"waiting"`

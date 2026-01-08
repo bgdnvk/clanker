@@ -80,11 +80,11 @@ func TestAnalyzeQueryResourceType(t *testing.T) {
 		query        string
 		expectedType ResourceType
 	}{
-		{"list pv resources", ResourcePV},                // "pv " is unique to PV
-		{"get pvc items", ResourcePVC},                   // "pvc" is unique
+		{"list pv resources", ResourcePV},                      // "pv " is unique to PV
+		{"get pvc items", ResourcePVC},                         // "pvc" is unique
 		{"describe storageclass config", ResourceStorageClass}, // "storageclass" is unique
-		{"show configmap data", ResourceConfigMap},       // "configmap" is unique
-		{"list secret items", ResourceSecret},            // "secret" is unique
+		{"show configmap data", ResourceConfigMap},             // "configmap" is unique
+		{"list secret items", ResourceSecret},                  // "secret" is unique
 	}
 
 	for _, tt := range tests {
@@ -107,12 +107,12 @@ func TestAnalyzeQueryOperation(t *testing.T) {
 		expectedOp   string
 		expectedRead bool
 	}{
-		{"list all resources", "list", true},       // "list" is unique
-		{"retrieve resource data", "get", true},    // "retrieve" is unique to get
-		{"info about resource", "describe", true},  // "info about" is unique to describe
-		{"add new resource", "create", false},      // "add" is unique to create
-		{"drop resource", "delete", false},         // "drop" is unique to delete
-		{"modify resource", "update", false},       // "modify" is unique to update
+		{"list all resources", "list", true},      // "list" is unique
+		{"retrieve resource data", "get", true},   // "retrieve" is unique to get
+		{"info about resource", "describe", true}, // "info about" is unique to describe
+		{"add new resource", "create", false},     // "add" is unique to create
+		{"drop resource", "delete", false},        // "drop" is unique to delete
+		{"modify resource", "update", false},      // "modify" is unique to update
 	}
 
 	for _, tt := range tests {

@@ -20,11 +20,11 @@ type K8sClient interface {
 type ResourceType string
 
 const (
-	ResourcePV          ResourceType = "persistentvolume"
-	ResourcePVC         ResourceType = "persistentvolumeclaim"
+	ResourcePV           ResourceType = "persistentvolume"
+	ResourcePVC          ResourceType = "persistentvolumeclaim"
 	ResourceStorageClass ResourceType = "storageclass"
-	ResourceConfigMap   ResourceType = "configmap"
-	ResourceSecret      ResourceType = "secret"
+	ResourceConfigMap    ResourceType = "configmap"
+	ResourceSecret       ResourceType = "secret"
 )
 
 // ResponseType indicates the type of response from the sub-agent
@@ -253,9 +253,9 @@ const (
 type AccessMode string
 
 const (
-	AccessModeReadWriteOnce AccessMode = "ReadWriteOnce"
-	AccessModeReadOnlyMany  AccessMode = "ReadOnlyMany"
-	AccessModeReadWriteMany AccessMode = "ReadWriteMany"
+	AccessModeReadWriteOnce    AccessMode = "ReadWriteOnce"
+	AccessModeReadOnlyMany     AccessMode = "ReadOnlyMany"
+	AccessModeReadWriteMany    AccessMode = "ReadWriteMany"
 	AccessModeReadWriteOncePod AccessMode = "ReadWriteOncePod"
 )
 

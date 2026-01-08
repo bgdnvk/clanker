@@ -1858,11 +1858,11 @@ func (a *Agent) getPodsJSON(ctx context.Context) ([]ClusterPodInfo, error) {
 			Spec struct {
 				NodeName string `json:"nodeName"`
 				Volumes  []struct {
-					Name                  string `json:"name"`
-					ConfigMap             *struct{ Name string } `json:"configMap,omitempty"`
+					Name                  string                       `json:"name"`
+					ConfigMap             *struct{ Name string }       `json:"configMap,omitempty"`
 					Secret                *struct{ SecretName string } `json:"secret,omitempty"`
-					PersistentVolumeClaim *struct{ ClaimName string } `json:"persistentVolumeClaim,omitempty"`
-					EmptyDir              *struct{} `json:"emptyDir,omitempty"`
+					PersistentVolumeClaim *struct{ ClaimName string }  `json:"persistentVolumeClaim,omitempty"`
+					EmptyDir              *struct{}                    `json:"emptyDir,omitempty"`
 				} `json:"volumes"`
 				Containers []struct {
 					Name  string `json:"name"`
@@ -1877,7 +1877,7 @@ func (a *Agent) getPodsJSON(ctx context.Context) ([]ClusterPodInfo, error) {
 					Ready        bool   `json:"ready"`
 					RestartCount int    `json:"restartCount"`
 					State        struct {
-						Running    *struct{} `json:"running,omitempty"`
+						Running    *struct{}                `json:"running,omitempty"`
 						Waiting    *struct{ Reason string } `json:"waiting,omitempty"`
 						Terminated *struct{ Reason string } `json:"terminated,omitempty"`
 					} `json:"state"`
@@ -1988,10 +1988,10 @@ func (a *Agent) getServicesJSON(ctx context.Context) ([]ClusterServiceInfo, erro
 				Labels    map[string]string `json:"labels"`
 			} `json:"metadata"`
 			Spec struct {
-				Type       string            `json:"type"`
-				ClusterIP  string            `json:"clusterIP"`
-				Selector   map[string]string `json:"selector"`
-				Ports      []struct {
+				Type      string            `json:"type"`
+				ClusterIP string            `json:"clusterIP"`
+				Selector  map[string]string `json:"selector"`
+				Ports     []struct {
 					Name       string      `json:"name"`
 					Protocol   string      `json:"protocol"`
 					Port       int         `json:"port"`
