@@ -561,4 +561,3 @@ func (s *SubAgent) parseAddRepoFromQuery(query string) AddRepoOptions {
 
 	return opts
 }
-
