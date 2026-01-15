@@ -374,18 +374,30 @@ func TestReleaseManagerInstallPlan(t *testing.T) {
 	if plan.Summary == "" {
 		t.Error("expected non-empty summary")
 	}
-	if len(plan.Steps) == 0 {
-		t.Error("expected at least one step")
+	// Should have 3 steps: add repo, update repo, install
+	if len(plan.Steps) < 3 {
+		t.Errorf("expected at least 3 steps for bitnami chart, got %d", len(plan.Steps))
 	}
 
-	step := plan.Steps[0]
-	if step.Command != "helm" {
-		t.Errorf("Command = %v, want helm", step.Command)
+	// Find the install step (last step)
+	var installStep *HelmStep
+	for i := range plan.Steps {
+		if plan.Steps[i].ID == "install-release" {
+			installStep = &plan.Steps[i]
+			break
+		}
+	}
+	if installStep == nil {
+		t.Fatal("expected to find install-release step")
+	}
+
+	if installStep.Command != "helm" {
+		t.Errorf("Command = %v, want helm", installStep.Command)
 	}
 
 	// Check that args contain expected values
 	argsStr := ""
-	for _, arg := range step.Args {
+	for _, arg := range installStep.Args {
 		argsStr += arg + " "
 	}
 	if !containsSubstring(argsStr, "install") {
@@ -396,6 +408,23 @@ func TestReleaseManagerInstallPlan(t *testing.T) {
 	}
 	if !containsSubstring(argsStr, "bitnami/nginx") {
 		t.Error("expected args to contain 'bitnami/nginx'")
+	}
+
+	// Check repo setup steps exist
+	var hasAddRepo, hasUpdateRepo bool
+	for _, step := range plan.Steps {
+		if step.ID == "add-repo" {
+			hasAddRepo = true
+		}
+		if step.ID == "update-repos" {
+			hasUpdateRepo = true
+		}
+	}
+	if !hasAddRepo {
+		t.Error("expected add-repo step for bitnami chart")
+	}
+	if !hasUpdateRepo {
+		t.Error("expected update-repos step for bitnami chart")
 	}
 }
 
@@ -416,13 +445,25 @@ func TestReleaseManagerUpgradePlan(t *testing.T) {
 	if plan.Summary == "" {
 		t.Error("expected non-empty summary")
 	}
-	if len(plan.Steps) == 0 {
-		t.Error("expected at least one step")
+	// Should have 3 steps: add repo, update repo, upgrade
+	if len(plan.Steps) < 3 {
+		t.Errorf("expected at least 3 steps for bitnami chart, got %d", len(plan.Steps))
 	}
 
-	step := plan.Steps[0]
+	// Find the upgrade step
+	var upgradeStep *HelmStep
+	for i := range plan.Steps {
+		if plan.Steps[i].ID == "upgrade-release" {
+			upgradeStep = &plan.Steps[i]
+			break
+		}
+	}
+	if upgradeStep == nil {
+		t.Fatal("expected to find upgrade-release step")
+	}
+
 	argsStr := ""
-	for _, arg := range step.Args {
+	for _, arg := range upgradeStep.Args {
 		argsStr += arg + " "
 	}
 	if !containsSubstring(argsStr, "upgrade") {
@@ -433,6 +474,23 @@ func TestReleaseManagerUpgradePlan(t *testing.T) {
 	}
 	if !containsSubstring(argsStr, "--reuse-values") {
 		t.Error("expected args to contain '--reuse-values'")
+	}
+
+	// Check repo setup steps exist
+	var hasAddRepo, hasUpdateRepo bool
+	for _, step := range plan.Steps {
+		if step.ID == "add-repo" {
+			hasAddRepo = true
+		}
+		if step.ID == "update-repos" {
+			hasUpdateRepo = true
+		}
+	}
+	if !hasAddRepo {
+		t.Error("expected add-repo step for bitnami chart")
+	}
+	if !hasUpdateRepo {
+		t.Error("expected update-repos step for bitnami chart")
 	}
 }
 

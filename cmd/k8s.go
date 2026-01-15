@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/bgdnvk/clanker/internal/k8s"
 	"github.com/bgdnvk/clanker/internal/k8s/cluster"
@@ -696,27 +699,166 @@ func runGetResources(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	debug := viper.GetBool("debug")
 
-	agent := k8s.NewAgent(debug)
+	agent, awsProfile, awsRegion := getK8sAgent()
 
-	clusterName := k8sClusterName
-	if clusterName == "" {
-		clusterName = "current-context"
+	// If cluster name is specified, get resources for that cluster only
+	if k8sClusterName != "" {
+		// First verify the cluster exists
+		clusterExists, err := verifyEKSClusterExists(ctx, k8sClusterName, awsProfile, awsRegion)
+		if err != nil {
+			return fmt.Errorf("failed to verify cluster: %w", err)
+		}
+		if !clusterExists {
+			return fmt.Errorf("EKS cluster '%s' not found in region %s", k8sClusterName, awsRegion)
+		}
+
+		// Validate and fix kubeconfig if needed
+		if err := ensureValidKubeconfig(ctx, k8sClusterName, awsProfile, awsRegion, debug); err != nil {
+			return fmt.Errorf("failed to configure kubeconfig: %w", err)
+		}
+
+		// Create fresh agent after kubeconfig update
+		agent = k8s.NewAgent(debug)
+
+		opts := k8s.QueryOptions{
+			ClusterName: k8sClusterName,
+		}
+
+		resources, err := agent.GetClusterResources(ctx, k8sClusterName, opts)
+		if err != nil {
+			return fmt.Errorf("failed to get cluster resources: %w", err)
+		}
+
+		// Validate we got actual data
+		if len(resources.Nodes) == 0 && len(resources.Pods) == 0 {
+			// Try to fix kubeconfig and retry
+			if debug {
+				fmt.Fprintf(os.Stderr, "[k8s] no resources found, attempting kubeconfig refresh...\n")
+			}
+			if err := forceUpdateKubeconfig(ctx, k8sClusterName, awsProfile, awsRegion); err != nil {
+				return fmt.Errorf("failed to refresh kubeconfig: %w", err)
+			}
+
+			// Retry with fresh agent
+			agent = k8s.NewAgent(debug)
+			resources, err = agent.GetClusterResources(ctx, k8sClusterName, opts)
+			if err != nil {
+				return fmt.Errorf("failed to get cluster resources after kubeconfig refresh: %w", err)
+			}
+
+			if len(resources.Nodes) == 0 && len(resources.Pods) == 0 {
+				return fmt.Errorf("unable to fetch resources from cluster '%s' - check cluster status and permissions", k8sClusterName)
+			}
+		}
+
+		var output []byte
+		if k8sOutputFormat == "yaml" {
+			output, err = yaml.Marshal(resources)
+		} else {
+			output, err = json.MarshalIndent(resources, "", "  ")
+		}
+
+		if err != nil {
+			return fmt.Errorf("failed to marshal resources: %w", err)
+		}
+
+		fmt.Println(string(output))
+		return nil
 	}
 
-	opts := k8s.QueryOptions{
-		ClusterName: clusterName,
-	}
-
-	resources, err := agent.GetClusterResources(ctx, clusterName, opts)
+	// No cluster specified - get resources from all EKS clusters
+	clusters, err := agent.ListEKSClusters(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get cluster resources: %w", err)
+		return fmt.Errorf("failed to list EKS clusters: %w", err)
+	}
+
+	if len(clusters) == 0 {
+		return fmt.Errorf("no EKS clusters found")
+	}
+
+	// Backup kubeconfig and save original context before multi-cluster operations
+	backupPath, err := backupKubeconfig(debug)
+	if err != nil {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[k8s] warning: failed to backup kubeconfig: %v\n", err)
+		}
+	}
+
+	originalContext := getCurrentContext(ctx)
+	if debug && originalContext != "" {
+		fmt.Fprintf(os.Stderr, "[k8s] saved original context: %s\n", originalContext)
+	}
+
+	multiResources := k8s.MultiClusterResources{
+		Clusters: make([]k8s.ClusterResources, 0, len(clusters)),
+	}
+
+	for _, cluster := range clusters {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[k8s] switching to cluster: %s\n", cluster.Name)
+		}
+
+		// Update kubeconfig and switch context for this cluster
+		if err := switchToCluster(ctx, cluster.Name, awsProfile, awsRegion, debug); err != nil {
+			if debug {
+				fmt.Fprintf(os.Stderr, "[k8s] warning: failed to switch to cluster %s: %v\n", cluster.Name, err)
+			}
+			continue
+		}
+
+		// Verify the context switch was successful
+		if !verifyContextSwitch(ctx, cluster.Name, debug) {
+			if debug {
+				fmt.Fprintf(os.Stderr, "[k8s] warning: context switch verification failed for %s\n", cluster.Name)
+			}
+			continue
+		}
+
+		opts := k8s.QueryOptions{
+			ClusterName: cluster.Name,
+		}
+
+		// Create a new agent with fresh client for this cluster
+		clusterAgent := k8s.NewAgent(debug)
+		resources, err := clusterAgent.GetClusterResources(ctx, cluster.Name, opts)
+		if err != nil {
+			if debug {
+				fmt.Fprintf(os.Stderr, "[k8s] warning: failed to get resources for %s: %v\n", cluster.Name, err)
+			}
+			continue
+		}
+
+		// Add cluster metadata
+		resources.Region = cluster.Region
+		resources.Status = cluster.Status
+
+		multiResources.Clusters = append(multiResources.Clusters, *resources)
+
+		if debug {
+			fmt.Fprintf(os.Stderr, "[k8s] successfully fetched resources from %s (%d nodes, %d pods)\n",
+				cluster.Name, len(resources.Nodes), len(resources.Pods))
+		}
+	}
+
+	// Restore original context if we had one
+	if originalContext != "" {
+		if err := restoreContext(ctx, originalContext, debug); err != nil {
+			if debug {
+				fmt.Fprintf(os.Stderr, "[k8s] warning: failed to restore original context: %v\n", err)
+			}
+		}
+	}
+
+	// Log backup location
+	if backupPath != "" && debug {
+		fmt.Fprintf(os.Stderr, "[k8s] kubeconfig backup saved at: %s\n", backupPath)
 	}
 
 	var output []byte
 	if k8sOutputFormat == "yaml" {
-		output, err = yaml.Marshal(resources)
+		output, err = yaml.Marshal(multiResources)
 	} else {
-		output, err = json.MarshalIndent(resources, "", "  ")
+		output, err = json.MarshalIndent(multiResources, "", "  ")
 	}
 
 	if err != nil {
@@ -724,5 +866,253 @@ func runGetResources(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println(string(output))
+	return nil
+}
+
+// verifyEKSClusterExists checks if an EKS cluster exists in the specified region
+func verifyEKSClusterExists(ctx context.Context, clusterName, awsProfile, awsRegion string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "aws", "eks", "describe-cluster",
+		"--name", clusterName,
+		"--profile", awsProfile,
+		"--region", awsRegion,
+		"--query", "cluster.status",
+		"--output", "text")
+
+	output, err := cmd.Output()
+	if err != nil {
+		// Check if it's a "not found" error
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr := string(exitErr.Stderr)
+			if strings.Contains(stderr, "ResourceNotFoundException") ||
+				strings.Contains(stderr, "not found") {
+				return false, nil
+			}
+		}
+		return false, fmt.Errorf("failed to describe cluster: %w", err)
+	}
+
+	status := strings.TrimSpace(string(output))
+	return status != "", nil
+}
+
+// ensureValidKubeconfig validates the kubeconfig and updates it if needed
+func ensureValidKubeconfig(ctx context.Context, clusterName, awsProfile, awsRegion string, debug bool) error {
+	// Check if current context points to the right cluster
+	contextValid := checkKubeconfigContext(ctx, clusterName, debug)
+
+	if !contextValid {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[k8s] kubeconfig context invalid or missing, updating...\n")
+		}
+		// Backup before making changes
+		if backupPath, err := backupKubeconfig(debug); err == nil && backupPath != "" && debug {
+			fmt.Fprintf(os.Stderr, "[k8s] kubeconfig backed up to: %s\n", backupPath)
+		}
+		return forceUpdateKubeconfig(ctx, clusterName, awsProfile, awsRegion)
+	}
+
+	// Verify kubectl can actually connect
+	if !verifyKubectlConnection(ctx, debug) {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[k8s] kubectl connection failed, refreshing kubeconfig...\n")
+		}
+		// Backup before making changes
+		if backupPath, err := backupKubeconfig(debug); err == nil && backupPath != "" && debug {
+			fmt.Fprintf(os.Stderr, "[k8s] kubeconfig backed up to: %s\n", backupPath)
+		}
+		return forceUpdateKubeconfig(ctx, clusterName, awsProfile, awsRegion)
+	}
+
+	return nil
+}
+
+// checkKubeconfigContext checks if the current kubeconfig context is valid for the cluster
+func checkKubeconfigContext(ctx context.Context, clusterName string, debug bool) bool {
+	// Get current context
+	cmd := exec.CommandContext(ctx, "kubectl", "config", "current-context")
+	output, err := cmd.Output()
+	if err != nil {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[k8s] no current context set: %v\n", err)
+		}
+		return false
+	}
+
+	currentContext := strings.TrimSpace(string(output))
+
+	// Check if context contains the cluster name (EKS contexts usually contain the cluster name)
+	if !strings.Contains(currentContext, clusterName) {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[k8s] current context '%s' does not match cluster '%s'\n", currentContext, clusterName)
+		}
+		return false
+	}
+
+	return true
+}
+
+// verifyKubectlConnection verifies that kubectl can connect to the cluster
+func verifyKubectlConnection(ctx context.Context, debug bool) bool {
+	// Try a simple cluster-info command with timeout
+	cmd := exec.CommandContext(ctx, "kubectl", "cluster-info", "--request-timeout=5s")
+	err := cmd.Run()
+	if err != nil {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[k8s] kubectl connection test failed: %v\n", err)
+		}
+		return false
+	}
+	return true
+}
+
+// forceUpdateKubeconfig forces an update of the kubeconfig for the specified cluster
+func forceUpdateKubeconfig(ctx context.Context, clusterName, awsProfile, awsRegion string) error {
+	cmd := exec.CommandContext(ctx, "aws", "eks", "update-kubeconfig",
+		"--name", clusterName,
+		"--profile", awsProfile,
+		"--region", awsRegion)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to update kubeconfig: %w - %s", err, string(output))
+	}
+
+	return nil
+}
+
+// backupKubeconfig creates a backup of the current kubeconfig file
+func backupKubeconfig(debug bool) (string, error) {
+	kubeconfigPath := getKubeconfigPath()
+	if kubeconfigPath == "" {
+		return "", fmt.Errorf("could not determine kubeconfig path")
+	}
+
+	// Check if kubeconfig exists
+	if _, err := os.Stat(kubeconfigPath); os.IsNotExist(err) {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[k8s] no existing kubeconfig to backup\n")
+		}
+		return "", nil
+	}
+
+	// Create backup directory
+	backupDir := filepath.Join(filepath.Dir(kubeconfigPath), "kubeconfig-backups")
+	if err := os.MkdirAll(backupDir, 0700); err != nil {
+		return "", fmt.Errorf("failed to create backup directory: %w", err)
+	}
+
+	// Generate backup filename with timestamp
+	timestamp := time.Now().Format("20060102-150405")
+	backupPath := filepath.Join(backupDir, fmt.Sprintf("config.backup.%s", timestamp))
+
+	// Read original file
+	content, err := os.ReadFile(kubeconfigPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read kubeconfig: %w", err)
+	}
+
+	// Write backup
+	if err := os.WriteFile(backupPath, content, 0600); err != nil {
+		return "", fmt.Errorf("failed to write backup: %w", err)
+	}
+
+	if debug {
+		fmt.Fprintf(os.Stderr, "[k8s] created kubeconfig backup: %s\n", backupPath)
+	}
+
+	return backupPath, nil
+}
+
+// getKubeconfigPath returns the path to the kubeconfig file
+func getKubeconfigPath() string {
+	// Check KUBECONFIG env var first
+	if kubeconfigEnv := os.Getenv("KUBECONFIG"); kubeconfigEnv != "" {
+		// If multiple paths, use the first one
+		paths := strings.Split(kubeconfigEnv, string(os.PathListSeparator))
+		if len(paths) > 0 {
+			return paths[0]
+		}
+	}
+
+	// Default to ~/.kube/config
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(homeDir, ".kube", "config")
+}
+
+// getCurrentContext returns the current kubectl context name
+func getCurrentContext(ctx context.Context) string {
+	cmd := exec.CommandContext(ctx, "kubectl", "config", "current-context")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
+// switchToCluster updates kubeconfig and switches context to the specified cluster
+func switchToCluster(ctx context.Context, clusterName, awsProfile, awsRegion string, debug bool) error {
+	// First, update kubeconfig for this cluster (this also sets the context)
+	cmd := exec.CommandContext(ctx, "aws", "eks", "update-kubeconfig",
+		"--name", clusterName,
+		"--profile", awsProfile,
+		"--region", awsRegion)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to update kubeconfig: %w - %s", err, string(output))
+	}
+
+	if debug {
+		fmt.Fprintf(os.Stderr, "[k8s] updated kubeconfig for cluster: %s\n", clusterName)
+	}
+
+	return nil
+}
+
+// verifyContextSwitch verifies that the current context is pointing to the expected cluster
+func verifyContextSwitch(ctx context.Context, clusterName string, debug bool) bool {
+	currentContext := getCurrentContext(ctx)
+	if currentContext == "" {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[k8s] no context set after switch\n")
+		}
+		return false
+	}
+
+	// EKS contexts typically contain the cluster name
+	if !strings.Contains(currentContext, clusterName) {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[k8s] context '%s' does not contain cluster name '%s'\n", currentContext, clusterName)
+		}
+		return false
+	}
+
+	// Quick connection test
+	testCmd := exec.CommandContext(ctx, "kubectl", "get", "nodes", "--request-timeout=10s", "-o", "name")
+	if err := testCmd.Run(); err != nil {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[k8s] connection test failed for %s: %v\n", clusterName, err)
+		}
+		return false
+	}
+
+	return true
+}
+
+// restoreContext restores the kubectl context to the specified context name
+func restoreContext(ctx context.Context, contextName string, debug bool) error {
+	cmd := exec.CommandContext(ctx, "kubectl", "config", "use-context", contextName)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to restore context: %w - %s", err, string(output))
+	}
+
+	if debug {
+		fmt.Fprintf(os.Stderr, "[k8s] restored original context: %s\n", contextName)
+	}
+
 	return nil
 }

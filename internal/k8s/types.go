@@ -201,6 +201,8 @@ type AIDecisionFunc func(ctx context.Context, prompt string) (string, error)
 type ClusterResources struct {
 	ClusterName string                 `json:"clusterName"`
 	ClusterARN  string                 `json:"clusterArn,omitempty"`
+	Region      string                 `json:"region,omitempty"`
+	Status      string                 `json:"status,omitempty"`
 	Nodes       []ClusterNodeInfo      `json:"nodes"`
 	Pods        []ClusterPodInfo       `json:"pods"`
 	Services    []ClusterServiceInfo   `json:"services"`
@@ -208,6 +210,11 @@ type ClusterResources struct {
 	PVCs        []ClusterPVCInfo       `json:"persistentVolumeClaims"`
 	ConfigMaps  []ClusterConfigMapInfo `json:"configMaps"`
 	Ingresses   []ClusterIngressInfo   `json:"ingresses,omitempty"`
+}
+
+// MultiClusterResources contains resources from multiple clusters
+type MultiClusterResources struct {
+	Clusters []ClusterResources `json:"clusters"`
 }
 
 // ClusterNodeInfo contains node information for visualization
