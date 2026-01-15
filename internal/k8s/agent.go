@@ -12,6 +12,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/k8s/networking"
 	"github.com/bgdnvk/clanker/internal/k8s/sre"
 	"github.com/bgdnvk/clanker/internal/k8s/storage"
+	"github.com/bgdnvk/clanker/internal/k8s/telemetry"
 	"github.com/bgdnvk/clanker/internal/k8s/workloads"
 )
 
@@ -148,6 +149,27 @@ func (a *sreClientAdapter) RunJSON(ctx context.Context, args ...string) ([]byte,
 	return a.client.RunJSON(ctx, args...)
 }
 
+// telemetryClientAdapter wraps Client to implement telemetry.K8sClient interface
+type telemetryClientAdapter struct {
+	client *Client
+}
+
+func (a *telemetryClientAdapter) Run(ctx context.Context, args ...string) (string, error) {
+	return a.client.Run(ctx, args...)
+}
+
+func (a *telemetryClientAdapter) RunWithNamespace(ctx context.Context, namespace string, args ...string) (string, error) {
+	return a.client.RunWithNamespace(ctx, namespace, args...)
+}
+
+func (a *telemetryClientAdapter) RunJSON(ctx context.Context, args ...string) ([]byte, error) {
+	return a.client.RunJSON(ctx, args...)
+}
+
+func (a *telemetryClientAdapter) GetJSON(ctx context.Context, resourceType, name, namespace string) ([]byte, error) {
+	return a.client.GetJSON(ctx, resourceType, name, namespace)
+}
+
 // Agent is the main K8s orchestrator that receives delegated queries from the main agent
 type Agent struct {
 	client       *Client
@@ -157,6 +179,7 @@ type Agent struct {
 	storage      *storage.SubAgent
 	helm         *helm.SubAgent
 	sre          *sre.SubAgent
+	telemetry    *telemetry.SubAgent
 	debug        bool
 	aiDecisionFn AIDecisionFunc
 }
@@ -356,6 +379,11 @@ func (a *Agent) HandleQuery(ctx context.Context, query string, opts QueryOptions
 		a.sre = sre.NewSubAgent(&sreClientAdapter{client: a.client}, a.debug)
 	}
 
+	// Initialize telemetry sub-agent if needed
+	if a.telemetry == nil {
+		a.telemetry = telemetry.NewSubAgent(&telemetryClientAdapter{client: a.client}, a.debug)
+	}
+
 	// Analyze the query
 	analysis := a.analyzeQuery(query)
 
@@ -387,6 +415,11 @@ func (a *Agent) HandleQuery(ctx context.Context, query string, opts QueryOptions
 	// Delegate sre queries to the sre sub-agent
 	if analysis.Category == "sre" {
 		return a.handleSREQuery(ctx, query, analysis, opts)
+	}
+
+	// Delegate telemetry queries to the telemetry sub-agent
+	if analysis.Category == "telemetry" {
+		return a.handleTelemetryQuery(ctx, query, analysis, opts)
 	}
 
 	// For read only operations, execute immediately
@@ -582,6 +615,12 @@ func (a *Agent) categorizeQuery(query string, analysis QueryAnalysis) string {
 	// Helm
 	if containsAny(query, []string{"helm", "chart", "release"}) {
 		return "helm"
+	}
+
+	// Telemetry and metrics
+	if containsAny(query, []string{"metrics", "usage", "top", "cpu", "memory", "resource usage",
+		"utilization", "stats", "statistics", "consumption", "allocat"}) {
+		return "telemetry"
 	}
 
 	// SRE and Troubleshooting
@@ -1178,6 +1217,140 @@ func convertSREPlanToK8sPlan(sp *sre.SREPlan) *K8sPlan {
 	}
 
 	return plan
+}
+
+// handleTelemetryQuery delegates telemetry queries to the telemetry sub-agent
+func (a *Agent) handleTelemetryQuery(ctx context.Context, query string, analysis QueryAnalysis, opts QueryOptions) (*K8sResponse, error) {
+	if a.debug {
+		fmt.Printf("[k8s-agent] delegating to telemetry sub-agent\n")
+	}
+
+	// Convert QueryOptions to telemetry.QueryOptions
+	telemetryOpts := telemetry.QueryOptions{
+		Namespace:     opts.Namespace,
+		AllNamespaces: analysis.ClusterScope,
+	}
+
+	response, err := a.telemetry.HandleQuery(ctx, query, telemetryOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert telemetry.Response to K8sResponse
+	k8sResponse := &K8sResponse{
+		NeedsApproval: false,
+	}
+
+	switch response.Type {
+	case telemetry.ResponseTypeResult:
+		k8sResponse.Type = ResponseTypeResult
+		if str, ok := response.Data.(string); ok {
+			k8sResponse.Result = str
+		} else if response.Data != nil {
+			// Format structured telemetry data
+			k8sResponse.Result = formatTelemetryData(response.Data, response.Message)
+		} else {
+			k8sResponse.Result = response.Message
+		}
+	case telemetry.ResponseTypeError:
+		k8sResponse.Type = ResponseTypeError
+		k8sResponse.Result = response.Message
+		if response.Error != nil {
+			k8sResponse.Error = response.Error
+		}
+	}
+
+	return k8sResponse, nil
+}
+
+// formatTelemetryData formats telemetry data for display
+func formatTelemetryData(data interface{}, message string) string {
+	var sb strings.Builder
+
+	switch v := data.(type) {
+	case *telemetry.ClusterMetrics:
+		sb.WriteString("Cluster Metrics:\n")
+		sb.WriteString(fmt.Sprintf("  Nodes: %d (Ready: %d)\n", v.NodeCount, v.ReadyNodes))
+		sb.WriteString(fmt.Sprintf("  CPU: %s / %s (%.1f%%)\n", v.UsedCPU, v.TotalCPU, v.CPUPercent))
+		sb.WriteString(fmt.Sprintf("  Memory: %s / %s (%.1f%%)\n", v.UsedMemory, v.TotalMemory, v.MemoryPercent))
+		if len(v.Nodes) > 0 {
+			sb.WriteString("\nNode Details:\n")
+			sb.WriteString(fmt.Sprintf("%-30s %-12s %-8s %-12s %-8s\n", "NAME", "CPU", "CPU%", "MEMORY", "MEM%"))
+			for _, n := range v.Nodes {
+				sb.WriteString(fmt.Sprintf("%-30s %-12s %-8.1f %-12s %-8.1f\n",
+					n.Name, n.CPUUsage, n.CPUPercent, n.MemUsage, n.MemPercent))
+			}
+		}
+	case []telemetry.NodeMetrics:
+		if len(v) == 0 {
+			return "No node metrics available"
+		}
+		sb.WriteString("Node Metrics:\n")
+		sb.WriteString(fmt.Sprintf("%-30s %-12s %-8s %-12s %-8s\n", "NAME", "CPU", "CPU%", "MEMORY", "MEM%"))
+		for _, n := range v {
+			sb.WriteString(fmt.Sprintf("%-30s %-12s %-8.1f %-12s %-8.1f\n",
+				n.Name, n.CPUUsage, n.CPUPercent, n.MemUsage, n.MemPercent))
+		}
+	case telemetry.NodeMetrics:
+		sb.WriteString(fmt.Sprintf("Node: %s\n", v.Name))
+		sb.WriteString(fmt.Sprintf("  CPU: %s (%.1f%%)\n", v.CPUUsage, v.CPUPercent))
+		sb.WriteString(fmt.Sprintf("  Memory: %s (%.1f%%)\n", v.MemUsage, v.MemPercent))
+	case *telemetry.NamespaceMetrics:
+		sb.WriteString(fmt.Sprintf("Namespace: %s\n", v.Namespace))
+		sb.WriteString(fmt.Sprintf("  Pods: %d\n", v.PodCount))
+		sb.WriteString(fmt.Sprintf("  Total CPU: %s\n", v.TotalCPU))
+		sb.WriteString(fmt.Sprintf("  Total Memory: %s\n", v.TotalMemory))
+		if len(v.Pods) > 0 {
+			sb.WriteString("\nPod Details:\n")
+			sb.WriteString(fmt.Sprintf("%-40s %-12s %-12s\n", "NAME", "CPU", "MEMORY"))
+			for _, p := range v.Pods {
+				sb.WriteString(fmt.Sprintf("%-40s %-12s %-12s\n", p.Name, p.CPUUsage, p.MemUsage))
+			}
+		}
+	case []telemetry.PodMetrics:
+		if len(v) == 0 {
+			return "No pod metrics available"
+		}
+		sb.WriteString("Pod Metrics:\n")
+		sb.WriteString(fmt.Sprintf("%-40s %-15s %-12s %-12s\n", "NAME", "NAMESPACE", "CPU", "MEMORY"))
+		for _, p := range v {
+			sb.WriteString(fmt.Sprintf("%-40s %-15s %-12s %-12s\n", p.Name, p.Namespace, p.CPUUsage, p.MemUsage))
+		}
+	case *telemetry.PodMetrics:
+		sb.WriteString(fmt.Sprintf("Pod: %s/%s\n", v.Namespace, v.Name))
+		sb.WriteString(fmt.Sprintf("  CPU: %s\n", v.CPUUsage))
+		sb.WriteString(fmt.Sprintf("  Memory: %s\n", v.MemUsage))
+		if v.CPURequest != "" || v.CPULimit != "" {
+			sb.WriteString(fmt.Sprintf("  CPU Request/Limit: %s / %s\n", v.CPURequest, v.CPULimit))
+		}
+		if v.MemRequest != "" || v.MemLimit != "" {
+			sb.WriteString(fmt.Sprintf("  Memory Request/Limit: %s / %s\n", v.MemRequest, v.MemLimit))
+		}
+		if len(v.Containers) > 0 {
+			sb.WriteString("\nContainers:\n")
+			for _, c := range v.Containers {
+				sb.WriteString(fmt.Sprintf("  %s: CPU %s, Memory %s\n", c.Name, c.CPUUsage, c.MemUsage))
+			}
+		}
+	case []telemetry.ContainerMetrics:
+		if len(v) == 0 {
+			return "No container metrics available"
+		}
+		sb.WriteString("Container Metrics:\n")
+		sb.WriteString(fmt.Sprintf("%-30s %-12s %-12s\n", "NAME", "CPU", "MEMORY"))
+		for _, c := range v {
+			sb.WriteString(fmt.Sprintf("%-30s %-12s %-12s\n", c.Name, c.CPUUsage, c.MemUsage))
+		}
+	default:
+		// Fallback to JSON representation
+		jsonBytes, err := json.MarshalIndent(data, "", "  ")
+		if err != nil {
+			return message
+		}
+		return string(jsonBytes)
+	}
+
+	return sb.String()
 }
 
 // formatDiagnosticReport formats a diagnostic report as a readable string

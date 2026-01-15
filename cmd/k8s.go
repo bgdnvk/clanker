@@ -113,6 +113,75 @@ Example:
 	RunE: runGetResources,
 }
 
+var k8sLogsCmd = &cobra.Command{
+	Use:   "logs [pod-name]",
+	Short: "Get logs from a pod",
+	Long: `Retrieve logs from a pod or container.
+
+Example:
+  clanker k8s logs my-pod
+  clanker k8s logs my-pod -c my-container
+  clanker k8s logs my-pod --tail 100
+  clanker k8s logs my-pod -f`,
+	Args: cobra.ExactArgs(1),
+	RunE: runGetLogs,
+}
+
+var k8sStatsCmd = &cobra.Command{
+	Use:   "stats",
+	Short: "Get resource metrics and statistics",
+	Long:  `Get CPU and memory metrics for nodes, pods, and containers.`,
+}
+
+var k8sStatsNodesCmd = &cobra.Command{
+	Use:   "nodes",
+	Short: "Get node metrics",
+	Long: `Get CPU and memory metrics for all cluster nodes.
+
+Example:
+  clanker k8s stats nodes
+  clanker k8s stats nodes --sort-by cpu
+  clanker k8s stats nodes -o json`,
+	RunE: runStatsNodes,
+}
+
+var k8sStatsPodsCmd = &cobra.Command{
+	Use:   "pods",
+	Short: "Get pod metrics",
+	Long: `Get CPU and memory metrics for pods.
+
+Example:
+  clanker k8s stats pods
+  clanker k8s stats pods -n kube-system
+  clanker k8s stats pods -A
+  clanker k8s stats pods --sort-by memory`,
+	RunE: runStatsPods,
+}
+
+var k8sStatsPodCmd = &cobra.Command{
+	Use:   "pod [pod-name]",
+	Short: "Get metrics for a specific pod",
+	Long: `Get CPU and memory metrics for a specific pod and its containers.
+
+Example:
+  clanker k8s stats pod my-pod
+  clanker k8s stats pod my-pod -n kube-system
+  clanker k8s stats pod my-pod --containers`,
+	Args: cobra.ExactArgs(1),
+	RunE: runStatsPod,
+}
+
+var k8sStatsClusterCmd = &cobra.Command{
+	Use:   "cluster",
+	Short: "Get cluster-wide metrics",
+	Long: `Get aggregated CPU and memory metrics for the entire cluster.
+
+Example:
+  clanker k8s stats cluster
+  clanker k8s stats cluster -o json`,
+	RunE: runStatsCluster,
+}
+
 // Flags
 var (
 	k8sNodes        int
@@ -129,6 +198,18 @@ var (
 	k8sNamespace    string
 	k8sClusterName  string
 	k8sOutputFormat string
+	// Logs flags
+	k8sLogContainer     string
+	k8sLogFollow        bool
+	k8sLogPrevious      bool
+	k8sLogTail          int
+	k8sLogSince         string
+	k8sLogTimestamps    bool
+	k8sLogAllContainers bool
+	// Stats flags
+	k8sStatsSortBy      string
+	k8sStatsContainers  bool
+	k8sStatsAllNS       bool
 )
 
 func init() {
@@ -172,6 +253,42 @@ func init() {
 	// Resources flags
 	k8sResourcesCmd.Flags().StringVar(&k8sClusterName, "cluster", "", "Cluster name (optional, uses current context if not specified)")
 	k8sResourcesCmd.Flags().StringVarP(&k8sOutputFormat, "output", "o", "json", "Output format (json or yaml)")
+
+	// Add logs and stats commands
+	k8sCmd.AddCommand(k8sLogsCmd)
+	k8sCmd.AddCommand(k8sStatsCmd)
+	k8sStatsCmd.AddCommand(k8sStatsNodesCmd)
+	k8sStatsCmd.AddCommand(k8sStatsPodsCmd)
+	k8sStatsCmd.AddCommand(k8sStatsPodCmd)
+	k8sStatsCmd.AddCommand(k8sStatsClusterCmd)
+
+	// Logs flags
+	k8sLogsCmd.Flags().StringVarP(&k8sLogContainer, "container", "c", "", "Container name")
+	k8sLogsCmd.Flags().BoolVarP(&k8sLogFollow, "follow", "f", false, "Follow log output")
+	k8sLogsCmd.Flags().BoolVarP(&k8sLogPrevious, "previous", "p", false, "Previous terminated container logs")
+	k8sLogsCmd.Flags().IntVar(&k8sLogTail, "tail", 100, "Lines from end of logs")
+	k8sLogsCmd.Flags().StringVar(&k8sLogSince, "since", "", "Show logs since duration (e.g., 1h, 30m)")
+	k8sLogsCmd.Flags().BoolVar(&k8sLogTimestamps, "timestamps", false, "Include timestamps")
+	k8sLogsCmd.Flags().BoolVar(&k8sLogAllContainers, "all-containers", false, "All containers in pod")
+	k8sLogsCmd.Flags().StringVarP(&k8sNamespace, "namespace", "n", "default", "Namespace")
+
+	// Stats nodes flags
+	k8sStatsNodesCmd.Flags().StringVar(&k8sStatsSortBy, "sort-by", "", "Sort by (cpu or memory)")
+	k8sStatsNodesCmd.Flags().StringVarP(&k8sOutputFormat, "output", "o", "table", "Output format (table, json, yaml)")
+
+	// Stats pods flags
+	k8sStatsPodsCmd.Flags().StringVarP(&k8sNamespace, "namespace", "n", "default", "Namespace")
+	k8sStatsPodsCmd.Flags().BoolVarP(&k8sStatsAllNS, "all-namespaces", "A", false, "All namespaces")
+	k8sStatsPodsCmd.Flags().StringVar(&k8sStatsSortBy, "sort-by", "", "Sort by (cpu or memory)")
+	k8sStatsPodsCmd.Flags().StringVarP(&k8sOutputFormat, "output", "o", "table", "Output format (table, json, yaml)")
+
+	// Stats pod flags
+	k8sStatsPodCmd.Flags().StringVarP(&k8sNamespace, "namespace", "n", "default", "Namespace")
+	k8sStatsPodCmd.Flags().BoolVar(&k8sStatsContainers, "containers", false, "Show container metrics")
+	k8sStatsPodCmd.Flags().StringVarP(&k8sOutputFormat, "output", "o", "table", "Output format (table, json, yaml)")
+
+	// Stats cluster flags
+	k8sStatsClusterCmd.Flags().StringVarP(&k8sOutputFormat, "output", "o", "table", "Output format (table, json, yaml)")
 }
 
 func getK8sAgent() (*k8s.Agent, string, string) {
@@ -1115,4 +1232,352 @@ func restoreContext(ctx context.Context, contextName string, debug bool) error {
 	}
 
 	return nil
+}
+
+// runGetLogs retrieves logs from a pod
+func runGetLogs(cmd *cobra.Command, args []string) error {
+	podName := args[0]
+	ctx := context.Background()
+	debug := viper.GetBool("debug")
+
+	// Build kubectl logs command
+	kubectlArgs := []string{"logs", podName, "-n", k8sNamespace}
+
+	if k8sLogContainer != "" {
+		kubectlArgs = append(kubectlArgs, "-c", k8sLogContainer)
+	}
+	if k8sLogFollow {
+		kubectlArgs = append(kubectlArgs, "-f")
+	}
+	if k8sLogPrevious {
+		kubectlArgs = append(kubectlArgs, "-p")
+	}
+	if k8sLogTail > 0 {
+		kubectlArgs = append(kubectlArgs, "--tail", fmt.Sprintf("%d", k8sLogTail))
+	}
+	if k8sLogSince != "" {
+		kubectlArgs = append(kubectlArgs, "--since", k8sLogSince)
+	}
+	if k8sLogTimestamps {
+		kubectlArgs = append(kubectlArgs, "--timestamps")
+	}
+	if k8sLogAllContainers {
+		kubectlArgs = append(kubectlArgs, "--all-containers")
+	}
+
+	if debug {
+		fmt.Fprintf(os.Stderr, "[k8s] executing: kubectl %s\n", strings.Join(kubectlArgs, " "))
+	}
+
+	kubectlCmd := exec.CommandContext(ctx, "kubectl", kubectlArgs...)
+	kubectlCmd.Stdout = os.Stdout
+	kubectlCmd.Stderr = os.Stderr
+
+	return kubectlCmd.Run()
+}
+
+// runStatsNodes gets node metrics
+func runStatsNodes(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+	debug := viper.GetBool("debug")
+
+	if debug {
+		fmt.Fprintf(os.Stderr, "[k8s] getting node metrics\n")
+	}
+
+	// Run kubectl top nodes
+	kubectlArgs := []string{"top", "nodes"}
+
+	if debug {
+		fmt.Fprintf(os.Stderr, "[k8s] executing: kubectl %s\n", strings.Join(kubectlArgs, " "))
+	}
+
+	kubectlCmd := exec.CommandContext(ctx, "kubectl", kubectlArgs...)
+	output, err := kubectlCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to get node metrics: %w\n%s", err, string(output))
+	}
+
+	if k8sOutputFormat == "json" || k8sOutputFormat == "yaml" {
+		// Parse output and convert to structured format
+		metrics := parseNodeMetricsOutput(string(output))
+		var formatted []byte
+		if k8sOutputFormat == "yaml" {
+			formatted, err = yaml.Marshal(metrics)
+		} else {
+			formatted, err = json.MarshalIndent(metrics, "", "  ")
+		}
+		if err != nil {
+			return fmt.Errorf("failed to format output: %w", err)
+		}
+		fmt.Println(string(formatted))
+	} else {
+		// Table output
+		fmt.Print(string(output))
+	}
+
+	return nil
+}
+
+// runStatsPods gets pod metrics
+func runStatsPods(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+	debug := viper.GetBool("debug")
+
+	kubectlArgs := []string{"top", "pods"}
+
+	if k8sStatsAllNS {
+		kubectlArgs = append(kubectlArgs, "--all-namespaces")
+	} else {
+		kubectlArgs = append(kubectlArgs, "-n", k8sNamespace)
+	}
+
+	if debug {
+		fmt.Fprintf(os.Stderr, "[k8s] executing: kubectl %s\n", strings.Join(kubectlArgs, " "))
+	}
+
+	kubectlCmd := exec.CommandContext(ctx, "kubectl", kubectlArgs...)
+	output, err := kubectlCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to get pod metrics: %w\n%s", err, string(output))
+	}
+
+	if k8sOutputFormat == "json" || k8sOutputFormat == "yaml" {
+		// Parse output and convert to structured format
+		metrics := parsePodMetricsOutput(string(output), k8sStatsAllNS)
+		var formatted []byte
+		if k8sOutputFormat == "yaml" {
+			formatted, err = yaml.Marshal(metrics)
+		} else {
+			formatted, err = json.MarshalIndent(metrics, "", "  ")
+		}
+		if err != nil {
+			return fmt.Errorf("failed to format output: %w", err)
+		}
+		fmt.Println(string(formatted))
+	} else {
+		// Table output
+		fmt.Print(string(output))
+	}
+
+	return nil
+}
+
+// runStatsPod gets metrics for a specific pod
+func runStatsPod(cmd *cobra.Command, args []string) error {
+	podName := args[0]
+	ctx := context.Background()
+	debug := viper.GetBool("debug")
+
+	kubectlArgs := []string{"top", "pod", podName, "-n", k8sNamespace}
+
+	if k8sStatsContainers {
+		kubectlArgs = append(kubectlArgs, "--containers")
+	}
+
+	if debug {
+		fmt.Fprintf(os.Stderr, "[k8s] executing: kubectl %s\n", strings.Join(kubectlArgs, " "))
+	}
+
+	kubectlCmd := exec.CommandContext(ctx, "kubectl", kubectlArgs...)
+	output, err := kubectlCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to get pod metrics: %w\n%s", err, string(output))
+	}
+
+	if k8sOutputFormat == "json" || k8sOutputFormat == "yaml" {
+		var metrics interface{}
+		if k8sStatsContainers {
+			metrics = parseContainerMetricsOutput(string(output))
+		} else {
+			pods := parsePodMetricsOutput(string(output), false)
+			if len(pods) > 0 {
+				metrics = pods[0]
+			}
+		}
+		var formatted []byte
+		if k8sOutputFormat == "yaml" {
+			formatted, err = yaml.Marshal(metrics)
+		} else {
+			formatted, err = json.MarshalIndent(metrics, "", "  ")
+		}
+		if err != nil {
+			return fmt.Errorf("failed to format output: %w", err)
+		}
+		fmt.Println(string(formatted))
+	} else {
+		// Table output
+		fmt.Print(string(output))
+	}
+
+	return nil
+}
+
+// runStatsCluster gets cluster-wide metrics
+func runStatsCluster(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+	debug := viper.GetBool("debug")
+
+	if debug {
+		fmt.Fprintf(os.Stderr, "[k8s] getting cluster metrics\n")
+	}
+
+	// Get node metrics
+	nodeCmd := exec.CommandContext(ctx, "kubectl", "top", "nodes", "--no-headers")
+	nodeOutput, err := nodeCmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to get node metrics: %w", err)
+	}
+
+	nodes := parseNodeMetricsOutput(string(nodeOutput))
+
+	// Calculate cluster totals
+	clusterMetrics := map[string]interface{}{
+		"nodeCount":     len(nodes),
+		"nodes":         nodes,
+		"totalCPU":      "0m",
+		"totalMemory":   "0Mi",
+		"avgCPUPercent": 0.0,
+		"avgMemPercent": 0.0,
+	}
+
+	var totalCPUPct, totalMemPct float64
+	for _, node := range nodes {
+		totalCPUPct += node["cpuPercent"].(float64)
+		totalMemPct += node["memPercent"].(float64)
+	}
+
+	if len(nodes) > 0 {
+		clusterMetrics["avgCPUPercent"] = totalCPUPct / float64(len(nodes))
+		clusterMetrics["avgMemPercent"] = totalMemPct / float64(len(nodes))
+	}
+
+	if k8sOutputFormat == "json" || k8sOutputFormat == "yaml" {
+		var formatted []byte
+		if k8sOutputFormat == "yaml" {
+			formatted, err = yaml.Marshal(clusterMetrics)
+		} else {
+			formatted, err = json.MarshalIndent(clusterMetrics, "", "  ")
+		}
+		if err != nil {
+			return fmt.Errorf("failed to format output: %w", err)
+		}
+		fmt.Println(string(formatted))
+	} else {
+		// Table output
+		fmt.Printf("Cluster Metrics\n")
+		fmt.Printf("===============\n")
+		fmt.Printf("Nodes: %d\n", len(nodes))
+		fmt.Printf("Avg CPU Usage: %.1f%%\n", clusterMetrics["avgCPUPercent"])
+		fmt.Printf("Avg Memory Usage: %.1f%%\n", clusterMetrics["avgMemPercent"])
+		fmt.Println()
+		fmt.Printf("%-30s %-12s %-8s %-12s %-8s\n", "NODE", "CPU", "CPU%", "MEMORY", "MEM%")
+		for _, node := range nodes {
+			cpuPct := fmt.Sprintf("%.1f%%", node["cpuPercent"])
+			memPct := fmt.Sprintf("%.1f%%", node["memPercent"])
+			fmt.Printf("%-30s %-12s %-8s %-12s %-8s\n",
+				node["name"], node["cpu"], cpuPct,
+				node["memory"], memPct)
+		}
+	}
+
+	return nil
+}
+
+// parseNodeMetricsOutput parses kubectl top nodes output
+func parseNodeMetricsOutput(output string) []map[string]interface{} {
+	var nodes []map[string]interface{}
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "NAME") {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+
+		cpuPct := strings.TrimSuffix(fields[2], "%")
+		cpuPctFloat := 0.0
+		fmt.Sscanf(cpuPct, "%f", &cpuPctFloat)
+
+		memPct := strings.TrimSuffix(fields[4], "%")
+		memPctFloat := 0.0
+		fmt.Sscanf(memPct, "%f", &memPctFloat)
+
+		nodes = append(nodes, map[string]interface{}{
+			"name":       fields[0],
+			"cpu":        fields[1],
+			"cpuPercent": cpuPctFloat,
+			"memory":     fields[3],
+			"memPercent": memPctFloat,
+		})
+	}
+
+	return nodes
+}
+
+// parsePodMetricsOutput parses kubectl top pods output
+func parsePodMetricsOutput(output string, allNamespaces bool) []map[string]interface{} {
+	var pods []map[string]interface{}
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "NAME") || strings.HasPrefix(line, "NAMESPACE") {
+			continue
+		}
+
+		fields := strings.Fields(line)
+
+		var pod map[string]interface{}
+		if allNamespaces && len(fields) >= 4 {
+			pod = map[string]interface{}{
+				"namespace": fields[0],
+				"name":      fields[1],
+				"cpu":       fields[2],
+				"memory":    fields[3],
+			}
+		} else if len(fields) >= 3 {
+			pod = map[string]interface{}{
+				"name":   fields[0],
+				"cpu":    fields[1],
+				"memory": fields[2],
+			}
+		} else {
+			continue
+		}
+
+		pods = append(pods, pod)
+	}
+
+	return pods
+}
+
+// parseContainerMetricsOutput parses kubectl top pods --containers output
+func parseContainerMetricsOutput(output string) []map[string]interface{} {
+	var containers []map[string]interface{}
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "POD") {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) >= 4 {
+			containers = append(containers, map[string]interface{}{
+				"pod":       fields[0],
+				"container": fields[1],
+				"cpu":       fields[2],
+				"memory":    fields[3],
+			})
+		}
+	}
+
+	return containers
 }

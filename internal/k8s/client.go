@@ -366,6 +366,56 @@ func (c *Client) GetVersion(ctx context.Context) (string, error) {
 	return c.Run(ctx, "version")
 }
 
+// TopNodes executes kubectl top nodes and returns the raw output
+func (c *Client) TopNodes(ctx context.Context) (string, error) {
+	return c.Run(ctx, "top", "nodes", "--no-headers")
+}
+
+// TopNodesWithHeaders executes kubectl top nodes with headers
+func (c *Client) TopNodesWithHeaders(ctx context.Context) (string, error) {
+	return c.Run(ctx, "top", "nodes")
+}
+
+// TopPods executes kubectl top pods in a namespace
+func (c *Client) TopPods(ctx context.Context, namespace string, allNamespaces bool) (string, error) {
+	args := []string{"top", "pods", "--no-headers"}
+	if allNamespaces {
+		args = append(args, "--all-namespaces")
+		return c.Run(ctx, args...)
+	}
+	return c.RunWithNamespace(ctx, namespace, args...)
+}
+
+// TopPodsWithHeaders executes kubectl top pods with headers
+func (c *Client) TopPodsWithHeaders(ctx context.Context, namespace string, allNamespaces bool) (string, error) {
+	args := []string{"top", "pods"}
+	if allNamespaces {
+		args = append(args, "--all-namespaces")
+		return c.Run(ctx, args...)
+	}
+	return c.RunWithNamespace(ctx, namespace, args...)
+}
+
+// TopPod executes kubectl top pod for a specific pod
+func (c *Client) TopPod(ctx context.Context, podName, namespace string) (string, error) {
+	return c.RunWithNamespace(ctx, namespace, "top", "pod", podName, "--no-headers")
+}
+
+// TopPodContainers executes kubectl top pods --containers
+func (c *Client) TopPodContainers(ctx context.Context, namespace string, allNamespaces bool) (string, error) {
+	args := []string{"top", "pods", "--containers", "--no-headers"}
+	if allNamespaces {
+		args = append(args, "--all-namespaces")
+		return c.Run(ctx, args...)
+	}
+	return c.RunWithNamespace(ctx, namespace, args...)
+}
+
+// TopPodContainersForPod executes kubectl top pod --containers for a specific pod
+func (c *Client) TopPodContainersForPod(ctx context.Context, podName, namespace string) (string, error) {
+	return c.RunWithNamespace(ctx, namespace, "top", "pod", podName, "--containers", "--no-headers")
+}
+
 // CheckConnection verifies kubectl can connect to the cluster
 func (c *Client) CheckConnection(ctx context.Context) error {
 	_, err := c.Run(ctx, "cluster-info")

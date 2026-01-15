@@ -210,6 +210,9 @@ type ClusterResources struct {
 	PVCs        []ClusterPVCInfo       `json:"persistentVolumeClaims"`
 	ConfigMaps  []ClusterConfigMapInfo `json:"configMaps"`
 	Ingresses   []ClusterIngressInfo   `json:"ingresses,omitempty"`
+	// Metrics data (optional, populated when metrics-server is available)
+	NodeMetrics []ClusterNodeMetrics `json:"nodeMetrics,omitempty"`
+	PodMetrics  []ClusterPodMetrics  `json:"podMetrics,omitempty"`
 }
 
 // MultiClusterResources contains resources from multiple clusters
@@ -328,4 +331,29 @@ type ClusterIngressRuleInfo struct {
 	Path        string `json:"path"`
 	ServiceName string `json:"serviceName"`
 	ServicePort string `json:"servicePort"`
+}
+
+// ClusterNodeMetrics contains node metrics for visualization
+type ClusterNodeMetrics struct {
+	Name       string  `json:"name"`
+	CPUUsage   string  `json:"cpuUsage"`   // e.g., "250m"
+	CPUPercent float64 `json:"cpuPercent"` // percentage of allocatable
+	MemUsage   string  `json:"memoryUsage"`
+	MemPercent float64 `json:"memoryPercent"`
+}
+
+// ClusterPodMetrics contains pod metrics for visualization
+type ClusterPodMetrics struct {
+	Name       string                    `json:"name"`
+	Namespace  string                    `json:"namespace"`
+	CPUUsage   string                    `json:"cpuUsage"`
+	MemUsage   string                    `json:"memoryUsage"`
+	Containers []ClusterContainerMetrics `json:"containers,omitempty"`
+}
+
+// ClusterContainerMetrics contains container metrics for visualization
+type ClusterContainerMetrics struct {
+	Name     string `json:"name"`
+	CPUUsage string `json:"cpuUsage"`
+	MemUsage string `json:"memoryUsage"`
 }
