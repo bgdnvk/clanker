@@ -2,6 +2,14 @@ BINARY_NAME=clanker
 BUILD_DIR=./bin
 MAIN_PATH=./main.go
 
+# Install settings
+# - If Homebrew is available, install into $(brew --prefix)/bin so it wins on PATH.
+# - Otherwise fall back to /usr/local/bin.
+BREW_PREFIX := $(shell brew --prefix 2>/dev/null)
+INSTALL_PREFIX ?= $(if $(BREW_PREFIX),$(BREW_PREFIX),/usr/local)
+INSTALL_BIN ?= $(INSTALL_PREFIX)/bin
+INSTALL_PATH ?= $(INSTALL_BIN)/$(BINARY_NAME)
+
 # Release settings (override at runtime)
 # Example:
 #   make release TAG=v0.0.2
@@ -74,17 +82,23 @@ ci: deps fmt vet test-short build
 run: build
 	@$(BUILD_DIR)/$(BINARY_NAME) $(ARGS)
 
-# Install to /usr/local/bin
 install: build
-	@echo "Installing $(BINARY_NAME) to /usr/local/bin..."
-	@sudo cp $(BUILD_DIR)/$(BINARY_NAME) /usr/local/bin/
-	@sudo chmod +x /usr/local/bin/$(BINARY_NAME)
+	@echo "Installing $(BINARY_NAME) to $(INSTALL_PATH)..."
+	@mkdir -p $(INSTALL_BIN)
+	@if [ -w "$(INSTALL_BIN)" ]; then \
+		install -m 0755 "$(BUILD_DIR)/$(BINARY_NAME)" "$(INSTALL_PATH)"; \
+	else \
+		sudo install -m 0755 "$(BUILD_DIR)/$(BINARY_NAME)" "$(INSTALL_PATH)"; \
+	fi
 	@echo "Installation complete. You can now run '$(BINARY_NAME)' from anywhere."
 
-# Uninstall from /usr/local/bin
 uninstall:
-	@echo "Removing $(BINARY_NAME) from /usr/local/bin..."
-	@sudo rm -f /usr/local/bin/$(BINARY_NAME)
+	@echo "Removing $(BINARY_NAME) from $(INSTALL_PATH)..."
+	@if [ -w "$(INSTALL_BIN)" ]; then \
+		rm -f "$(INSTALL_PATH)"; \
+	else \
+		sudo rm -f "$(INSTALL_PATH)"; \
+	fi
 	@echo "Uninstallation complete"
 
 # Development build (builds in current directory)
@@ -126,8 +140,8 @@ help:
 	@echo "  test       - Run tests"
 	@echo "  test-short - Run tests in short mode"
 	@echo "  run        - Build and run (use ARGS=\"...\" for arguments)"
-	@echo "  install    - Install to /usr/local/bin"
-	@echo "  uninstall  - Remove from /usr/local/bin"
+	@echo "  install    - Install to $(INSTALL_BIN) (Homebrew prefix if available)"
+	@echo "  uninstall  - Remove from $(INSTALL_BIN) (Homebrew prefix if available)"
 	@echo "  dev        - Build for development"
 	@echo "  deps       - Download dependencies"
 	@echo "  fmt        - Format code"

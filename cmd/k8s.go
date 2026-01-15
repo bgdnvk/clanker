@@ -694,9 +694,7 @@ func runGetKubeconfig(cmd *cobra.Command, args []string) error {
 
 func runGetResources(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
-	debug := viper.GetBool("debug")
-
-	agent := k8s.NewAgent(debug)
+	agent, awsProfile, awsRegion := getK8sAgent()
 
 	clusterName := k8sClusterName
 	if clusterName == "" {
@@ -705,6 +703,8 @@ func runGetResources(cmd *cobra.Command, args []string) error {
 
 	opts := k8s.QueryOptions{
 		ClusterName: clusterName,
+		AWSProfile:  awsProfile,
+		Region:      awsRegion,
 	}
 
 	resources, err := agent.GetClusterResources(ctx, clusterName, opts)

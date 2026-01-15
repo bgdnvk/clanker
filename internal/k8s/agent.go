@@ -1,9 +1,11 @@
 package k8s
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"strings"
 
 	"github.com/bgdnvk/clanker/internal/cli"
@@ -14,6 +16,54 @@ import (
 	"github.com/bgdnvk/clanker/internal/k8s/storage"
 	"github.com/bgdnvk/clanker/internal/k8s/workloads"
 )
+
+type awsCallerIdentity struct {
+	UserID  string `json:"UserId"`
+	Account string `json:"Account"`
+	ARN     string `json:"Arn"`
+}
+
+func getAWSCallerIdentity(ctx context.Context, profile string) (*awsCallerIdentity, error) {
+	args := []string{"sts", "get-caller-identity", "--output", "json"}
+	if profile != "" {
+		args = append(args, "--profile", profile)
+	}
+
+	cmd := exec.CommandContext(ctx, "aws", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("aws sts get-caller-identity failed: %w (%s)", err, strings.TrimSpace(stderr.String()))
+	}
+
+	var out awsCallerIdentity
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		return nil, fmt.Errorf("failed to parse aws sts get-caller-identity output: %w", err)
+	}
+	return &out, nil
+}
+
+func isKubectlAuthOrRBACError(err error) (auth bool, rbac bool) {
+	if err == nil {
+		return false, false
+	}
+	s := strings.ToLower(err.Error())
+
+	// Authn failures (can't authenticate)
+	if strings.Contains(s, "provide credentials") ||
+		strings.Contains(s, "you must be logged in") ||
+		strings.Contains(s, "unauthorized") {
+		auth = true
+	}
+
+	// Authz failures (authenticated but not allowed)
+	if strings.Contains(s, "forbidden") {
+		rbac = true
+	}
+
+	return auth, rbac
+}
 
 // clientAdapter wraps Client to implement workloads.K8sClient interface
 type clientAdapter struct {
@@ -1747,6 +1797,123 @@ func (a *Agent) GetClusterResources(ctx context.Context, clusterName string, opt
 	// Initialize client if needed
 	if a.client == nil {
 		a.client = NewClient(opts.Kubeconfig, "", a.debug)
+	}
+
+	// Ensure EKS provider is registered when AWS settings are provided.
+	if opts.AWSProfile != "" || opts.Region != "" {
+		if _, ok := a.clusterMgr.GetProvider(ClusterTypeEKS); !ok {
+			a.RegisterEKSProvider(opts.AWSProfile, opts.Region)
+		}
+	}
+
+	findContext := func() (string, error) {
+		contexts, err := a.client.GetContexts(ctx)
+		if err != nil {
+			return "", err
+		}
+
+		for _, c := range contexts {
+			if c == opts.ClusterName {
+				return c, nil
+			}
+		}
+		for _, c := range contexts {
+			if strings.Contains(c, opts.ClusterName) {
+				return c, nil
+			}
+		}
+
+		return "", nil
+	}
+
+	selectContext := func() error {
+		if opts.ClusterName == "" || opts.ClusterName == "current-context" {
+			return nil
+		}
+		ctxName, err := findContext()
+		if err != nil {
+			return err
+		}
+		if ctxName == "" {
+			return fmt.Errorf("no kube context found for cluster %s", opts.ClusterName)
+		}
+		a.client.SetContext(ctxName)
+		return nil
+	}
+
+	refreshEKS := func() (bool, error) {
+		if opts.ClusterName == "" || opts.ClusterName == "current-context" {
+			return false, nil
+		}
+		provider, ok := a.clusterMgr.GetProvider(ClusterTypeEKS)
+		if !ok {
+			return false, nil
+		}
+
+		kubeconfigPath, err := provider.GetKubeconfig(ctx, opts.ClusterName)
+		if err != nil {
+			return false, err
+		}
+
+		a.client = NewClient(kubeconfigPath, "", a.debug)
+		return true, nil
+	}
+
+	// Try to select the right context; if missing, refresh kubeconfig and retry.
+	if err := selectContext(); err != nil {
+		if _, rerr := refreshEKS(); rerr != nil {
+			return nil, rerr
+		}
+		if err2 := selectContext(); err2 != nil {
+			return nil, err2
+		}
+	}
+
+	// Fail loudly if we can't even reach the cluster API.
+	// If kubeconfig is stale (e.g. EKS endpoint rotation), auto-refresh once and retry.
+	if err := a.client.CheckConnection(ctx); err != nil {
+		if refreshed, rerr := refreshEKS(); rerr == nil && refreshed {
+			if err2 := selectContext(); err2 == nil {
+				if err3 := a.client.CheckConnection(ctx); err3 == nil {
+					// ok
+				} else {
+					// Still failing after refresh; fall through to hinting below.
+					err = err3
+				}
+			} else {
+				return nil, err2
+			}
+		}
+
+		if opts.ClusterName != "" && opts.ClusterName != "current-context" {
+			auth, rbac := isKubectlAuthOrRBACError(err)
+			if auth || rbac {
+				identity, idErr := getAWSCallerIdentity(ctx, opts.AWSProfile)
+				identityStr := "unknown"
+				if idErr == nil && identity != nil {
+					identityStr = identity.ARN
+				}
+
+				if auth {
+					return nil, fmt.Errorf(
+						"EKS authentication failed for cluster %s (AWS identity: %s). Your IAM principal likely isn't granted access to the cluster (EKS access entry or aws-auth mapping). Original error: %w",
+						opts.ClusterName,
+						identityStr,
+						err,
+					)
+				}
+				if rbac {
+					return nil, fmt.Errorf(
+						"EKS RBAC authorization failed for cluster %s (AWS identity: %s). You're authenticated but not allowed; you need a RoleBinding/ClusterRoleBinding granting the required verbs/resources. Original error: %w",
+						opts.ClusterName,
+						identityStr,
+						err,
+					)
+				}
+			}
+		}
+
+		return nil, err
 	}
 
 	result := &ClusterResources{
