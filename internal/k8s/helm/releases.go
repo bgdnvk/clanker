@@ -78,6 +78,31 @@ func (m *ReleaseManager) GetReleaseValues(ctx context.Context, name, namespace s
 
 // InstallReleasePlan creates a plan for installing a Helm chart
 func (m *ReleaseManager) InstallReleasePlan(opts InstallOptions) *HelmPlan {
+	steps := []HelmStep{}
+
+	// Add repo setup steps if chart is from a known repo
+	repoName, repoURL := getRepoFromChart(opts.Chart)
+	if repoName != "" && repoURL != "" {
+		// Step 1: Add repo (will be skipped if already exists)
+		steps = append(steps, HelmStep{
+			ID:          "add-repo",
+			Description: fmt.Sprintf("Add %s Helm repository", repoName),
+			Command:     "helm",
+			Args:        []string{"repo", "add", repoName, repoURL, "--force-update"},
+			Reason:      fmt.Sprintf("Ensure %s repository is configured", repoName),
+		})
+
+		// Step 2: Update repos
+		steps = append(steps, HelmStep{
+			ID:          "update-repos",
+			Description: "Update Helm repositories",
+			Command:     "helm",
+			Args:        []string{"repo", "update"},
+			Reason:      "Fetch latest chart versions from repositories",
+		})
+	}
+
+	// Build install args
 	args := []string{"install", opts.ReleaseName, opts.Chart}
 
 	if opts.Namespace != "" {
@@ -116,8 +141,21 @@ func (m *ReleaseManager) InstallReleasePlan(opts InstallOptions) *HelmPlan {
 		args = append(args, "--description", opts.Description)
 	}
 
+	// Step 3 (or 1 if no repo): Install the chart
+	steps = append(steps, HelmStep{
+		ID:          "install-release",
+		Description: fmt.Sprintf("Install release %s", opts.ReleaseName),
+		Command:     "helm",
+		Args:        args,
+		Reason:      fmt.Sprintf("Install chart %s in namespace %s", opts.Chart, opts.Namespace),
+	})
+
 	notes := []string{
 		fmt.Sprintf("Installing chart %s as release %s", opts.Chart, opts.ReleaseName),
+	}
+
+	if repoName != "" {
+		notes = append(notes, fmt.Sprintf("Repository %s will be added/updated automatically", repoName))
 	}
 
 	if opts.CreateNamespace {
@@ -132,21 +170,69 @@ func (m *ReleaseManager) InstallReleasePlan(opts InstallOptions) *HelmPlan {
 		Version:   1,
 		CreatedAt: time.Now(),
 		Summary:   fmt.Sprintf("Install Helm release %s from chart %s", opts.ReleaseName, opts.Chart),
-		Steps: []HelmStep{
-			{
-				ID:          "install-release",
-				Description: fmt.Sprintf("Install release %s", opts.ReleaseName),
-				Command:     "helm",
-				Args:        args,
-				Reason:      fmt.Sprintf("Install chart %s in namespace %s", opts.Chart, opts.Namespace),
-			},
-		},
-		Notes: notes,
+		Steps:     steps,
+		Notes:     notes,
 	}
+}
+
+// getRepoFromChart extracts the repo name and URL from a chart reference
+func getRepoFromChart(chart string) (string, string) {
+	// Map of known repos to their URLs
+	knownRepos := map[string]string{
+		"bitnami":              "https://charts.bitnami.com/bitnami",
+		"stable":               "https://charts.helm.sh/stable",
+		"grafana":              "https://grafana.github.io/helm-charts",
+		"prometheus-community": "https://prometheus-community.github.io/helm-charts",
+		"jenkins":              "https://charts.jenkins.io",
+		"hashicorp":            "https://helm.releases.hashicorp.com",
+		"ingress-nginx":        "https://kubernetes.github.io/ingress-nginx",
+		"jetstack":             "https://charts.jetstack.io",
+		"elastic":              "https://helm.elastic.co",
+		"apache":               "https://charts.apache.org",
+		"traefik":              "https://traefik.github.io/charts",
+		"argo":                 "https://argoproj.github.io/argo-helm",
+		"longhorn":             "https://charts.longhorn.io",
+		"metallb":              "https://metallb.github.io/metallb",
+		"nfs-subdir":           "https://kubernetes-sigs.github.io/nfs-subdir-external-provisioner",
+	}
+
+	// Check if chart has repo prefix (e.g., "bitnami/redis")
+	if idx := strings.Index(chart, "/"); idx > 0 {
+		repoName := chart[:idx]
+		if url, ok := knownRepos[repoName]; ok {
+			return repoName, url
+		}
+	}
+
+	return "", ""
 }
 
 // UpgradeReleasePlan creates a plan for upgrading a Helm release
 func (m *ReleaseManager) UpgradeReleasePlan(opts UpgradeOptions) *HelmPlan {
+	steps := []HelmStep{}
+
+	// Add repo setup steps if chart is from a known repo
+	repoName, repoURL := getRepoFromChart(opts.Chart)
+	if repoName != "" && repoURL != "" {
+		// Step 1: Add repo (will be skipped if already exists)
+		steps = append(steps, HelmStep{
+			ID:          "add-repo",
+			Description: fmt.Sprintf("Add %s Helm repository", repoName),
+			Command:     "helm",
+			Args:        []string{"repo", "add", repoName, repoURL, "--force-update"},
+			Reason:      fmt.Sprintf("Ensure %s repository is configured", repoName),
+		})
+
+		// Step 2: Update repos
+		steps = append(steps, HelmStep{
+			ID:          "update-repos",
+			Description: "Update Helm repositories",
+			Command:     "helm",
+			Args:        []string{"repo", "update"},
+			Reason:      "Fetch latest chart versions from repositories",
+		})
+	}
+
 	args := []string{"upgrade", opts.ReleaseName, opts.Chart}
 
 	if opts.Namespace != "" {
@@ -197,8 +283,21 @@ func (m *ReleaseManager) UpgradeReleasePlan(opts UpgradeOptions) *HelmPlan {
 		args = append(args, "--description", opts.Description)
 	}
 
+	// Step 3 (or 1 if no repo): Upgrade the release
+	steps = append(steps, HelmStep{
+		ID:          "upgrade-release",
+		Description: fmt.Sprintf("Upgrade release %s", opts.ReleaseName),
+		Command:     "helm",
+		Args:        args,
+		Reason:      fmt.Sprintf("Upgrade release %s to latest chart version", opts.ReleaseName),
+	})
+
 	notes := []string{
 		fmt.Sprintf("Upgrading release %s with chart %s", opts.ReleaseName, opts.Chart),
+	}
+
+	if repoName != "" {
+		notes = append(notes, fmt.Sprintf("Repository %s will be added/updated automatically", repoName))
 	}
 
 	if opts.Install {
@@ -213,16 +312,8 @@ func (m *ReleaseManager) UpgradeReleasePlan(opts UpgradeOptions) *HelmPlan {
 		Version:   1,
 		CreatedAt: time.Now(),
 		Summary:   fmt.Sprintf("Upgrade Helm release %s", opts.ReleaseName),
-		Steps: []HelmStep{
-			{
-				ID:          "upgrade-release",
-				Description: fmt.Sprintf("Upgrade release %s", opts.ReleaseName),
-				Command:     "helm",
-				Args:        args,
-				Reason:      fmt.Sprintf("Upgrade release %s to latest chart version", opts.ReleaseName),
-			},
-		},
-		Notes: notes,
+		Steps:     steps,
+		Notes:     notes,
 	}
 }
 
