@@ -146,6 +146,7 @@ type HelmCmd struct {
 	Wait       bool           `json:"wait"`
 	Timeout    string         `json:"timeout,omitempty"`
 	Reason     string         `json:"reason"`
+	Args       []string       `json:"args,omitempty"` // Raw command arguments for direct execution
 }
 
 // Manifest represents a K8s manifest to apply

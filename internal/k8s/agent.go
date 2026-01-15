@@ -1055,6 +1055,8 @@ func convertHelmPlanToK8sPlan(hp *helm.HelmPlan) *K8sPlan {
 				Release:   release,
 				Chart:     chart,
 				Namespace: namespace,
+				Args:      step.Args, // Preserve raw args for execution
+				Reason:    step.Reason,
 			}
 			plan.HelmCmds = append(plan.HelmCmds, cmd)
 		}
