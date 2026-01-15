@@ -861,14 +861,59 @@ func handleK8sQuery(ctx context.Context, question string, debug bool, kubeconfig
 	// Output based on response type
 	switch response.Type {
 	case k8s.ResponseTypePlan:
-		// Output plan for user verification
-		planJSON, err := json.MarshalIndent(response.Plan, "", "  ")
-		if err != nil {
-			return fmt.Errorf("failed to format plan: %w", err)
+		// Display plan summary
+		fmt.Printf("\nPlan: %s\n", response.Plan.Summary)
+		fmt.Println(strings.Repeat("-", 60))
+
+		// Show helm commands if present
+		if len(response.Plan.HelmCmds) > 0 {
+			fmt.Println("\nSteps:")
+			for i, cmd := range response.Plan.HelmCmds {
+				if len(cmd.Args) > 0 {
+					fmt.Printf("  %d. helm %s\n", i+1, strings.Join(cmd.Args, " "))
+				} else {
+					fmt.Printf("  %d. helm %s %s %s\n", i+1, cmd.Action, cmd.Release, cmd.Chart)
+				}
+				if cmd.Reason != "" {
+					fmt.Printf("     Reason: %s\n", cmd.Reason)
+				}
+			}
 		}
-		fmt.Println(string(planJSON))
-		fmt.Println("\n// To apply this plan, run:")
-		fmt.Println("// clanker ask --k8s-apply --plan-file <save-above-to-file.json>")
+
+		// Show kubectl commands if present
+		if len(response.Plan.KubectlCmds) > 0 {
+			fmt.Println("\nKubectl Commands:")
+			for i, cmd := range response.Plan.KubectlCmds {
+				fmt.Printf("  %d. kubectl %s\n", i+1, strings.Join(cmd.Args, " "))
+			}
+		}
+
+		// Show notes
+		if len(response.Plan.Notes) > 0 {
+			fmt.Println("\nNotes:")
+			for _, note := range response.Plan.Notes {
+				fmt.Printf("  - %s\n", note)
+			}
+		}
+
+		fmt.Println(strings.Repeat("-", 60))
+
+		// Prompt for approval
+		fmt.Print("\nDo you want to apply this plan? [y/N]: ")
+		var answer string
+		fmt.Scanln(&answer)
+
+		if strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
+			fmt.Println("Plan cancelled.")
+			return nil
+		}
+
+		// Execute the plan
+		fmt.Println("\nApplying plan...")
+		if err := executeK8sAgentPlan(ctx, response.Plan, debug); err != nil {
+			return fmt.Errorf("plan execution failed: %w", err)
+		}
+		fmt.Println("\nPlan applied successfully!")
 
 	case k8s.ResponseTypeResult:
 		fmt.Println(response.Result)
@@ -878,6 +923,96 @@ func handleK8sQuery(ctx context.Context, question string, debug bool, kubeconfig
 	}
 
 	return nil
+}
+
+// executeK8sAgentPlan executes a K8s plan including helm and kubectl commands
+func executeK8sAgentPlan(ctx context.Context, k8sPlan *k8s.K8sPlan, debug bool) error {
+	// Execute helm commands
+	for _, helmCmd := range k8sPlan.HelmCmds {
+		if debug {
+			fmt.Printf("[debug] Executing helm command: %s %s\n", helmCmd.Action, helmCmd.Release)
+		}
+
+		// Build command args based on the helm command structure
+		args := buildHelmArgs(helmCmd)
+		if len(args) == 0 {
+			continue
+		}
+
+		fmt.Printf("  Running: helm %s\n", strings.Join(args, " "))
+
+		cmd := exec.CommandContext(ctx, "helm", args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("helm command failed: %w", err)
+		}
+	}
+
+	// Execute kubectl commands
+	for _, kubectlCmd := range k8sPlan.KubectlCmds {
+		if debug {
+			fmt.Printf("[debug] Executing kubectl command: %v\n", kubectlCmd.Args)
+		}
+
+		fmt.Printf("  Running: kubectl %s\n", strings.Join(kubectlCmd.Args, " "))
+
+		cmd := exec.CommandContext(ctx, "kubectl", kubectlCmd.Args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("kubectl command failed: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// buildHelmArgs builds helm command arguments from a HelmCmd
+func buildHelmArgs(helmCmd k8s.HelmCmd) []string {
+	// If raw Args are available, use them directly
+	if len(helmCmd.Args) > 0 {
+		return helmCmd.Args
+	}
+
+	// Otherwise, build args from structured fields
+	var args []string
+
+	switch helmCmd.Action {
+	case "install":
+		args = []string{"install", helmCmd.Release, helmCmd.Chart}
+		if helmCmd.Namespace != "" {
+			args = append(args, "-n", helmCmd.Namespace)
+		}
+		if helmCmd.Wait {
+			args = append(args, "--wait")
+		}
+		if helmCmd.Timeout != "" {
+			args = append(args, "--timeout", helmCmd.Timeout)
+		}
+	case "upgrade":
+		args = []string{"upgrade", helmCmd.Release, helmCmd.Chart}
+		if helmCmd.Namespace != "" {
+			args = append(args, "-n", helmCmd.Namespace)
+		}
+		if helmCmd.Wait {
+			args = append(args, "--wait")
+		}
+	case "uninstall":
+		args = []string{"uninstall", helmCmd.Release}
+		if helmCmd.Namespace != "" {
+			args = append(args, "-n", helmCmd.Namespace)
+		}
+	case "rollback":
+		args = []string{"rollback", helmCmd.Release}
+		if helmCmd.Namespace != "" {
+			args = append(args, "-n", helmCmd.Namespace)
+		}
+	}
+
+	return args
 }
 
 // handleK8sClusterProvisioning handles cluster creation requests with plan display and approval
