@@ -477,24 +477,80 @@ func (s *SubAgent) parseInstallFromQuery(query string, namespace string) Install
 		Timeout:   5 * time.Minute,
 	}
 
-	// Extract release name
+	lower := strings.ToLower(query)
+
+	// Extract release name (skip filler words)
 	releasePattern := regexp.MustCompile(`install\s+([a-z0-9][a-z0-9-]*[a-z0-9])`)
-	if matches := releasePattern.FindStringSubmatch(strings.ToLower(query)); len(matches) > 1 {
-		opts.ReleaseName = matches[1]
+	if matches := releasePattern.FindStringSubmatch(lower); len(matches) > 1 {
+		name := matches[1]
+		// Skip if release name is a filler word
+		if !isFillerWord(name) {
+			opts.ReleaseName = name
+		}
 	}
 
-	// Extract chart name
-	chartPattern := regexp.MustCompile(`install\s+[a-z0-9-]+\s+([a-z0-9][a-z0-9-/]*[a-z0-9])`)
-	if matches := chartPattern.FindStringSubmatch(strings.ToLower(query)); len(matches) > 1 {
+	// Try to extract explicit chart reference (repo/chart format)
+	chartRefPattern := regexp.MustCompile(`([a-z0-9-]+/[a-z0-9-]+)`)
+	if matches := chartRefPattern.FindStringSubmatch(lower); len(matches) > 1 {
 		opts.Chart = matches[1]
 	}
 
+	// If no explicit chart found, infer from release name
+	if opts.Chart == "" && opts.ReleaseName != "" {
+		opts.Chart = inferChartName(opts.ReleaseName)
+	}
+
 	// Check for create-namespace
-	if strings.Contains(strings.ToLower(query), "create namespace") {
+	if strings.Contains(lower, "create namespace") {
 		opts.CreateNamespace = true
 	}
 
 	return opts
+}
+
+// isFillerWord returns true if the word is a common filler word in queries
+func isFillerWord(word string) bool {
+	fillerWords := map[string]bool{
+		"using": true, "with": true, "from": true, "the": true, "a": true,
+		"helm": true, "chart": true, "release": true, "to": true, "on": true,
+		"in": true, "my": true, "this": true, "that": true,
+	}
+	return fillerWords[word]
+}
+
+// inferChartName infers the full chart name from a common application name
+func inferChartName(name string) string {
+	// Map of common application names to their chart references
+	commonCharts := map[string]string{
+		"redis":         "bitnami/redis",
+		"nginx":         "bitnami/nginx",
+		"postgresql":    "bitnami/postgresql",
+		"postgres":      "bitnami/postgresql",
+		"mysql":         "bitnami/mysql",
+		"mongodb":       "bitnami/mongodb",
+		"mongo":         "bitnami/mongodb",
+		"kafka":         "bitnami/kafka",
+		"rabbitmq":      "bitnami/rabbitmq",
+		"elasticsearch": "bitnami/elasticsearch",
+		"grafana":       "grafana/grafana",
+		"prometheus":    "prometheus-community/prometheus",
+		"jenkins":       "jenkins/jenkins",
+		"wordpress":     "bitnami/wordpress",
+		"mariadb":       "bitnami/mariadb",
+		"minio":         "bitnami/minio",
+		"apache":        "bitnami/apache",
+		"tomcat":        "bitnami/tomcat",
+		"memcached":     "bitnami/memcached",
+		"consul":        "hashicorp/consul",
+		"vault":         "hashicorp/vault",
+	}
+
+	if chart, ok := commonCharts[name]; ok {
+		return chart
+	}
+
+	// Default to bitnami if unknown
+	return "bitnami/" + name
 }
 
 // parseUpgradeFromQuery parses upgrade options from a query
@@ -505,20 +561,30 @@ func (s *SubAgent) parseUpgradeFromQuery(query string, namespace string) Upgrade
 		Timeout:   5 * time.Minute,
 	}
 
-	// Extract release name
+	lower := strings.ToLower(query)
+
+	// Extract release name (skip filler words)
 	releasePattern := regexp.MustCompile(`upgrade\s+([a-z0-9][a-z0-9-]*[a-z0-9])`)
-	if matches := releasePattern.FindStringSubmatch(strings.ToLower(query)); len(matches) > 1 {
-		opts.ReleaseName = matches[1]
+	if matches := releasePattern.FindStringSubmatch(lower); len(matches) > 1 {
+		name := matches[1]
+		if !isFillerWord(name) {
+			opts.ReleaseName = name
+		}
 	}
 
-	// Extract chart name
-	chartPattern := regexp.MustCompile(`upgrade\s+[a-z0-9-]+\s+([a-z0-9][a-z0-9-/]*[a-z0-9])`)
-	if matches := chartPattern.FindStringSubmatch(strings.ToLower(query)); len(matches) > 1 {
+	// Try to extract explicit chart reference (repo/chart format)
+	chartRefPattern := regexp.MustCompile(`([a-z0-9-]+/[a-z0-9-]+)`)
+	if matches := chartRefPattern.FindStringSubmatch(lower); len(matches) > 1 {
 		opts.Chart = matches[1]
 	}
 
+	// If no explicit chart found, infer from release name
+	if opts.Chart == "" && opts.ReleaseName != "" {
+		opts.Chart = inferChartName(opts.ReleaseName)
+	}
+
 	// Check for install flag
-	if strings.Contains(strings.ToLower(query), "install if not exists") {
+	if strings.Contains(lower, "install if not exists") {
 		opts.Install = true
 	}
 
