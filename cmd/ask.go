@@ -73,6 +73,17 @@ Examples:
 		if cmd.Flags().Changed("agent-trace") {
 			viper.Set("agent.trace", agentTrace)
 		}
+		routeOnly, _ := cmd.Flags().GetBool("route-only")
+
+		// Handle route-only mode: return routing decision as JSON without executing
+		if routeOnly {
+			agent, reason := determineRoutingDecision(question)
+			result := map[string]string{
+				"agent":  agent,
+				"reason": reason,
+			}
+			return json.NewEncoder(os.Stdout).Encode(result)
+		}
 
 		if makerMode {
 			ctx := context.Background()
@@ -588,6 +599,7 @@ func init() {
 	askCmd.Flags().Bool("destroyer", false, "Allow destructive AWS CLI operations when using --maker (requires explicit confirmation in UI/workflow)")
 	askCmd.Flags().Bool("apply", false, "Apply an approved maker plan (reads from stdin unless --plan-file is provided)")
 	askCmd.Flags().String("plan-file", "", "Optional path to maker plan JSON file for --apply")
+	askCmd.Flags().Bool("route-only", false, "Return routing decision as JSON without executing (for backend integration)")
 }
 
 func resolveGeminiAPIKey(flagValue string) string {
@@ -1198,4 +1210,90 @@ func executeK8sPlan(ctx context.Context, rawPlan string, profile string, debug b
 	}
 
 	return nil
+}
+
+// determineRoutingDecision analyzes a question and returns which agent should handle it.
+// This is used by the --route-only flag to return routing decisions without executing.
+func determineRoutingDecision(question string) (agent string, reason string) {
+	questionLower := strings.ToLower(question)
+
+	// Check for diagram/visualization requests
+	diagramKeywords := []string{
+		"diagram", "visual", "visualize", "layout", "arrange",
+		"draw", "illustrate", "show on diagram", "add to diagram",
+		"update diagram", "modify diagram",
+	}
+	for _, kw := range diagramKeywords {
+		if strings.Contains(questionLower, kw) {
+			return "diagram", "Diagram or visualization request detected"
+		}
+	}
+
+	// Action keywords for infrastructure provisioning
+	actionKeywords := []string{
+		"create", "provision", "deploy", "launch", "spin up", "set up", "setup",
+		"add", "make", "build", "install", "configure", "enable", "start",
+		"update", "modify", "change", "scale", "resize", "upgrade",
+		"delete", "remove", "destroy", "terminate", "tear down", "teardown",
+	}
+
+	// K8s resources (checked first as more specific)
+	k8sResources := []string{
+		"kubernetes", "k8s", "pod", "pods", "deployment", "deployments",
+		"service", "services", "ingress", "namespace", "configmap",
+		"secret", "pvc", "persistent volume", "statefulset", "daemonset",
+		"replicaset", "cronjob", "job", "container", "helm", "chart",
+		"kubectl", "eksctl", "kubeadm", "nginx", "redis", "mysql", "postgres", "mongodb",
+		"cluster", "node", "nodes", "kube",
+	}
+
+	// AWS resources (excluding EKS which is handled by K8s maker)
+	awsResources := []string{
+		"ec2", "instance", "lambda", "function", "s3", "bucket",
+		"rds", "database", "dynamodb", "table", "sqs", "queue",
+		"sns", "topic", "ecs", "fargate", "elasticache", "memcached",
+		"elb", "alb", "nlb", "load balancer", "api gateway", "cloudfront", "cdn",
+		"route53", "dns", "iam", "role", "policy", "user",
+		"vpc", "subnet", "security group", "nat", "igw",
+		"kinesis", "stream", "glue", "athena", "redshift",
+		"elastic beanstalk", "codepipeline", "codebuild",
+	}
+
+	hasAction := false
+	for _, action := range actionKeywords {
+		if strings.Contains(questionLower, action) {
+			hasAction = true
+			break
+		}
+	}
+
+	// Check if question mentions K8s resources
+	hasK8sResource := false
+	for _, resource := range k8sResources {
+		if strings.Contains(questionLower, resource) {
+			hasK8sResource = true
+			break
+		}
+	}
+
+	if hasAction {
+		// Check K8s resources first (more specific)
+		if hasK8sResource {
+			return "k8s-maker", "K8s infrastructure provisioning or modification request"
+		}
+		// Check AWS resources
+		for _, resource := range awsResources {
+			if strings.Contains(questionLower, resource) {
+				return "maker", "AWS infrastructure provisioning or modification request"
+			}
+		}
+	}
+
+	// K8s read queries (no action keyword but mentions K8s resources)
+	if hasK8sResource {
+		return "k8s", "K8s query or analysis request"
+	}
+
+	// Default to CLI for general queries
+	return "cli", "General infrastructure query or analysis"
 }
