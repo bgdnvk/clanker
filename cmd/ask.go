@@ -85,6 +85,111 @@ Examples:
 			return json.NewEncoder(os.Stdout).Encode(result)
 		}
 
+		// Handle apply mode (independent of maker mode)
+		if applyMode {
+			ctx := context.Background()
+			var rawPlan string
+			if planFile != "" {
+				data, err := os.ReadFile(planFile)
+				if err != nil {
+					return fmt.Errorf("failed to read plan file: %w", err)
+				}
+				rawPlan = string(data)
+			} else {
+				data, err := io.ReadAll(os.Stdin)
+				if err != nil {
+					return fmt.Errorf("failed to read plan from stdin: %w", err)
+				}
+				rawPlan = string(data)
+			}
+
+			// Check if this is a K8s plan (contains helm, eksctl, kubectl, or kubeadm commands)
+			if isK8sPlan(rawPlan) {
+				return executeK8sPlan(ctx, rawPlan, profile, debug)
+			}
+
+			// Fall back to AWS maker plan execution
+			makerPlan, err := maker.ParsePlan(rawPlan)
+			if err != nil {
+				return fmt.Errorf("invalid plan: %w", err)
+			}
+
+			// Resolve AWS profile/region for execution.
+			targetProfile := profile
+			if targetProfile == "" {
+				defaultEnv := viper.GetString("infra.default_environment")
+				if defaultEnv == "" {
+					defaultEnv = "dev"
+				}
+				targetProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+				if targetProfile == "" {
+					targetProfile = viper.GetString("aws.default_profile")
+				}
+				if targetProfile == "" {
+					targetProfile = "default"
+				}
+			}
+
+			region := ""
+			if envRegion := strings.TrimSpace(os.Getenv("AWS_REGION")); envRegion != "" {
+				region = envRegion
+			} else if envRegion := strings.TrimSpace(os.Getenv("AWS_DEFAULT_REGION")); envRegion != "" {
+				region = envRegion
+			} else {
+				// Prefer the profile's configured region so maker apply and infra analysis query the same region.
+				cmd := exec.CommandContext(ctx, "aws", "configure", "get", "region", "--profile", targetProfile)
+				if out, err := cmd.CombinedOutput(); err == nil {
+					region = strings.TrimSpace(string(out))
+				}
+			}
+			if region == "" {
+				region = ai.FindInfraAnalysisRegion()
+			}
+			if region == "" {
+				region = "us-east-1"
+			}
+
+			// Resolve provider for AI-assisted error handling
+			var provider string
+			if aiProfile != "" {
+				provider = aiProfile
+			} else {
+				provider = viper.GetString("ai.default_provider")
+				if provider == "" {
+					provider = "openai"
+				}
+			}
+
+			var apiKey string
+			switch provider {
+			case "gemini":
+				apiKey = ""
+			case "gemini-api":
+				apiKey = resolveGeminiAPIKey(geminiKey)
+			case "openai":
+				apiKey = resolveOpenAIKey(openaiKey)
+			case "anthropic":
+				if anthropicKey != "" {
+					apiKey = anthropicKey
+				} else {
+					apiKey = viper.GetString("ai.providers.anthropic.api_key_env")
+				}
+			default:
+				apiKey = viper.GetString("ai.api_key")
+			}
+
+			return maker.ExecutePlan(ctx, makerPlan, maker.ExecOptions{
+				Profile:    targetProfile,
+				Region:     region,
+				Writer:     os.Stdout,
+				Destroyer:  destroyer,
+				AIProvider: provider,
+				AIAPIKey:   apiKey,
+				AIProfile:  aiProfile,
+				Debug:      debug,
+			})
+		}
+
 		if makerMode {
 			ctx := context.Background()
 
@@ -120,79 +225,7 @@ Examples:
 				apiKey = viper.GetString("ai.api_key")
 			}
 
-			if applyMode {
-				var rawPlan string
-				if planFile != "" {
-					data, err := os.ReadFile(planFile)
-					if err != nil {
-						return fmt.Errorf("failed to read plan file: %w", err)
-					}
-					rawPlan = string(data)
-				} else {
-					data, err := io.ReadAll(os.Stdin)
-					if err != nil {
-						return fmt.Errorf("failed to read plan from stdin: %w", err)
-					}
-					rawPlan = string(data)
-				}
-
-				// Check if this is a K8s plan (contains eksctl, kubectl, or kubeadm commands)
-				if isK8sPlan(rawPlan) {
-					return executeK8sPlan(ctx, rawPlan, profile, debug)
-				}
-
-				makerPlan, err := maker.ParsePlan(rawPlan)
-				if err != nil {
-					return fmt.Errorf("invalid plan: %w", err)
-				}
-
-				// Resolve AWS profile/region for execution.
-				targetProfile := profile
-				if targetProfile == "" {
-					defaultEnv := viper.GetString("infra.default_environment")
-					if defaultEnv == "" {
-						defaultEnv = "dev"
-					}
-					targetProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
-					if targetProfile == "" {
-						targetProfile = viper.GetString("aws.default_profile")
-					}
-					if targetProfile == "" {
-						targetProfile = "default"
-					}
-				}
-
-				region := ""
-				if envRegion := strings.TrimSpace(os.Getenv("AWS_REGION")); envRegion != "" {
-					region = envRegion
-				} else if envRegion := strings.TrimSpace(os.Getenv("AWS_DEFAULT_REGION")); envRegion != "" {
-					region = envRegion
-				} else {
-					// Prefer the profile's configured region so maker apply and infra analysis query the same region.
-					cmd := exec.CommandContext(ctx, "aws", "configure", "get", "region", "--profile", targetProfile)
-					if out, err := cmd.CombinedOutput(); err == nil {
-						region = strings.TrimSpace(string(out))
-					}
-				}
-				if region == "" {
-					region = ai.FindInfraAnalysisRegion()
-				}
-				if region == "" {
-					region = "us-east-1"
-				}
-
-				return maker.ExecutePlan(ctx, makerPlan, maker.ExecOptions{
-					Profile:    targetProfile,
-					Region:     region,
-					Writer:     os.Stdout,
-					Destroyer:  destroyer,
-					AIProvider: provider,
-					AIAPIKey:   apiKey,
-					AIProfile:  aiProfile,
-					Debug:      debug,
-				})
-			}
-
+			// Generate AWS maker plan
 			if strings.TrimSpace(question) == "" {
 				return fmt.Errorf("requires a question")
 			}
@@ -861,110 +894,20 @@ func handleK8sQuery(ctx context.Context, question string, debug bool, kubeconfig
 	// Output based on response type
 	switch response.Type {
 	case k8s.ResponseTypePlan:
-		// Display plan summary
-		fmt.Printf("\nPlan: %s\n", response.Plan.Summary)
-		fmt.Println(strings.Repeat("-", 60))
-
-		// Show helm commands if present
-		if len(response.Plan.HelmCmds) > 0 {
-			fmt.Println("\nSteps:")
-			for i, cmd := range response.Plan.HelmCmds {
-				if len(cmd.Args) > 0 {
-					fmt.Printf("  %d. helm %s\n", i+1, strings.Join(cmd.Args, " "))
-				} else {
-					fmt.Printf("  %d. helm %s %s %s\n", i+1, cmd.Action, cmd.Release, cmd.Chart)
-				}
-				if cmd.Reason != "" {
-					fmt.Printf("     Reason: %s\n", cmd.Reason)
-				}
-			}
+		// Output plan as JSON (like AWS maker)
+		planJSON, err := json.MarshalIndent(response.Plan, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to format plan: %w", err)
 		}
-
-		// Show kubectl commands if present
-		if len(response.Plan.KubectlCmds) > 0 {
-			fmt.Println("\nKubectl Commands:")
-			for i, cmd := range response.Plan.KubectlCmds {
-				fmt.Printf("  %d. kubectl %s\n", i+1, strings.Join(cmd.Args, " "))
-			}
-		}
-
-		// Show notes
-		if len(response.Plan.Notes) > 0 {
-			fmt.Println("\nNotes:")
-			for _, note := range response.Plan.Notes {
-				fmt.Printf("  - %s\n", note)
-			}
-		}
-
-		fmt.Println(strings.Repeat("-", 60))
-
-		// Prompt for approval
-		fmt.Print("\nDo you want to apply this plan? [y/N]: ")
-		var answer string
-		fmt.Scanln(&answer)
-
-		if strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
-			fmt.Println("Plan cancelled.")
-			return nil
-		}
-
-		// Execute the plan
-		fmt.Println("\nApplying plan...")
-		if err := executeK8sAgentPlan(ctx, response.Plan, debug); err != nil {
-			return fmt.Errorf("plan execution failed: %w", err)
-		}
-		fmt.Println("\nPlan applied successfully!")
+		fmt.Println(string(planJSON))
+		fmt.Println("\n// To apply this plan, run:")
+		fmt.Println("// clanker ask --apply --plan-file <save-above-to-file.json>")
 
 	case k8s.ResponseTypeResult:
 		fmt.Println(response.Result)
 
 	case k8s.ResponseTypeError:
 		return response.Error
-	}
-
-	return nil
-}
-
-// executeK8sAgentPlan executes a K8s plan including helm and kubectl commands
-func executeK8sAgentPlan(ctx context.Context, k8sPlan *k8s.K8sPlan, debug bool) error {
-	// Execute helm commands
-	for _, helmCmd := range k8sPlan.HelmCmds {
-		if debug {
-			fmt.Printf("[debug] Executing helm command: %s %s\n", helmCmd.Action, helmCmd.Release)
-		}
-
-		// Build command args based on the helm command structure
-		args := buildHelmArgs(helmCmd)
-		if len(args) == 0 {
-			continue
-		}
-
-		fmt.Printf("  Running: helm %s\n", strings.Join(args, " "))
-
-		cmd := exec.CommandContext(ctx, "helm", args...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("helm command failed: %w", err)
-		}
-	}
-
-	// Execute kubectl commands
-	for _, kubectlCmd := range k8sPlan.KubectlCmds {
-		if debug {
-			fmt.Printf("[debug] Executing kubectl command: %v\n", kubectlCmd.Args)
-		}
-
-		fmt.Printf("  Running: kubectl %s\n", strings.Join(kubectlCmd.Args, " "))
-
-		cmd := exec.CommandContext(ctx, "kubectl", kubectlCmd.Args...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("kubectl command failed: %w", err)
-		}
 	}
 
 	return nil
@@ -1275,12 +1218,63 @@ func formatK8sCommand(cmdName string, args []string) string {
 func isK8sPlan(rawPlan string) bool {
 	return strings.Contains(rawPlan, `"eksctl"`) ||
 		strings.Contains(rawPlan, `"kubectl"`) ||
-		strings.Contains(rawPlan, `"kubeadm"`)
+		strings.Contains(rawPlan, `"kubeadm"`) ||
+		strings.Contains(rawPlan, `"helm_cmds"`) ||
+		strings.Contains(rawPlan, `"helm"`)
 }
 
-// executeK8sPlan executes a K8s plan
+// executeK8sPlan executes a K8s plan (supports both K8sPlan with helm_cmds and MakerPlan formats)
 func executeK8sPlan(ctx context.Context, rawPlan string, profile string, debug bool) error {
-	// Parse the plan
+	// First try to parse as K8sPlan (with helm_cmds)
+	var k8sPlan k8s.K8sPlan
+	if err := json.Unmarshal([]byte(rawPlan), &k8sPlan); err == nil && len(k8sPlan.HelmCmds) > 0 {
+		fmt.Printf("\n[k8s] Executing plan: %s\n", k8sPlan.Summary)
+		fmt.Println(strings.Repeat("-", 60))
+
+		// Execute helm commands
+		totalSteps := len(k8sPlan.HelmCmds) + len(k8sPlan.KubectlCmds)
+		stepNum := 0
+
+		for _, helmCmd := range k8sPlan.HelmCmds {
+			stepNum++
+			args := buildHelmArgs(helmCmd)
+			if len(args) == 0 {
+				continue
+			}
+
+			fmt.Printf("[k8s] running %d/%d: helm %s\n", stepNum, totalSteps, strings.Join(args, " "))
+
+			cmd := exec.CommandContext(ctx, "helm", args...)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("helm command failed: %w", err)
+			}
+			fmt.Println()
+		}
+
+		// Execute kubectl commands
+		for _, kubectlCmd := range k8sPlan.KubectlCmds {
+			stepNum++
+			fmt.Printf("[k8s] running %d/%d: kubectl %s\n", stepNum, totalSteps, strings.Join(kubectlCmd.Args, " "))
+
+			cmd := exec.CommandContext(ctx, "kubectl", kubectlCmd.Args...)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("kubectl command failed: %w", err)
+			}
+			fmt.Println()
+		}
+
+		fmt.Println(strings.Repeat("-", 60))
+		fmt.Println("[k8s] Plan executed successfully!")
+		return nil
+	}
+
+	// Fall back to MakerPlan format (eksctl, kubectl, kubeadm commands)
 	var makerPlan plan.MakerPlan
 	if err := json.Unmarshal([]byte(rawPlan), &makerPlan); err != nil {
 		return fmt.Errorf("failed to parse K8s plan: %w", err)
@@ -1310,6 +1304,9 @@ func executeK8sPlan(ctx context.Context, rawPlan string, profile string, debug b
 	if awsRegion == "" {
 		awsRegion = "us-east-1"
 	}
+
+	fmt.Printf("\n[k8s] Executing plan: %s\n", makerPlan.Summary)
+	fmt.Println(strings.Repeat("-", 60))
 
 	// Execute each command
 	for i, cmd := range makerPlan.Commands {
@@ -1344,6 +1341,8 @@ func executeK8sPlan(ctx context.Context, rawPlan string, profile string, debug b
 		fmt.Println()
 	}
 
+	fmt.Println(strings.Repeat("-", 60))
+	fmt.Println("[k8s] Plan executed successfully!")
 	return nil
 }
 
