@@ -342,7 +342,8 @@ Format as a professional compliance table suitable for government security docum
 			var inferredTerraform bool
 			var inferredCode bool
 			var inferredK8s bool
-			includeAWS, inferredCode, includeGitHub, inferredTerraform, inferredK8s = inferContext(question)
+			routingQuestion := questionForRouting(question)
+			includeAWS, inferredCode, includeGitHub, inferredTerraform, inferredK8s = inferContext(routingQuestion)
 			_ = inferredCode
 
 			if debug {
@@ -356,7 +357,7 @@ Format as a professional compliance table suitable for government security docum
 
 			// Handle K8s queries by delegating to K8s agent
 			if inferredK8s {
-				return handleK8sQuery(context.Background(), question, debug, viper.GetString("kubernetes.kubeconfig"))
+				return handleK8sQuery(context.Background(), routingQuestion, debug, viper.GetString("kubernetes.kubeconfig"))
 			}
 		}
 
@@ -796,6 +797,52 @@ func inferContext(question string) (aws bool, code bool, github bool, terraform 
 	}
 
 	return aws, code, github, terraform, k8s
+}
+
+func questionForRouting(question string) string {
+	trimmed := strings.TrimSpace(question)
+	if trimmed == "" {
+		return trimmed
+	}
+
+	// If the prompt contains a chat transcript (as emitted by clanker-cloud),
+	// route based on the last explicit user turn.
+	// Format we expect (roughly):
+	//   You\n<question>\n\nClanker\n...
+	start := strings.LastIndex(trimmed, "\nYou\n")
+	startLen := len("\nYou\n")
+	if start == -1 && strings.HasPrefix(trimmed, "You\n") {
+		start = 0
+		startLen = len("You\n")
+	}
+
+	if start != -1 {
+		candidate := trimmed[start+startLen:]
+		// End at next assistant turn marker if present.
+		if end := strings.Index(candidate, "\n\nClanker\n"); end != -1 {
+			candidate = candidate[:end]
+		} else if end := strings.Index(candidate, "\nClanker\n"); end != -1 {
+			candidate = candidate[:end]
+		}
+		candidate = strings.TrimSpace(candidate)
+		if candidate != "" {
+			return candidate
+		}
+	}
+
+	// Generic fallback: if a prompt appends one or more sections like
+	// "Current <something> context:", route on the text before the first such section.
+	lower := strings.ToLower(trimmed)
+	if idx := strings.Index(lower, "\ncurrent "); idx != -1 {
+		if strings.Contains(lower[idx:], " context:") {
+			before := strings.TrimSpace(trimmed[:idx])
+			if before != "" {
+				return before
+			}
+		}
+	}
+
+	return trimmed
 }
 
 // handleK8sQuery delegates a Kubernetes query to the K8s agent

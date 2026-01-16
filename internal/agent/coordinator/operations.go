@@ -10,6 +10,7 @@ import (
 type operationGenerator func(*model.AgentContext, model.AWSData) []awsclient.LLMOperation
 
 var operationCatalog = map[string]operationGenerator{
+	"k8s":            generateK8sOperations,
 	"log":            generateLogOperations,
 	"metrics":        generateMetricsOperations,
 	"infrastructure": generateInfrastructureOperations,
@@ -39,6 +40,18 @@ func generateLogOperations(ctx *model.AgentContext, _ model.AWSData) []awsclient
 	return []awsclient.LLMOperation{
 		{Operation: "discover_services", Reason: "Discover services matching the query", Parameters: map[string]any{"query": ctx.OriginalQuery}},
 		{Operation: "investigate_service_logs", Reason: "Investigate logs for discovered services", Parameters: map[string]any{"query": ctx.OriginalQuery}},
+	}
+}
+
+func generateK8sOperations(_ *model.AgentContext, params model.AWSData) []awsclient.LLMOperation {
+	scope, _ := params["scope"].(string)
+	if scope == "cluster_resources" {
+		return []awsclient.LLMOperation{
+			{Operation: "k8s_get_cluster_resources", Reason: "Gather Kubernetes cluster resources for context", Parameters: map[string]any{}},
+		}
+	}
+	return []awsclient.LLMOperation{
+		{Operation: "k8s_get_cluster_resources", Reason: "Gather Kubernetes cluster resources for context", Parameters: map[string]any{}},
 	}
 }
 
