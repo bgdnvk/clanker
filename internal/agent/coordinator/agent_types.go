@@ -17,6 +17,14 @@ type AgentType struct {
 }
 
 var (
+	AgentTypeK8s = AgentType{
+		Name: "k8s",
+		Dependencies: Dependency{
+			ProvidedData:   []string{"k8s_resources", "k8s_health"},
+			ExecutionOrder: 1,
+			WaitTimeout:    6 * time.Second,
+		},
+	}
 	AgentTypeLog = AgentType{
 		Name: "log",
 		Dependencies: Dependency{

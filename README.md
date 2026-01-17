@@ -133,10 +133,145 @@ clanker ask --aws --maker --destroyer "delete the clanka-postgres rds instance" 
 
 When you run with `--maker --apply`, the runner tries to be safe and repeatable:
 
--   Idempotent “already exists” errors are treated as success when safe (e.g. duplicate SG rules).
+-   Idempotent "already exists" errors are treated as success when safe (e.g. duplicate SG rules).
 -   Some AWS async operations are waited to terminal state (e.g. CloudFormation create/update) so failures surface and can be remediated.
 -   If the runner detects common AWS runtime issues (CIDR/subnet/template mismatches), it may rewrite and retry the original AWS CLI command.
 -   If built-in retries/glue are exhausted, it can escalate to AI for prerequisite commands, then retry the original command with exponential backoff.
+
+## Kubernetes Commands
+
+Clanker provides comprehensive Kubernetes cluster management and monitoring capabilities.
+
+### Cluster Management
+
+```bash
+# Create an EKS cluster
+clanker k8s create eks my-cluster --nodes 2 --node-type t3.small
+clanker k8s create eks my-cluster --plan  # Show plan only
+
+# Create a kubeadm cluster on EC2
+clanker k8s create kubeadm my-cluster --workers 2 --key-pair my-key
+clanker k8s create kubeadm my-cluster --plan  # Show plan only
+
+# List clusters
+clanker k8s list eks
+clanker k8s list kubeadm
+
+# Delete a cluster
+clanker k8s delete eks my-cluster
+clanker k8s delete kubeadm my-cluster
+
+# Get kubeconfig for a cluster
+clanker k8s kubeconfig eks my-cluster
+clanker k8s kubeconfig kubeadm my-cluster
+```
+
+### Deploy Applications
+
+```bash
+# Deploy a container image
+clanker k8s deploy nginx --name my-nginx --port 80
+clanker k8s deploy nginx --replicas 3 --namespace production
+clanker k8s deploy nginx --plan  # Show plan only
+```
+
+### Get Cluster Resources
+
+```bash
+# Get all resources from a specific cluster (JSON output)
+clanker k8s resources --cluster my-cluster
+
+# Get resources in YAML format
+clanker k8s resources --cluster my-cluster -o yaml
+
+# Get resources from all EKS clusters
+clanker k8s resources
+```
+
+### Pod Logs
+
+```bash
+# Get logs from a pod
+clanker k8s logs my-pod
+
+# Get logs from a specific container
+clanker k8s logs my-pod -c my-container
+
+# Follow logs in real-time
+clanker k8s logs my-pod -f
+
+# Get last N lines
+clanker k8s logs my-pod --tail 100
+
+# Get logs from a specific time period
+clanker k8s logs my-pod --since 1h
+
+# Get logs with timestamps
+clanker k8s logs my-pod --timestamps
+
+# Get logs from all containers in a pod
+clanker k8s logs my-pod --all-containers
+
+# Get previous container logs (after restart)
+clanker k8s logs my-pod -p
+
+# Combine options
+clanker k8s logs my-pod -n kube-system --tail 50 --since 30m
+```
+
+### Resource Metrics and Statistics
+
+```bash
+# Get node metrics
+clanker k8s stats nodes
+clanker k8s stats nodes --sort-by cpu
+clanker k8s stats nodes --sort-by memory
+clanker k8s stats nodes -o json
+clanker k8s stats nodes -o yaml
+
+# Get pod metrics
+clanker k8s stats pods
+clanker k8s stats pods -n kube-system
+clanker k8s stats pods -A  # All namespaces
+clanker k8s stats pods --sort-by memory
+clanker k8s stats pods -o json
+
+# Get metrics for a specific pod
+clanker k8s stats pod my-pod
+clanker k8s stats pod my-pod -n production
+clanker k8s stats pod my-pod --containers  # Show container-level metrics
+clanker k8s stats pod my-pod -o json
+
+# Get cluster-wide aggregated metrics
+clanker k8s stats cluster
+clanker k8s stats cluster -o json
+```
+
+### Natural Language Queries
+
+Clanker supports natural language queries for Kubernetes operations:
+
+```bash
+# Telemetry and metrics queries
+clanker ask "show cpu usage for all nodes"
+clanker ask "which pods are using the most memory"
+clanker ask "what is the resource utilization of the cluster"
+clanker ask "show metrics for pod nginx in namespace default"
+clanker ask "top 10 pods by cpu usage"
+
+# Log queries
+clanker ask "show logs for pod nginx"
+clanker ask "get recent errors from deployment web-app"
+
+# Cluster information
+clanker ask "list all pods in kube-system namespace"
+clanker ask "show services in production namespace"
+clanker ask "what deployments are running"
+
+# Troubleshooting
+clanker ask "why is pod nginx failing"
+clanker ask "diagnose issues with deployment api-server"
+```
 
 ## Troubleshooting
 

@@ -234,6 +234,8 @@ func uniqueStrings(in []string) []string {
 
 func (c *Coordinator) lookupAgentType(name string) (AgentType, bool) {
 	switch name {
+	case "k8s":
+		return AgentTypeK8s, true
 	case "log":
 		return AgentTypeLog, true
 	case "metrics":

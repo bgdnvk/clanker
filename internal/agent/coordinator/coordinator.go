@@ -10,6 +10,7 @@ import (
 	dt "github.com/bgdnvk/clanker/internal/agent/decisiontree"
 	"github.com/bgdnvk/clanker/internal/agent/model"
 	awsclient "github.com/bgdnvk/clanker/internal/aws"
+	"github.com/bgdnvk/clanker/internal/k8s"
 	"github.com/spf13/viper"
 )
 
@@ -205,6 +206,25 @@ func (c *Coordinator) runParallelAgent(ctx context.Context, agent *ParallelAgent
 		)
 
 		switch op.Operation {
+		case "k8s_get_cluster_resources":
+			k8sAgent := k8s.NewAgentWithOptions(k8s.AgentOptions{
+				Debug:      verbose,
+				AWSProfile: viper.GetString("aws.default_profile"),
+				Region:     viper.GetString("aws.default_region"),
+				Kubeconfig: viper.GetString("k8s.kubeconfig"),
+			})
+			clusterName := viper.GetString("k8s.cluster")
+			if clusterName == "" {
+				clusterName = "current"
+			}
+			qopts := k8s.QueryOptions{
+				ClusterName: clusterName,
+				Namespace:   viper.GetString("k8s.namespace"),
+				AWSProfile:  viper.GetString("aws.default_profile"),
+				Region:      viper.GetString("aws.default_region"),
+				Kubeconfig:  viper.GetString("k8s.kubeconfig"),
+			}
+			result, err = k8sAgent.GetClusterResources(ctx, clusterName, qopts)
 		case "discover_services":
 			result, err = c.discoverServicesWithAI(ctx, op.Parameters)
 		case "investigate_service_logs":

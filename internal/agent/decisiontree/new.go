@@ -15,6 +15,15 @@ func New() *Tree {
 
 	root.Children = []*Node{
 		{
+			ID:         "k8s_context",
+			Name:       "Kubernetes context gathering",
+			Condition:  "contains_keywords(['kubernetes', 'k8s', 'kubectl', 'kube', 'namespace', 'pod', 'pods', 'deployment', 'deployments', 'statefulset', 'daemonset', 'ingress', 'helm', 'eks', 'kubeadm', 'k3s'])",
+			Action:     "gather_k8s_context",
+			Priority:   10,
+			AgentTypes: []string{"k8s"},
+			Parameters: model.AWSData{"scope": "cluster_resources"},
+		},
+		{
 			ID:         "logs_priority",
 			Name:       "Logs investigation priority",
 			Condition:  "contains_keywords(['logs', 'log', 'errors', 'stacktrace', 'trace', 'panic', 'exception', 'latest', 'recent', 'problems', 'debug', 'investigate', 'crash'])",

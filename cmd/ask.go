@@ -13,6 +13,8 @@ import (
 	"github.com/bgdnvk/clanker/internal/ai"
 	"github.com/bgdnvk/clanker/internal/aws"
 	ghclient "github.com/bgdnvk/clanker/internal/github"
+	"github.com/bgdnvk/clanker/internal/k8s"
+	"github.com/bgdnvk/clanker/internal/k8s/plan"
 	"github.com/bgdnvk/clanker/internal/maker"
 	tfclient "github.com/bgdnvk/clanker/internal/terraform"
 	"github.com/spf13/cobra"
@@ -71,6 +73,122 @@ Examples:
 		if cmd.Flags().Changed("agent-trace") {
 			viper.Set("agent.trace", agentTrace)
 		}
+		routeOnly, _ := cmd.Flags().GetBool("route-only")
+
+		// Handle route-only mode: return routing decision as JSON without executing
+		if routeOnly {
+			agent, reason := determineRoutingDecision(question)
+			result := map[string]string{
+				"agent":  agent,
+				"reason": reason,
+			}
+			return json.NewEncoder(os.Stdout).Encode(result)
+		}
+
+		// Handle apply mode (independent of maker mode)
+		if applyMode {
+			ctx := context.Background()
+			var rawPlan string
+			if planFile != "" {
+				data, err := os.ReadFile(planFile)
+				if err != nil {
+					return fmt.Errorf("failed to read plan file: %w", err)
+				}
+				rawPlan = string(data)
+			} else {
+				data, err := io.ReadAll(os.Stdin)
+				if err != nil {
+					return fmt.Errorf("failed to read plan from stdin: %w", err)
+				}
+				rawPlan = string(data)
+			}
+
+			// Check if this is a K8s plan (contains helm, eksctl, kubectl, or kubeadm commands)
+			if isK8sPlan(rawPlan) {
+				return executeK8sPlan(ctx, rawPlan, profile, debug)
+			}
+
+			// Fall back to AWS maker plan execution
+			makerPlan, err := maker.ParsePlan(rawPlan)
+			if err != nil {
+				return fmt.Errorf("invalid plan: %w", err)
+			}
+
+			// Resolve AWS profile/region for execution.
+			targetProfile := profile
+			if targetProfile == "" {
+				defaultEnv := viper.GetString("infra.default_environment")
+				if defaultEnv == "" {
+					defaultEnv = "dev"
+				}
+				targetProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+				if targetProfile == "" {
+					targetProfile = viper.GetString("aws.default_profile")
+				}
+				if targetProfile == "" {
+					targetProfile = "default"
+				}
+			}
+
+			region := ""
+			if envRegion := strings.TrimSpace(os.Getenv("AWS_REGION")); envRegion != "" {
+				region = envRegion
+			} else if envRegion := strings.TrimSpace(os.Getenv("AWS_DEFAULT_REGION")); envRegion != "" {
+				region = envRegion
+			} else {
+				// Prefer the profile's configured region so maker apply and infra analysis query the same region.
+				cmd := exec.CommandContext(ctx, "aws", "configure", "get", "region", "--profile", targetProfile)
+				if out, err := cmd.CombinedOutput(); err == nil {
+					region = strings.TrimSpace(string(out))
+				}
+			}
+			if region == "" {
+				region = ai.FindInfraAnalysisRegion()
+			}
+			if region == "" {
+				region = "us-east-1"
+			}
+
+			// Resolve provider for AI-assisted error handling
+			var provider string
+			if aiProfile != "" {
+				provider = aiProfile
+			} else {
+				provider = viper.GetString("ai.default_provider")
+				if provider == "" {
+					provider = "openai"
+				}
+			}
+
+			var apiKey string
+			switch provider {
+			case "gemini":
+				apiKey = ""
+			case "gemini-api":
+				apiKey = resolveGeminiAPIKey(geminiKey)
+			case "openai":
+				apiKey = resolveOpenAIKey(openaiKey)
+			case "anthropic":
+				if anthropicKey != "" {
+					apiKey = anthropicKey
+				} else {
+					apiKey = viper.GetString("ai.providers.anthropic.api_key_env")
+				}
+			default:
+				apiKey = viper.GetString("ai.api_key")
+			}
+
+			return maker.ExecutePlan(ctx, makerPlan, maker.ExecOptions{
+				Profile:    targetProfile,
+				Region:     region,
+				Writer:     os.Stdout,
+				Destroyer:  destroyer,
+				AIProvider: provider,
+				AIAPIKey:   apiKey,
+				AIProfile:  aiProfile,
+				Debug:      debug,
+			})
+		}
 
 		if makerMode {
 			ctx := context.Background()
@@ -107,74 +225,7 @@ Examples:
 				apiKey = viper.GetString("ai.api_key")
 			}
 
-			if applyMode {
-				var rawPlan string
-				if planFile != "" {
-					data, err := os.ReadFile(planFile)
-					if err != nil {
-						return fmt.Errorf("failed to read plan file: %w", err)
-					}
-					rawPlan = string(data)
-				} else {
-					data, err := io.ReadAll(os.Stdin)
-					if err != nil {
-						return fmt.Errorf("failed to read plan from stdin: %w", err)
-					}
-					rawPlan = string(data)
-				}
-
-				plan, err := maker.ParsePlan(rawPlan)
-				if err != nil {
-					return fmt.Errorf("invalid plan: %w", err)
-				}
-
-				// Resolve AWS profile/region for execution.
-				targetProfile := profile
-				if targetProfile == "" {
-					defaultEnv := viper.GetString("infra.default_environment")
-					if defaultEnv == "" {
-						defaultEnv = "dev"
-					}
-					targetProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
-					if targetProfile == "" {
-						targetProfile = viper.GetString("aws.default_profile")
-					}
-					if targetProfile == "" {
-						targetProfile = "default"
-					}
-				}
-
-				region := ""
-				if envRegion := strings.TrimSpace(os.Getenv("AWS_REGION")); envRegion != "" {
-					region = envRegion
-				} else if envRegion := strings.TrimSpace(os.Getenv("AWS_DEFAULT_REGION")); envRegion != "" {
-					region = envRegion
-				} else {
-					// Prefer the profile's configured region so maker apply and infra analysis query the same region.
-					cmd := exec.CommandContext(ctx, "aws", "configure", "get", "region", "--profile", targetProfile)
-					if out, err := cmd.CombinedOutput(); err == nil {
-						region = strings.TrimSpace(string(out))
-					}
-				}
-				if region == "" {
-					region = ai.FindInfraAnalysisRegion()
-				}
-				if region == "" {
-					region = "us-east-1"
-				}
-
-				return maker.ExecutePlan(ctx, plan, maker.ExecOptions{
-					Profile:    targetProfile,
-					Region:     region,
-					Writer:     os.Stdout,
-					Destroyer:  destroyer,
-					AIProvider: provider,
-					AIAPIKey:   apiKey,
-					AIProfile:  aiProfile,
-					Debug:      debug,
-				})
-			}
-
+			// Generate AWS maker plan
 			if strings.TrimSpace(question) == "" {
 				return fmt.Errorf("requires a question")
 			}
@@ -290,16 +341,23 @@ Format as a professional compliance table suitable for government security docum
 		if !includeAWS && !includeGitHub && !includeTerraform {
 			var inferredTerraform bool
 			var inferredCode bool
-			includeAWS, inferredCode, includeGitHub, inferredTerraform = inferContext(question)
+			var inferredK8s bool
+			routingQuestion := questionForRouting(question)
+			includeAWS, inferredCode, includeGitHub, inferredTerraform, inferredK8s = inferContext(routingQuestion)
 			_ = inferredCode
 
 			if debug {
-				fmt.Printf("Inferred context: AWS=%v, GitHub=%v, Terraform=%v\n", includeAWS, includeGitHub, inferredTerraform)
+				fmt.Printf("Inferred context: AWS=%v, GitHub=%v, Terraform=%v, K8s=%v\n", includeAWS, includeGitHub, inferredTerraform, inferredK8s)
 			}
 
 			// Handle inferred Terraform context
 			if inferredTerraform {
 				includeTerraform = true
+			}
+
+			// Handle K8s queries by delegating to K8s agent
+			if inferredK8s {
+				return handleK8sQuery(context.Background(), routingQuestion, debug, viper.GetString("kubernetes.kubeconfig"))
 			}
 		}
 
@@ -575,6 +633,7 @@ func init() {
 	askCmd.Flags().Bool("destroyer", false, "Allow destructive AWS CLI operations when using --maker (requires explicit confirmation in UI/workflow)")
 	askCmd.Flags().Bool("apply", false, "Apply an approved maker plan (reads from stdin unless --plan-file is provided)")
 	askCmd.Flags().String("plan-file", "", "Optional path to maker plan JSON file for --apply")
+	askCmd.Flags().Bool("route-only", false, "Return routing decision as JSON without executing (for backend integration)")
 }
 
 func resolveGeminiAPIKey(flagValue string) string {
@@ -637,9 +696,9 @@ func resolveGeminiModel(provider, flagValue string) string {
 	return model
 }
 
-// inferContext tries to determine if the question is about AWS, GitHub, or Terraform.
+// inferContext tries to determine if the question is about AWS, GitHub, Terraform, or Kubernetes.
 // Code scanning is disabled, so this never infers code context.
-func inferContext(question string) (aws bool, code bool, github bool, terraform bool) {
+func inferContext(question string) (aws bool, code bool, github bool, terraform bool, k8s bool) {
 	awsKeywords := []string{
 		// Core services
 		"ec2", "lambda", "rds", "s3", "ecs", "cloudwatch", "logs", "batch", "sqs", "sns", "dynamodb", "elasticache", "elb", "alb", "nlb", "route53", "cloudfront", "api-gateway", "cognito", "iam", "vpc", "subnet", "security-group", "nacl", "nat", "igw", "vpn", "direct-connect",
@@ -681,6 +740,27 @@ func inferContext(question string) (aws bool, code bool, github bool, terraform 
 		"dev", "stage", "staging", "prod", "production", "qa", "environment", "workspace",
 	}
 
+	k8sKeywords := []string{
+		// Core K8s terms
+		"kubernetes", "k8s", "kubectl", "kube",
+		// Workloads
+		"pod", "pods", "deployment", "deployments", "replicaset", "statefulset",
+		"daemonset", "job", "cronjob",
+		// Networking
+		"service", "services", "ingress", "loadbalancer", "nodeport", "clusterip",
+		"networkpolicy", "endpoint",
+		// Storage
+		"pv", "pvc", "persistentvolume", "storageclass", "configmap", "secret",
+		// Cluster
+		"node", "nodes", "namespace", "cluster", "kubeconfig", "context",
+		// Tools
+		"helm", "chart", "release", "tiller",
+		// Providers
+		"eks", "kubeadm", "kops", "k3s", "minikube",
+		// Operations
+		"rollout", "scale", "drain", "cordon", "taint",
+	}
+
 	questionLower := strings.ToLower(question)
 
 	for _, keyword := range awsKeywords {
@@ -704,14 +784,697 @@ func inferContext(question string) (aws bool, code bool, github bool, terraform 
 		}
 	}
 
+	for _, keyword := range k8sKeywords {
+		if contains(questionLower, keyword) {
+			k8s = true
+			break
+		}
+	}
+
 	// If no specific context detected, include AWS + GitHub by default.
-	if !aws && !github && !terraform {
+	if !aws && !github && !terraform && !k8s {
 		aws, github = true, true
 	}
 
-	return aws, code, github, terraform
+	return aws, code, github, terraform, k8s
+}
+
+func questionForRouting(question string) string {
+	trimmed := strings.TrimSpace(question)
+	if trimmed == "" {
+		return trimmed
+	}
+
+	// If the prompt contains a chat transcript (as emitted by clanker-cloud),
+	// route based on the last explicit user turn.
+	// Format we expect (roughly):
+	//   You\n<question>\n\nClanker\n...
+	start := strings.LastIndex(trimmed, "\nYou\n")
+	startLen := len("\nYou\n")
+	if start == -1 && strings.HasPrefix(trimmed, "You\n") {
+		start = 0
+		startLen = len("You\n")
+	}
+
+	if start != -1 {
+		candidate := trimmed[start+startLen:]
+		// End at next assistant turn marker if present.
+		if end := strings.Index(candidate, "\n\nClanker\n"); end != -1 {
+			candidate = candidate[:end]
+		} else if end := strings.Index(candidate, "\nClanker\n"); end != -1 {
+			candidate = candidate[:end]
+		}
+		candidate = strings.TrimSpace(candidate)
+		if candidate != "" {
+			return candidate
+		}
+	}
+
+	// Generic fallback: if a prompt appends one or more sections like
+	// "Current <something> context:", route on the text before the first such section.
+	lower := strings.ToLower(trimmed)
+	if idx := strings.Index(lower, "\ncurrent "); idx != -1 {
+		if strings.Contains(lower[idx:], " context:") {
+			before := strings.TrimSpace(trimmed[:idx])
+			if before != "" {
+				return before
+			}
+		}
+	}
+
+	return trimmed
+}
+
+// handleK8sQuery delegates a Kubernetes query to the K8s agent
+func handleK8sQuery(ctx context.Context, question string, debug bool, kubeconfig string) error {
+	if debug {
+		fmt.Println("Delegating query to K8s agent...")
+	}
+
+	// Create K8s agent with AWS profile and region for EKS support
+	// Resolve profile using same pattern as AWS client
+	awsProfile := ""
+	defaultEnv := viper.GetString("infra.default_environment")
+	if defaultEnv == "" {
+		defaultEnv = "dev"
+	}
+	awsProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+	if awsProfile == "" {
+		awsProfile = viper.GetString("aws.default_profile")
+	}
+	if awsProfile == "" {
+		awsProfile = "default"
+	}
+
+	// Resolve region
+	awsRegion := viper.GetString(fmt.Sprintf("infra.aws.environments.%s.region", defaultEnv))
+	if awsRegion == "" {
+		awsRegion = viper.GetString("aws.default_region")
+	}
+	if awsRegion == "" {
+		awsRegion = "us-east-1"
+	}
+
+	questionLower := strings.ToLower(question)
+
+	// Check if this is a cluster provisioning request
+	isClusterProvisioning := (strings.Contains(questionLower, "create") || strings.Contains(questionLower, "provision") || strings.Contains(questionLower, "setup")) &&
+		(strings.Contains(questionLower, "cluster") || strings.Contains(questionLower, "eks") || strings.Contains(questionLower, "kubeadm"))
+
+	if isClusterProvisioning {
+		return handleK8sClusterProvisioning(ctx, question, questionLower, awsProfile, awsRegion, debug)
+	}
+
+	// Check if this is a deployment request (creating a deployment, not listing)
+	// Exclude read-only queries that mention "deployment" or "deployments"
+	isReadOnlyQuery := strings.Contains(questionLower, "list") ||
+		strings.Contains(questionLower, "get") ||
+		strings.Contains(questionLower, "show") ||
+		strings.Contains(questionLower, "describe") ||
+		strings.Contains(questionLower, "what") ||
+		strings.Contains(questionLower, "how") ||
+		strings.Contains(questionLower, "scale") ||
+		strings.Contains(questionLower, "rollout") ||
+		strings.Contains(questionLower, "status")
+
+	// Check for actual deploy action words (not just substring match on "deployment")
+	hasDeployAction := strings.Contains(questionLower, "deploy ") ||
+		strings.HasPrefix(questionLower, "deploy") ||
+		strings.Contains(questionLower, "run ")
+
+	isDeployRequest := hasDeployAction &&
+		!strings.Contains(questionLower, "cluster") &&
+		!isReadOnlyQuery
+
+	if isDeployRequest {
+		return handleK8sDeployment(ctx, question, questionLower, debug)
+	}
+
+	k8sAgent := k8s.NewAgentWithOptions(k8s.AgentOptions{
+		Debug:      debug,
+		AWSProfile: awsProfile,
+		Region:     awsRegion,
+		Kubeconfig: kubeconfig,
+	})
+
+	// Configure query options
+	opts := k8s.QueryOptions{
+		ClusterName: viper.GetString("kubernetes.default_cluster"),
+		ClusterType: k8s.ClusterType(viper.GetString("kubernetes.default_type")),
+		Namespace:   viper.GetString("kubernetes.default_namespace"),
+		Kubeconfig:  kubeconfig,
+	}
+
+	if opts.Namespace == "" {
+		opts.Namespace = "default"
+	}
+	if opts.ClusterType == "" {
+		opts.ClusterType = k8s.ClusterTypeExisting
+	}
+
+	// Handle the query
+	response, err := k8sAgent.HandleQuery(ctx, question, opts)
+	if err != nil {
+		return fmt.Errorf("K8s agent error: %w", err)
+	}
+
+	// Output based on response type
+	switch response.Type {
+	case k8s.ResponseTypePlan:
+		// Output plan as JSON (like AWS maker)
+		planJSON, err := json.MarshalIndent(response.Plan, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to format plan: %w", err)
+		}
+		fmt.Println(string(planJSON))
+		fmt.Println("\n// To apply this plan, run:")
+		fmt.Println("// clanker ask --apply --plan-file <save-above-to-file.json>")
+
+	case k8s.ResponseTypeResult:
+		fmt.Println(response.Result)
+
+	case k8s.ResponseTypeError:
+		return response.Error
+	}
+
+	return nil
+}
+
+// buildHelmArgs builds helm command arguments from a HelmCmd
+func buildHelmArgs(helmCmd k8s.HelmCmd) []string {
+	// If raw Args are available, use them directly
+	if len(helmCmd.Args) > 0 {
+		return helmCmd.Args
+	}
+
+	// Otherwise, build args from structured fields
+	var args []string
+
+	switch helmCmd.Action {
+	case "install":
+		args = []string{"install", helmCmd.Release, helmCmd.Chart}
+		if helmCmd.Namespace != "" {
+			args = append(args, "-n", helmCmd.Namespace)
+		}
+		if helmCmd.Wait {
+			args = append(args, "--wait")
+		}
+		if helmCmd.Timeout != "" {
+			args = append(args, "--timeout", helmCmd.Timeout)
+		}
+	case "upgrade":
+		args = []string{"upgrade", helmCmd.Release, helmCmd.Chart}
+		if helmCmd.Namespace != "" {
+			args = append(args, "-n", helmCmd.Namespace)
+		}
+		if helmCmd.Wait {
+			args = append(args, "--wait")
+		}
+	case "uninstall":
+		args = []string{"uninstall", helmCmd.Release}
+		if helmCmd.Namespace != "" {
+			args = append(args, "-n", helmCmd.Namespace)
+		}
+	case "rollback":
+		args = []string{"rollback", helmCmd.Release}
+		if helmCmd.Namespace != "" {
+			args = append(args, "-n", helmCmd.Namespace)
+		}
+	}
+
+	return args
+}
+
+// handleK8sClusterProvisioning handles cluster creation requests with plan display and approval
+func handleK8sClusterProvisioning(ctx context.Context, question, questionLower, awsProfile, awsRegion string, debug bool) error {
+	// Determine cluster type from question
+	isEKS := strings.Contains(questionLower, "eks")
+	isKubeadm := strings.Contains(questionLower, "kubeadm") || strings.Contains(questionLower, "ec2")
+
+	// Default to EKS if not specified
+	if !isEKS && !isKubeadm {
+		isEKS = true
+	}
+
+	// Extract cluster name from question
+	clusterName := extractClusterName(questionLower)
+	if clusterName == "" {
+		clusterName = "clanker-cluster"
+	}
+
+	// Extract node count
+	nodeCount := extractNodeCount(questionLower)
+	if nodeCount <= 0 {
+		nodeCount = 1
+	}
+
+	// Extract instance type
+	instanceType := extractInstanceType(questionLower)
+	if instanceType == "" {
+		instanceType = "t3.small"
+	}
+
+	if isEKS {
+		return handleEKSCreation(ctx, clusterName, nodeCount, instanceType, awsProfile, awsRegion, debug)
+	}
+
+	return handleKubeadmCreation(ctx, clusterName, nodeCount, instanceType, awsProfile, awsRegion, debug)
+}
+
+// handleEKSCreation handles EKS cluster creation - outputs plan JSON like AWS maker
+func handleEKSCreation(ctx context.Context, clusterName string, nodeCount int, instanceType, awsProfile, awsRegion string, debug bool) error {
+	// Generate the plan
+	k8sPlan := plan.GenerateEKSCreatePlan(plan.EKSCreateOptions{
+		ClusterName:       clusterName,
+		Region:            awsRegion,
+		Profile:           awsProfile,
+		NodeCount:         nodeCount,
+		NodeType:          instanceType,
+		KubernetesVersion: "1.29",
+	})
+
+	// Convert to maker-compatible format and output JSON (same as AWS maker)
+	question := fmt.Sprintf("create an eks cluster called %s with %d node using %s", clusterName, nodeCount, instanceType)
+	makerPlan := k8sPlan.ToMakerPlan(question)
+	planJSON, err := json.MarshalIndent(makerPlan, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to format plan: %w", err)
+	}
+	fmt.Println(string(planJSON))
+
+	return nil
+}
+
+// handleKubeadmCreation handles kubeadm cluster creation - outputs plan JSON like AWS maker
+func handleKubeadmCreation(ctx context.Context, clusterName string, workerCount int, instanceType, awsProfile, awsRegion string, debug bool) error {
+	// Default key pair name
+	keyPairName := fmt.Sprintf("clanker-%s-key", clusterName)
+
+	// Check/ensure SSH key exists (output to stderr so it doesn't mix with JSON)
+	sshKeyInfo, err := plan.EnsureSSHKey(ctx, keyPairName, awsRegion, awsProfile, os.Stderr)
+	if err != nil {
+		return fmt.Errorf("failed to ensure SSH key: %w", err)
+	}
+
+	sshKeyPath := sshKeyInfo.PrivateKeyPath
+
+	// Generate the plan
+	k8sPlan := plan.GenerateKubeadmCreatePlan(plan.KubeadmCreateOptions{
+		ClusterName:       clusterName,
+		Region:            awsRegion,
+		Profile:           awsProfile,
+		WorkerCount:       workerCount,
+		NodeType:          instanceType,
+		ControlPlaneType:  instanceType,
+		KubernetesVersion: "1.29",
+		KeyPairName:       keyPairName,
+		SSHKeyPath:        sshKeyPath,
+		CNI:               "calico",
+	})
+
+	// Convert to maker-compatible format and output JSON (same as AWS maker)
+	question := fmt.Sprintf("create a kubeadm cluster called %s with %d workers using %s", clusterName, workerCount, instanceType)
+	makerPlan := k8sPlan.ToMakerPlan(question)
+	planJSON, err := json.MarshalIndent(makerPlan, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to format plan: %w", err)
+	}
+	fmt.Println(string(planJSON))
+
+	return nil
+}
+
+// handleK8sDeployment handles deployment requests - outputs plan JSON like AWS maker
+func handleK8sDeployment(ctx context.Context, question, questionLower string, debug bool) error {
+	// Extract image from question
+	image := extractImage(questionLower)
+	if image == "" {
+		image = "nginx"
+	}
+
+	// Extract deployment name
+	deployName := extractDeployName(questionLower)
+	if deployName == "" {
+		// Extract from image
+		parts := strings.Split(image, "/")
+		deployName = parts[len(parts)-1]
+		if idx := strings.Index(deployName, ":"); idx > 0 {
+			deployName = deployName[:idx]
+		}
+	}
+
+	// Extract port
+	port := 80
+
+	// Extract replicas
+	replicas := 1
+
+	// Extract namespace
+	namespace := "default"
+
+	// Generate deploy plan
+	deployPlan := plan.GenerateDeployPlan(plan.DeployOptions{
+		Name:      deployName,
+		Image:     image,
+		Port:      port,
+		Replicas:  replicas,
+		Namespace: namespace,
+		Type:      "deployment",
+	})
+
+	// Convert to maker-compatible format and output JSON (same as AWS maker)
+	deployQuestion := fmt.Sprintf("deploy %s to kubernetes", image)
+	makerPlan := deployPlan.ToMakerPlan(deployQuestion)
+	planJSON, err := json.MarshalIndent(makerPlan, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to format plan: %w", err)
+	}
+	fmt.Println(string(planJSON))
+
+	return nil
+}
+
+// Helper functions for parsing questions
+
+func extractClusterName(question string) string {
+	// Look for "called X" or "named X" patterns
+	patterns := []string{"called ", "named ", "name "}
+	for _, pattern := range patterns {
+		if idx := strings.Index(question, pattern); idx != -1 {
+			rest := question[idx+len(pattern):]
+			words := strings.Fields(rest)
+			if len(words) > 0 {
+				name := words[0]
+				// Clean up any trailing punctuation
+				name = strings.TrimRight(name, ".,;:!?")
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+func extractNodeCount(question string) int {
+	// Look for "X node" or "X worker" patterns
+	words := strings.Fields(question)
+	for i, word := range words {
+		if (strings.Contains(word, "node") || strings.Contains(word, "worker")) && i > 0 {
+			var count int
+			if _, err := fmt.Sscanf(words[i-1], "%d", &count); err == nil {
+				return count
+			}
+		}
+	}
+	return 0
+}
+
+func extractInstanceType(question string) string {
+	// Look for common instance type patterns
+	instanceTypes := []string{"t3.micro", "t3.small", "t3.medium", "t3.large", "t3.xlarge",
+		"t2.micro", "t2.small", "t2.medium", "t2.large",
+		"m5.large", "m5.xlarge", "m6i.large", "m6i.xlarge"}
+	for _, t := range instanceTypes {
+		if strings.Contains(question, t) {
+			return t
+		}
+	}
+	return ""
+}
+
+func extractImage(question string) string {
+	// Look for common image patterns
+	words := strings.Fields(question)
+	for _, word := range words {
+		// Check for docker image patterns
+		if strings.Contains(word, "/") || strings.Contains(word, ":") {
+			return strings.TrimRight(word, ".,;:!?")
+		}
+		// Check for common images
+		commonImages := []string{"nginx", "redis", "postgres", "mysql", "mongo", "node", "python", "golang"}
+		for _, img := range commonImages {
+			if word == img {
+				return img
+			}
+		}
+	}
+	return ""
+}
+
+func extractDeployName(question string) string {
+	// Look for "called X" or "named X" patterns
+	patterns := []string{"called ", "named ", "name "}
+	for _, pattern := range patterns {
+		if idx := strings.Index(question, pattern); idx != -1 {
+			rest := question[idx+len(pattern):]
+			words := strings.Fields(rest)
+			if len(words) > 0 {
+				name := words[0]
+				name = strings.TrimRight(name, ".,;:!?")
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 func contains(s, substr string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+}
+
+// formatK8sCommand formats a command for display (like AWS maker formatAWSArgsForLog)
+func formatK8sCommand(cmdName string, args []string) string {
+	const maxArgLen = 160
+	const maxTotalLen = 700
+
+	parts := make([]string, 0, len(args)+1)
+	parts = append(parts, cmdName)
+	for _, a := range args {
+		if len(a) > maxArgLen {
+			a = a[:maxArgLen] + "..."
+		}
+		parts = append(parts, a)
+	}
+	s := strings.Join(parts, " ")
+	if len(s) > maxTotalLen {
+		s = s[:maxTotalLen] + "..."
+	}
+	return s
+}
+
+// isK8sPlan checks if a plan JSON is a K8s plan (contains eksctl, kubectl, or kubeadm commands)
+func isK8sPlan(rawPlan string) bool {
+	return strings.Contains(rawPlan, `"eksctl"`) ||
+		strings.Contains(rawPlan, `"kubectl"`) ||
+		strings.Contains(rawPlan, `"kubeadm"`) ||
+		strings.Contains(rawPlan, `"helm_cmds"`) ||
+		strings.Contains(rawPlan, `"helm"`)
+}
+
+// executeK8sPlan executes a K8s plan (supports both K8sPlan with helm_cmds and MakerPlan formats)
+func executeK8sPlan(ctx context.Context, rawPlan string, profile string, debug bool) error {
+	// First try to parse as K8sPlan (with helm_cmds)
+	var k8sPlan k8s.K8sPlan
+	if err := json.Unmarshal([]byte(rawPlan), &k8sPlan); err == nil && len(k8sPlan.HelmCmds) > 0 {
+		fmt.Printf("\n[k8s] Executing plan: %s\n", k8sPlan.Summary)
+		fmt.Println(strings.Repeat("-", 60))
+
+		// Execute helm commands
+		totalSteps := len(k8sPlan.HelmCmds) + len(k8sPlan.KubectlCmds)
+		stepNum := 0
+
+		for _, helmCmd := range k8sPlan.HelmCmds {
+			stepNum++
+			args := buildHelmArgs(helmCmd)
+			if len(args) == 0 {
+				continue
+			}
+
+			fmt.Printf("[k8s] running %d/%d: helm %s\n", stepNum, totalSteps, strings.Join(args, " "))
+
+			cmd := exec.CommandContext(ctx, "helm", args...)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("helm command failed: %w", err)
+			}
+			fmt.Println()
+		}
+
+		// Execute kubectl commands
+		for _, kubectlCmd := range k8sPlan.KubectlCmds {
+			stepNum++
+			fmt.Printf("[k8s] running %d/%d: kubectl %s\n", stepNum, totalSteps, strings.Join(kubectlCmd.Args, " "))
+
+			cmd := exec.CommandContext(ctx, "kubectl", kubectlCmd.Args...)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("kubectl command failed: %w", err)
+			}
+			fmt.Println()
+		}
+
+		fmt.Println(strings.Repeat("-", 60))
+		fmt.Println("[k8s] Plan executed successfully!")
+		return nil
+	}
+
+	// Fall back to MakerPlan format (eksctl, kubectl, kubeadm commands)
+	var makerPlan plan.MakerPlan
+	if err := json.Unmarshal([]byte(rawPlan), &makerPlan); err != nil {
+		return fmt.Errorf("failed to parse K8s plan: %w", err)
+	}
+
+	// Resolve AWS profile
+	awsProfile := profile
+	if awsProfile == "" {
+		defaultEnv := viper.GetString("infra.default_environment")
+		if defaultEnv == "" {
+			defaultEnv = "dev"
+		}
+		awsProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+		if awsProfile == "" {
+			awsProfile = viper.GetString("aws.default_profile")
+		}
+		if awsProfile == "" {
+			awsProfile = "default"
+		}
+	}
+
+	// Resolve region
+	awsRegion := viper.GetString(fmt.Sprintf("infra.aws.environments.%s.region", viper.GetString("infra.default_environment")))
+	if awsRegion == "" {
+		awsRegion = viper.GetString("aws.default_region")
+	}
+	if awsRegion == "" {
+		awsRegion = "us-east-1"
+	}
+
+	fmt.Printf("\n[k8s] Executing plan: %s\n", makerPlan.Summary)
+	fmt.Println(strings.Repeat("-", 60))
+
+	// Execute each command
+	for i, cmd := range makerPlan.Commands {
+		if len(cmd.Args) == 0 {
+			continue
+		}
+
+		cmdName := cmd.Args[0]
+		cmdArgs := cmd.Args[1:]
+
+		// Add profile/region for AWS and eksctl commands
+		if cmdName == "aws" || cmdName == "eksctl" {
+			cmdArgs = append(cmdArgs, "--profile", awsProfile)
+			if cmdName == "eksctl" {
+				cmdArgs = append(cmdArgs, "--region", awsRegion)
+			}
+		}
+
+		// Format command for display (like AWS maker)
+		displayCmd := formatK8sCommand(cmdName, cmdArgs)
+		fmt.Printf("[k8s] running %d/%d: %s\n", i+1, len(makerPlan.Commands), displayCmd)
+
+		// Execute the command
+		execCmd := exec.CommandContext(ctx, cmdName, cmdArgs...)
+		execCmd.Stdout = os.Stdout
+		execCmd.Stderr = os.Stderr
+
+		if err := execCmd.Run(); err != nil {
+			return fmt.Errorf("command failed: %s: %w", cmdName, err)
+		}
+
+		fmt.Println()
+	}
+
+	fmt.Println(strings.Repeat("-", 60))
+	fmt.Println("[k8s] Plan executed successfully!")
+	return nil
+}
+
+// determineRoutingDecision analyzes a question and returns which agent should handle it.
+// This is used by the --route-only flag to return routing decisions without executing.
+func determineRoutingDecision(question string) (agent string, reason string) {
+	questionLower := strings.ToLower(question)
+
+	// Check for diagram/visualization requests
+	diagramKeywords := []string{
+		"diagram", "visual", "visualize", "layout", "arrange",
+		"draw", "illustrate", "show on diagram", "add to diagram",
+		"update diagram", "modify diagram",
+	}
+	for _, kw := range diagramKeywords {
+		if strings.Contains(questionLower, kw) {
+			return "diagram", "Diagram or visualization request detected"
+		}
+	}
+
+	// Action keywords for infrastructure provisioning
+	actionKeywords := []string{
+		"create", "provision", "deploy", "launch", "spin up", "set up", "setup",
+		"add", "make", "build", "install", "configure", "enable", "start",
+		"update", "modify", "change", "scale", "resize", "upgrade",
+		"delete", "remove", "destroy", "terminate", "tear down", "teardown",
+	}
+
+	// K8s resources (checked first as more specific)
+	k8sResources := []string{
+		"kubernetes", "k8s", "pod", "pods", "deployment", "deployments",
+		"service", "services", "ingress", "namespace", "configmap",
+		"secret", "pvc", "persistent volume", "statefulset", "daemonset",
+		"replicaset", "cronjob", "job", "container", "helm", "chart",
+		"kubectl", "eksctl", "kubeadm", "nginx", "redis", "mysql", "postgres", "mongodb",
+		"cluster", "node", "nodes", "kube",
+	}
+
+	// AWS resources (excluding EKS which is handled by K8s maker)
+	awsResources := []string{
+		"ec2", "instance", "lambda", "function", "s3", "bucket",
+		"rds", "database", "dynamodb", "table", "sqs", "queue",
+		"sns", "topic", "ecs", "fargate", "elasticache", "memcached",
+		"elb", "alb", "nlb", "load balancer", "api gateway", "cloudfront", "cdn",
+		"route53", "dns", "iam", "role", "policy", "user",
+		"vpc", "subnet", "security group", "nat", "igw",
+		"kinesis", "stream", "glue", "athena", "redshift",
+		"elastic beanstalk", "codepipeline", "codebuild",
+	}
+
+	hasAction := false
+	for _, action := range actionKeywords {
+		if strings.Contains(questionLower, action) {
+			hasAction = true
+			break
+		}
+	}
+
+	// Check if question mentions K8s resources
+	hasK8sResource := false
+	for _, resource := range k8sResources {
+		if strings.Contains(questionLower, resource) {
+			hasK8sResource = true
+			break
+		}
+	}
+
+	if hasAction {
+		// Check K8s resources first (more specific)
+		if hasK8sResource {
+			return "k8s-maker", "K8s infrastructure provisioning or modification request"
+		}
+		// Check AWS resources
+		for _, resource := range awsResources {
+			if strings.Contains(questionLower, resource) {
+				return "maker", "AWS infrastructure provisioning or modification request"
+			}
+		}
+	}
+
+	// K8s read queries (no action keyword but mentions K8s resources)
+	if hasK8sResource {
+		return "k8s", "K8s query or analysis request"
+	}
+
+	// Default to CLI for general queries
+	return "cli", "General infrastructure query or analysis"
 }
