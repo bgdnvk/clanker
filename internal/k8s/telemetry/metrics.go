@@ -44,8 +44,8 @@ func (m *MetricsManager) GetClusterMetrics(ctx context.Context) (*ClusterMetrics
 	}
 
 	// Aggregate metrics
-	var totalCPU, usedCPU int64     // millicores
-	var totalMem, usedMem int64     // bytes
+	var totalCPU, usedCPU int64 // millicores
+	var totalMem, usedMem int64 // bytes
 	var totalCPUPct, totalMemPct float64
 
 	for _, node := range nodes {

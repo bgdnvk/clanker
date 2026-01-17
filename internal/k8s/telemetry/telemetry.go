@@ -120,8 +120,8 @@ func (s *SubAgent) handleClusterMetrics(ctx context.Context, opts QueryOptions) 
 	}
 
 	return &Response{
-		Type:    ResponseTypeResult,
-		Data:    result,
+		Type: ResponseTypeResult,
+		Data: result,
 		Message: fmt.Sprintf("Cluster metrics: %d nodes, CPU %s/%s (%.1f%%), Memory %s/%s (%.1f%%)",
 			result.NodeCount, result.UsedCPU, result.TotalCPU, result.CPUPercent,
 			result.UsedMemory, result.TotalMemory, result.MemoryPercent),
@@ -144,8 +144,8 @@ func (s *SubAgent) handleNodeMetrics(ctx context.Context, opts QueryOptions) (*R
 		for _, node := range nodes {
 			if node.Name == opts.NodeName || strings.Contains(node.Name, opts.NodeName) {
 				return &Response{
-					Type:    ResponseTypeResult,
-					Data:    node,
+					Type: ResponseTypeResult,
+					Data: node,
 					Message: fmt.Sprintf("Node %s: CPU %s (%.1f%%), Memory %s (%.1f%%)",
 						node.Name, node.CPUUsage, node.CPUPercent, node.MemUsage, node.MemPercent),
 				}, nil
@@ -186,8 +186,8 @@ func (s *SubAgent) handleNamespaceMetrics(ctx context.Context, opts QueryOptions
 	}
 
 	return &Response{
-		Type:    ResponseTypeResult,
-		Data:    result,
+		Type: ResponseTypeResult,
+		Data: result,
 		Message: fmt.Sprintf("Namespace %s: %d pods, CPU %s, Memory %s",
 			result.Namespace, result.PodCount, result.TotalCPU, result.TotalMemory),
 	}, nil
@@ -207,8 +207,8 @@ func (s *SubAgent) handlePodMetrics(ctx context.Context, opts QueryOptions) (*Re
 		}
 
 		return &Response{
-			Type:    ResponseTypeResult,
-			Data:    pod,
+			Type: ResponseTypeResult,
+			Data: pod,
 			Message: fmt.Sprintf("Pod %s/%s: CPU %s, Memory %s",
 				pod.Namespace, pod.Name, pod.CPUUsage, pod.MemUsage),
 		}, nil

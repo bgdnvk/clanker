@@ -68,10 +68,10 @@ type ResourceUsage struct {
 // NodeMetrics represents metrics for a single node
 type NodeMetrics struct {
 	Name        string        `json:"name"`
-	CPUUsage    string        `json:"cpuUsage"`       // e.g., "250m"
-	CPUPercent  float64       `json:"cpuPercent"`     // percentage of allocatable
-	MemUsage    string        `json:"memoryUsage"`    // e.g., "1.2Gi"
-	MemPercent  float64       `json:"memoryPercent"`  // percentage of allocatable
+	CPUUsage    string        `json:"cpuUsage"`      // e.g., "250m"
+	CPUPercent  float64       `json:"cpuPercent"`    // percentage of allocatable
+	MemUsage    string        `json:"memoryUsage"`   // e.g., "1.2Gi"
+	MemPercent  float64       `json:"memoryPercent"` // percentage of allocatable
 	Allocatable ResourceUsage `json:"allocatable,omitempty"`
 	Capacity    ResourceUsage `json:"capacity,omitempty"`
 }
@@ -145,11 +145,11 @@ type MetricsResult struct {
 
 // TopNodeOutput represents raw output from kubectl top nodes
 type TopNodeOutput struct {
-	Name      string
-	CPUCores  string // e.g., "250m" or "1"
-	CPUPct    string // e.g., "6%"
-	MemBytes  string // e.g., "2147Mi"
-	MemPct    string // e.g., "27%"
+	Name     string
+	CPUCores string // e.g., "250m" or "1"
+	CPUPct   string // e.g., "6%"
+	MemBytes string // e.g., "2147Mi"
+	MemPct   string // e.g., "27%"
 }
 
 // TopPodOutput represents raw output from kubectl top pods

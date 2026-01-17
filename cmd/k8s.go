@@ -207,9 +207,9 @@ var (
 	k8sLogTimestamps    bool
 	k8sLogAllContainers bool
 	// Stats flags
-	k8sStatsSortBy      string
-	k8sStatsContainers  bool
-	k8sStatsAllNS       bool
+	k8sStatsSortBy     string
+	k8sStatsContainers bool
+	k8sStatsAllNS      bool
 )
 
 func init() {
