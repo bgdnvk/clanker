@@ -8,7 +8,7 @@ ai:
 
   providers:
     gemini-api:
-      model: gemini-3-pro-preview
+      model: gemini-2.5-flash
       api_key_env: GEMINI_API_KEY
 
     # OpenAI example:
@@ -28,6 +28,9 @@ infra:
       dev:
         profile: your-aws-profile
         region: us-east-1
+
+  gcp:
+    project_id: your-gcp-project-id
 
 
 # -------------------- Optional blocks --------------------

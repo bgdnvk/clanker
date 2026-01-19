@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/bgdnvk/clanker/internal/aws"
+	"github.com/bgdnvk/clanker/internal/gcp"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -45,6 +46,10 @@ func init() {
 	// Register AWS static commands
 	awsCmd := aws.CreateAWSCommands()
 	rootCmd.AddCommand(awsCmd)
+
+	// Register GCP static commands
+	gcpCmd := gcp.CreateGCPCommands()
+	rootCmd.AddCommand(gcpCmd)
 }
 
 // initConfig reads in config file and ENV variables if set.
