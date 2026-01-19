@@ -12,6 +12,7 @@ import (
 
 	"github.com/bgdnvk/clanker/internal/ai"
 	"github.com/bgdnvk/clanker/internal/aws"
+	"github.com/bgdnvk/clanker/internal/gcp"
 	ghclient "github.com/bgdnvk/clanker/internal/github"
 	"github.com/bgdnvk/clanker/internal/k8s"
 	"github.com/bgdnvk/clanker/internal/k8s/plan"
@@ -22,15 +23,16 @@ import (
 )
 
 // askCmd represents the ask command
-const defaultGeminiModel = "gemini-3-pro-preview"
+const defaultGeminiModel = "gemini-2.5-flash"
 
 var askCmd = &cobra.Command{
 	Use:   "ask [question]",
-	Short: "Ask AI about your AWS infrastructure or GitHub repository",
-	Long: `Ask natural language questions about your AWS infrastructure or GitHub repository.
+	Short: "Ask AI about your cloud infrastructure or GitHub repository",
+	Long: `Ask natural language questions about your AWS or GCP infrastructure or GitHub repository.
 	
 Examples:
   clanker ask "What EC2 instances are running?"
+  clanker ask --gcp "List Cloud Run services"
   clanker ask "Show me lambda functions with high error rates"
   clanker ask "What's the current RDS instance status?"
   clanker ask "Show me GitHub Actions workflow status"
@@ -54,17 +56,21 @@ Examples:
 		// Get context from flags
 		includeAWS, _ := cmd.Flags().GetBool("aws")
 		includeGitHub, _ := cmd.Flags().GetBool("github")
+		includeGCP, _ := cmd.Flags().GetBool("gcp")
 		includeTerraform, _ := cmd.Flags().GetBool("terraform")
 		debug := viper.GetBool("debug")
 		discovery, _ := cmd.Flags().GetBool("discovery")
 		compliance, _ := cmd.Flags().GetBool("compliance")
 		profile, _ := cmd.Flags().GetString("profile")
 		workspace, _ := cmd.Flags().GetString("workspace")
+		gcpProject, _ := cmd.Flags().GetString("gcp-project")
 		aiProfile, _ := cmd.Flags().GetString("ai-profile")
 		openaiKey, _ := cmd.Flags().GetString("openai-key")
 		anthropicKey, _ := cmd.Flags().GetString("anthropic-key")
 		geminiKey, _ := cmd.Flags().GetString("gemini-key")
 		geminiModel, _ := cmd.Flags().GetString("gemini-model")
+		openaiModel, _ := cmd.Flags().GetString("openai-model")
+		anthropicModel, _ := cmd.Flags().GetString("anthropic-model")
 		makerMode, _ := cmd.Flags().GetBool("maker")
 		applyMode, _ := cmd.Flags().GetBool("apply")
 		planFile, _ := cmd.Flags().GetString("plan-file")
@@ -204,7 +210,7 @@ Examples:
 				}
 			}
 
-			maybeOverrideGeminiModel(provider, geminiModel)
+			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel)
 
 			// Resolve API key based on provider.
 			var apiKey string
@@ -338,21 +344,26 @@ Format as a professional compliance table suitable for government security docum
 		}
 
 		// If no specific context is requested, try to infer from the question
-		if !includeAWS && !includeGitHub && !includeTerraform {
+		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP {
 			var inferredTerraform bool
 			var inferredCode bool
 			var inferredK8s bool
+			var inferredGCP bool
 			routingQuestion := questionForRouting(question)
-			includeAWS, inferredCode, includeGitHub, inferredTerraform, inferredK8s = inferContext(routingQuestion)
+			includeAWS, inferredCode, includeGitHub, inferredTerraform, inferredK8s, inferredGCP = inferContext(routingQuestion)
 			_ = inferredCode
 
 			if debug {
-				fmt.Printf("Inferred context: AWS=%v, GitHub=%v, Terraform=%v, K8s=%v\n", includeAWS, includeGitHub, inferredTerraform, inferredK8s)
+				fmt.Printf("Inferred context: AWS=%v, GitHub=%v, Terraform=%v, K8s=%v, GCP=%v\n", includeAWS, includeGitHub, inferredTerraform, inferredK8s, inferredGCP)
 			}
 
 			// Handle inferred Terraform context
 			if inferredTerraform {
 				includeTerraform = true
+			}
+
+			if inferredGCP {
+				includeGCP = true
 			}
 
 			// Handle K8s queries by delegating to K8s agent
@@ -367,6 +378,7 @@ Format as a professional compliance table suitable for government security docum
 		var awsContext string
 		var githubContext string
 		var terraformContext string
+		var gcpContext string
 
 		if includeAWS {
 			var awsClient *aws.Client
@@ -444,6 +456,26 @@ Format as a professional compliance table suitable for government security docum
 			}
 		}
 
+		if includeGCP {
+			projectID := gcpProject
+			if projectID == "" {
+				projectID = gcp.ResolveProjectID()
+			}
+			if projectID == "" {
+				return fmt.Errorf("gcp project_id is required (set infra.gcp.project_id or use --gcp-project)")
+			}
+
+			gcpClient, err := gcp.NewClient(projectID, debug)
+			if err != nil {
+				return fmt.Errorf("failed to create GCP client: %w", err)
+			}
+
+			gcpContext, err = gcpClient.GetRelevantContext(ctx, question)
+			if err != nil {
+				return fmt.Errorf("failed to get GCP context: %w", err)
+			}
+		}
+
 		// Query AI with tool support
 		var aiClient *ai.Client
 		var err error
@@ -506,7 +538,7 @@ Format as a professional compliance table suitable for government security docum
 				}
 			}
 
-			maybeOverrideGeminiModel(provider, geminiModel)
+			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel)
 
 			// Get the appropriate API key based on provider
 			var apiKey string
@@ -548,7 +580,7 @@ Format as a professional compliance table suitable for government security docum
 				}
 			}
 
-			maybeOverrideGeminiModel(provider, geminiModel)
+			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel)
 
 			// Get the appropriate API key based on provider
 			var apiKey string
@@ -577,6 +609,12 @@ Format as a professional compliance table suitable for government security docum
 
 		// Only Terraform context is supported here (code scanning disabled).
 		combinedCodeContext := terraformContext
+		if strings.TrimSpace(gcpContext) != "" {
+			if combinedCodeContext != "" {
+				combinedCodeContext += "\n"
+			}
+			combinedCodeContext += "GCP Context:\n" + gcpContext
+		}
 
 		// If no tools are enabled, skip the tool-calling pipeline entirely.
 		// This avoids confusing "selected operations" output that cannot execute.
@@ -617,16 +655,20 @@ func init() {
 	rootCmd.AddCommand(askCmd)
 
 	askCmd.Flags().Bool("aws", false, "Include AWS infrastructure context")
+	askCmd.Flags().Bool("gcp", false, "Include GCP infrastructure context")
 	askCmd.Flags().Bool("github", false, "Include GitHub repository context")
 	askCmd.Flags().Bool("terraform", false, "Include Terraform workspace context")
 	askCmd.Flags().Bool("discovery", false, "Run comprehensive infrastructure discovery (all services)")
 	askCmd.Flags().Bool("compliance", false, "Generate compliance report showing all services, ports, and protocols")
 	askCmd.Flags().String("profile", "", "AWS profile to use for infrastructure queries")
+	askCmd.Flags().String("gcp-project", "", "GCP project ID to use for infrastructure queries")
 	askCmd.Flags().String("workspace", "", "Terraform workspace to use for infrastructure queries")
 	askCmd.Flags().String("ai-profile", "", "AI profile to use (default: 'default')")
 	askCmd.Flags().String("openai-key", "", "OpenAI API key (overrides config)")
 	askCmd.Flags().String("anthropic-key", "", "Anthropic API key (overrides config)")
 	askCmd.Flags().String("gemini-key", "", "Gemini API key (overrides config and env vars)")
+	askCmd.Flags().String("openai-model", "", "OpenAI model to use (overrides config)")
+	askCmd.Flags().String("anthropic-model", "", "Anthropic model to use (overrides config)")
 	askCmd.Flags().String("gemini-model", "", "Gemini model to use (overrides config)")
 	askCmd.Flags().Bool("agent-trace", false, "Show detailed coordinator agent lifecycle logs (overrides config)")
 	askCmd.Flags().Bool("maker", false, "Generate an AWS CLI plan (JSON) for infrastructure changes")
@@ -672,13 +714,20 @@ func resolveOpenAIKey(flagValue string) string {
 	return ""
 }
 
-func maybeOverrideGeminiModel(provider, flagValue string) {
-	if provider != "gemini" && provider != "gemini-api" {
-		return
-	}
-
-	if model := resolveGeminiModel(provider, flagValue); model != "" {
-		viper.Set(fmt.Sprintf("ai.providers.%s.model", provider), model)
+func maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel string) {
+	switch provider {
+	case "openai":
+		if strings.TrimSpace(openaiModel) != "" {
+			viper.Set("ai.providers.openai.model", strings.TrimSpace(openaiModel))
+		}
+	case "anthropic":
+		if strings.TrimSpace(anthropicModel) != "" {
+			viper.Set("ai.providers.anthropic.model", strings.TrimSpace(anthropicModel))
+		}
+	case "gemini", "gemini-api":
+		if model := resolveGeminiModel(provider, geminiModel); model != "" {
+			viper.Set(fmt.Sprintf("ai.providers.%s.model", provider), model)
+		}
 	}
 }
 
@@ -698,7 +747,7 @@ func resolveGeminiModel(provider, flagValue string) string {
 
 // inferContext tries to determine if the question is about AWS, GitHub, Terraform, or Kubernetes.
 // Code scanning is disabled, so this never infers code context.
-func inferContext(question string) (aws bool, code bool, github bool, terraform bool, k8s bool) {
+func inferContext(question string) (aws bool, code bool, github bool, terraform bool, k8s bool, gcp bool) {
 	awsKeywords := []string{
 		// Core services
 		"ec2", "lambda", "rds", "s3", "ecs", "cloudwatch", "logs", "batch", "sqs", "sns", "dynamodb", "elasticache", "elb", "alb", "nlb", "route53", "cloudfront", "api-gateway", "cognito", "iam", "vpc", "subnet", "security-group", "nacl", "nat", "igw", "vpn", "direct-connect",
@@ -761,6 +810,13 @@ func inferContext(question string) (aws bool, code bool, github bool, terraform 
 		"rollout", "scale", "drain", "cordon", "taint",
 	}
 
+	gcpKeywords := []string{
+		"gcp", "google cloud", "cloud run", "cloudrun", "cloud sql", "cloudsql", "gke", "gcs", "cloud storage",
+		"pubsub", "pub/sub", "cloud functions", "cloud function", "compute engine", "gce", "iam service account",
+		"workload identity", "artifact registry", "secret manager", "bigquery", "spanner", "bigtable",
+		"cloud build", "cloud deploy", "cloud dns", "cloud armor", "cloud load balancing", "api gateway",
+	}
+
 	questionLower := strings.ToLower(question)
 
 	for _, keyword := range awsKeywords {
@@ -791,12 +847,19 @@ func inferContext(question string) (aws bool, code bool, github bool, terraform 
 		}
 	}
 
+	for _, keyword := range gcpKeywords {
+		if contains(questionLower, keyword) {
+			gcp = true
+			break
+		}
+	}
+
 	// If no specific context detected, include AWS + GitHub by default.
-	if !aws && !github && !terraform && !k8s {
+	if !aws && !github && !terraform && !k8s && !gcp {
 		aws, github = true, true
 	}
 
-	return aws, code, github, terraform, k8s
+	return aws, code, github, terraform, k8s, gcp
 }
 
 func questionForRouting(question string) string {
