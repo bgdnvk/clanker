@@ -1364,6 +1364,12 @@ func executeK8sPlan(ctx context.Context, rawPlan string, profile string, debug b
 		cmdName := cmd.Args[0]
 		cmdArgs := cmd.Args[1:]
 
+		// Handle eks commands - they need to run as "aws eks ..."
+		if cmdName == "eks" {
+			cmdName = "aws"
+			cmdArgs = append([]string{"eks"}, cmdArgs...)
+		}
+
 		// Add profile/region for AWS and eksctl commands
 		if cmdName == "aws" || cmdName == "eksctl" {
 			cmdArgs = append(cmdArgs, "--profile", awsProfile)
