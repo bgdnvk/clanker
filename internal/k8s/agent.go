@@ -1337,7 +1337,7 @@ func (a *Agent) handleLoggingQuery(ctx context.Context, query string, analysis Q
 	}
 
 	switch response.Type {
-	case logging.ResponseTypeResult, logging.ResponseTypeRawLogs:
+	case logging.ResponseTypeRawLogs, logging.ResponseTypeSummary:
 		k8sResponse.Type = ResponseTypeResult
 		if response.RawLogs != "" {
 			k8sResponse.Result = response.Message + "\n\n" + response.RawLogs
