@@ -219,6 +219,50 @@ clanker k8s logs my-pod -p
 clanker k8s logs my-pod -n kube-system --tail 50 --since 30m
 ```
 
+### Natural Language Log Queries
+
+Query and analyze logs using natural language:
+
+```bash
+# Query logs with natural language
+clanker k8s logs query "show me errors from nginx deployment"
+clanker k8s logs query "show 503 errors from namespace production"
+clanker k8s logs query "get logs from pod my-app last 30 minutes"
+clanker k8s logs query "show timeout errors from all pods"
+
+# Filter with flags
+clanker k8s logs query "show errors" --namespace production --tail 200
+clanker k8s logs query "show errors" --deployment nginx --since 1h
+
+# Enable AI analysis mode
+clanker k8s logs query "show errors from default namespace" --analyze
+```
+
+### AI-Powered Log Analysis
+
+Analyze logs to identify root causes and get fix suggestions:
+
+```bash
+# Analyze logs and identify issues
+clanker k8s logs analyze "why is my nginx pod failing"
+clanker k8s logs analyze "what is causing errors in production namespace"
+clanker k8s logs analyze "investigate the crash in my-app deployment"
+
+# Target specific resources
+clanker k8s logs analyze "why are there errors" --deployment web-server
+clanker k8s logs analyze "investigate issues" --namespace staging --since 2h
+clanker k8s logs analyze "what is wrong" --node worker-1
+```
+
+The analyze command provides:
+- Summary of detected issues
+- Root cause analysis
+- Impact assessment
+- Recommended fixes with kubectl commands
+- Confidence score
+
+Note: Full AI analysis requires an API key configured. Without AI, quick pattern-based analysis is used.
+
 ### Resource Metrics and Statistics
 
 ```bash
