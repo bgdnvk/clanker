@@ -9,6 +9,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/cli"
 	"github.com/bgdnvk/clanker/internal/k8s/cluster"
 	"github.com/bgdnvk/clanker/internal/k8s/helm"
+	"github.com/bgdnvk/clanker/internal/k8s/logging"
 	"github.com/bgdnvk/clanker/internal/k8s/networking"
 	"github.com/bgdnvk/clanker/internal/k8s/sre"
 	"github.com/bgdnvk/clanker/internal/k8s/storage"
@@ -170,6 +171,23 @@ func (a *telemetryClientAdapter) GetJSON(ctx context.Context, resourceType, name
 	return a.client.GetJSON(ctx, resourceType, name, namespace)
 }
 
+// loggingClientAdapter wraps Client to implement logging.K8sClient interface
+type loggingClientAdapter struct {
+	client *Client
+}
+
+func (a *loggingClientAdapter) Run(ctx context.Context, args ...string) (string, error) {
+	return a.client.Run(ctx, args...)
+}
+
+func (a *loggingClientAdapter) RunWithNamespace(ctx context.Context, namespace string, args ...string) (string, error) {
+	return a.client.RunWithNamespace(ctx, namespace, args...)
+}
+
+func (a *loggingClientAdapter) RunJSON(ctx context.Context, args ...string) ([]byte, error) {
+	return a.client.RunJSON(ctx, args...)
+}
+
 // Agent is the main K8s orchestrator that receives delegated queries from the main agent
 type Agent struct {
 	client       *Client
@@ -180,6 +198,7 @@ type Agent struct {
 	helm         *helm.SubAgent
 	sre          *sre.SubAgent
 	telemetry    *telemetry.SubAgent
+	logging      *logging.SubAgent
 	debug        bool
 	aiDecisionFn AIDecisionFunc
 }
@@ -254,6 +273,12 @@ type KubeadmProviderOptions struct {
 // SetAIDecisionFunction sets the function used for AI based decisions
 func (a *Agent) SetAIDecisionFunction(fn AIDecisionFunc) {
 	a.aiDecisionFn = fn
+	// Propagate AI function to logging subagent if initialized
+	if a.logging != nil {
+		a.logging.SetAIDecisionFunction(func(ctx context.Context, prompt string) (string, error) {
+			return fn(ctx, prompt)
+		})
+	}
 }
 
 // SetClient sets the kubectl client
@@ -384,6 +409,17 @@ func (a *Agent) HandleQuery(ctx context.Context, query string, opts QueryOptions
 		a.telemetry = telemetry.NewSubAgent(&telemetryClientAdapter{client: a.client}, a.debug)
 	}
 
+	// Initialize logging sub-agent if needed
+	if a.logging == nil {
+		a.logging = logging.NewSubAgent(&loggingClientAdapter{client: a.client}, a.debug)
+		// Set AI function if available
+		if a.aiDecisionFn != nil {
+			a.logging.SetAIDecisionFunction(func(ctx context.Context, prompt string) (string, error) {
+				return a.aiDecisionFn(ctx, prompt)
+			})
+		}
+	}
+
 	// Analyze the query
 	analysis := a.analyzeQuery(query)
 
@@ -420,6 +456,11 @@ func (a *Agent) HandleQuery(ctx context.Context, query string, opts QueryOptions
 	// Delegate telemetry queries to the telemetry sub-agent
 	if analysis.Category == "telemetry" {
 		return a.handleTelemetryQuery(ctx, query, analysis, opts)
+	}
+
+	// Delegate logging queries to the logging sub-agent
+	if analysis.Category == "logging" {
+		return a.handleLoggingQuery(ctx, query, analysis, opts)
 	}
 
 	// For read only operations, execute immediately
@@ -621,6 +662,16 @@ func (a *Agent) categorizeQuery(query string, analysis QueryAnalysis) string {
 	if containsAny(query, []string{"metrics", "usage", "top", "cpu", "memory", "resource usage",
 		"utilization", "stats", "statistics", "consumption", "allocat"}) {
 		return "telemetry"
+	}
+
+	// Logging queries - natural language log analysis
+	if containsAny(query, []string{"logs", "log", "show me the logs", "error logs", "analyze logs",
+		"log analysis", "what happened", "503", "500", "timeout",
+		"log entries", "container logs", "application logs"}) {
+		// Check if this is specifically about logs (not just health/diagnostics)
+		if containsAny(query, []string{"logs", "log ", "log analysis", "error logs", "show me"}) {
+			return "logging"
+		}
 	}
 
 	// SRE and Troubleshooting
@@ -1253,6 +1304,54 @@ func (a *Agent) handleTelemetryQuery(ctx context.Context, query string, analysis
 			k8sResponse.Result = response.Message
 		}
 	case telemetry.ResponseTypeError:
+		k8sResponse.Type = ResponseTypeError
+		k8sResponse.Result = response.Message
+		if response.Error != nil {
+			k8sResponse.Error = response.Error
+		}
+	}
+
+	return k8sResponse, nil
+}
+
+// handleLoggingQuery delegates logging queries to the logging sub-agent
+func (a *Agent) handleLoggingQuery(ctx context.Context, query string, analysis QueryAnalysis, opts QueryOptions) (*K8sResponse, error) {
+	if a.debug {
+		fmt.Printf("[k8s-agent] delegating to logging sub-agent\n")
+	}
+
+	// Convert QueryOptions to logging.QueryOptions
+	loggingOpts := logging.QueryOptions{
+		Namespace:     opts.Namespace,
+		AllNamespaces: analysis.ClusterScope,
+	}
+
+	response, err := a.logging.HandleQuery(ctx, query, loggingOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert logging.Response to K8sResponse
+	k8sResponse := &K8sResponse{
+		NeedsApproval: false,
+	}
+
+	switch response.Type {
+	case logging.ResponseTypeResult, logging.ResponseTypeRawLogs:
+		k8sResponse.Type = ResponseTypeResult
+		if response.RawLogs != "" {
+			k8sResponse.Result = response.Message + "\n\n" + response.RawLogs
+		} else {
+			k8sResponse.Result = response.Message
+		}
+	case logging.ResponseTypeAnalysis:
+		k8sResponse.Type = ResponseTypeResult
+		if response.Analysis != nil {
+			k8sResponse.Result = logging.FormatAnalysisForDisplay(response.Analysis)
+		} else {
+			k8sResponse.Result = response.Message
+		}
+	case logging.ResponseTypeError:
 		k8sResponse.Type = ResponseTypeError
 		k8sResponse.Result = response.Message
 		if response.Error != nil {
