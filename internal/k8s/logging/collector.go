@@ -363,9 +363,9 @@ func (c *LogCollector) getAllPods(ctx context.Context, opts QueryOptions) ([]Pod
 	if !opts.AllNamespaces {
 		var filtered []PodInfo
 		systemNamespaces := map[string]bool{
-			"kube-system":       true,
-			"kube-public":       true,
-			"kube-node-lease":   true,
+			"kube-system":        true,
+			"kube-public":        true,
+			"kube-node-lease":    true,
 			"local-path-storage": true,
 		}
 		for _, pod := range pods {

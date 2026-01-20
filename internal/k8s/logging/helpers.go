@@ -156,7 +156,7 @@ func extractTimeConstraint(query string) string {
 		pattern string
 		result  string
 	}{
-		{`last\s+(\d+)\s*h(our)?s?`, ""},    // Will be computed
+		{`last\s+(\d+)\s*h(our)?s?`, ""},      // Will be computed
 		{`last\s+(\d+)\s*m(in(ute)?)?s?`, ""}, // Will be computed
 		{`past\s+(\d+)\s*h(our)?s?`, ""},
 		{`past\s+(\d+)\s*m(in(ute)?)?s?`, ""},

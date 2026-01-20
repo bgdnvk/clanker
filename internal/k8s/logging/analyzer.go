@@ -143,15 +143,15 @@ func (a *LogAnalyzer) parseAnalysisResponse(response, query string) (*LogAnalysi
 	jsonStr := extractJSON(response)
 	if jsonStr != "" {
 		var parsed struct {
-			Summary          string `json:"summary"`
-			IssuesFound      []struct {
+			Summary     string `json:"summary"`
+			IssuesFound []struct {
 				Type        string `json:"type"`
 				Severity    string `json:"severity"`
 				Description string `json:"description"`
 				Occurrences int    `json:"occurrences"`
 			} `json:"issuesFound"`
-			RootCause        string  `json:"rootCause"`
-			ImpactAssessment string  `json:"impactAssessment"`
+			RootCause        string `json:"rootCause"`
+			ImpactAssessment string `json:"impactAssessment"`
 			Recommendations  []struct {
 				Priority    int    `json:"priority"`
 				Action      string `json:"action"`

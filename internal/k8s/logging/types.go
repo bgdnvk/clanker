@@ -117,13 +117,13 @@ type TimeRange struct {
 
 // LogSummary provides a quick overview of logs
 type LogSummary struct {
-	TotalLines      int                `json:"totalLines"`
-	ErrorCount      int                `json:"errorCount"`
-	WarnCount       int                `json:"warnCount"`
-	PodCount        int                `json:"podCount"`
-	TopErrors       []ErrorPattern     `json:"topErrors"`
-	TimeRange       TimeRange          `json:"timeRange"`
-	StatusBreakdown map[string]int     `json:"statusBreakdown,omitempty"`
+	TotalLines      int            `json:"totalLines"`
+	ErrorCount      int            `json:"errorCount"`
+	WarnCount       int            `json:"warnCount"`
+	PodCount        int            `json:"podCount"`
+	TopErrors       []ErrorPattern `json:"topErrors"`
+	TimeRange       TimeRange      `json:"timeRange"`
+	StatusBreakdown map[string]int `json:"statusBreakdown,omitempty"`
 }
 
 // ErrorPattern represents a recurring error pattern
