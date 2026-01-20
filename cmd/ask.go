@@ -344,6 +344,10 @@ Format as a professional compliance table suitable for government security docum
 		}
 
 		// If no specific context is requested, try to infer from the question
+		if workspace != "" {
+			includeTerraform = true
+		}
+
 		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP {
 			var inferredTerraform bool
 			var inferredCode bool
@@ -439,20 +443,29 @@ Format as a professional compliance table suitable for government security docum
 		}
 
 		if includeTerraform {
-			// Only try to create Terraform client if workspaces are configured
 			workspaces := viper.GetStringMap("terraform.workspaces")
-			if len(workspaces) > 0 {
+			if workspace == "" && len(workspaces) == 0 {
+				if debug {
+					fmt.Println("Terraform context requested but no workspaces configured, skipping")
+				}
+			} else {
 				tfClient, err := tfclient.NewClient(workspace)
 				if err != nil {
 					return fmt.Errorf("failed to create Terraform client: %w", err)
+				}
+
+				ran, err := maybeRunTerraformCommand(ctx, question, tfClient)
+				if err != nil {
+					return err
+				}
+				if ran {
+					return nil
 				}
 
 				terraformContext, err = tfClient.GetRelevantContext(ctx, question)
 				if err != nil {
 					return fmt.Errorf("failed to get Terraform context: %w", err)
 				}
-			} else if debug {
-				fmt.Println("Terraform context requested but no workspaces configured, skipping")
 			}
 		}
 
@@ -712,6 +725,43 @@ func resolveOpenAIKey(flagValue string) string {
 		return envVal
 	}
 	return ""
+}
+
+func maybeRunTerraformCommand(ctx context.Context, question string, tfClient *tfclient.Client) (bool, error) {
+	q := strings.ToLower(strings.TrimSpace(question))
+	if q == "" {
+		return false, nil
+	}
+
+	isInit := strings.Contains(q, "terraform init") || strings.Contains(q, "init terraform")
+	isPlan := strings.Contains(q, "terraform plan") || strings.Contains(q, "plan terraform")
+	isApply := strings.Contains(q, "terraform apply") || strings.Contains(q, "apply terraform")
+	applyConfirmed := strings.Contains(q, "confirm apply") || strings.Contains(q, "approved apply") || strings.Contains(q, "apply confirmed")
+
+	if !isInit && !isPlan && !isApply {
+		return false, nil
+	}
+
+	var output string
+	var err error
+	if isInit {
+		output, err = tfClient.RunInit(ctx)
+	} else if isPlan {
+		output, err = tfClient.RunPlan(ctx)
+	} else if isApply {
+		if !applyConfirmed {
+			return true, fmt.Errorf("terraform apply requires confirmation: include 'confirm apply' in your request")
+		}
+		output, err = tfClient.RunApply(ctx)
+	}
+	if err != nil {
+		return true, err
+	}
+
+	if output != "" {
+		fmt.Println(output)
+	}
+	return true, nil
 }
 
 func maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel string) {
@@ -1466,6 +1516,16 @@ func executeK8sPlan(ctx context.Context, rawPlan string, profile string, debug b
 // This is used by the --route-only flag to return routing decisions without executing.
 func determineRoutingDecision(question string) (agent string, reason string) {
 	questionLower := strings.ToLower(question)
+	terraformSignals := []string{
+		"terraform", "tf ", "tfstate", "tf plan", "tf apply", "tf destroy",
+		"hcl", "module", "provider", "workspace", "state", "plan", "apply", "destroy",
+		"drift", "refresh", "init",
+	}
+	for _, kw := range terraformSignals {
+		if strings.Contains(questionLower, kw) {
+			return "terraform", "Terraform query or analysis request"
+		}
+	}
 
 	// Check for diagram/visualization requests
 	diagramKeywords := []string{
