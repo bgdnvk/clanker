@@ -96,7 +96,7 @@ func (s *SubAgent) analyzeQuery(query string) QueryAnalysis {
 		if analysis.ResourceName == "" {
 			analysis.ResourceName = extractResourceName(q, "deploy")
 		}
-	} else if containsAny(q, []string{"namespace logs", "ns logs", "in namespace", "from namespace"}) {
+	} else if containsAny(q, []string{"namespace logs", "ns logs", "in namespace", "from namespace", "namespace"}) && !containsAny(q, []string{"pod", "deployment", "deploy"}) {
 		analysis.Scope = ScopeNamespace
 	} else if containsAny(q, []string{"pod"}) {
 		analysis.Scope = ScopePod

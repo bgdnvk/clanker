@@ -48,6 +48,9 @@ func extractNamespace(query string) string {
 // extractResourceName extracts a resource name from the query based on resource type
 func extractResourceName(query, resourceType string) string {
 	patterns := []string{
+		// "name deployment" pattern (name before type)
+		`([a-z0-9][a-z0-9-]*[a-z0-9])\s+` + resourceType + `(?:\s|$|[^a-z0-9])`,
+		// "deployment name" pattern (name after type)
 		resourceType + `\s+([a-z0-9][a-z0-9-]*[a-z0-9])`,
 		resourceType + `\s+named\s+([a-z0-9][a-z0-9-]*[a-z0-9])`,
 		resourceType + `\s+called\s+([a-z0-9][a-z0-9-]*[a-z0-9])`,
