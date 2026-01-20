@@ -10,8 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bgdnvk/clanker/internal/ai"
 	"github.com/bgdnvk/clanker/internal/k8s"
 	"github.com/bgdnvk/clanker/internal/k8s/cluster"
+	"github.com/bgdnvk/clanker/internal/k8s/logging"
 	"github.com/bgdnvk/clanker/internal/k8s/plan"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -127,6 +129,33 @@ Example:
 	RunE: runGetLogs,
 }
 
+var k8sLogsQueryCmd = &cobra.Command{
+	Use:   "query \"<natural-language-query>\"",
+	Short: "Query logs using natural language",
+	Long: `Query Kubernetes logs using natural language.
+
+Examples:
+  clanker k8s logs query "show me errors from nginx deployment"
+  clanker k8s logs query "show 503 errors from namespace production"
+  clanker k8s logs query "get logs from pod my-app last 30 minutes"
+  clanker k8s logs query "show timeout errors from all pods"`,
+	Args: cobra.ExactArgs(1),
+	RunE: runLogsQuery,
+}
+
+var k8sLogsAnalyzeCmd = &cobra.Command{
+	Use:   "analyze \"<query>\"",
+	Short: "Analyze logs with AI to identify issues",
+	Long: `Use AI to analyze logs and identify root causes and suggest fixes.
+
+Examples:
+  clanker k8s logs analyze "why is my nginx pod failing"
+  clanker k8s logs analyze "what is causing errors in production namespace"
+  clanker k8s logs analyze "investigate the crash in my-app deployment"`,
+	Args: cobra.ExactArgs(1),
+	RunE: runLogsAnalyze,
+}
+
 var k8sStatsCmd = &cobra.Command{
 	Use:   "stats",
 	Short: "Get resource metrics and statistics",
@@ -210,6 +239,12 @@ var (
 	k8sStatsSortBy     string
 	k8sStatsContainers bool
 	k8sStatsAllNS      bool
+	// Logs query/analyze flags
+	k8sLogsQueryTail       int
+	k8sLogsQuerySince      string
+	k8sLogsQueryDeployment string
+	k8sLogsQueryNode       string
+	k8sLogsQueryAnalyze    bool
 )
 
 func init() {
@@ -256,13 +291,15 @@ func init() {
 
 	// Add logs and stats commands
 	k8sCmd.AddCommand(k8sLogsCmd)
+	k8sLogsCmd.AddCommand(k8sLogsQueryCmd)
+	k8sLogsCmd.AddCommand(k8sLogsAnalyzeCmd)
 	k8sCmd.AddCommand(k8sStatsCmd)
 	k8sStatsCmd.AddCommand(k8sStatsNodesCmd)
 	k8sStatsCmd.AddCommand(k8sStatsPodsCmd)
 	k8sStatsCmd.AddCommand(k8sStatsPodCmd)
 	k8sStatsCmd.AddCommand(k8sStatsClusterCmd)
 
-	// Logs flags
+	// Logs flags (for direct pod logs)
 	k8sLogsCmd.Flags().StringVarP(&k8sLogContainer, "container", "c", "", "Container name")
 	k8sLogsCmd.Flags().BoolVarP(&k8sLogFollow, "follow", "f", false, "Follow log output")
 	k8sLogsCmd.Flags().BoolVarP(&k8sLogPrevious, "previous", "p", false, "Previous terminated container logs")
@@ -271,6 +308,21 @@ func init() {
 	k8sLogsCmd.Flags().BoolVar(&k8sLogTimestamps, "timestamps", false, "Include timestamps")
 	k8sLogsCmd.Flags().BoolVar(&k8sLogAllContainers, "all-containers", false, "All containers in pod")
 	k8sLogsCmd.Flags().StringVarP(&k8sNamespace, "namespace", "n", "default", "Namespace")
+
+	// Logs query flags
+	k8sLogsQueryCmd.Flags().StringVarP(&k8sNamespace, "namespace", "n", "", "Target namespace (overrides query)")
+	k8sLogsQueryCmd.Flags().IntVar(&k8sLogsQueryTail, "tail", 100, "Number of lines per pod")
+	k8sLogsQueryCmd.Flags().StringVar(&k8sLogsQuerySince, "since", "", "Time duration (e.g., 1h, 30m)")
+	k8sLogsQueryCmd.Flags().StringVar(&k8sLogsQueryDeployment, "deployment", "", "Target deployment")
+	k8sLogsQueryCmd.Flags().StringVar(&k8sLogsQueryNode, "node", "", "Target node")
+	k8sLogsQueryCmd.Flags().BoolVar(&k8sLogsQueryAnalyze, "analyze", false, "Enable AI analysis mode")
+
+	// Logs analyze flags
+	k8sLogsAnalyzeCmd.Flags().StringVarP(&k8sNamespace, "namespace", "n", "", "Target namespace")
+	k8sLogsAnalyzeCmd.Flags().IntVar(&k8sLogsQueryTail, "tail", 100, "Number of lines per pod")
+	k8sLogsAnalyzeCmd.Flags().StringVar(&k8sLogsQuerySince, "since", "", "Time duration (e.g., 1h, 30m)")
+	k8sLogsAnalyzeCmd.Flags().StringVar(&k8sLogsQueryDeployment, "deployment", "", "Target deployment")
+	k8sLogsAnalyzeCmd.Flags().StringVar(&k8sLogsQueryNode, "node", "", "Target node")
 
 	// Stats nodes flags
 	k8sStatsNodesCmd.Flags().StringVar(&k8sStatsSortBy, "sort-by", "", "Sort by (cpu or memory)")
@@ -1274,6 +1326,179 @@ func runGetLogs(cmd *cobra.Command, args []string) error {
 	kubectlCmd.Stderr = os.Stderr
 
 	return kubectlCmd.Run()
+}
+
+// runLogsQuery handles natural language log queries
+func runLogsQuery(cmd *cobra.Command, args []string) error {
+	query := args[0]
+	ctx := context.Background()
+	debug := viper.GetBool("debug")
+
+	if debug {
+		fmt.Fprintf(os.Stderr, "[k8s] logs query: %s\n", query)
+	}
+
+	// Create logging client
+	k8sClient := k8s.NewClient("", "", debug)
+	loggingClient := logging.NewSubAgent(&loggingClientAdapter{client: k8sClient}, debug)
+
+	// Build query options from flags
+	opts := logging.QueryOptions{
+		Namespace:      k8sNamespace,
+		TailLines:      k8sLogsQueryTail,
+		Since:          k8sLogsQuerySince,
+		DeploymentName: k8sLogsQueryDeployment,
+		NodeName:       k8sLogsQueryNode,
+		AnalyzeMode:    k8sLogsQueryAnalyze,
+	}
+
+	// If AI analyze flag is set, configure AI function
+	if k8sLogsQueryAnalyze {
+		aiClient := getAIClient()
+		if aiClient == nil {
+			if debug {
+				fmt.Fprintf(os.Stderr, "[k8s] warning: AI client not available\n")
+			}
+		} else {
+			loggingClient.SetAIDecisionFunction(func(ctx context.Context, prompt string) (string, error) {
+				return aiClient.Ask(ctx, prompt, "", "")
+			})
+		}
+	}
+
+	// Execute the query
+	response, err := loggingClient.HandleQuery(ctx, query, opts)
+	if err != nil {
+		return fmt.Errorf("failed to query logs: %w", err)
+	}
+
+	// Display results
+	if response.Error != nil {
+		return fmt.Errorf("log query error: %v", response.Error)
+	}
+
+	switch response.Type {
+	case logging.ResponseTypeRawLogs:
+		fmt.Println(response.Message)
+		if response.RawLogs != "" {
+			fmt.Println()
+			fmt.Println(response.RawLogs)
+		}
+	case logging.ResponseTypeAnalysis:
+		if response.Analysis != nil {
+			fmt.Println(logging.FormatAnalysisForDisplay(response.Analysis))
+		} else {
+			fmt.Println(response.Message)
+		}
+	default:
+		fmt.Println(response.Message)
+	}
+
+	return nil
+}
+
+// runLogsAnalyze handles AI-powered log analysis
+func runLogsAnalyze(cmd *cobra.Command, args []string) error {
+	query := args[0]
+	ctx := context.Background()
+	debug := viper.GetBool("debug")
+
+	if debug {
+		fmt.Fprintf(os.Stderr, "[k8s] logs analyze: %s\n", query)
+	}
+
+	// Create logging client
+	k8sClient := k8s.NewClient("", "", debug)
+	loggingClient := logging.NewSubAgent(&loggingClientAdapter{client: k8sClient}, debug)
+
+	// Configure AI function (required for analysis)
+	aiClient := getAIClient()
+	if aiClient == nil {
+		fmt.Println("Note: AI analysis not available. Using quick analysis mode.")
+	} else {
+		loggingClient.SetAIDecisionFunction(func(ctx context.Context, prompt string) (string, error) {
+			return aiClient.Ask(ctx, prompt, "", "")
+		})
+	}
+
+	// Build query options from flags
+	opts := logging.QueryOptions{
+		Namespace:      k8sNamespace,
+		TailLines:      k8sLogsQueryTail,
+		Since:          k8sLogsQuerySince,
+		DeploymentName: k8sLogsQueryDeployment,
+		NodeName:       k8sLogsQueryNode,
+		AnalyzeMode:    true, // Always analyze
+	}
+
+	// Execute the analysis
+	response, err := loggingClient.HandleQuery(ctx, query, opts)
+	if err != nil {
+		return fmt.Errorf("failed to analyze logs: %w", err)
+	}
+
+	// Display results
+	if response.Error != nil {
+		return fmt.Errorf("log analysis error: %v", response.Error)
+	}
+
+	if response.Analysis != nil {
+		fmt.Println(logging.FormatAnalysisForDisplay(response.Analysis))
+	} else {
+		fmt.Println(response.Message)
+	}
+
+	return nil
+}
+
+// loggingClientAdapter wraps k8s.Client to implement logging.K8sClient interface
+type loggingClientAdapter struct {
+	client *k8s.Client
+}
+
+func (a *loggingClientAdapter) Run(ctx context.Context, args ...string) (string, error) {
+	return a.client.Run(ctx, args...)
+}
+
+func (a *loggingClientAdapter) RunWithNamespace(ctx context.Context, namespace string, args ...string) (string, error) {
+	return a.client.RunWithNamespace(ctx, namespace, args...)
+}
+
+func (a *loggingClientAdapter) RunJSON(ctx context.Context, args ...string) ([]byte, error) {
+	return a.client.RunJSON(ctx, args...)
+}
+
+// getAIClient creates an AI client from configuration
+func getAIClient() *ai.Client {
+	provider := viper.GetString("ai.default_provider")
+	if provider == "" {
+		provider = "openai"
+	}
+
+	// Get provider config
+	apiKey := viper.GetString(fmt.Sprintf("ai.providers.%s.api_key", provider))
+	model := viper.GetString(fmt.Sprintf("ai.providers.%s.model", provider))
+
+	if apiKey == "" {
+		// Try environment variables
+		switch provider {
+		case "openai":
+			apiKey = os.Getenv("OPENAI_API_KEY")
+		case "gemini":
+			apiKey = os.Getenv("GEMINI_API_KEY")
+		}
+	}
+
+	if apiKey == "" {
+		return nil
+	}
+
+	// ai.NewClient signature: (provider, apiKey string, debug bool, aiProfile ...string)
+	debug := viper.GetBool("debug")
+	if model != "" {
+		return ai.NewClient(provider, apiKey, debug, model)
+	}
+	return ai.NewClient(provider, apiKey, debug)
 }
 
 // runStatsNodes gets node metrics
