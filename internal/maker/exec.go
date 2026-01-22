@@ -43,10 +43,11 @@ type AWSFailure struct {
 }
 
 type ExecOptions struct {
-	Profile   string
-	Region    string
-	Writer    io.Writer
-	Destroyer bool
+	Profile    string
+	Region     string
+	GCPProject string
+	Writer     io.Writer
+	Destroyer  bool
 
 	AIProvider string
 	AIAPIKey   string

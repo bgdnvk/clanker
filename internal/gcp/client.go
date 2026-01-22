@@ -161,6 +161,7 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 		{name: "Pub/Sub Subscriptions", args: []string{"pubsub", "subscriptions", "list", "--format", "table(name,topic,ackDeadlineSeconds)"}, keys: []string{"pubsub subscription", "pub/sub subscription"}},
 		{name: "Cloud Tasks Queues", args: []string{"tasks", "queues", "list", "--format", "table(name,rateLimits.maxDispatchesPerSecond)"}, keys: []string{"cloud tasks", "tasks queue"}},
 		{name: "Cloud Scheduler Jobs", args: []string{"scheduler", "jobs", "list", "--format", "table(name,schedule,timezone)"}, keys: []string{"cloud scheduler", "scheduler job"}},
+		{name: "Eventarc Triggers (us-east4)", args: []string{"eventarc", "triggers", "list", "--location", "us-east4", "--format", "table(name,location,destination.cloudRun.service,transport.pubsub.topic)"}, keys: []string{"eventarc", "trigger", "triggers"}},
 		{name: "Secret Manager Secrets", args: []string{"secrets", "list", "--format", "table(name,createTime,labels)"}, keys: []string{"secret manager", "secrets"}},
 		{name: "Cloud KMS Keyrings", args: []string{"kms", "keyrings", "list", "--location", "global", "--format", "table(name,locationId)"}, keys: []string{"kms", "keyring", "keyrings", "key management"}},
 		{name: "Cloud Build Triggers", args: []string{"builds", "triggers", "list", "--format", "table(name,description,createTime)"}, keys: []string{"cloud build", "build trigger", "build triggers"}},

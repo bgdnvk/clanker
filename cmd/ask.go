@@ -114,10 +114,19 @@ Examples:
 				return executeK8sPlan(ctx, rawPlan, profile, debug)
 			}
 
-			// Fall back to AWS maker plan execution
+			// Fall back to maker plan execution
 			makerPlan, err := maker.ParsePlan(rawPlan)
 			if err != nil {
 				return fmt.Errorf("invalid plan: %w", err)
+			}
+
+			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "gcp") {
+				return maker.ExecuteGCPPlan(ctx, makerPlan, maker.ExecOptions{
+					GCPProject: gcpProject,
+					Writer:     os.Stdout,
+					Destroyer:  destroyer,
+					Debug:      debug,
+				})
 			}
 
 			// Resolve AWS profile/region for execution.
@@ -187,6 +196,7 @@ Examples:
 			return maker.ExecutePlan(ctx, makerPlan, maker.ExecOptions{
 				Profile:    targetProfile,
 				Region:     region,
+				GCPProject: gcpProject,
 				Writer:     os.Stdout,
 				Destroyer:  destroyer,
 				AIProvider: provider,
@@ -231,13 +241,44 @@ Examples:
 				apiKey = viper.GetString("ai.api_key")
 			}
 
-			// Generate AWS maker plan
+			// Generate maker plan
 			if strings.TrimSpace(question) == "" {
 				return fmt.Errorf("requires a question")
 			}
 
+			// Decide provider for maker plans.
+			// Priority:
+			//  1) Explicit flags win (--gcp / --aws)
+			//  2) Infer from question (cheap heuristic)
+			makerProvider := "aws"
+			makerProviderReason := "default"
+			explicitGCP := cmd.Flags().Changed("gcp") && includeGCP
+			explicitAWS := cmd.Flags().Changed("aws") && includeAWS
+			switch {
+			case explicitGCP && explicitAWS:
+				return fmt.Errorf("cannot use --aws and --gcp together with --maker")
+			case explicitGCP:
+				makerProvider = "gcp"
+				makerProviderReason = "explicit"
+			case explicitAWS:
+				makerProvider = "aws"
+				makerProviderReason = "explicit"
+			default:
+				_, _, _, _, _, inferredGCP := inferContext(questionForRouting(question))
+				if inferredGCP {
+					makerProvider = "gcp"
+					makerProviderReason = "inferred"
+				}
+			}
+
+			// Log to stderr so stdout stays valid JSON.
+			_, _ = fmt.Fprintf(os.Stderr, "[maker] provider=%s (%s)\n", makerProvider, makerProviderReason)
+
 			aiClient := ai.NewClient(provider, apiKey, debug, aiProfile)
 			prompt := maker.PlanPromptWithMode(question, destroyer)
+			if makerProvider == "gcp" {
+				prompt = maker.GCPPlanPromptWithMode(question, destroyer)
+			}
 			resp, err := aiClient.AskPrompt(ctx, prompt)
 			if err != nil {
 				return err
@@ -247,6 +288,24 @@ Examples:
 			plan, err := maker.ParsePlan(cleaned)
 			if err != nil {
 				return fmt.Errorf("failed to parse maker plan: %w", err)
+			}
+
+			plan.Provider = makerProvider
+
+			if strings.EqualFold(strings.TrimSpace(plan.Provider), "gcp") {
+				if plan.CreatedAt.IsZero() {
+					plan.CreatedAt = time.Now().UTC()
+				}
+				plan.Question = question
+				if plan.Version == 0 {
+					plan.Version = maker.CurrentPlanVersion
+				}
+				out, err := json.MarshalIndent(plan, "", "  ")
+				if err != nil {
+					return err
+				}
+				fmt.Println(string(out))
+				return nil
 			}
 
 			// Resolve AWS profile/region for planning-time dependency expansion.
@@ -684,8 +743,8 @@ func init() {
 	askCmd.Flags().String("anthropic-model", "", "Anthropic model to use (overrides config)")
 	askCmd.Flags().String("gemini-model", "", "Gemini model to use (overrides config)")
 	askCmd.Flags().Bool("agent-trace", false, "Show detailed coordinator agent lifecycle logs (overrides config)")
-	askCmd.Flags().Bool("maker", false, "Generate an AWS CLI plan (JSON) for infrastructure changes")
-	askCmd.Flags().Bool("destroyer", false, "Allow destructive AWS CLI operations when using --maker (requires explicit confirmation in UI/workflow)")
+	askCmd.Flags().Bool("maker", false, "Generate an AWS or GCP CLI plan (JSON) for infrastructure changes")
+	askCmd.Flags().Bool("destroyer", false, "Allow destructive operations when using --maker (requires explicit confirmation in UI/workflow)")
 	askCmd.Flags().Bool("apply", false, "Apply an approved maker plan (reads from stdin unless --plan-file is provided)")
 	askCmd.Flags().String("plan-file", "", "Optional path to maker plan JSON file for --apply")
 	askCmd.Flags().Bool("route-only", false, "Return routing decision as JSON without executing (for backend integration)")
