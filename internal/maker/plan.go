@@ -12,6 +12,7 @@ const CurrentPlanVersion = 1
 type Plan struct {
 	Version   int       `json:"version"`
 	CreatedAt time.Time `json:"createdAt"`
+	Provider  string    `json:"provider,omitempty"`
 	Question  string    `json:"question"`
 	Summary   string    `json:"summary"`
 	Commands  []Command `json:"commands"`
@@ -37,6 +38,10 @@ func ParsePlan(raw string) (*Plan, error) {
 
 	if p.Version == 0 {
 		p.Version = CurrentPlanVersion
+	}
+
+	if strings.TrimSpace(p.Provider) == "" {
+		p.Provider = "aws"
 	}
 
 	if len(p.Commands) == 0 {
@@ -66,8 +71,13 @@ func normalizeArgs(args []string) []string {
 		out = append(out, a)
 	}
 
-	if len(out) > 0 && strings.EqualFold(out[0], "aws") {
-		out = out[1:]
+	if len(out) > 0 {
+		switch {
+		case strings.EqualFold(out[0], "aws"):
+			out = out[1:]
+		case strings.EqualFold(out[0], "gcloud"):
+			out = out[1:]
+		}
 	}
 
 	return out

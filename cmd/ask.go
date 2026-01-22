@@ -114,10 +114,19 @@ Examples:
 				return executeK8sPlan(ctx, rawPlan, profile, debug)
 			}
 
-			// Fall back to AWS maker plan execution
+			// Fall back to maker plan execution
 			makerPlan, err := maker.ParsePlan(rawPlan)
 			if err != nil {
 				return fmt.Errorf("invalid plan: %w", err)
+			}
+
+			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "gcp") {
+				return maker.ExecuteGCPPlan(ctx, makerPlan, maker.ExecOptions{
+					GCPProject: gcpProject,
+					Writer:     os.Stdout,
+					Destroyer:  destroyer,
+					Debug:      debug,
+				})
 			}
 
 			// Resolve AWS profile/region for execution.
@@ -187,6 +196,7 @@ Examples:
 			return maker.ExecutePlan(ctx, makerPlan, maker.ExecOptions{
 				Profile:    targetProfile,
 				Region:     region,
+				GCPProject: gcpProject,
 				Writer:     os.Stdout,
 				Destroyer:  destroyer,
 				AIProvider: provider,
@@ -231,13 +241,44 @@ Examples:
 				apiKey = viper.GetString("ai.api_key")
 			}
 
-			// Generate AWS maker plan
+			// Generate maker plan
 			if strings.TrimSpace(question) == "" {
 				return fmt.Errorf("requires a question")
 			}
 
+			// Decide provider for maker plans.
+			// Priority:
+			//  1) Explicit flags win (--gcp / --aws)
+			//  2) Infer from question (cheap heuristic)
+			makerProvider := "aws"
+			makerProviderReason := "default"
+			explicitGCP := cmd.Flags().Changed("gcp") && includeGCP
+			explicitAWS := cmd.Flags().Changed("aws") && includeAWS
+			switch {
+			case explicitGCP && explicitAWS:
+				return fmt.Errorf("cannot use --aws and --gcp together with --maker")
+			case explicitGCP:
+				makerProvider = "gcp"
+				makerProviderReason = "explicit"
+			case explicitAWS:
+				makerProvider = "aws"
+				makerProviderReason = "explicit"
+			default:
+				_, _, _, _, _, inferredGCP := inferContext(questionForRouting(question))
+				if inferredGCP {
+					makerProvider = "gcp"
+					makerProviderReason = "inferred"
+				}
+			}
+
+			// Log to stderr so stdout stays valid JSON.
+			_, _ = fmt.Fprintf(os.Stderr, "[maker] provider=%s (%s)\n", makerProvider, makerProviderReason)
+
 			aiClient := ai.NewClient(provider, apiKey, debug, aiProfile)
 			prompt := maker.PlanPromptWithMode(question, destroyer)
+			if makerProvider == "gcp" {
+				prompt = maker.GCPPlanPromptWithMode(question, destroyer)
+			}
 			resp, err := aiClient.AskPrompt(ctx, prompt)
 			if err != nil {
 				return err
@@ -247,6 +288,24 @@ Examples:
 			plan, err := maker.ParsePlan(cleaned)
 			if err != nil {
 				return fmt.Errorf("failed to parse maker plan: %w", err)
+			}
+
+			plan.Provider = makerProvider
+
+			if strings.EqualFold(strings.TrimSpace(plan.Provider), "gcp") {
+				if plan.CreatedAt.IsZero() {
+					plan.CreatedAt = time.Now().UTC()
+				}
+				plan.Question = question
+				if plan.Version == 0 {
+					plan.Version = maker.CurrentPlanVersion
+				}
+				out, err := json.MarshalIndent(plan, "", "  ")
+				if err != nil {
+					return err
+				}
+				fmt.Println(string(out))
+				return nil
 			}
 
 			// Resolve AWS profile/region for planning-time dependency expansion.
@@ -344,6 +403,10 @@ Format as a professional compliance table suitable for government security docum
 		}
 
 		// If no specific context is requested, try to infer from the question
+		if workspace != "" {
+			includeTerraform = true
+		}
+
 		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP {
 			var inferredTerraform bool
 			var inferredCode bool
@@ -439,20 +502,29 @@ Format as a professional compliance table suitable for government security docum
 		}
 
 		if includeTerraform {
-			// Only try to create Terraform client if workspaces are configured
 			workspaces := viper.GetStringMap("terraform.workspaces")
-			if len(workspaces) > 0 {
+			if workspace == "" && len(workspaces) == 0 {
+				if debug {
+					fmt.Println("Terraform context requested but no workspaces configured, skipping")
+				}
+			} else {
 				tfClient, err := tfclient.NewClient(workspace)
 				if err != nil {
 					return fmt.Errorf("failed to create Terraform client: %w", err)
+				}
+
+				ran, err := maybeRunTerraformCommand(ctx, question, tfClient)
+				if err != nil {
+					return err
+				}
+				if ran {
+					return nil
 				}
 
 				terraformContext, err = tfClient.GetRelevantContext(ctx, question)
 				if err != nil {
 					return fmt.Errorf("failed to get Terraform context: %w", err)
 				}
-			} else if debug {
-				fmt.Println("Terraform context requested but no workspaces configured, skipping")
 			}
 		}
 
@@ -671,8 +743,8 @@ func init() {
 	askCmd.Flags().String("anthropic-model", "", "Anthropic model to use (overrides config)")
 	askCmd.Flags().String("gemini-model", "", "Gemini model to use (overrides config)")
 	askCmd.Flags().Bool("agent-trace", false, "Show detailed coordinator agent lifecycle logs (overrides config)")
-	askCmd.Flags().Bool("maker", false, "Generate an AWS CLI plan (JSON) for infrastructure changes")
-	askCmd.Flags().Bool("destroyer", false, "Allow destructive AWS CLI operations when using --maker (requires explicit confirmation in UI/workflow)")
+	askCmd.Flags().Bool("maker", false, "Generate an AWS or GCP CLI plan (JSON) for infrastructure changes")
+	askCmd.Flags().Bool("destroyer", false, "Allow destructive operations when using --maker (requires explicit confirmation in UI/workflow)")
 	askCmd.Flags().Bool("apply", false, "Apply an approved maker plan (reads from stdin unless --plan-file is provided)")
 	askCmd.Flags().String("plan-file", "", "Optional path to maker plan JSON file for --apply")
 	askCmd.Flags().Bool("route-only", false, "Return routing decision as JSON without executing (for backend integration)")
@@ -712,6 +784,43 @@ func resolveOpenAIKey(flagValue string) string {
 		return envVal
 	}
 	return ""
+}
+
+func maybeRunTerraformCommand(ctx context.Context, question string, tfClient *tfclient.Client) (bool, error) {
+	q := strings.ToLower(strings.TrimSpace(question))
+	if q == "" {
+		return false, nil
+	}
+
+	isInit := strings.Contains(q, "terraform init") || strings.Contains(q, "init terraform")
+	isPlan := strings.Contains(q, "terraform plan") || strings.Contains(q, "plan terraform")
+	isApply := strings.Contains(q, "terraform apply") || strings.Contains(q, "apply terraform")
+	applyConfirmed := strings.Contains(q, "confirm apply") || strings.Contains(q, "approved apply") || strings.Contains(q, "apply confirmed")
+
+	if !isInit && !isPlan && !isApply {
+		return false, nil
+	}
+
+	var output string
+	var err error
+	if isInit {
+		output, err = tfClient.RunInit(ctx)
+	} else if isPlan {
+		output, err = tfClient.RunPlan(ctx)
+	} else if isApply {
+		if !applyConfirmed {
+			return true, fmt.Errorf("terraform apply requires confirmation: include 'confirm apply' in your request")
+		}
+		output, err = tfClient.RunApply(ctx)
+	}
+	if err != nil {
+		return true, err
+	}
+
+	if output != "" {
+		fmt.Println(output)
+	}
+	return true, nil
 }
 
 func maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel string) {
@@ -1466,6 +1575,16 @@ func executeK8sPlan(ctx context.Context, rawPlan string, profile string, debug b
 // This is used by the --route-only flag to return routing decisions without executing.
 func determineRoutingDecision(question string) (agent string, reason string) {
 	questionLower := strings.ToLower(question)
+	terraformSignals := []string{
+		"terraform", "tf ", "tfstate", "tf plan", "tf apply", "tf destroy",
+		"hcl", "module", "provider", "workspace", "state", "plan", "apply", "destroy",
+		"drift", "refresh", "init",
+	}
+	for _, kw := range terraformSignals {
+		if strings.Contains(questionLower, kw) {
+			return "terraform", "Terraform query or analysis request"
+		}
+	}
 
 	// Check for diagram/visualization requests
 	diagramKeywords := []string{

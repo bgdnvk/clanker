@@ -18,6 +18,15 @@ type Client struct {
 }
 
 func NewClient(workspace string) (*Client, error) {
+	if looksLikePath(workspace) {
+		if expanded, ok := expandTerraformPath(workspace); ok {
+			return &Client{
+				workspace: "local",
+				path:      expanded,
+			}, nil
+		}
+	}
+
 	// Get workspace configuration
 	workspaces := viper.GetStringMap("terraform.workspaces")
 	if len(workspaces) == 0 {
@@ -48,6 +57,37 @@ func NewClient(workspace string) (*Client, error) {
 		workspace: workspace,
 		path:      path,
 	}, nil
+}
+
+func looksLikePath(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if strings.ContainsAny(value, "/\\") {
+		return true
+	}
+	if strings.HasPrefix(value, "~") || strings.HasPrefix(value, ".") {
+		return true
+	}
+	return false
+}
+
+func expandTerraformPath(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
+	}
+	if strings.HasPrefix(raw, "~") {
+		if home, err := os.UserHomeDir(); err == nil {
+			raw = filepath.Join(home, strings.TrimPrefix(raw, "~"))
+		}
+	}
+	path := filepath.Clean(os.ExpandEnv(raw))
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		return path, true
+	}
+	return "", false
 }
 
 func (c *Client) GetRelevantContext(ctx context.Context, question string) (string, error) {
@@ -91,6 +131,58 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 	}
 
 	return context.String(), nil
+}
+
+func (c *Client) RunInit(ctx context.Context) (string, error) {
+	return c.runCommand(ctx, "init", "-input=false")
+}
+
+func (c *Client) RunPlan(ctx context.Context) (string, error) {
+	initOutput, err := c.RunInit(ctx)
+	if err != nil {
+		return "", err
+	}
+	planOutput, err := c.runCommand(ctx, "plan", "-no-color", "-compact-warnings")
+	if err != nil {
+		return "", err
+	}
+	return mergeOutputs(initOutput, planOutput), nil
+}
+
+func (c *Client) RunApply(ctx context.Context) (string, error) {
+	initOutput, err := c.RunInit(ctx)
+	if err != nil {
+		return "", err
+	}
+	applyOutput, err := c.runCommand(ctx, "apply", "-auto-approve", "-no-color")
+	if err != nil {
+		return "", err
+	}
+	return mergeOutputs(initOutput, applyOutput), nil
+}
+
+func mergeOutputs(primary string, secondary string) string {
+	primary = strings.TrimSpace(primary)
+	secondary = strings.TrimSpace(secondary)
+	if primary == "" {
+		return secondary
+	}
+	if secondary == "" {
+		return primary
+	}
+	return primary + "\n" + secondary
+}
+
+func (c *Client) runCommand(ctx context.Context, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "terraform", args...)
+	cmd.Dir = c.path
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("terraform %s failed: %w\nOutput: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+
+	return strings.TrimSpace(string(output)), nil
 }
 
 func (c *Client) getWorkspaceInfo(ctx context.Context) (string, error) {

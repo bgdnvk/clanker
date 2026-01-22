@@ -3,6 +3,7 @@ package gcp
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -35,6 +36,12 @@ Supported resources:
   subnets               - VPC subnets
   firewall              - Firewall rules
   load-balancers        - Forwarding rules (load balancers)
+	lb-forwarding-rules    - Forwarding rules (global + regional)
+	lb-target-proxies      - Target HTTP/HTTPS proxies
+	lb-url-maps            - URL maps
+	lb-backend-services    - Backend services
+	lb-health-checks       - Health checks
+	lb-ssl-certs           - SSL certificates
   armor                 - Cloud Armor security policies
   dns                   - Cloud DNS managed zones
   gke, clusters         - GKE clusters
@@ -53,16 +60,22 @@ Supported resources:
   tasks                 - Cloud Tasks queues
   scheduler             - Cloud Scheduler jobs
   secrets               - Secret Manager secrets
+	secret-versions        - Secret Manager secret versions (last 5)
 	kms                   - Cloud KMS keyrings
   build-triggers        - Cloud Build triggers
   deploy-pipelines      - Cloud Deploy delivery pipelines
   logging-sinks         - Cloud Logging sinks
   alert-policies        - Cloud Monitoring alert policies
-  api-gateway           - API Gateway APIs`,
+	artifact-packages      - Artifact Registry packages (per repo, limited)
+	artifact-images        - Artifact Registry docker images (per repo, limited)
+	dns-record-sets        - Cloud DNS record sets (per zone)
+	eventarc-triggers      - Eventarc triggers (multi-region)
+	api-gateway           - API Gateway APIs`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resourceType := strings.ToLower(args[0])
 			projectID, _ := cmd.Flags().GetString("project")
+			location, _ := cmd.Flags().GetString("location")
 
 			if projectID == "" {
 				projectID = ResolveProjectID()
@@ -80,6 +93,11 @@ Supported resources:
 			ctx := context.Background()
 			exec := func(args ...string) (string, error) {
 				return client.execGcloud(ctx, args...)
+			}
+
+			commonRegions := []string{
+				"us-central1", "us-east1", "us-east4", "us-west1", "us-west2",
+				"europe-west1", "europe-west2", "asia-east1", "asia-northeast1",
 			}
 
 			switch resourceType {
@@ -151,6 +169,55 @@ Supported resources:
 				fmt.Print(result)
 			case "load-balancers":
 				result, err := exec("compute", "forwarding-rules", "list", "--format", "table(name,region,IPAddress,IPProtocol,portRange,target)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "lb-forwarding-rules":
+				result, err := exec("compute", "forwarding-rules", "list", "--format", "table(name,region,IPAddress,IPProtocol,portRange,target)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+				result, err = exec("compute", "forwarding-rules", "list", "--global", "--format", "table(name,IPAddress,IPProtocol,portRange,target)")
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "warning: failed to list global forwarding rules: %v\n", err)
+					return nil
+				}
+				fmt.Print(result)
+			case "lb-target-proxies":
+				fmt.Println("Target HTTP Proxies:")
+				result, err := exec("compute", "target-http-proxies", "list", "--format", "table(name,urlMap)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+				fmt.Println("\nTarget HTTPS Proxies:")
+				result, err = exec("compute", "target-https-proxies", "list", "--format", "table(name,urlMap,sslCertificates.list())")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "lb-url-maps":
+				result, err := exec("compute", "url-maps", "list", "--format", "table(name,defaultService)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "lb-backend-services":
+				result, err := exec("compute", "backend-services", "list", "--format", "table(name,protocol,healthChecks.list())")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "lb-health-checks":
+				result, err := exec("compute", "health-checks", "list", "--format", "table(name,type,checkIntervalSec,timeoutSec)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "lb-ssl-certs":
+				result, err := exec("compute", "ssl-certificates", "list", "--format", "table(name,type,expireTime)")
 				if err != nil {
 					return err
 				}
@@ -263,6 +330,30 @@ Supported resources:
 					return err
 				}
 				fmt.Print(result)
+			case "secret-versions":
+				secretsList, err := exec("secrets", "list", "--format", "value(name)")
+				if err != nil {
+					return err
+				}
+				secrets := strings.Fields(secretsList)
+				if len(secrets) == 0 {
+					fmt.Println("(no secrets)")
+					return nil
+				}
+				for _, sec := range secrets {
+					sec = strings.TrimSpace(sec)
+					if sec == "" {
+						continue
+					}
+					fmt.Printf("Secret: %s\n", sec)
+					result, err := exec("secrets", "versions", "list", sec, "--limit", "5", "--format", "table(name,state,createTime)")
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "warning: failed to list versions for %s: %v\n", sec, err)
+						continue
+					}
+					fmt.Print(result)
+					fmt.Println()
+				}
 			case "kms", "keyrings":
 				result, err := exec("kms", "keyrings", "list", "--location", "global", "--format", "table(name,locationId)")
 				if err != nil {
@@ -299,6 +390,141 @@ Supported resources:
 					return err
 				}
 				fmt.Print(result)
+			case "dns-record-sets":
+				zonesList, err := exec("dns", "managed-zones", "list", "--format", "value(name)")
+				if err != nil {
+					return err
+				}
+				zones := strings.Fields(zonesList)
+				if len(zones) == 0 {
+					fmt.Println("(no DNS zones)")
+					return nil
+				}
+				for _, zone := range zones {
+					zone = strings.TrimSpace(zone)
+					if zone == "" {
+						continue
+					}
+					fmt.Printf("Zone: %s\n", zone)
+					result, err := exec("dns", "record-sets", "list", "--zone", zone, "--format", "table(name,type,ttl,rrdatas[0])")
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "warning: failed to list record-sets for zone %s: %v\n", zone, err)
+						continue
+					}
+					fmt.Print(result)
+					fmt.Println()
+				}
+			case "eventarc-triggers", "eventarc", "triggers":
+				regions := commonRegions
+				if strings.TrimSpace(location) != "" {
+					regions = []string{strings.TrimSpace(location)}
+				}
+				var any bool
+				var firstErr error
+				for _, r := range regions {
+					result, err := exec("eventarc", "triggers", "list", "--location", r, "--format", "table(name,location,destination.cloudRun.service,transport.pubsub.topic,serviceAccount)")
+					if err != nil {
+						if firstErr == nil {
+							firstErr = err
+						}
+						fmt.Fprintf(os.Stderr, "warning: failed to list triggers in %s: %v\n", r, err)
+						continue
+					}
+					if strings.TrimSpace(result) == "" {
+						continue
+					}
+					fmt.Printf("Location: %s\n", r)
+					fmt.Print(result)
+					fmt.Println()
+					any = true
+				}
+				if !any && firstErr != nil {
+					return firstErr
+				}
+			case "artifact-packages":
+				reposList, err := exec("artifacts", "repositories", "list", "--format", "value(name)")
+				if err != nil {
+					return err
+				}
+				repos := strings.Fields(reposList)
+				if len(repos) == 0 {
+					fmt.Println("(no Artifact Registry repositories)")
+					return nil
+				}
+				for _, full := range repos {
+					full = strings.TrimSpace(full)
+					if full == "" {
+						continue
+					}
+					loc := ""
+					repo := ""
+					parts := strings.Split(strings.Trim(full, "/"), "/")
+					for i := 0; i+1 < len(parts); i++ {
+						if parts[i] == "locations" {
+							loc = parts[i+1]
+						}
+						if parts[i] == "repositories" {
+							repo = parts[i+1]
+						}
+					}
+					if loc == "" || repo == "" {
+						continue
+					}
+					fmt.Printf("Repo: %s (%s)\n", repo, loc)
+					result, err := exec("artifacts", "packages", "list", "--repository", repo, "--location", loc, "--limit", "20", "--format", "table(name,createTime,updateTime)")
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "warning: failed to list packages for %s/%s: %v\n", loc, repo, err)
+						continue
+					}
+					fmt.Print(result)
+					fmt.Println()
+				}
+			case "artifact-images":
+				reposList, err := exec("artifacts", "repositories", "list", "--format", "value(name,format,location)")
+				if err != nil {
+					return err
+				}
+				lines := strings.Split(reposList, "\n")
+				var any bool
+				for _, line := range lines {
+					line = strings.TrimSpace(line)
+					if line == "" {
+						continue
+					}
+					parts := strings.Fields(line)
+					if len(parts) < 3 {
+						continue
+					}
+					full := parts[0]
+					format := strings.ToUpper(strings.TrimSpace(parts[1]))
+					loc := strings.TrimSpace(parts[2])
+					if format != "DOCKER" {
+						continue
+					}
+					repo := ""
+					p := strings.Split(strings.Trim(full, "/"), "/")
+					for i := 0; i+1 < len(p); i++ {
+						if p[i] == "repositories" {
+							repo = p[i+1]
+						}
+					}
+					if repo == "" || loc == "" {
+						continue
+					}
+					fmt.Printf("Repo: %s (%s)\n", repo, loc)
+					imagePath := fmt.Sprintf("%s-docker.pkg.dev/%s/%s", loc, projectID, repo)
+					result, err := exec("artifacts", "docker", "images", "list", imagePath, "--include-tags", "--limit", "50")
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "warning: failed to list docker images for %s: %v\n", imagePath, err)
+						continue
+					}
+					fmt.Print(result)
+					fmt.Println()
+					any = true
+				}
+				if !any {
+					fmt.Println("(no DOCKER repositories)")
+				}
 			default:
 				return fmt.Errorf("unsupported resource type: %s", resourceType)
 			}
@@ -308,6 +534,7 @@ Supported resources:
 	}
 
 	gcpListCmd.Flags().StringP("project", "p", "", "GCP project ID")
+	gcpListCmd.Flags().String("location", "", "GCP location/region for region-scoped resources")
 	gcpCmd.AddCommand(gcpListCmd)
 
 	return gcpCmd

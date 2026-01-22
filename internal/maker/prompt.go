@@ -19,10 +19,10 @@ Your job: produce a concrete, minimal AWS CLI execution plan to satisfy the user
 Constraints:
 - Output ONLY valid JSON.
 - Use this schema exactly:
- - Use this schema exactly:
 {
   "version": 1,
   "createdAt": "RFC3339 timestamp",
+  "provider": "aws",
   "question": "original user question",
   "summary": "short summary of what will be created/changed",
   "commands": [
@@ -238,6 +238,128 @@ AWS Lambda code packaging:
   - If you use an existing role, include explicit aws iam attach-role-policy steps for any required AWS-managed execution/telemetry policies.
   - For Lambda specifically, attaching arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole is usually required so it can write to CloudWatch Logs.
 - If you need to reference the AWS account id, use the literal token "<YOUR_ACCOUNT_ID>" in ARNs (the runner will substitute it).
+
+User request:
+%q`, destructiveRule, question)
+}
+
+func GCPPlanPrompt(question string) string {
+	return GCPPlanPromptWithMode(question, false)
+}
+
+func GCPPlanPromptWithMode(question string, destroyer bool) string {
+	destructiveRule := "- Avoid any destructive operations (delete/remove/terminate/destroy)."
+	if destroyer {
+		destructiveRule = "- Destructive operations are allowed ONLY if the user explicitly asked for deletion/teardown."
+	}
+
+	return fmt.Sprintf(`You are an infrastructure maker planner.
+
+Your job: produce a concrete, minimal Google Cloud (gcloud) CLI execution plan to satisfy the user request.
+
+Constraints:
+- Output ONLY valid JSON.
+- Use this schema exactly:
+{
+  "version": 1,
+  "createdAt": "RFC3339 timestamp",
+  "provider": "gcp",
+  "question": "original user question",
+  "summary": "short summary of what will be created/changed",
+  "commands": [
+    {
+      "args": ["gcloud", "<service>", "<operation>", "..."],
+      "reason": "why this command is needed",
+      "produces": {
+        "OPTIONAL_BINDING_NAME": "$.json.path.to.value"
+      }
+    }
+  ],
+  "notes": ["optional notes"]
+}
+
+Rules for commands:
+- Provide args as an array; do NOT provide a single string.
+- Commands MUST be gcloud only. Every command args MUST start with "gcloud".
+- Do NOT include any non-gcloud programs (no aws/kubectl/python/node/bash/curl/zip/terraform/etc).
+- Do NOT include shell operators, pipes, redirects, or subshells.
+- Prefer idempotent operations where possible.
+
+Placeholders and bindings (CRITICAL):
+- You MAY use placeholder tokens inside args like "<SERVICE_URL>" or "<SA_EMAIL>".
+- If you use ANY placeholder token "<NAME>", you MUST ensure an earlier command includes:
+  - "produces": { "NAME": "$.json.path.to.value" }
+- If a command output is needed later (placeholders/bindings), include "--format=json" and a correct "produces" mapping.
+
+Common gcloud patterns (use when relevant):
+- Cloud Run: gcloud run deploy <service> --image <image> --region <region> --platform managed
+- GCS bucket: gcloud storage buckets create gs://<bucket> --location <region>
+
+Examples (copy these shapes):
+
+0) Read current project id for bindings:
+{
+  "args": ["gcloud", "config", "list", "core/project", "--format=json"],
+  "reason": "Get current gcloud project for later bindings",
+  "produces": {
+    "PROJECT_ID": "$.core.project"
+  }
+}
+
+1) Create a GCS bucket with a unique name:
+{
+  "args": ["gcloud", "storage", "buckets", "create", "gs://myapp-<RANDOM_SUFFIX>", "--location", "us-east4"],
+  "reason": "Create a new Cloud Storage bucket"
+}
+
+2) Create a service account and grant it bucket access:
+{
+  "args": ["gcloud", "iam", "service-accounts", "create", "myapp-sa", "--display-name", "myapp storage access"],
+  "reason": "Service identity for the app"
+}
+{
+  "args": ["gcloud", "storage", "buckets", "add-iam-policy-binding", "gs://myapp-<RANDOM_SUFFIX>", "--member", "serviceAccount:myapp-sa@<PROJECT_ID>.iam.gserviceaccount.com", "--role", "roles/storage.objectAdmin"],
+  "reason": "Grant service account access to the bucket"
+}
+
+3) Cloud Run deploy (service account + env vars):
+{
+  "args": ["gcloud", "run", "deploy", "myapp", "--image", "us-docker.pkg.dev/<PROJECT_ID>/<REPO>/<IMAGE>:<TAG>", "--region", "us-east4", "--platform", "managed", "--service-account", "myapp-sa@<PROJECT_ID>.iam.gserviceaccount.com", "--set-env-vars", "BUCKET=gs://myapp-<RANDOM_SUFFIX>"],
+  "reason": "Deploy the app to Cloud Run",
+  "produces": {
+    "PROJECT_ID": "$.core.project"
+  }
+}
+
+4) Cloud Run allow unauthenticated (public):
+{
+  "args": ["gcloud", "run", "services", "add-iam-policy-binding", "myapp", "--region", "us-east4", "--member", "allUsers", "--role", "roles/run.invoker"],
+  "reason": "Allow unauthenticated access to the Cloud Run service"
+}
+
+5) Pub/Sub topic + subscription:
+{
+  "args": ["gcloud", "pubsub", "topics", "create", "myapp-events"],
+  "reason": "Create a Pub/Sub topic for events"
+}
+{
+  "args": ["gcloud", "pubsub", "subscriptions", "create", "myapp-events-sub", "--topic", "myapp-events"],
+  "reason": "Create a subscription to consume events"
+}
+
+6) Artifact Registry docker repo:
+{
+  "args": ["gcloud", "artifacts", "repositories", "create", "myapp", "--repository-format", "docker", "--location", "us-east4", "--description", "myapp images"],
+  "reason": "Create an Artifact Registry repository for container images"
+}
+
+7) Cloud SQL instance (Postgres) skeleton:
+{
+  "args": ["gcloud", "sql", "instances", "create", "myapp-db", "--database-version", "POSTGRES_15", "--region", "us-east4", "--tier", "db-custom-1-3840"],
+  "reason": "Create a Cloud SQL Postgres instance"
+}
+
+%s
 
 User request:
 %q`, destructiveRule, question)
