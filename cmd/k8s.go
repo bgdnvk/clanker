@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bgdnvk/clanker/internal/ai"
 	"github.com/bgdnvk/clanker/internal/k8s"
 	"github.com/bgdnvk/clanker/internal/k8s/cluster"
 	"github.com/bgdnvk/clanker/internal/k8s/plan"
@@ -182,6 +183,27 @@ Example:
 	RunE: runStatsCluster,
 }
 
+var k8sAskCmd = &cobra.Command{
+	Use:   "ask [question]",
+	Short: "Ask natural language questions about your Kubernetes cluster",
+	Long: `Ask natural language questions about your Kubernetes cluster using AI.
+
+The AI will analyze your question, determine what kubectl operations are needed,
+execute them, and provide a comprehensive markdown-formatted response.
+
+Conversation history is maintained per cluster for follow-up questions.
+
+Examples:
+  clanker k8s ask "how many pods are running"
+  clanker k8s ask --cluster test-cluster --profile myaws "show me all deployments"
+  clanker k8s ask --cluster prod "give me error logs for nginx pod"
+  clanker k8s ask "which pods are using the most memory"
+  clanker k8s ask "why is my pod crashing"
+  clanker k8s ask "tell me the health of my cluster"`,
+	Args: cobra.ExactArgs(1),
+	RunE: runK8sAsk,
+}
+
 // Flags
 var (
 	k8sNodes        int
@@ -210,6 +232,13 @@ var (
 	k8sStatsSortBy     string
 	k8sStatsContainers bool
 	k8sStatsAllNS      bool
+	// Ask flags
+	k8sAskCluster    string
+	k8sAskProfile    string
+	k8sAskKubeconfig string
+	k8sAskContext    string
+	k8sAskAIProfile  string
+	k8sAskDebug      bool
 )
 
 func init() {
@@ -289,6 +318,18 @@ func init() {
 
 	// Stats cluster flags
 	k8sStatsClusterCmd.Flags().StringVarP(&k8sOutputFormat, "output", "o", "table", "Output format (table, json, yaml)")
+
+	// Add ask command
+	k8sCmd.AddCommand(k8sAskCmd)
+
+	// Ask command flags
+	k8sAskCmd.Flags().StringVar(&k8sAskCluster, "cluster", "", "Kubernetes cluster name (EKS cluster name)")
+	k8sAskCmd.Flags().StringVar(&k8sAskProfile, "profile", "", "AWS profile for EKS clusters")
+	k8sAskCmd.Flags().StringVar(&k8sAskKubeconfig, "kubeconfig", "", "Path to kubeconfig file (default: ~/.kube/config)")
+	k8sAskCmd.Flags().StringVar(&k8sAskContext, "context", "", "kubectl context to use (overrides --cluster)")
+	k8sAskCmd.Flags().StringVarP(&k8sNamespace, "namespace", "n", "", "Default namespace for queries (default: all namespaces)")
+	k8sAskCmd.Flags().StringVar(&k8sAskAIProfile, "ai-profile", "", "AI profile to use for LLM queries")
+	k8sAskCmd.Flags().BoolVar(&k8sAskDebug, "debug", false, "Enable debug output")
 }
 
 func getK8sAgent() (*k8s.Agent, string, string) {
@@ -1580,4 +1621,270 @@ func parseContainerMetricsOutput(output string) []map[string]interface{} {
 	}
 
 	return containers
+}
+
+// runK8sAsk implements the k8s ask command using a three-stage LLM pipeline
+func runK8sAsk(cmd *cobra.Command, args []string) error {
+	question := args[0]
+	ctx := context.Background()
+
+	// Get debug flag (from command or viper)
+	debug := k8sAskDebug || viper.GetBool("debug")
+
+	if debug {
+		fmt.Println("[k8s ask] Starting LLM-powered query pipeline...")
+	}
+
+	// Resolve AWS profile
+	awsProfile := k8sAskProfile
+	if awsProfile == "" {
+		defaultEnv := viper.GetString("infra.default_environment")
+		if defaultEnv == "" {
+			defaultEnv = "dev"
+		}
+		awsProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+		if awsProfile == "" {
+			awsProfile = viper.GetString("aws.default_profile")
+		}
+		if awsProfile == "" {
+			awsProfile = "default"
+		}
+	}
+
+	// Resolve AWS region
+	awsRegion := ""
+	defaultEnv := viper.GetString("infra.default_environment")
+	if defaultEnv == "" {
+		defaultEnv = "dev"
+	}
+	awsRegion = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.region", defaultEnv))
+	if awsRegion == "" {
+		awsRegion = viper.GetString("aws.default_region")
+	}
+	if awsRegion == "" {
+		awsRegion = "us-east-1"
+	}
+
+	// If cluster is specified, update kubeconfig for EKS
+	if k8sAskCluster != "" && k8sAskContext == "" {
+		if debug {
+			fmt.Printf("[k8s ask] Updating kubeconfig for EKS cluster: %s\n", k8sAskCluster)
+		}
+		if err := updateKubeconfigForEKS(ctx, k8sAskCluster, awsProfile, awsRegion, debug); err != nil {
+			return fmt.Errorf("failed to update kubeconfig for cluster %s: %w", k8sAskCluster, err)
+		}
+	}
+
+	// Create K8s client
+	k8sClient := k8s.NewClient(k8sAskKubeconfig, k8sAskContext, debug)
+	if k8sNamespace != "" {
+		k8sClient.SetNamespace(k8sNamespace)
+	}
+
+	// Verify cluster connection
+	if err := k8sClient.CheckConnection(ctx); err != nil {
+		return fmt.Errorf("cannot connect to Kubernetes cluster: %w\nTry running: aws eks update-kubeconfig --name <cluster-name> --profile %s", err, awsProfile)
+	}
+
+	// Determine cluster name for conversation history
+	clusterName := k8sAskCluster
+	if clusterName == "" {
+		currentCtx, err := k8sClient.GetCurrentContext(ctx)
+		if err == nil {
+			clusterName = currentCtx
+		} else {
+			clusterName = "default"
+		}
+	}
+
+	if debug {
+		fmt.Printf("[k8s ask] Using cluster context: %s\n", clusterName)
+	}
+
+	// Load conversation history
+	history := k8s.NewConversationHistory(clusterName)
+	if err := history.Load(); err != nil && debug {
+		fmt.Printf("[k8s ask] Warning: could not load conversation history: %v\n", err)
+	}
+
+	// Gather cluster status for context
+	if debug {
+		fmt.Println("[k8s ask] Gathering cluster status...")
+	}
+	clusterStatus, err := k8s.GatherClusterStatus(ctx, k8sClient)
+	if err != nil && debug {
+		fmt.Printf("[k8s ask] Warning: could not gather cluster status: %v\n", err)
+	}
+	if clusterStatus != nil {
+		history.UpdateClusterStatus(clusterStatus)
+	}
+
+	// Create AI client
+	aiClient, err := createAIClient(debug)
+	if err != nil {
+		return fmt.Errorf("failed to create AI client: %w", err)
+	}
+
+	// Stage 1: LLM analyzes query and determines K8s operations
+	if debug {
+		fmt.Println("[k8s ask] Stage 1: Analyzing query with LLM...")
+	}
+
+	clusterContext := history.GetClusterStatusContext()
+	conversationContext := history.GetRecentContext(5)
+
+	analysisPrompt := k8s.GetLLMAnalysisPrompt(question, clusterContext)
+	analysisResponse, err := aiClient.AskPrompt(ctx, analysisPrompt)
+	if err != nil {
+		return fmt.Errorf("failed to analyze query: %w", err)
+	}
+
+	// Parse the analysis response
+	var analysis k8s.K8sAnalysis
+	cleanedResponse := aiClient.CleanJSONResponse(analysisResponse)
+	if err := json.Unmarshal([]byte(cleanedResponse), &analysis); err != nil {
+		if debug {
+			fmt.Printf("[k8s ask] Warning: Failed to parse LLM analysis, raw response:\n%s\n", analysisResponse)
+		}
+		// Continue with empty operations, the LLM might give a direct response
+		analysis = k8s.K8sAnalysis{
+			Operations: []k8s.K8sOperation{},
+			Analysis:   "Could not parse LLM response",
+		}
+	}
+
+	if debug {
+		fmt.Printf("[k8s ask] Stage 1 complete: %d operations identified\n", len(analysis.Operations))
+		for i, op := range analysis.Operations {
+			fmt.Printf("  %d. %s - %s\n", i+1, op.Operation, op.Reason)
+		}
+	}
+
+	// Stage 2: Execute K8s operations
+	if debug {
+		fmt.Println("[k8s ask] Stage 2: Executing K8s operations...")
+	}
+
+	var k8sResults string
+	if len(analysis.Operations) > 0 {
+		k8sResults, err = k8sClient.ExecuteOperations(ctx, analysis.Operations)
+		if err != nil && debug {
+			fmt.Printf("[k8s ask] Warning: Some operations failed: %v\n", err)
+		}
+	}
+
+	if debug {
+		fmt.Printf("[k8s ask] Stage 2 complete: %d chars of results\n", len(k8sResults))
+	}
+
+	// Stage 3: Build final context and get LLM response
+	if debug {
+		fmt.Println("[k8s ask] Stage 3: Generating final response...")
+	}
+
+	var finalContext strings.Builder
+	finalContext.WriteString(clusterContext)
+	finalContext.WriteString("\n\n")
+	if k8sResults != "" {
+		finalContext.WriteString("Kubernetes Data:\n")
+		finalContext.WriteString(k8sResults)
+	}
+
+	finalPrompt := k8s.GetFinalResponsePrompt(question, finalContext.String(), conversationContext)
+	response, err := aiClient.AskPrompt(ctx, finalPrompt)
+	if err != nil {
+		return fmt.Errorf("failed to generate response: %w", err)
+	}
+
+	// Save conversation history
+	history.AddEntry(question, response, clusterName)
+	if err := history.Save(); err != nil && debug {
+		fmt.Printf("[k8s ask] Warning: could not save conversation history: %v\n", err)
+	}
+
+	// Output the response
+	fmt.Println(response)
+	return nil
+}
+
+// updateKubeconfigForEKS updates kubeconfig for an EKS cluster
+func updateKubeconfigForEKS(ctx context.Context, clusterName, awsProfile, awsRegion string, debug bool) error {
+	args := []string{
+		"eks", "update-kubeconfig",
+		"--name", clusterName,
+		"--profile", awsProfile,
+		"--region", awsRegion,
+	}
+
+	if debug {
+		fmt.Printf("[k8s ask] Running: aws %s\n", strings.Join(args, " "))
+	}
+
+	cmd := exec.CommandContext(ctx, "aws", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("aws eks update-kubeconfig failed: %w\nOutput: %s", err, string(output))
+	}
+
+	if debug {
+		fmt.Printf("[k8s ask] Kubeconfig updated: %s\n", strings.TrimSpace(string(output)))
+	}
+
+	return nil
+}
+
+// createAIClient creates an AI client based on configuration
+func createAIClient(debug bool) (*ai.Client, error) {
+	// Resolve AI provider
+	provider := k8sAskAIProfile
+	if provider == "" {
+		provider = viper.GetString("ai.default_provider")
+	}
+	if provider == "" {
+		provider = "bedrock"
+	}
+
+	// Resolve API key based on provider
+	var apiKey string
+	switch provider {
+	case "bedrock", "claude":
+		// Bedrock uses AWS credentials, no API key needed
+		apiKey = ""
+	case "gemini":
+		// Gemini ADC, no API key needed
+		apiKey = ""
+	case "gemini-api":
+		apiKey = viper.GetString("ai.providers.gemini-api.api_key")
+		if apiKey == "" {
+			if envName := viper.GetString("ai.providers.gemini-api.api_key_env"); envName != "" {
+				apiKey = os.Getenv(envName)
+			}
+		}
+		if apiKey == "" {
+			apiKey = os.Getenv("GEMINI_API_KEY")
+		}
+	case "openai":
+		apiKey = viper.GetString("ai.providers.openai.api_key")
+		if apiKey == "" {
+			if envName := viper.GetString("ai.providers.openai.api_key_env"); envName != "" {
+				apiKey = os.Getenv(envName)
+			}
+		}
+		if apiKey == "" {
+			apiKey = os.Getenv("OPENAI_API_KEY")
+		}
+	case "anthropic":
+		apiKey = viper.GetString("ai.providers.anthropic.api_key")
+		if apiKey == "" {
+			if envName := viper.GetString("ai.providers.anthropic.api_key_env"); envName != "" {
+				apiKey = os.Getenv(envName)
+			}
+		}
+	}
+
+	if debug {
+		fmt.Printf("[k8s ask] Using AI provider: %s\n", provider)
+	}
+
+	return ai.NewClient(provider, apiKey, debug, k8sAskAIProfile), nil
 }
