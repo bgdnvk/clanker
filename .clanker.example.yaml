@@ -91,5 +91,25 @@ infra:
 #     dev:
 #       path: /path/to/infra
 
+# Kubernetes (for `clanker k8s ask ...`):
+# kubernetes:
+#   kubeconfig: ""           # Path to kubeconfig (default: ~/.kube/config)
+#   default_context: ""      # Default kubectl context
+#   default_namespace: ""    # Default namespace (empty = all namespaces)
+#   clusters:
+#     production:
+#       type: eks            # eks or existing
+#       name: prod-cluster   # EKS cluster name
+#       profile: prod-aws    # AWS profile for EKS
+#       region: us-east-1
+#     staging:
+#       type: eks
+#       name: staging-cluster
+#       profile: dev-aws
+#       region: us-west-2
+#     local:
+#       type: existing       # Use existing kubectl context
+#       context: minikube
+
 # General settings:
 # timeout: 30

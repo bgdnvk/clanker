@@ -247,30 +247,70 @@ clanker k8s stats cluster
 clanker k8s stats cluster -o json
 ```
 
-### Natural Language Queries
+### K8s Ask: Natural Language Queries
 
-Clanker supports natural language queries for Kubernetes operations:
+The `k8s ask` command enables natural language queries against your Kubernetes cluster using AI. It uses a three-stage LLM pipeline similar to the AWS ask mode:
+
+1. **Stage 1**: LLM analyzes your question and determines which kubectl operations are needed
+2. **Stage 2**: Execute the kubectl operations in parallel
+3. **Stage 3**: Combine results with cluster context and generate a markdown response
+
+Conversation history is maintained per cluster for follow-up questions.
 
 ```bash
-# Telemetry and metrics queries
+# Basic queries
+clanker k8s ask "how many pods are running"
+clanker k8s ask "how many nodes do I have"
+clanker k8s ask "list all deployments and their replica counts"
+clanker k8s ask "tell me the health of my cluster"
+
+# With cluster and profile specification (for EKS)
+clanker k8s ask --cluster my-cluster --profile myaws "show me all pods"
+clanker k8s ask --cluster prod --profile prod-aws "how many replicas do I have"
+
+# Namespace-specific queries
+clanker k8s ask -n kube-system "show me all pods"
+
+# Resource metrics
+clanker k8s ask "which pods are using the most memory"
+clanker k8s ask "show node resource usage"
+clanker k8s ask "top 10 pods by cpu usage"
+
+# Logs and troubleshooting
+clanker k8s ask "show me recent logs from nginx"
+clanker k8s ask "why is my pod crashing"
+clanker k8s ask "show me pods that are not running"
+clanker k8s ask "get warning events from the cluster"
+
+# Follow-up questions (uses conversation context)
+clanker k8s ask "show me the nginx deployment"
+clanker k8s ask "now show me its logs"
+
+# Debug mode (shows LLM operations)
+clanker k8s ask --debug "how many pods are running"
+```
+
+#### K8s Ask Flags
+
+| Flag | Description |
+|------|-------------|
+| `--cluster` | EKS cluster name (updates kubeconfig automatically) |
+| `--profile` | AWS profile for EKS clusters |
+| `--kubeconfig` | Path to kubeconfig file (default: ~/.kube/config) |
+| `--context` | kubectl context to use (overrides --cluster) |
+| `-n, --namespace` | Default namespace for queries |
+| `--ai-profile` | AI profile to use for LLM queries |
+| `--debug` | Show detailed debug output including LLM operations |
+
+### Legacy Natural Language Queries (via `clanker ask`)
+
+The main `ask` command also supports Kubernetes queries through automatic context detection:
+
+```bash
+# These queries are automatically routed to K8s handling
 clanker ask "show cpu usage for all nodes"
-clanker ask "which pods are using the most memory"
-clanker ask "what is the resource utilization of the cluster"
-clanker ask "show metrics for pod nginx in namespace default"
-clanker ask "top 10 pods by cpu usage"
-
-# Log queries
-clanker ask "show logs for pod nginx"
-clanker ask "get recent errors from deployment web-app"
-
-# Cluster information
 clanker ask "list all pods in kube-system namespace"
-clanker ask "show services in production namespace"
-clanker ask "what deployments are running"
-
-# Troubleshooting
 clanker ask "why is pod nginx failing"
-clanker ask "diagnose issues with deployment api-server"
 ```
 
 ## Troubleshooting
