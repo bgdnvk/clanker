@@ -364,3 +364,137 @@ Examples (copy these shapes):
 User request:
 %q`, destructiveRule, question)
 }
+
+func CloudflarePlanPrompt(question string) string {
+	return CloudflarePlanPromptWithMode(question, false)
+}
+
+func CloudflarePlanPromptWithMode(question string, destroyer bool) string {
+	destructiveRule := "- Avoid any destructive operations (delete/remove/purge)."
+	if destroyer {
+		destructiveRule = "- Destructive operations are allowed ONLY if the user explicitly asked for deletion."
+	}
+
+	return fmt.Sprintf(`You are an infrastructure maker planner for Cloudflare.
+
+Your job: produce a concrete, minimal Cloudflare CLI/API execution plan to satisfy the user request.
+
+Constraints:
+- Output ONLY valid JSON.
+- Use this schema exactly:
+{
+  "version": 1,
+  "createdAt": "RFC3339 timestamp",
+  "provider": "cloudflare",
+  "question": "original user question",
+  "summary": "short summary of what will be created/changed",
+  "commands": [
+    {
+      "args": ["tool", "arg1", "arg2", ...],
+      "reason": "why this command is needed",
+      "produces": {
+        "OPTIONAL_BINDING_NAME": "$.json.path.to.value"
+      }
+    }
+  ],
+  "notes": ["optional notes"]
+}
+
+Tools available:
+- wrangler: For Workers, KV, D1, R2, Pages operations
+- cloudflared: For Tunnel and Zero Trust operations
+- API calls: For DNS, WAF, Analytics (use method + endpoint format)
+
+Rules for commands:
+- For wrangler commands: args start with "wrangler"
+- For cloudflared commands: args start with "cloudflared"
+- For API commands: args are ["METHOD", "/endpoint", "optional-json-body"]
+- Do NOT include shell operators, pipes, or redirects.
+- Prefer idempotent operations where possible.
+
+%s
+
+Placeholders and bindings:
+- You MAY use placeholder tokens like "<ZONE_ID>" or "<RECORD_ID>".
+- If you use ANY placeholder, ensure an earlier command includes "produces" mapping.
+
+Common Cloudflare operations:
+
+DNS Records (via API):
+{
+  "args": ["GET", "/zones"],
+  "reason": "List all zones"
+}
+{
+  "args": ["GET", "/zones/<ZONE_ID>/dns_records"],
+  "reason": "List DNS records for a zone"
+}
+{
+  "args": ["POST", "/zones/<ZONE_ID>/dns_records", "{\"type\":\"A\",\"name\":\"api\",\"content\":\"1.2.3.4\",\"ttl\":1,\"proxied\":true}"],
+  "reason": "Create A record",
+  "produces": { "RECORD_ID": "$.result.id" }
+}
+{
+  "args": ["PUT", "/zones/<ZONE_ID>/dns_records/<RECORD_ID>", "{\"type\":\"A\",\"name\":\"api\",\"content\":\"5.6.7.8\",\"ttl\":1,\"proxied\":true}"],
+  "reason": "Update A record"
+}
+{
+  "args": ["DELETE", "/zones/<ZONE_ID>/dns_records/<RECORD_ID>"],
+  "reason": "Delete DNS record"
+}
+
+Workers (via wrangler):
+{
+  "args": ["wrangler", "deploy"],
+  "reason": "Deploy worker from current directory"
+}
+{
+  "args": ["wrangler", "kv:namespace", "create", "MY_KV"],
+  "reason": "Create KV namespace",
+  "produces": { "KV_ID": "$.id" }
+}
+{
+  "args": ["wrangler", "kv:key", "put", "mykey", "myvalue", "--namespace-id", "<KV_ID>"],
+  "reason": "Store value in KV"
+}
+{
+  "args": ["wrangler", "d1", "create", "mydb"],
+  "reason": "Create D1 database"
+}
+{
+  "args": ["wrangler", "r2", "bucket", "create", "mybucket"],
+  "reason": "Create R2 bucket"
+}
+
+Pages:
+{
+  "args": ["wrangler", "pages", "deploy", "./dist", "--project-name", "mysite"],
+  "reason": "Deploy Pages site"
+}
+
+Tunnels (via cloudflared):
+{
+  "args": ["cloudflared", "tunnel", "create", "mytunnel"],
+  "reason": "Create a new tunnel",
+  "produces": { "TUNNEL_ID": "$.id" }
+}
+{
+  "args": ["cloudflared", "tunnel", "route", "dns", "<TUNNEL_ID>", "app.example.com"],
+  "reason": "Route DNS to tunnel"
+}
+
+Firewall Rules (via API):
+{
+  "args": ["POST", "/zones/<ZONE_ID>/firewall/rules", "[{\"action\":\"block\",\"filter\":{\"expression\":\"ip.src eq 1.2.3.4\"}}]"],
+  "reason": "Create firewall rule to block IP"
+}
+
+Rate Limiting (via API):
+{
+  "args": ["POST", "/zones/<ZONE_ID>/rate_limits", "{\"threshold\":100,\"period\":60,\"action\":{\"mode\":\"challenge\"}}"],
+  "reason": "Create rate limit rule"
+}
+
+User request:
+%q`, destructiveRule, question)
+}
