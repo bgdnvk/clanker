@@ -12,6 +12,8 @@ import (
 
 	"github.com/bgdnvk/clanker/internal/ai"
 	"github.com/bgdnvk/clanker/internal/aws"
+	"github.com/bgdnvk/clanker/internal/cloudflare"
+	cfdns "github.com/bgdnvk/clanker/internal/cloudflare/dns"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	ghclient "github.com/bgdnvk/clanker/internal/github"
 	"github.com/bgdnvk/clanker/internal/k8s"
@@ -57,6 +59,7 @@ Examples:
 		includeAWS, _ := cmd.Flags().GetBool("aws")
 		includeGitHub, _ := cmd.Flags().GetBool("github")
 		includeGCP, _ := cmd.Flags().GetBool("gcp")
+		includeCloudflare, _ := cmd.Flags().GetBool("cloudflare")
 		includeTerraform, _ := cmd.Flags().GetBool("terraform")
 		debug := viper.GetBool("debug")
 		discovery, _ := cmd.Flags().GetBool("discovery")
@@ -126,6 +129,21 @@ Examples:
 					Writer:     os.Stdout,
 					Destroyer:  destroyer,
 					Debug:      debug,
+				})
+			}
+
+			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "cloudflare") {
+				cfToken := cloudflare.ResolveAPIToken()
+				cfAccountID := cloudflare.ResolveAccountID()
+				if cfToken == "" {
+					return fmt.Errorf("cloudflare api_token is required (set cloudflare.api_token, CLOUDFLARE_API_TOKEN, or CF_API_TOKEN)")
+				}
+				return maker.ExecuteCloudflarePlan(ctx, makerPlan, maker.ExecOptions{
+					CloudflareAPIToken:  cfToken,
+					CloudflareAccountID: cfAccountID,
+					Writer:              os.Stdout,
+					Destroyer:           destroyer,
+					Debug:               debug,
 				})
 			}
 
@@ -248,15 +266,30 @@ Examples:
 
 			// Decide provider for maker plans.
 			// Priority:
-			//  1) Explicit flags win (--gcp / --aws)
+			//  1) Explicit flags win (--gcp / --aws / --cloudflare)
 			//  2) Infer from question (cheap heuristic)
 			makerProvider := "aws"
 			makerProviderReason := "default"
 			explicitGCP := cmd.Flags().Changed("gcp") && includeGCP
 			explicitAWS := cmd.Flags().Changed("aws") && includeAWS
+			explicitCloudflare := cmd.Flags().Changed("cloudflare") && includeCloudflare
+			explicitCount := 0
+			if explicitGCP {
+				explicitCount++
+			}
+			if explicitAWS {
+				explicitCount++
+			}
+			if explicitCloudflare {
+				explicitCount++
+			}
+			if explicitCount > 1 {
+				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --cloudflare) together with --maker")
+			}
 			switch {
-			case explicitGCP && explicitAWS:
-				return fmt.Errorf("cannot use --aws and --gcp together with --maker")
+			case explicitCloudflare:
+				makerProvider = "cloudflare"
+				makerProviderReason = "explicit"
 			case explicitGCP:
 				makerProvider = "gcp"
 				makerProviderReason = "explicit"
@@ -264,8 +297,11 @@ Examples:
 				makerProvider = "aws"
 				makerProviderReason = "explicit"
 			default:
-				_, _, _, _, _, inferredGCP := inferContext(questionForRouting(question))
-				if inferredGCP {
+				_, _, _, _, _, inferredGCP, inferredCloudflare := inferContext(questionForRouting(question))
+				if inferredCloudflare {
+					makerProvider = "cloudflare"
+					makerProviderReason = "inferred"
+				} else if inferredGCP {
 					makerProvider = "gcp"
 					makerProviderReason = "inferred"
 				}
@@ -275,9 +311,14 @@ Examples:
 			_, _ = fmt.Fprintf(os.Stderr, "[maker] provider=%s (%s)\n", makerProvider, makerProviderReason)
 
 			aiClient := ai.NewClient(provider, apiKey, debug, aiProfile)
-			prompt := maker.PlanPromptWithMode(question, destroyer)
-			if makerProvider == "gcp" {
+			var prompt string
+			switch makerProvider {
+			case "cloudflare":
+				prompt = maker.CloudflarePlanPromptWithMode(question, destroyer)
+			case "gcp":
 				prompt = maker.GCPPlanPromptWithMode(question, destroyer)
+			default:
+				prompt = maker.PlanPromptWithMode(question, destroyer)
 			}
 			resp, err := aiClient.AskPrompt(ctx, prompt)
 			if err != nil {
@@ -292,7 +333,9 @@ Examples:
 
 			plan.Provider = makerProvider
 
-			if strings.EqualFold(strings.TrimSpace(plan.Provider), "gcp") {
+			// Handle GCP and Cloudflare plans (output directly, no enrichment)
+			providerLower := strings.ToLower(strings.TrimSpace(plan.Provider))
+			if providerLower == "gcp" || providerLower == "cloudflare" {
 				if plan.CreatedAt.IsZero() {
 					plan.CreatedAt = time.Now().UTC()
 				}
@@ -407,17 +450,18 @@ Format as a professional compliance table suitable for government security docum
 			includeTerraform = true
 		}
 
-		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP {
+		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeCloudflare {
 			var inferredTerraform bool
 			var inferredCode bool
 			var inferredK8s bool
 			var inferredGCP bool
+			var inferredCloudflare bool
 			routingQuestion := questionForRouting(question)
-			includeAWS, inferredCode, includeGitHub, inferredTerraform, inferredK8s, inferredGCP = inferContext(routingQuestion)
+			includeAWS, inferredCode, includeGitHub, inferredTerraform, inferredK8s, inferredGCP, inferredCloudflare = inferContext(routingQuestion)
 			_ = inferredCode
 
 			if debug {
-				fmt.Printf("Inferred context: AWS=%v, GitHub=%v, Terraform=%v, K8s=%v, GCP=%v\n", includeAWS, includeGitHub, inferredTerraform, inferredK8s, inferredGCP)
+				fmt.Printf("Inferred context: AWS=%v, GitHub=%v, Terraform=%v, K8s=%v, GCP=%v, Cloudflare=%v\n", includeAWS, includeGitHub, inferredTerraform, inferredK8s, inferredGCP, inferredCloudflare)
 			}
 
 			// Handle inferred Terraform context
@@ -427,6 +471,11 @@ Format as a professional compliance table suitable for government security docum
 
 			if inferredGCP {
 				includeGCP = true
+			}
+
+			// Handle Cloudflare queries by delegating to Cloudflare agent
+			if inferredCloudflare {
+				return handleCloudflareQuery(context.Background(), routingQuestion, debug)
 			}
 
 			// Handle K8s queries by delegating to K8s agent
@@ -728,6 +777,7 @@ func init() {
 
 	askCmd.Flags().Bool("aws", false, "Include AWS infrastructure context")
 	askCmd.Flags().Bool("gcp", false, "Include GCP infrastructure context")
+	askCmd.Flags().Bool("cloudflare", false, "Include Cloudflare infrastructure context")
 	askCmd.Flags().Bool("github", false, "Include GitHub repository context")
 	askCmd.Flags().Bool("terraform", false, "Include Terraform workspace context")
 	askCmd.Flags().Bool("discovery", false, "Run comprehensive infrastructure discovery (all services)")
@@ -854,9 +904,9 @@ func resolveGeminiModel(provider, flagValue string) string {
 	return model
 }
 
-// inferContext tries to determine if the question is about AWS, GitHub, Terraform, or Kubernetes.
+// inferContext tries to determine if the question is about AWS, GitHub, Terraform, Kubernetes, GCP, or Cloudflare.
 // Code scanning is disabled, so this never infers code context.
-func inferContext(question string) (aws bool, code bool, github bool, terraform bool, k8s bool, gcp bool) {
+func inferContext(question string) (aws bool, code bool, github bool, terraform bool, k8s bool, gcp bool, cf bool) {
 	awsKeywords := []string{
 		// Core services
 		"ec2", "lambda", "rds", "s3", "ecs", "cloudwatch", "logs", "batch", "sqs", "sns", "dynamodb", "elasticache", "elb", "alb", "nlb", "route53", "cloudfront", "api-gateway", "cognito", "iam", "vpc", "subnet", "security-group", "nacl", "nat", "igw", "vpn", "direct-connect",
@@ -926,6 +976,21 @@ func inferContext(question string) (aws bool, code bool, github bool, terraform 
 		"cloud build", "cloud deploy", "cloud dns", "cloud armor", "cloud load balancing", "api gateway",
 	}
 
+	cloudflareKeywords := []string{
+		// Platform and tools
+		"cloudflare", "cf", "wrangler", "cloudflared",
+		// DNS
+		"dns record", "zone", "nameserver", "cname", "a record", "aaaa record", "mx record", "txt record",
+		// Workers and edge
+		"worker", "workers", "kv", "d1", "r2", "pages", "durable objects",
+		// Security
+		"waf", "firewall rule", "rate limit", "ddos", "bot management", "page rules",
+		// Zero Trust
+		"tunnel", "access", "zero trust", "warp", "cloudflare access",
+		// Analytics and performance
+		"cdn", "cache", "analytics", "web analytics",
+	}
+
 	questionLower := strings.ToLower(question)
 
 	for _, keyword := range awsKeywords {
@@ -963,12 +1028,19 @@ func inferContext(question string) (aws bool, code bool, github bool, terraform 
 		}
 	}
 
+	for _, keyword := range cloudflareKeywords {
+		if contains(questionLower, keyword) {
+			cf = true
+			break
+		}
+	}
+
 	// If no specific context detected, include AWS + GitHub by default.
-	if !aws && !github && !terraform && !k8s && !gcp {
+	if !aws && !github && !terraform && !k8s && !gcp && !cf {
 		aws, github = true, true
 	}
 
-	return aws, code, github, terraform, k8s, gcp
+	return aws, code, github, terraform, k8s, gcp, cf
 }
 
 func questionForRouting(question string) string {
@@ -1015,6 +1087,109 @@ func questionForRouting(question string) string {
 	}
 
 	return trimmed
+}
+
+// handleCloudflareQuery delegates a Cloudflare query to the Cloudflare agent
+func handleCloudflareQuery(ctx context.Context, question string, debug bool) error {
+	if debug {
+		fmt.Println("Delegating query to Cloudflare agent...")
+	}
+
+	accountID := cloudflare.ResolveAccountID()
+	apiToken := cloudflare.ResolveAPIToken()
+
+	if apiToken == "" {
+		return fmt.Errorf("cloudflare api_token is required (set cloudflare.api_token, CLOUDFLARE_API_TOKEN, or CF_API_TOKEN)")
+	}
+
+	client, err := cloudflare.NewClient(accountID, apiToken, debug)
+	if err != nil {
+		return fmt.Errorf("failed to create Cloudflare client: %w", err)
+	}
+
+	// Determine if this is a DNS query
+	questionLower := strings.ToLower(question)
+	isDNS := strings.Contains(questionLower, "dns") ||
+		strings.Contains(questionLower, "record") ||
+		strings.Contains(questionLower, "zone") ||
+		strings.Contains(questionLower, "domain") ||
+		strings.Contains(questionLower, "cname") ||
+		strings.Contains(questionLower, "a record") ||
+		strings.Contains(questionLower, "mx") ||
+		strings.Contains(questionLower, "txt") ||
+		strings.Contains(questionLower, "nameserver")
+
+	if isDNS {
+		// Use DNS subagent
+		dnsAgent := cfdns.NewSubAgent(client, debug)
+		opts := cfdns.QueryOptions{}
+
+		response, err := dnsAgent.HandleQuery(ctx, question, opts)
+		if err != nil {
+			return fmt.Errorf("Cloudflare DNS agent error: %w", err)
+		}
+
+		switch response.Type {
+		case cfdns.ResponseTypePlan:
+			planJSON, err := json.MarshalIndent(response.Plan, "", "  ")
+			if err != nil {
+				return fmt.Errorf("failed to format plan: %w", err)
+			}
+			fmt.Println(string(planJSON))
+			fmt.Println("\n// To apply this plan, run:")
+			fmt.Println("// clanker ask --apply --plan-file <save-above-to-file.json>")
+		case cfdns.ResponseTypeResult:
+			fmt.Println(response.Result)
+		case cfdns.ResponseTypeError:
+			return response.Error
+		}
+		return nil
+	}
+
+	// For non-DNS queries, use the general Cloudflare context
+	cfContext, err := client.GetRelevantContext(ctx, question)
+	if err != nil {
+		return fmt.Errorf("failed to get Cloudflare context: %w", err)
+	}
+
+	// Get AI provider settings
+	aiProfile := viper.GetString("ai.default_provider")
+	if aiProfile == "" {
+		aiProfile = "openai"
+	}
+
+	var apiKey string
+	switch aiProfile {
+	case "gemini", "gemini-api":
+		apiKey = ""
+	case "openai":
+		apiKey = viper.GetString("ai.providers.openai.api_key")
+		if apiKey == "" {
+			apiKey = os.Getenv("OPENAI_API_KEY")
+		}
+	default:
+		apiKey = viper.GetString("ai.api_key")
+	}
+
+	aiClient := ai.NewClient(aiProfile, apiKey, debug, aiProfile)
+
+	// Build prompt with Cloudflare context
+	prompt := fmt.Sprintf(`You are a Cloudflare infrastructure assistant. Answer the following question based on the Cloudflare account context provided.
+
+Question: %s
+
+Cloudflare Account Context:
+%s
+
+Provide a clear and helpful response.`, question, cfContext)
+
+	response, err := aiClient.AskPrompt(ctx, prompt)
+	if err != nil {
+		return fmt.Errorf("failed to get AI response: %w", err)
+	}
+
+	fmt.Println(response)
+	return nil
 }
 
 // handleK8sQuery delegates a Kubernetes query to the K8s agent

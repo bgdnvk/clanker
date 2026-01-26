@@ -111,5 +111,11 @@ infra:
 #       type: existing       # Use existing kubectl context
 #       context: minikube
 
+# Cloudflare (for `clanker cf ask ...` and `clanker ask --cloudflare ...`):
+# cloudflare:
+#   api_token: ""            # Cloudflare API token (or set CLOUDFLARE_API_TOKEN / CF_API_TOKEN)
+#   account_id: ""           # Cloudflare account ID (or set CLOUDFLARE_ACCOUNT_ID / CF_ACCOUNT_ID)
+#   default_zone: ""         # Default zone name for DNS operations
+
 # General settings:
 # timeout: 30
