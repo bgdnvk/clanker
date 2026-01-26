@@ -225,13 +225,11 @@ func handleGeneralCfQuery(ctx context.Context, client *cloudflare.Client, questi
 	}
 
 	// Create AI client
-	aiClient, err := ai.NewClient(aiProfile, nil, nil, debug)
-	if err != nil {
-		return "", fmt.Errorf("failed to create AI client: %w", err)
-	}
+	apiKey := viper.GetString(fmt.Sprintf("ai.providers.%s.api_key", aiProfile))
+	aiClient := ai.NewClient(aiProfile, apiKey, debug)
 
 	// Get AI response
-	response, err := aiClient.Ask(ctx, prompt)
+	response, err := aiClient.AskPrompt(ctx, prompt)
 	if err != nil {
 		return "", fmt.Errorf("AI query failed: %w", err)
 	}
