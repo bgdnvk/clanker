@@ -4,17 +4,17 @@ import "time"
 
 // Zone represents a Cloudflare DNS zone
 type Zone struct {
-	ID                string    `json:"id"`
-	Name              string    `json:"name"`
-	Status            string    `json:"status"`
-	Paused            bool      `json:"paused"`
-	Type              string    `json:"type"`
-	DevelopmentMode   int       `json:"development_mode"`
-	NameServers       []string  `json:"name_servers"`
-	OriginalNameServers []string `json:"original_name_servers"`
-	CreatedOn         time.Time `json:"created_on"`
-	ModifiedOn        time.Time `json:"modified_on"`
-	Plan              ZonePlan  `json:"plan"`
+	ID                  string    `json:"id"`
+	Name                string    `json:"name"`
+	Status              string    `json:"status"`
+	Paused              bool      `json:"paused"`
+	Type                string    `json:"type"`
+	DevelopmentMode     int       `json:"development_mode"`
+	NameServers         []string  `json:"name_servers"`
+	OriginalNameServers []string  `json:"original_name_servers"`
+	CreatedOn           time.Time `json:"created_on"`
+	ModifiedOn          time.Time `json:"modified_on"`
+	Plan                ZonePlan  `json:"plan"`
 }
 
 // ZonePlan represents the Cloudflare plan for a zone
@@ -28,20 +28,20 @@ type ZonePlan struct {
 
 // DNSRecord represents a Cloudflare DNS record
 type DNSRecord struct {
-	ID         string    `json:"id"`
-	Type       string    `json:"type"`
-	Name       string    `json:"name"`
-	Content    string    `json:"content"`
-	Proxied    bool      `json:"proxied"`
-	Proxiable  bool      `json:"proxiable"`
-	TTL        int       `json:"ttl"`
-	Locked     bool      `json:"locked"`
-	ZoneID     string    `json:"zone_id"`
-	ZoneName   string    `json:"zone_name"`
-	CreatedOn  time.Time `json:"created_on"`
-	ModifiedOn time.Time `json:"modified_on"`
-	Priority   *int      `json:"priority,omitempty"` // For MX records
-	Data       *RecordData `json:"data,omitempty"`   // For SRV, CAA, etc.
+	ID         string      `json:"id"`
+	Type       string      `json:"type"`
+	Name       string      `json:"name"`
+	Content    string      `json:"content"`
+	Proxied    bool        `json:"proxied"`
+	Proxiable  bool        `json:"proxiable"`
+	TTL        int         `json:"ttl"`
+	Locked     bool        `json:"locked"`
+	ZoneID     string      `json:"zone_id"`
+	ZoneName   string      `json:"zone_name"`
+	CreatedOn  time.Time   `json:"created_on"`
+	ModifiedOn time.Time   `json:"modified_on"`
+	Priority   *int        `json:"priority,omitempty"` // For MX records
+	Data       *RecordData `json:"data,omitempty"`     // For SRV, CAA, etc.
 }
 
 // RecordData contains additional data for certain record types

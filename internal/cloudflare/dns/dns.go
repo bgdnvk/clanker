@@ -146,14 +146,14 @@ func (s *SubAgent) extractZoneName(query string) string {
 func (s *SubAgent) extractRecordType(queryLower string) string {
 	recordTypes := map[string]string{
 		" a ": "A", " a,": "A", " a.": "A",
-		"aaaa": "AAAA",
+		"aaaa":  "AAAA",
 		"cname": "CNAME",
-		"mx": "MX",
-		"txt": "TXT",
-		"ns": "NS",
-		"srv": "SRV",
-		"caa": "CAA",
-		"ptr": "PTR",
+		"mx":    "MX",
+		"txt":   "TXT",
+		"ns":    "NS",
+		"srv":   "SRV",
+		"caa":   "CAA",
+		"ptr":   "PTR",
 	}
 
 	for pattern, recType := range recordTypes {

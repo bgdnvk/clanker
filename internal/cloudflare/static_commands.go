@@ -13,9 +13,9 @@ import (
 // CreateCloudflareCommands creates the Cloudflare command tree for static commands
 func CreateCloudflareCommands() *cobra.Command {
 	cfCmd := &cobra.Command{
-		Use:   "cf",
-		Short: "Query Cloudflare infrastructure directly",
-		Long:  "Query your Cloudflare infrastructure without AI interpretation. Useful for getting raw data.",
+		Use:     "cf",
+		Short:   "Query Cloudflare infrastructure directly",
+		Long:    "Query your Cloudflare infrastructure without AI interpretation. Useful for getting raw data.",
 		Aliases: []string{"cloudflare"},
 	}
 
@@ -150,9 +150,9 @@ func listZones(ctx context.Context, client *Client) error {
 	var response struct {
 		Success bool `json:"success"`
 		Result  []struct {
-			ID          string `json:"id"`
-			Name        string `json:"name"`
-			Status      string `json:"status"`
+			ID          string   `json:"id"`
+			Name        string   `json:"name"`
+			Status      string   `json:"status"`
 			NameServers []string `json:"name_servers"`
 			Plan        struct {
 				Name string `json:"name"`
