@@ -6,11 +6,11 @@ import (
 
 func TestInferContext_CloudflareExplicit(t *testing.T) {
 	tests := []struct {
-		name              string
-		query             string
-		expectCloudflare  bool
-		expectAWS         bool
-		expectK8s         bool
+		name             string
+		query            string
+		expectCloudflare bool
+		expectAWS        bool
+		expectK8s        bool
 	}{
 		{
 			name:             "explicit cloudflare mention",
