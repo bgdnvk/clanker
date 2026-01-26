@@ -144,27 +144,37 @@ func (s *SubAgent) extractZoneName(query string) string {
 
 // extractRecordType extracts DNS record type from query
 func (s *SubAgent) extractRecordType(queryLower string) string {
-	recordTypes := map[string]string{
-		" a ": "A", " a,": "A", " a.": "A",
-		"aaaa":  "AAAA",
-		"cname": "CNAME",
-		"mx":    "MX",
-		"txt":   "TXT",
-		"ns":    "NS",
-		"srv":   "SRV",
-		"caa":   "CAA",
-		"ptr":   "PTR",
+	// Use word boundary patterns to avoid matching substrings (e.g., "ns" in "dns")
+	recordPatterns := []struct {
+		pattern string
+		recType string
+	}{
+		{`\baaaa\b`, "AAAA"},
+		{`\bcname\b`, "CNAME"},
+		{`\bmx\b`, "MX"},
+		{`\btxt\b`, "TXT"},
+		{`\bns\b`, "NS"},
+		{`\bsrv\b`, "SRV"},
+		{`\bcaa\b`, "CAA"},
+		{`\bptr\b`, "PTR"},
+		{`\ba record`, "A"},
+		{`\ba\b`, "A"}, // Must be last to avoid matching "a" in other words
 	}
 
-	for pattern, recType := range recordTypes {
-		if strings.Contains(queryLower, pattern) {
-			return recType
+	for _, rp := range recordPatterns {
+		re := regexp.MustCompile(rp.pattern)
+		if re.MatchString(queryLower) {
+			// Extra check for "a" to avoid false positives
+			if rp.recType == "A" && rp.pattern == `\ba\b` {
+				// Only match if it looks like a record type context
+				if !strings.Contains(queryLower, " a record") &&
+					!strings.Contains(queryLower, "type a") &&
+					!strings.Contains(queryLower, "a type") {
+					continue
+				}
+			}
+			return rp.recType
 		}
-	}
-
-	// Check for "A record" pattern
-	if strings.Contains(queryLower, "a record") {
-		return "A"
 	}
 
 	return ""
