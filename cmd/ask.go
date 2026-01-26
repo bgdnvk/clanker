@@ -14,6 +14,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/aws"
 	"github.com/bgdnvk/clanker/internal/cloudflare"
 	cfdns "github.com/bgdnvk/clanker/internal/cloudflare/dns"
+	cfwaf "github.com/bgdnvk/clanker/internal/cloudflare/waf"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	ghclient "github.com/bgdnvk/clanker/internal/github"
 	"github.com/bgdnvk/clanker/internal/k8s"
@@ -1107,8 +1108,46 @@ func handleCloudflareQuery(ctx context.Context, question string, debug bool) err
 		return fmt.Errorf("failed to create Cloudflare client: %w", err)
 	}
 
-	// Determine if this is a DNS query
+	// Determine query type
 	questionLower := strings.ToLower(question)
+
+	// Check for WAF/Security queries
+	isWAF := strings.Contains(questionLower, "firewall") ||
+		strings.Contains(questionLower, "waf") ||
+		strings.Contains(questionLower, "rate limit") ||
+		strings.Contains(questionLower, "security level") ||
+		strings.Contains(questionLower, "under attack") ||
+		strings.Contains(questionLower, "ddos") ||
+		strings.Contains(questionLower, "bot")
+
+	if isWAF {
+		// Use WAF subagent
+		wafAgent := cfwaf.NewSubAgent(client, debug)
+		opts := cfwaf.QueryOptions{}
+
+		response, err := wafAgent.HandleQuery(ctx, question, opts)
+		if err != nil {
+			return fmt.Errorf("Cloudflare WAF agent error: %w", err)
+		}
+
+		switch response.Type {
+		case cfwaf.ResponseTypePlan:
+			planJSON, err := json.MarshalIndent(response.Plan, "", "  ")
+			if err != nil {
+				return fmt.Errorf("failed to format plan: %w", err)
+			}
+			fmt.Println(string(planJSON))
+			fmt.Println("\n// To apply this plan, run:")
+			fmt.Println("// clanker ask --apply --plan-file <save-above-to-file.json>")
+		case cfwaf.ResponseTypeResult:
+			fmt.Println(response.Result)
+		case cfwaf.ResponseTypeError:
+			return response.Error
+		}
+		return nil
+	}
+
+	// Check for DNS queries
 	isDNS := strings.Contains(questionLower, "dns") ||
 		strings.Contains(questionLower, "record") ||
 		strings.Contains(questionLower, "zone") ||
