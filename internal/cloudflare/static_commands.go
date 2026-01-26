@@ -13,10 +13,10 @@ import (
 // CreateCloudflareCommands creates the Cloudflare command tree for static commands
 func CreateCloudflareCommands() *cobra.Command {
 	cfCmd := &cobra.Command{
-		Use:   "cloudflare",
+		Use:   "cf",
 		Short: "Query Cloudflare infrastructure directly",
 		Long:  "Query your Cloudflare infrastructure without AI interpretation. Useful for getting raw data.",
-		Aliases: []string{"cf"},
+		Aliases: []string{"cloudflare"},
 	}
 
 	cfListCmd := &cobra.Command{
