@@ -461,11 +461,93 @@ Format as a professional compliance table suitable for government security docum
 			var inferredGCP bool
 			var inferredCloudflare bool
 			routingQuestion := questionForRouting(question)
+
+			// First, do quick keyword check for explicit terms
 			includeAWS, inferredCode, includeGitHub, inferredTerraform, inferredK8s, inferredGCP, inferredCloudflare = inferContext(routingQuestion)
 			_ = inferredCode
 
 			if debug {
-				fmt.Printf("Inferred context: AWS=%v, GitHub=%v, Terraform=%v, K8s=%v, GCP=%v, Cloudflare=%v\n", includeAWS, includeGitHub, inferredTerraform, inferredK8s, inferredGCP, inferredCloudflare)
+				fmt.Printf("Keyword inference: AWS=%v, GitHub=%v, Terraform=%v, K8s=%v, GCP=%v, Cloudflare=%v\n",
+					includeAWS, includeGitHub, inferredTerraform, inferredK8s, inferredGCP, inferredCloudflare)
+			}
+
+			// For ambiguous queries (multiple services detected or Cloudflare detected),
+			// use LLM to make the final routing decision
+			needsLLMClassification := false
+
+			// Count how many services were inferred
+			inferredCount := 0
+			if includeAWS {
+				inferredCount++
+			}
+			if inferredK8s {
+				inferredCount++
+			}
+			if inferredGCP {
+				inferredCount++
+			}
+			if inferredCloudflare {
+				inferredCount++
+			}
+
+			// Use LLM classification if:
+			// 1. Multiple services inferred (ambiguous)
+			// 2. Cloudflare was inferred (verify it's actually Cloudflare-related)
+			if inferredCount > 1 || inferredCloudflare {
+				needsLLMClassification = true
+			}
+
+			if needsLLMClassification {
+				if debug {
+					fmt.Println("[routing] Ambiguous query detected, using LLM for classification...")
+				}
+
+				llmService, err := classifyQueryWithLLM(context.Background(), routingQuestion, debug)
+				if err != nil {
+					// FALLBACK: LLM classification failed, use keyword-based inference
+					if debug {
+						fmt.Printf("[routing] LLM classification failed (%v), falling back to keyword inference\n", err)
+					}
+					// Keep the keyword-inferred values as-is (no changes needed)
+				} else {
+					// LLM succeeded - override keyword-based inference with LLM decision
+					switch llmService {
+					case "cloudflare":
+						inferredCloudflare = true
+						inferredK8s = false
+						inferredGCP = false
+						includeAWS = false
+					case "k8s":
+						inferredK8s = true
+						inferredCloudflare = false
+						inferredGCP = false
+					case "gcp":
+						inferredGCP = true
+						inferredCloudflare = false
+						inferredK8s = false
+					case "aws":
+						includeAWS = true
+						inferredCloudflare = false
+						inferredK8s = false
+						inferredGCP = false
+					case "terraform":
+						inferredTerraform = true
+						inferredCloudflare = false
+					case "github":
+						includeGitHub = true
+						inferredCloudflare = false
+					default:
+						// "general" - default to AWS
+						includeAWS = true
+						inferredCloudflare = false
+						inferredK8s = false
+					}
+
+					if debug {
+						fmt.Printf("LLM override: AWS=%v, K8s=%v, GCP=%v, Cloudflare=%v\n",
+							includeAWS, inferredK8s, inferredGCP, inferredCloudflare)
+					}
+				}
 			}
 
 			// Handle inferred Terraform context
@@ -981,18 +1063,11 @@ func inferContext(question string) (aws bool, code bool, github bool, terraform 
 	}
 
 	cloudflareKeywords := []string{
-		// Platform and tools
-		"cloudflare", "cf", "wrangler", "cloudflared",
-		// DNS
-		"dns record", "zone", "nameserver", "cname", "a record", "aaaa record", "mx record", "txt record",
-		// Workers and edge
-		"worker", "workers", "kv", "d1", "r2", "pages", "durable objects",
-		// Security
-		"waf", "firewall rule", "rate limit", "ddos", "bot management", "page rules",
-		// Zero Trust
-		"tunnel", "access", "zero trust", "warp", "cloudflare access",
-		// Analytics and performance
-		"cdn", "cache", "analytics", "web analytics",
+		// Only match if Cloudflare is explicitly mentioned
+		"cloudflare",
+		// Cloudflare-specific CLI tools (unique to Cloudflare)
+		"wrangler",
+		"cloudflared",
 	}
 
 	questionLower := strings.ToLower(question)
@@ -1984,4 +2059,93 @@ func determineRoutingDecision(question string) (agent string, reason string) {
 
 	// Default to CLI for general queries
 	return "cli", "General infrastructure query or analysis"
+}
+
+// getRoutingClassificationPrompt returns a prompt for LLM to classify which service a query is about
+func getRoutingClassificationPrompt(question string) string {
+	return fmt.Sprintf(`Classify which cloud service or platform this user query is about.
+
+User Query: "%s"
+
+Available services:
+- cloudflare: Cloudflare CDN, DNS, Workers, KV, D1, R2, Pages, WAF, Tunnels, Zero Trust, Analytics
+- aws: Amazon Web Services (EC2, Lambda, S3, RDS, VPC, Route53, CloudFront, IAM, ECS, etc.)
+- k8s: Kubernetes clusters, pods, deployments, services, helm, kubectl
+- gcp: Google Cloud Platform (Cloud Run, GKE, Cloud SQL, BigQuery, etc.)
+- github: GitHub repositories, PRs, issues, actions, workflows
+- terraform: Infrastructure as code, Terraform plans, state, modules
+- general: General questions not specific to any cloud platform
+
+IMPORTANT RULES:
+1. Only classify as "cloudflare" if the query EXPLICITLY mentions Cloudflare, wrangler, cloudflared, or Cloudflare-specific products
+2. Generic terms like "cdn", "cache", "dns", "worker", "waf", "rate limit", "tunnel" should default to AWS unless Cloudflare is explicitly mentioned
+3. If the query mentions AWS services (EC2, Lambda, S3, CloudFront, Route53, etc.), classify as "aws"
+4. If uncertain, classify as "aws" (the default cloud provider)
+
+Respond with ONLY a JSON object:
+{
+    "service": "cloudflare|aws|k8s|gcp|github|terraform|general",
+    "confidence": "high|medium|low",
+    "reason": "brief explanation of why this classification"
+}`, question)
+}
+
+// classifyQueryWithLLM uses the AI client to determine which service a query is about
+func classifyQueryWithLLM(ctx context.Context, question string, debug bool) (string, error) {
+	// Get provider config
+	provider := viper.GetString("ai.default_provider")
+	if provider == "" {
+		provider = "openai"
+	}
+
+	var apiKey string
+	switch provider {
+	case "openai":
+		apiKey = os.Getenv("OPENAI_API_KEY")
+		if apiKey == "" {
+			apiKey = viper.GetString("ai.providers.openai.api_key")
+		}
+	case "anthropic":
+		apiKey = os.Getenv("ANTHROPIC_API_KEY")
+		if apiKey == "" {
+			apiKey = viper.GetString("ai.providers.anthropic.api_key")
+		}
+	case "gemini", "gemini-api":
+		apiKey = os.Getenv("GEMINI_API_KEY")
+	}
+
+	// Create minimal AI client for classification
+	aiClient := ai.NewClient(provider, apiKey, debug, "")
+
+	prompt := getRoutingClassificationPrompt(question)
+	response, err := aiClient.AskPrompt(ctx, prompt)
+	if err != nil {
+		if debug {
+			fmt.Printf("[routing] LLM classification failed: %v, falling back to keyword matching\n", err)
+		}
+		return "", err
+	}
+
+	// Parse the JSON response
+	var classification struct {
+		Service    string `json:"service"`
+		Confidence string `json:"confidence"`
+		Reason     string `json:"reason"`
+	}
+
+	// Clean response and parse JSON
+	cleaned := aiClient.CleanJSONResponse(response)
+	if err := json.Unmarshal([]byte(cleaned), &classification); err != nil {
+		if debug {
+			fmt.Printf("[routing] Failed to parse classification response: %v\n", err)
+		}
+		return "", err
+	}
+
+	if debug {
+		fmt.Printf("[routing] LLM classification: service=%s, confidence=%s, reason=%s\n",
+			classification.Service, classification.Confidence, classification.Reason)
+	}
+
+	return classification.Service, nil
 }
