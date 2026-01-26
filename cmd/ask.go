@@ -13,9 +13,11 @@ import (
 	"github.com/bgdnvk/clanker/internal/ai"
 	"github.com/bgdnvk/clanker/internal/aws"
 	"github.com/bgdnvk/clanker/internal/cloudflare"
+	cfanalytics "github.com/bgdnvk/clanker/internal/cloudflare/analytics"
 	cfdns "github.com/bgdnvk/clanker/internal/cloudflare/dns"
 	cfwaf "github.com/bgdnvk/clanker/internal/cloudflare/waf"
 	cfworkers "github.com/bgdnvk/clanker/internal/cloudflare/workers"
+	cfzerotrust "github.com/bgdnvk/clanker/internal/cloudflare/zerotrust"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	ghclient "github.com/bgdnvk/clanker/internal/github"
 	"github.com/bgdnvk/clanker/internal/k8s"
@@ -1180,6 +1182,71 @@ func handleCloudflareQuery(ctx context.Context, question string, debug bool) err
 		case cfworkers.ResponseTypeResult:
 			fmt.Println(response.Result)
 		case cfworkers.ResponseTypeError:
+			return response.Error
+		}
+		return nil
+	}
+
+	// Check for Analytics queries
+	isAnalytics := strings.Contains(questionLower, "analytics") ||
+		strings.Contains(questionLower, "traffic") ||
+		strings.Contains(questionLower, "bandwidth") ||
+		strings.Contains(questionLower, "requests") ||
+		strings.Contains(questionLower, "visitors") ||
+		strings.Contains(questionLower, "page views") ||
+		strings.Contains(questionLower, "performance metrics")
+
+	if isAnalytics {
+		// Use Analytics subagent
+		analyticsAgent := cfanalytics.NewSubAgent(client, debug)
+		opts := cfanalytics.QueryOptions{}
+
+		response, err := analyticsAgent.HandleQuery(ctx, question, opts)
+		if err != nil {
+			return fmt.Errorf("Cloudflare Analytics agent error: %w", err)
+		}
+
+		switch response.Type {
+		case cfanalytics.ResponseTypeResult:
+			fmt.Println(response.Result)
+		case cfanalytics.ResponseTypeError:
+			return response.Error
+		}
+		return nil
+	}
+
+	// Check for Zero Trust queries
+	isZeroTrust := strings.Contains(questionLower, "tunnel") ||
+		strings.Contains(questionLower, "access app") ||
+		strings.Contains(questionLower, "access policy") ||
+		strings.Contains(questionLower, "zero trust") ||
+		strings.Contains(questionLower, "cloudflared") ||
+		strings.Contains(questionLower, "warp")
+
+	if isZeroTrust {
+		// Use Zero Trust subagent
+		ztAgent := cfzerotrust.NewSubAgent(client, debug)
+		opts := cfzerotrust.QueryOptions{
+			AccountID: accountID,
+		}
+
+		response, err := ztAgent.HandleQuery(ctx, question, opts)
+		if err != nil {
+			return fmt.Errorf("Cloudflare Zero Trust agent error: %w", err)
+		}
+
+		switch response.Type {
+		case cfzerotrust.ResponseTypePlan:
+			planJSON, err := json.MarshalIndent(response.Plan, "", "  ")
+			if err != nil {
+				return fmt.Errorf("failed to format plan: %w", err)
+			}
+			fmt.Println(string(planJSON))
+			fmt.Println("\n// To apply this plan, run:")
+			fmt.Println("// clanker ask --apply --plan-file <save-above-to-file.json>")
+		case cfzerotrust.ResponseTypeResult:
+			fmt.Println(response.Result)
+		case cfzerotrust.ResponseTypeError:
 			return response.Error
 		}
 		return nil

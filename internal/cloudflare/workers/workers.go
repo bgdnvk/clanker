@@ -299,10 +299,6 @@ func (s *SubAgent) listPagesProjects(ctx context.Context) (*Response, error) {
 
 // generatePlan creates a plan for Workers modifications
 func (s *SubAgent) generatePlan(ctx context.Context, query string, analysis QueryAnalysis, opts QueryOptions) (*Plan, error) {
-	plan := &Plan{
-		Commands: []Command{},
-	}
-
 	switch analysis.ResourceType {
 	case "kv":
 		return s.generateKVPlan(analysis)
@@ -313,8 +309,6 @@ func (s *SubAgent) generatePlan(ctx context.Context, query string, analysis Quer
 	default:
 		return nil, fmt.Errorf("worker deployment plans should use 'wrangler deploy' directly")
 	}
-
-	return plan, nil
 }
 
 // generateKVPlan creates a plan for KV operations
