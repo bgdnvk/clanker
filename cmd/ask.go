@@ -23,6 +23,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/k8s"
 	"github.com/bgdnvk/clanker/internal/k8s/plan"
 	"github.com/bgdnvk/clanker/internal/maker"
+	"github.com/bgdnvk/clanker/internal/routing"
 	tfclient "github.com/bgdnvk/clanker/internal/terraform"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -301,11 +302,11 @@ Examples:
 				makerProvider = "aws"
 				makerProviderReason = "explicit"
 			default:
-				_, _, _, _, _, inferredGCP, inferredCloudflare := inferContext(questionForRouting(question))
-				if inferredCloudflare {
+				svcCtx := routing.InferContext(questionForRouting(question))
+				if svcCtx.Cloudflare {
 					makerProvider = "cloudflare"
 					makerProviderReason = "inferred"
-				} else if inferredGCP {
+				} else if svcCtx.GCP {
 					makerProvider = "gcp"
 					makerProviderReason = "inferred"
 				}
@@ -455,54 +456,26 @@ Format as a professional compliance table suitable for government security docum
 		}
 
 		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeCloudflare {
-			var inferredTerraform bool
-			var inferredCode bool
-			var inferredK8s bool
-			var inferredGCP bool
-			var inferredCloudflare bool
 			routingQuestion := questionForRouting(question)
 
 			// First, do quick keyword check for explicit terms
-			includeAWS, inferredCode, includeGitHub, inferredTerraform, inferredK8s, inferredGCP, inferredCloudflare = inferContext(routingQuestion)
-			_ = inferredCode
+			svcCtx := routing.InferContext(routingQuestion)
+			includeAWS = svcCtx.AWS
+			includeGitHub = svcCtx.GitHub
 
 			if debug {
 				fmt.Printf("Keyword inference: AWS=%v, GitHub=%v, Terraform=%v, K8s=%v, GCP=%v, Cloudflare=%v\n",
-					includeAWS, includeGitHub, inferredTerraform, inferredK8s, inferredGCP, inferredCloudflare)
+					svcCtx.AWS, svcCtx.GitHub, svcCtx.Terraform, svcCtx.K8s, svcCtx.GCP, svcCtx.Cloudflare)
 			}
 
 			// For ambiguous queries (multiple services detected or Cloudflare detected),
 			// use LLM to make the final routing decision
-			needsLLMClassification := false
-
-			// Count how many services were inferred
-			inferredCount := 0
-			if includeAWS {
-				inferredCount++
-			}
-			if inferredK8s {
-				inferredCount++
-			}
-			if inferredGCP {
-				inferredCount++
-			}
-			if inferredCloudflare {
-				inferredCount++
-			}
-
-			// Use LLM classification if:
-			// 1. Multiple services inferred (ambiguous)
-			// 2. Cloudflare was inferred (verify it's actually Cloudflare-related)
-			if inferredCount > 1 || inferredCloudflare {
-				needsLLMClassification = true
-			}
-
-			if needsLLMClassification {
+			if routing.NeedsLLMClassification(svcCtx) {
 				if debug {
 					fmt.Println("[routing] Ambiguous query detected, using LLM for classification...")
 				}
 
-				llmService, err := classifyQueryWithLLM(context.Background(), routingQuestion, debug)
+				llmService, err := routing.ClassifyWithLLM(context.Background(), routingQuestion, debug)
 				if err != nil {
 					// FALLBACK: LLM classification failed, use keyword-based inference
 					if debug {
@@ -511,61 +484,35 @@ Format as a professional compliance table suitable for government security docum
 					// Keep the keyword-inferred values as-is (no changes needed)
 				} else {
 					// LLM succeeded - override keyword-based inference with LLM decision
-					switch llmService {
-					case "cloudflare":
-						inferredCloudflare = true
-						inferredK8s = false
-						inferredGCP = false
-						includeAWS = false
-					case "k8s":
-						inferredK8s = true
-						inferredCloudflare = false
-						inferredGCP = false
-					case "gcp":
-						inferredGCP = true
-						inferredCloudflare = false
-						inferredK8s = false
-					case "aws":
-						includeAWS = true
-						inferredCloudflare = false
-						inferredK8s = false
-						inferredGCP = false
-					case "terraform":
-						inferredTerraform = true
-						inferredCloudflare = false
-					case "github":
-						includeGitHub = true
-						inferredCloudflare = false
-					default:
-						// "general" - default to AWS
-						includeAWS = true
-						inferredCloudflare = false
-						inferredK8s = false
-					}
+					routing.ApplyLLMClassification(&svcCtx, llmService)
 
 					if debug {
 						fmt.Printf("LLM override: AWS=%v, K8s=%v, GCP=%v, Cloudflare=%v\n",
-							includeAWS, inferredK8s, inferredGCP, inferredCloudflare)
+							svcCtx.AWS, svcCtx.K8s, svcCtx.GCP, svcCtx.Cloudflare)
 					}
 				}
 			}
 
 			// Handle inferred Terraform context
-			if inferredTerraform {
+			if svcCtx.Terraform {
 				includeTerraform = true
 			}
 
-			if inferredGCP {
+			if svcCtx.GCP {
 				includeGCP = true
 			}
 
+			// Update includeAWS and includeGitHub from service context
+			includeAWS = svcCtx.AWS
+			includeGitHub = svcCtx.GitHub
+
 			// Handle Cloudflare queries by delegating to Cloudflare agent
-			if inferredCloudflare {
+			if svcCtx.Cloudflare {
 				return handleCloudflareQuery(context.Background(), routingQuestion, debug)
 			}
 
 			// Handle K8s queries by delegating to K8s agent
-			if inferredK8s {
+			if svcCtx.K8s {
 				return handleK8sQuery(context.Background(), routingQuestion, debug, viper.GetString("kubernetes.kubeconfig"))
 			}
 		}
@@ -988,138 +935,6 @@ func resolveGeminiModel(provider, flagValue string) string {
 	}
 
 	return model
-}
-
-// inferContext tries to determine if the question is about AWS, GitHub, Terraform, Kubernetes, GCP, or Cloudflare.
-// Code scanning is disabled, so this never infers code context.
-func inferContext(question string) (aws bool, code bool, github bool, terraform bool, k8s bool, gcp bool, cf bool) {
-	awsKeywords := []string{
-		// Core services
-		"ec2", "lambda", "rds", "s3", "ecs", "cloudwatch", "logs", "batch", "sqs", "sns", "dynamodb", "elasticache", "elb", "alb", "nlb", "route53", "cloudfront", "api-gateway", "cognito", "iam", "vpc", "subnet", "security-group", "nacl", "nat", "igw", "vpn", "direct-connect",
-		// General terms
-		"instance", "bucket", "database", "aws", "resources", "infrastructure", "running", "account", "error", "log", "job", "queue", "compute", "storage", "network", "cdn", "load-balancer", "auto-scaling", "scaling", "health", "metric", "alarm", "notification", "backup", "snapshot", "ami", "volume", "ebs", "efs", "fsx",
-		// Compute and GPU terms
-		"gpu", "cuda", "ml", "machine-learning", "training", "inference", "p2", "p3", "p4", "g3", "g4", "g5", "spot", "reserved", "dedicated",
-		// Status and operations
-		"status", "state", "healthy", "unhealthy", "available", "pending", "stopping", "stopped", "terminated", "creating", "deleting", "modifying", "active", "inactive", "enabled", "disabled",
-		// Cost and billing
-		"cost", "billing", "price", "usage", "spend", "budget",
-		// Monitoring and debugging
-		"monitor", "trace", "debug", "performance", "latency", "throughput", "error-rate", "failure", "timeout", "retry",
-		// Infrastructure discovery
-		"services", "active", "deployed", "discovery", "overview", "summary", "list-all", "what's-running", "what-services", "infrastructure-overview",
-	}
-
-	githubKeywords := []string{
-		// GitHub platform
-		"github", "git", "repository", "repo", "fork", "clone", "branch", "tag", "release", "issue", "discussion",
-		// CI/CD and Actions
-		"action", "workflow", "ci", "cd", "build", "deploy", "deployment", "pipeline", "job", "step", "runner", "artifact",
-		// Collaboration
-		"pr", "pull", "request", "merge", "commit", "push", "pull-request", "review", "approve", "comment", "assignee", "reviewer",
-		// Project management
-		"milestone", "project", "board", "epic", "story", "task", "bug", "feature", "enhancement", "label", "status",
-		// Security and compliance
-		"security", "vulnerability", "dependabot", "secret", "token", "permission", "access", "audit",
-	}
-
-	terraformKeywords := []string{
-		// Terraform core
-		"terraform", "tf", "hcl", "plan", "apply", "destroy", "init", "workspace", "state", "backend", "provider", "resource", "data", "module", "variable", "output", "local",
-		// Operations
-		"infrastructure-as-code", "iac", "provisioning", "deployment", "environment", "stack", "configuration", "template",
-		// State management
-		"tfstate", "state-file", "remote-state", "lock", "unlock", "drift", "refresh", "import", "taint", "untaint",
-		// Workspaces and environments
-		"dev", "stage", "staging", "prod", "production", "qa", "environment", "workspace",
-	}
-
-	k8sKeywords := []string{
-		// Core K8s terms
-		"kubernetes", "k8s", "kubectl", "kube",
-		// Workloads
-		"pod", "pods", "deployment", "deployments", "replicaset", "statefulset",
-		"daemonset", "job", "cronjob",
-		// Networking
-		"service", "services", "ingress", "loadbalancer", "nodeport", "clusterip",
-		"networkpolicy", "endpoint",
-		// Storage
-		"pv", "pvc", "persistentvolume", "storageclass", "configmap", "secret",
-		// Cluster
-		"node", "nodes", "namespace", "cluster", "kubeconfig", "context",
-		// Tools
-		"helm", "chart", "release", "tiller",
-		// Providers
-		"eks", "kubeadm", "kops", "k3s", "minikube",
-		// Operations
-		"rollout", "scale", "drain", "cordon", "taint",
-	}
-
-	gcpKeywords := []string{
-		"gcp", "google cloud", "cloud run", "cloudrun", "cloud sql", "cloudsql", "gke", "gcs", "cloud storage",
-		"pubsub", "pub/sub", "cloud functions", "cloud function", "compute engine", "gce", "iam service account",
-		"workload identity", "artifact registry", "secret manager", "bigquery", "spanner", "bigtable",
-		"cloud build", "cloud deploy", "cloud dns", "cloud armor", "cloud load balancing", "api gateway",
-	}
-
-	cloudflareKeywords := []string{
-		// Only match if Cloudflare is explicitly mentioned
-		"cloudflare",
-		// Cloudflare-specific CLI tools (unique to Cloudflare)
-		"wrangler",
-		"cloudflared",
-	}
-
-	questionLower := strings.ToLower(question)
-
-	for _, keyword := range awsKeywords {
-		if contains(questionLower, keyword) {
-			aws = true
-			break
-		}
-	}
-
-	for _, keyword := range githubKeywords {
-		if contains(questionLower, keyword) {
-			github = true
-			break
-		}
-	}
-
-	for _, keyword := range terraformKeywords {
-		if contains(questionLower, keyword) {
-			terraform = true
-			break
-		}
-	}
-
-	for _, keyword := range k8sKeywords {
-		if contains(questionLower, keyword) {
-			k8s = true
-			break
-		}
-	}
-
-	for _, keyword := range gcpKeywords {
-		if contains(questionLower, keyword) {
-			gcp = true
-			break
-		}
-	}
-
-	for _, keyword := range cloudflareKeywords {
-		if contains(questionLower, keyword) {
-			cf = true
-			break
-		}
-	}
-
-	// If no specific context detected, include AWS + GitHub by default.
-	if !aws && !github && !terraform && !k8s && !gcp && !cf {
-		aws, github = true, true
-	}
-
-	return aws, code, github, terraform, k8s, gcp, cf
 }
 
 func questionForRouting(question string) string {
@@ -1803,10 +1618,6 @@ func extractDeployName(question string) string {
 	return ""
 }
 
-func contains(s, substr string) bool {
-	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
-}
-
 // formatK8sCommand formats a command for display (like AWS maker formatAWSArgsForLog)
 func formatK8sCommand(cmdName string, args []string) string {
 	const maxArgLen = 160
@@ -2059,93 +1870,4 @@ func determineRoutingDecision(question string) (agent string, reason string) {
 
 	// Default to CLI for general queries
 	return "cli", "General infrastructure query or analysis"
-}
-
-// getRoutingClassificationPrompt returns a prompt for LLM to classify which service a query is about
-func getRoutingClassificationPrompt(question string) string {
-	return fmt.Sprintf(`Classify which cloud service or platform this user query is about.
-
-User Query: "%s"
-
-Available services:
-- cloudflare: Cloudflare CDN, DNS, Workers, KV, D1, R2, Pages, WAF, Tunnels, Zero Trust, Analytics
-- aws: Amazon Web Services (EC2, Lambda, S3, RDS, VPC, Route53, CloudFront, IAM, ECS, etc.)
-- k8s: Kubernetes clusters, pods, deployments, services, helm, kubectl
-- gcp: Google Cloud Platform (Cloud Run, GKE, Cloud SQL, BigQuery, etc.)
-- github: GitHub repositories, PRs, issues, actions, workflows
-- terraform: Infrastructure as code, Terraform plans, state, modules
-- general: General questions not specific to any cloud platform
-
-IMPORTANT RULES:
-1. Only classify as "cloudflare" if the query EXPLICITLY mentions Cloudflare, wrangler, cloudflared, or Cloudflare-specific products
-2. Generic terms like "cdn", "cache", "dns", "worker", "waf", "rate limit", "tunnel" should default to AWS unless Cloudflare is explicitly mentioned
-3. If the query mentions AWS services (EC2, Lambda, S3, CloudFront, Route53, etc.), classify as "aws"
-4. If uncertain, classify as "aws" (the default cloud provider)
-
-Respond with ONLY a JSON object:
-{
-    "service": "cloudflare|aws|k8s|gcp|github|terraform|general",
-    "confidence": "high|medium|low",
-    "reason": "brief explanation of why this classification"
-}`, question)
-}
-
-// classifyQueryWithLLM uses the AI client to determine which service a query is about
-func classifyQueryWithLLM(ctx context.Context, question string, debug bool) (string, error) {
-	// Get provider config
-	provider := viper.GetString("ai.default_provider")
-	if provider == "" {
-		provider = "openai"
-	}
-
-	var apiKey string
-	switch provider {
-	case "openai":
-		apiKey = os.Getenv("OPENAI_API_KEY")
-		if apiKey == "" {
-			apiKey = viper.GetString("ai.providers.openai.api_key")
-		}
-	case "anthropic":
-		apiKey = os.Getenv("ANTHROPIC_API_KEY")
-		if apiKey == "" {
-			apiKey = viper.GetString("ai.providers.anthropic.api_key")
-		}
-	case "gemini", "gemini-api":
-		apiKey = os.Getenv("GEMINI_API_KEY")
-	}
-
-	// Create minimal AI client for classification
-	aiClient := ai.NewClient(provider, apiKey, debug, "")
-
-	prompt := getRoutingClassificationPrompt(question)
-	response, err := aiClient.AskPrompt(ctx, prompt)
-	if err != nil {
-		if debug {
-			fmt.Printf("[routing] LLM classification failed: %v, falling back to keyword matching\n", err)
-		}
-		return "", err
-	}
-
-	// Parse the JSON response
-	var classification struct {
-		Service    string `json:"service"`
-		Confidence string `json:"confidence"`
-		Reason     string `json:"reason"`
-	}
-
-	// Clean response and parse JSON
-	cleaned := aiClient.CleanJSONResponse(response)
-	if err := json.Unmarshal([]byte(cleaned), &classification); err != nil {
-		if debug {
-			fmt.Printf("[routing] Failed to parse classification response: %v\n", err)
-		}
-		return "", err
-	}
-
-	if debug {
-		fmt.Printf("[routing] LLM classification: service=%s, confidence=%s, reason=%s\n",
-			classification.Service, classification.Confidence, classification.Reason)
-	}
-
-	return classification.Service, nil
 }
