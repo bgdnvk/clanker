@@ -15,6 +15,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/cloudflare"
 	cfdns "github.com/bgdnvk/clanker/internal/cloudflare/dns"
 	cfwaf "github.com/bgdnvk/clanker/internal/cloudflare/waf"
+	cfworkers "github.com/bgdnvk/clanker/internal/cloudflare/workers"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	ghclient "github.com/bgdnvk/clanker/internal/github"
 	"github.com/bgdnvk/clanker/internal/k8s"
@@ -1142,6 +1143,43 @@ func handleCloudflareQuery(ctx context.Context, question string, debug bool) err
 		case cfwaf.ResponseTypeResult:
 			fmt.Println(response.Result)
 		case cfwaf.ResponseTypeError:
+			return response.Error
+		}
+		return nil
+	}
+
+	// Check for Workers queries
+	isWorkers := strings.Contains(questionLower, "worker") ||
+		strings.Contains(questionLower, "kv") ||
+		strings.Contains(questionLower, "d1") ||
+		strings.Contains(questionLower, "r2") ||
+		strings.Contains(questionLower, "pages") ||
+		strings.Contains(questionLower, "durable object")
+
+	if isWorkers {
+		// Use Workers subagent
+		workersAgent := cfworkers.NewSubAgent(client, debug)
+		opts := cfworkers.QueryOptions{
+			AccountID: accountID,
+		}
+
+		response, err := workersAgent.HandleQuery(ctx, question, opts)
+		if err != nil {
+			return fmt.Errorf("Cloudflare Workers agent error: %w", err)
+		}
+
+		switch response.Type {
+		case cfworkers.ResponseTypePlan:
+			planJSON, err := json.MarshalIndent(response.Plan, "", "  ")
+			if err != nil {
+				return fmt.Errorf("failed to format plan: %w", err)
+			}
+			fmt.Println(string(planJSON))
+			fmt.Println("\n// To apply this plan, run:")
+			fmt.Println("// clanker ask --apply --plan-file <save-above-to-file.json>")
+		case cfworkers.ResponseTypeResult:
+			fmt.Println(response.Result)
+		case cfworkers.ResponseTypeError:
 			return response.Error
 		}
 		return nil
