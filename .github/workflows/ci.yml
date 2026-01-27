@@ -34,7 +34,7 @@ jobs:
     needs: lint
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [macos-latest]
         go-version: ['1.23', '1.24']
     runs-on: ${{ matrix.os }}
     steps:
@@ -57,14 +57,6 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
-            goos: linux
-            goarch: amd64
-            binary: clanker
-          - os: ubuntu-latest
-            goos: linux
-            goarch: arm64
-            binary: clanker
           - os: macos-latest
             goos: darwin
             goarch: amd64
@@ -73,10 +65,6 @@ jobs:
             goos: darwin
             goarch: arm64
             binary: clanker
-          - os: windows-latest
-            goos: windows
-            goarch: amd64
-            binary: clanker.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

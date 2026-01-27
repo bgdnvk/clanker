@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/bgdnvk/clanker/internal/aws"
+	"github.com/bgdnvk/clanker/internal/cloudflare"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -50,6 +51,11 @@ func init() {
 	// Register GCP static commands
 	gcpCmd := gcp.CreateGCPCommands()
 	rootCmd.AddCommand(gcpCmd)
+
+	// Register Cloudflare static commands and ask command
+	cfCmd := cloudflare.CreateCloudflareCommands()
+	AddCfAskCommand(cfCmd)
+	rootCmd.AddCommand(cfCmd)
 }
 
 // initConfig reads in config file and ENV variables if set.

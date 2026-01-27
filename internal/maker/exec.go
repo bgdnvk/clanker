@@ -53,6 +53,10 @@ type ExecOptions struct {
 	AIAPIKey   string
 	AIProfile  string
 	Debug      bool
+
+	// Cloudflare options
+	CloudflareAPIToken  string
+	CloudflareAccountID string
 }
 
 func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {

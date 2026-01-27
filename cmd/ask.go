@@ -12,11 +12,18 @@ import (
 
 	"github.com/bgdnvk/clanker/internal/ai"
 	"github.com/bgdnvk/clanker/internal/aws"
+	"github.com/bgdnvk/clanker/internal/cloudflare"
+	cfanalytics "github.com/bgdnvk/clanker/internal/cloudflare/analytics"
+	cfdns "github.com/bgdnvk/clanker/internal/cloudflare/dns"
+	cfwaf "github.com/bgdnvk/clanker/internal/cloudflare/waf"
+	cfworkers "github.com/bgdnvk/clanker/internal/cloudflare/workers"
+	cfzerotrust "github.com/bgdnvk/clanker/internal/cloudflare/zerotrust"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	ghclient "github.com/bgdnvk/clanker/internal/github"
 	"github.com/bgdnvk/clanker/internal/k8s"
 	"github.com/bgdnvk/clanker/internal/k8s/plan"
 	"github.com/bgdnvk/clanker/internal/maker"
+	"github.com/bgdnvk/clanker/internal/routing"
 	tfclient "github.com/bgdnvk/clanker/internal/terraform"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -57,6 +64,7 @@ Examples:
 		includeAWS, _ := cmd.Flags().GetBool("aws")
 		includeGitHub, _ := cmd.Flags().GetBool("github")
 		includeGCP, _ := cmd.Flags().GetBool("gcp")
+		includeCloudflare, _ := cmd.Flags().GetBool("cloudflare")
 		includeTerraform, _ := cmd.Flags().GetBool("terraform")
 		debug := viper.GetBool("debug")
 		discovery, _ := cmd.Flags().GetBool("discovery")
@@ -126,6 +134,21 @@ Examples:
 					Writer:     os.Stdout,
 					Destroyer:  destroyer,
 					Debug:      debug,
+				})
+			}
+
+			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "cloudflare") {
+				cfToken := cloudflare.ResolveAPIToken()
+				cfAccountID := cloudflare.ResolveAccountID()
+				if cfToken == "" {
+					return fmt.Errorf("cloudflare api_token is required (set cloudflare.api_token, CLOUDFLARE_API_TOKEN, or CF_API_TOKEN)")
+				}
+				return maker.ExecuteCloudflarePlan(ctx, makerPlan, maker.ExecOptions{
+					CloudflareAPIToken:  cfToken,
+					CloudflareAccountID: cfAccountID,
+					Writer:              os.Stdout,
+					Destroyer:           destroyer,
+					Debug:               debug,
 				})
 			}
 
@@ -248,15 +271,30 @@ Examples:
 
 			// Decide provider for maker plans.
 			// Priority:
-			//  1) Explicit flags win (--gcp / --aws)
+			//  1) Explicit flags win (--gcp / --aws / --cloudflare)
 			//  2) Infer from question (cheap heuristic)
 			makerProvider := "aws"
 			makerProviderReason := "default"
 			explicitGCP := cmd.Flags().Changed("gcp") && includeGCP
 			explicitAWS := cmd.Flags().Changed("aws") && includeAWS
+			explicitCloudflare := cmd.Flags().Changed("cloudflare") && includeCloudflare
+			explicitCount := 0
+			if explicitGCP {
+				explicitCount++
+			}
+			if explicitAWS {
+				explicitCount++
+			}
+			if explicitCloudflare {
+				explicitCount++
+			}
+			if explicitCount > 1 {
+				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --cloudflare) together with --maker")
+			}
 			switch {
-			case explicitGCP && explicitAWS:
-				return fmt.Errorf("cannot use --aws and --gcp together with --maker")
+			case explicitCloudflare:
+				makerProvider = "cloudflare"
+				makerProviderReason = "explicit"
 			case explicitGCP:
 				makerProvider = "gcp"
 				makerProviderReason = "explicit"
@@ -264,8 +302,11 @@ Examples:
 				makerProvider = "aws"
 				makerProviderReason = "explicit"
 			default:
-				_, _, _, _, _, inferredGCP := inferContext(questionForRouting(question))
-				if inferredGCP {
+				svcCtx := routing.InferContext(questionForRouting(question))
+				if svcCtx.Cloudflare {
+					makerProvider = "cloudflare"
+					makerProviderReason = "inferred"
+				} else if svcCtx.GCP {
 					makerProvider = "gcp"
 					makerProviderReason = "inferred"
 				}
@@ -275,9 +316,14 @@ Examples:
 			_, _ = fmt.Fprintf(os.Stderr, "[maker] provider=%s (%s)\n", makerProvider, makerProviderReason)
 
 			aiClient := ai.NewClient(provider, apiKey, debug, aiProfile)
-			prompt := maker.PlanPromptWithMode(question, destroyer)
-			if makerProvider == "gcp" {
+			var prompt string
+			switch makerProvider {
+			case "cloudflare":
+				prompt = maker.CloudflarePlanPromptWithMode(question, destroyer)
+			case "gcp":
 				prompt = maker.GCPPlanPromptWithMode(question, destroyer)
+			default:
+				prompt = maker.PlanPromptWithMode(question, destroyer)
 			}
 			resp, err := aiClient.AskPrompt(ctx, prompt)
 			if err != nil {
@@ -292,7 +338,9 @@ Examples:
 
 			plan.Provider = makerProvider
 
-			if strings.EqualFold(strings.TrimSpace(plan.Provider), "gcp") {
+			// Handle GCP and Cloudflare plans (output directly, no enrichment)
+			providerLower := strings.ToLower(strings.TrimSpace(plan.Provider))
+			if providerLower == "gcp" || providerLower == "cloudflare" {
 				if plan.CreatedAt.IsZero() {
 					plan.CreatedAt = time.Now().UTC()
 				}
@@ -407,30 +455,64 @@ Format as a professional compliance table suitable for government security docum
 			includeTerraform = true
 		}
 
-		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP {
-			var inferredTerraform bool
-			var inferredCode bool
-			var inferredK8s bool
-			var inferredGCP bool
+		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeCloudflare {
 			routingQuestion := questionForRouting(question)
-			includeAWS, inferredCode, includeGitHub, inferredTerraform, inferredK8s, inferredGCP = inferContext(routingQuestion)
-			_ = inferredCode
+
+			// First, do quick keyword check for explicit terms
+			svcCtx := routing.InferContext(routingQuestion)
+			includeAWS = svcCtx.AWS
+			includeGitHub = svcCtx.GitHub
 
 			if debug {
-				fmt.Printf("Inferred context: AWS=%v, GitHub=%v, Terraform=%v, K8s=%v, GCP=%v\n", includeAWS, includeGitHub, inferredTerraform, inferredK8s, inferredGCP)
+				fmt.Printf("Keyword inference: AWS=%v, GitHub=%v, Terraform=%v, K8s=%v, GCP=%v, Cloudflare=%v\n",
+					svcCtx.AWS, svcCtx.GitHub, svcCtx.Terraform, svcCtx.K8s, svcCtx.GCP, svcCtx.Cloudflare)
+			}
+
+			// For ambiguous queries (multiple services detected or Cloudflare detected),
+			// use LLM to make the final routing decision
+			if routing.NeedsLLMClassification(svcCtx) {
+				if debug {
+					fmt.Println("[routing] Ambiguous query detected, using LLM for classification...")
+				}
+
+				llmService, err := routing.ClassifyWithLLM(context.Background(), routingQuestion, debug)
+				if err != nil {
+					// FALLBACK: LLM classification failed, use keyword-based inference
+					if debug {
+						fmt.Printf("[routing] LLM classification failed (%v), falling back to keyword inference\n", err)
+					}
+					// Keep the keyword-inferred values as-is (no changes needed)
+				} else {
+					// LLM succeeded - override keyword-based inference with LLM decision
+					routing.ApplyLLMClassification(&svcCtx, llmService)
+
+					if debug {
+						fmt.Printf("LLM override: AWS=%v, K8s=%v, GCP=%v, Cloudflare=%v\n",
+							svcCtx.AWS, svcCtx.K8s, svcCtx.GCP, svcCtx.Cloudflare)
+					}
+				}
 			}
 
 			// Handle inferred Terraform context
-			if inferredTerraform {
+			if svcCtx.Terraform {
 				includeTerraform = true
 			}
 
-			if inferredGCP {
+			if svcCtx.GCP {
 				includeGCP = true
 			}
 
+			// Update includeAWS and includeGitHub from service context
+			includeAWS = svcCtx.AWS
+			includeGitHub = svcCtx.GitHub
+
+			// Handle Cloudflare queries by delegating to Cloudflare agent
+			if svcCtx.Cloudflare {
+				return handleCloudflareQuery(context.Background(), routingQuestion, debug)
+			}
+
 			// Handle K8s queries by delegating to K8s agent
-			if inferredK8s {
+			if svcCtx.K8s {
 				return handleK8sQuery(context.Background(), routingQuestion, debug, viper.GetString("kubernetes.kubeconfig"))
 			}
 		}
@@ -728,6 +810,7 @@ func init() {
 
 	askCmd.Flags().Bool("aws", false, "Include AWS infrastructure context")
 	askCmd.Flags().Bool("gcp", false, "Include GCP infrastructure context")
+	askCmd.Flags().Bool("cloudflare", false, "Include Cloudflare infrastructure context")
 	askCmd.Flags().Bool("github", false, "Include GitHub repository context")
 	askCmd.Flags().Bool("terraform", false, "Include Terraform workspace context")
 	askCmd.Flags().Bool("discovery", false, "Run comprehensive infrastructure discovery (all services)")
@@ -854,123 +937,6 @@ func resolveGeminiModel(provider, flagValue string) string {
 	return model
 }
 
-// inferContext tries to determine if the question is about AWS, GitHub, Terraform, or Kubernetes.
-// Code scanning is disabled, so this never infers code context.
-func inferContext(question string) (aws bool, code bool, github bool, terraform bool, k8s bool, gcp bool) {
-	awsKeywords := []string{
-		// Core services
-		"ec2", "lambda", "rds", "s3", "ecs", "cloudwatch", "logs", "batch", "sqs", "sns", "dynamodb", "elasticache", "elb", "alb", "nlb", "route53", "cloudfront", "api-gateway", "cognito", "iam", "vpc", "subnet", "security-group", "nacl", "nat", "igw", "vpn", "direct-connect",
-		// General terms
-		"instance", "bucket", "database", "aws", "resources", "infrastructure", "running", "account", "error", "log", "job", "queue", "compute", "storage", "network", "cdn", "load-balancer", "auto-scaling", "scaling", "health", "metric", "alarm", "notification", "backup", "snapshot", "ami", "volume", "ebs", "efs", "fsx",
-		// Compute and GPU terms
-		"gpu", "cuda", "ml", "machine-learning", "training", "inference", "p2", "p3", "p4", "g3", "g4", "g5", "spot", "reserved", "dedicated",
-		// Status and operations
-		"status", "state", "healthy", "unhealthy", "available", "pending", "stopping", "stopped", "terminated", "creating", "deleting", "modifying", "active", "inactive", "enabled", "disabled",
-		// Cost and billing
-		"cost", "billing", "price", "usage", "spend", "budget",
-		// Monitoring and debugging
-		"monitor", "trace", "debug", "performance", "latency", "throughput", "error-rate", "failure", "timeout", "retry",
-		// Infrastructure discovery
-		"services", "active", "deployed", "discovery", "overview", "summary", "list-all", "what's-running", "what-services", "infrastructure-overview",
-	}
-
-	githubKeywords := []string{
-		// GitHub platform
-		"github", "git", "repository", "repo", "fork", "clone", "branch", "tag", "release", "issue", "discussion",
-		// CI/CD and Actions
-		"action", "workflow", "ci", "cd", "build", "deploy", "deployment", "pipeline", "job", "step", "runner", "artifact",
-		// Collaboration
-		"pr", "pull", "request", "merge", "commit", "push", "pull-request", "review", "approve", "comment", "assignee", "reviewer",
-		// Project management
-		"milestone", "project", "board", "epic", "story", "task", "bug", "feature", "enhancement", "label", "status",
-		// Security and compliance
-		"security", "vulnerability", "dependabot", "secret", "token", "permission", "access", "audit",
-	}
-
-	terraformKeywords := []string{
-		// Terraform core
-		"terraform", "tf", "hcl", "plan", "apply", "destroy", "init", "workspace", "state", "backend", "provider", "resource", "data", "module", "variable", "output", "local",
-		// Operations
-		"infrastructure-as-code", "iac", "provisioning", "deployment", "environment", "stack", "configuration", "template",
-		// State management
-		"tfstate", "state-file", "remote-state", "lock", "unlock", "drift", "refresh", "import", "taint", "untaint",
-		// Workspaces and environments
-		"dev", "stage", "staging", "prod", "production", "qa", "environment", "workspace",
-	}
-
-	k8sKeywords := []string{
-		// Core K8s terms
-		"kubernetes", "k8s", "kubectl", "kube",
-		// Workloads
-		"pod", "pods", "deployment", "deployments", "replicaset", "statefulset",
-		"daemonset", "job", "cronjob",
-		// Networking
-		"service", "services", "ingress", "loadbalancer", "nodeport", "clusterip",
-		"networkpolicy", "endpoint",
-		// Storage
-		"pv", "pvc", "persistentvolume", "storageclass", "configmap", "secret",
-		// Cluster
-		"node", "nodes", "namespace", "cluster", "kubeconfig", "context",
-		// Tools
-		"helm", "chart", "release", "tiller",
-		// Providers
-		"eks", "kubeadm", "kops", "k3s", "minikube",
-		// Operations
-		"rollout", "scale", "drain", "cordon", "taint",
-	}
-
-	gcpKeywords := []string{
-		"gcp", "google cloud", "cloud run", "cloudrun", "cloud sql", "cloudsql", "gke", "gcs", "cloud storage",
-		"pubsub", "pub/sub", "cloud functions", "cloud function", "compute engine", "gce", "iam service account",
-		"workload identity", "artifact registry", "secret manager", "bigquery", "spanner", "bigtable",
-		"cloud build", "cloud deploy", "cloud dns", "cloud armor", "cloud load balancing", "api gateway",
-	}
-
-	questionLower := strings.ToLower(question)
-
-	for _, keyword := range awsKeywords {
-		if contains(questionLower, keyword) {
-			aws = true
-			break
-		}
-	}
-
-	for _, keyword := range githubKeywords {
-		if contains(questionLower, keyword) {
-			github = true
-			break
-		}
-	}
-
-	for _, keyword := range terraformKeywords {
-		if contains(questionLower, keyword) {
-			terraform = true
-			break
-		}
-	}
-
-	for _, keyword := range k8sKeywords {
-		if contains(questionLower, keyword) {
-			k8s = true
-			break
-		}
-	}
-
-	for _, keyword := range gcpKeywords {
-		if contains(questionLower, keyword) {
-			gcp = true
-			break
-		}
-	}
-
-	// If no specific context detected, include AWS + GitHub by default.
-	if !aws && !github && !terraform && !k8s && !gcp {
-		aws, github = true, true
-	}
-
-	return aws, code, github, terraform, k8s, gcp
-}
-
 func questionForRouting(question string) string {
 	trimmed := strings.TrimSpace(question)
 	if trimmed == "" {
@@ -1015,6 +981,249 @@ func questionForRouting(question string) string {
 	}
 
 	return trimmed
+}
+
+// handleCloudflareQuery delegates a Cloudflare query to the Cloudflare agent
+func handleCloudflareQuery(ctx context.Context, question string, debug bool) error {
+	if debug {
+		fmt.Println("Delegating query to Cloudflare agent...")
+	}
+
+	accountID := cloudflare.ResolveAccountID()
+	apiToken := cloudflare.ResolveAPIToken()
+
+	if apiToken == "" {
+		return fmt.Errorf("cloudflare api_token is required (set cloudflare.api_token, CLOUDFLARE_API_TOKEN, or CF_API_TOKEN)")
+	}
+
+	client, err := cloudflare.NewClient(accountID, apiToken, debug)
+	if err != nil {
+		return fmt.Errorf("failed to create Cloudflare client: %w", err)
+	}
+
+	// Determine query type
+	questionLower := strings.ToLower(question)
+
+	// Check for WAF/Security queries
+	isWAF := strings.Contains(questionLower, "firewall") ||
+		strings.Contains(questionLower, "waf") ||
+		strings.Contains(questionLower, "rate limit") ||
+		strings.Contains(questionLower, "security level") ||
+		strings.Contains(questionLower, "under attack") ||
+		strings.Contains(questionLower, "ddos") ||
+		strings.Contains(questionLower, "bot")
+
+	if isWAF {
+		// Use WAF subagent
+		wafAgent := cfwaf.NewSubAgent(client, debug)
+		opts := cfwaf.QueryOptions{}
+
+		response, err := wafAgent.HandleQuery(ctx, question, opts)
+		if err != nil {
+			return fmt.Errorf("Cloudflare WAF agent error: %w", err)
+		}
+
+		switch response.Type {
+		case cfwaf.ResponseTypePlan:
+			planJSON, err := json.MarshalIndent(response.Plan, "", "  ")
+			if err != nil {
+				return fmt.Errorf("failed to format plan: %w", err)
+			}
+			fmt.Println(string(planJSON))
+			fmt.Println("\n// To apply this plan, run:")
+			fmt.Println("// clanker ask --apply --plan-file <save-above-to-file.json>")
+		case cfwaf.ResponseTypeResult:
+			fmt.Println(response.Result)
+		case cfwaf.ResponseTypeError:
+			return response.Error
+		}
+		return nil
+	}
+
+	// Check for Workers queries
+	isWorkers := strings.Contains(questionLower, "worker") ||
+		strings.Contains(questionLower, "kv") ||
+		strings.Contains(questionLower, "d1") ||
+		strings.Contains(questionLower, "r2") ||
+		strings.Contains(questionLower, "pages") ||
+		strings.Contains(questionLower, "durable object")
+
+	if isWorkers {
+		// Use Workers subagent
+		workersAgent := cfworkers.NewSubAgent(client, debug)
+		opts := cfworkers.QueryOptions{
+			AccountID: accountID,
+		}
+
+		response, err := workersAgent.HandleQuery(ctx, question, opts)
+		if err != nil {
+			return fmt.Errorf("Cloudflare Workers agent error: %w", err)
+		}
+
+		switch response.Type {
+		case cfworkers.ResponseTypePlan:
+			planJSON, err := json.MarshalIndent(response.Plan, "", "  ")
+			if err != nil {
+				return fmt.Errorf("failed to format plan: %w", err)
+			}
+			fmt.Println(string(planJSON))
+			fmt.Println("\n// To apply this plan, run:")
+			fmt.Println("// clanker ask --apply --plan-file <save-above-to-file.json>")
+		case cfworkers.ResponseTypeResult:
+			fmt.Println(response.Result)
+		case cfworkers.ResponseTypeError:
+			return response.Error
+		}
+		return nil
+	}
+
+	// Check for Analytics queries
+	isAnalytics := strings.Contains(questionLower, "analytics") ||
+		strings.Contains(questionLower, "traffic") ||
+		strings.Contains(questionLower, "bandwidth") ||
+		strings.Contains(questionLower, "requests") ||
+		strings.Contains(questionLower, "visitors") ||
+		strings.Contains(questionLower, "page views") ||
+		strings.Contains(questionLower, "performance metrics")
+
+	if isAnalytics {
+		// Use Analytics subagent
+		analyticsAgent := cfanalytics.NewSubAgent(client, debug)
+		opts := cfanalytics.QueryOptions{}
+
+		response, err := analyticsAgent.HandleQuery(ctx, question, opts)
+		if err != nil {
+			return fmt.Errorf("Cloudflare Analytics agent error: %w", err)
+		}
+
+		switch response.Type {
+		case cfanalytics.ResponseTypeResult:
+			fmt.Println(response.Result)
+		case cfanalytics.ResponseTypeError:
+			return response.Error
+		}
+		return nil
+	}
+
+	// Check for Zero Trust queries
+	isZeroTrust := strings.Contains(questionLower, "tunnel") ||
+		strings.Contains(questionLower, "access app") ||
+		strings.Contains(questionLower, "access policy") ||
+		strings.Contains(questionLower, "zero trust") ||
+		strings.Contains(questionLower, "cloudflared") ||
+		strings.Contains(questionLower, "warp")
+
+	if isZeroTrust {
+		// Use Zero Trust subagent
+		ztAgent := cfzerotrust.NewSubAgent(client, debug)
+		opts := cfzerotrust.QueryOptions{
+			AccountID: accountID,
+		}
+
+		response, err := ztAgent.HandleQuery(ctx, question, opts)
+		if err != nil {
+			return fmt.Errorf("Cloudflare Zero Trust agent error: %w", err)
+		}
+
+		switch response.Type {
+		case cfzerotrust.ResponseTypePlan:
+			planJSON, err := json.MarshalIndent(response.Plan, "", "  ")
+			if err != nil {
+				return fmt.Errorf("failed to format plan: %w", err)
+			}
+			fmt.Println(string(planJSON))
+			fmt.Println("\n// To apply this plan, run:")
+			fmt.Println("// clanker ask --apply --plan-file <save-above-to-file.json>")
+		case cfzerotrust.ResponseTypeResult:
+			fmt.Println(response.Result)
+		case cfzerotrust.ResponseTypeError:
+			return response.Error
+		}
+		return nil
+	}
+
+	// Check for DNS queries
+	isDNS := strings.Contains(questionLower, "dns") ||
+		strings.Contains(questionLower, "record") ||
+		strings.Contains(questionLower, "zone") ||
+		strings.Contains(questionLower, "domain") ||
+		strings.Contains(questionLower, "cname") ||
+		strings.Contains(questionLower, "a record") ||
+		strings.Contains(questionLower, "mx") ||
+		strings.Contains(questionLower, "txt") ||
+		strings.Contains(questionLower, "nameserver")
+
+	if isDNS {
+		// Use DNS subagent
+		dnsAgent := cfdns.NewSubAgent(client, debug)
+		opts := cfdns.QueryOptions{}
+
+		response, err := dnsAgent.HandleQuery(ctx, question, opts)
+		if err != nil {
+			return fmt.Errorf("Cloudflare DNS agent error: %w", err)
+		}
+
+		switch response.Type {
+		case cfdns.ResponseTypePlan:
+			planJSON, err := json.MarshalIndent(response.Plan, "", "  ")
+			if err != nil {
+				return fmt.Errorf("failed to format plan: %w", err)
+			}
+			fmt.Println(string(planJSON))
+			fmt.Println("\n// To apply this plan, run:")
+			fmt.Println("// clanker ask --apply --plan-file <save-above-to-file.json>")
+		case cfdns.ResponseTypeResult:
+			fmt.Println(response.Result)
+		case cfdns.ResponseTypeError:
+			return response.Error
+		}
+		return nil
+	}
+
+	// For non-DNS queries, use the general Cloudflare context
+	cfContext, err := client.GetRelevantContext(ctx, question)
+	if err != nil {
+		return fmt.Errorf("failed to get Cloudflare context: %w", err)
+	}
+
+	// Get AI provider settings
+	aiProfile := viper.GetString("ai.default_provider")
+	if aiProfile == "" {
+		aiProfile = "openai"
+	}
+
+	var apiKey string
+	switch aiProfile {
+	case "gemini", "gemini-api":
+		apiKey = ""
+	case "openai":
+		apiKey = viper.GetString("ai.providers.openai.api_key")
+		if apiKey == "" {
+			apiKey = os.Getenv("OPENAI_API_KEY")
+		}
+	default:
+		apiKey = viper.GetString("ai.api_key")
+	}
+
+	aiClient := ai.NewClient(aiProfile, apiKey, debug, aiProfile)
+
+	// Build prompt with Cloudflare context
+	prompt := fmt.Sprintf(`You are a Cloudflare infrastructure assistant. Answer the following question based on the Cloudflare account context provided.
+
+Question: %s
+
+Cloudflare Account Context:
+%s
+
+Provide a clear and helpful response.`, question, cfContext)
+
+	response, err := aiClient.AskPrompt(ctx, prompt)
+	if err != nil {
+		return fmt.Errorf("failed to get AI response: %w", err)
+	}
+
+	fmt.Println(response)
+	return nil
 }
 
 // handleK8sQuery delegates a Kubernetes query to the K8s agent
@@ -1407,10 +1616,6 @@ func extractDeployName(question string) string {
 		}
 	}
 	return ""
-}
-
-func contains(s, substr string) bool {
-	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
 }
 
 // formatK8sCommand formats a command for display (like AWS maker formatAWSArgsForLog)
