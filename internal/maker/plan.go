@@ -77,6 +77,8 @@ func normalizeArgs(args []string) []string {
 			out = out[1:]
 		case strings.EqualFold(out[0], "gcloud"):
 			out = out[1:]
+		case strings.EqualFold(out[0], "az"):
+			out = out[1:]
 		}
 	}
 
