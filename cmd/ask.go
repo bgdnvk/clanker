@@ -12,6 +12,7 @@ import (
 
 	"github.com/bgdnvk/clanker/internal/ai"
 	"github.com/bgdnvk/clanker/internal/aws"
+	"github.com/bgdnvk/clanker/internal/azure"
 	"github.com/bgdnvk/clanker/internal/cloudflare"
 	cfanalytics "github.com/bgdnvk/clanker/internal/cloudflare/analytics"
 	cfdns "github.com/bgdnvk/clanker/internal/cloudflare/dns"
@@ -64,6 +65,7 @@ Examples:
 		includeAWS, _ := cmd.Flags().GetBool("aws")
 		includeGitHub, _ := cmd.Flags().GetBool("github")
 		includeGCP, _ := cmd.Flags().GetBool("gcp")
+		includeAzure, _ := cmd.Flags().GetBool("azure")
 		includeCloudflare, _ := cmd.Flags().GetBool("cloudflare")
 		includeTerraform, _ := cmd.Flags().GetBool("terraform")
 		debug := viper.GetBool("debug")
@@ -72,6 +74,7 @@ Examples:
 		profile, _ := cmd.Flags().GetString("profile")
 		workspace, _ := cmd.Flags().GetString("workspace")
 		gcpProject, _ := cmd.Flags().GetString("gcp-project")
+		azureSubscription, _ := cmd.Flags().GetString("azure-subscription")
 		aiProfile, _ := cmd.Flags().GetString("ai-profile")
 		openaiKey, _ := cmd.Flags().GetString("openai-key")
 		anthropicKey, _ := cmd.Flags().GetString("anthropic-key")
@@ -134,6 +137,22 @@ Examples:
 					Writer:     os.Stdout,
 					Destroyer:  destroyer,
 					Debug:      debug,
+				})
+			}
+
+			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "azure") {
+				sub := strings.TrimSpace(azureSubscription)
+				if sub == "" {
+					sub = azure.ResolveSubscriptionID()
+				}
+				if sub == "" {
+					return fmt.Errorf("azure subscription_id is required (set infra.azure.subscription_id, AZURE_SUBSCRIPTION_ID, or use --azure-subscription)")
+				}
+				return maker.ExecuteAzurePlan(ctx, makerPlan, maker.ExecOptions{
+					AzureSubscriptionID: sub,
+					Writer:              os.Stdout,
+					Destroyer:           destroyer,
+					Debug:               debug,
 				})
 			}
 
@@ -278,6 +297,7 @@ Examples:
 			explicitGCP := cmd.Flags().Changed("gcp") && includeGCP
 			explicitAWS := cmd.Flags().Changed("aws") && includeAWS
 			explicitCloudflare := cmd.Flags().Changed("cloudflare") && includeCloudflare
+			explicitAzure := cmd.Flags().Changed("azure") && includeAzure
 			explicitCount := 0
 			if explicitGCP {
 				explicitCount++
@@ -288,12 +308,18 @@ Examples:
 			if explicitCloudflare {
 				explicitCount++
 			}
+			if explicitAzure {
+				explicitCount++
+			}
 			if explicitCount > 1 {
-				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --cloudflare) together with --maker")
+				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --azure, --cloudflare) together with --maker")
 			}
 			switch {
 			case explicitCloudflare:
 				makerProvider = "cloudflare"
+				makerProviderReason = "explicit"
+			case explicitAzure:
+				makerProvider = "azure"
 				makerProviderReason = "explicit"
 			case explicitGCP:
 				makerProvider = "gcp"
@@ -305,6 +331,9 @@ Examples:
 				svcCtx := routing.InferContext(questionForRouting(question))
 				if svcCtx.Cloudflare {
 					makerProvider = "cloudflare"
+					makerProviderReason = "inferred"
+				} else if svcCtx.Azure {
+					makerProvider = "azure"
 					makerProviderReason = "inferred"
 				} else if svcCtx.GCP {
 					makerProvider = "gcp"
@@ -320,6 +349,8 @@ Examples:
 			switch makerProvider {
 			case "cloudflare":
 				prompt = maker.CloudflarePlanPromptWithMode(question, destroyer)
+			case "azure":
+				prompt = maker.AzurePlanPromptWithMode(question, destroyer)
 			case "gcp":
 				prompt = maker.GCPPlanPromptWithMode(question, destroyer)
 			default:
@@ -338,9 +369,9 @@ Examples:
 
 			plan.Provider = makerProvider
 
-			// Handle GCP and Cloudflare plans (output directly, no enrichment)
+			// Handle GCP, Azure, and Cloudflare plans (output directly, no enrichment)
 			providerLower := strings.ToLower(strings.TrimSpace(plan.Provider))
-			if providerLower == "gcp" || providerLower == "cloudflare" {
+			if providerLower == "gcp" || providerLower == "azure" || providerLower == "cloudflare" {
 				if plan.CreatedAt.IsZero() {
 					plan.CreatedAt = time.Now().UTC()
 				}
@@ -455,7 +486,7 @@ Format as a professional compliance table suitable for government security docum
 			includeTerraform = true
 		}
 
-		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeCloudflare {
+		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare {
 			routingQuestion := questionForRouting(question)
 
 			// First, do quick keyword check for explicit terms
@@ -487,8 +518,8 @@ Format as a professional compliance table suitable for government security docum
 					routing.ApplyLLMClassification(&svcCtx, llmService)
 
 					if debug {
-						fmt.Printf("LLM override: AWS=%v, K8s=%v, GCP=%v, Cloudflare=%v\n",
-							svcCtx.AWS, svcCtx.K8s, svcCtx.GCP, svcCtx.Cloudflare)
+						fmt.Printf("LLM override: AWS=%v, K8s=%v, GCP=%v, Azure=%v, Cloudflare=%v\n",
+							svcCtx.AWS, svcCtx.K8s, svcCtx.GCP, svcCtx.Azure, svcCtx.Cloudflare)
 					}
 				}
 			}
@@ -502,9 +533,14 @@ Format as a professional compliance table suitable for government security docum
 				includeGCP = true
 			}
 
+			if svcCtx.Azure {
+				includeAzure = true
+			}
+
 			// Update includeAWS and includeGitHub from service context
 			includeAWS = svcCtx.AWS
 			includeGitHub = svcCtx.GitHub
+			includeAzure = svcCtx.Azure
 
 			// Handle Cloudflare queries by delegating to Cloudflare agent
 			if svcCtx.Cloudflare {
@@ -524,6 +560,7 @@ Format as a professional compliance table suitable for government security docum
 		var githubContext string
 		var terraformContext string
 		var gcpContext string
+		var azureContext string
 
 		if includeAWS {
 			var awsClient *aws.Client
@@ -627,6 +664,24 @@ Format as a professional compliance table suitable for government security docum
 			gcpContext, err = gcpClient.GetRelevantContext(ctx, question)
 			if err != nil {
 				return fmt.Errorf("failed to get GCP context: %w", err)
+			}
+		}
+
+		if includeAzure {
+			sub := strings.TrimSpace(azureSubscription)
+			if sub == "" {
+				sub = azure.ResolveSubscriptionID()
+			}
+			if sub == "" {
+				return fmt.Errorf("azure subscription_id is required (set infra.azure.subscription_id, AZURE_SUBSCRIPTION_ID, or use --azure-subscription)")
+			}
+			azureClient, err := azure.NewClient(sub, debug)
+			if err != nil {
+				return fmt.Errorf("failed to create Azure client: %w", err)
+			}
+			azureContext, err = azureClient.GetRelevantContext(ctx, question)
+			if err != nil {
+				return fmt.Errorf("failed to get Azure context: %w", err)
 			}
 		}
 
@@ -769,6 +824,12 @@ Format as a professional compliance table suitable for government security docum
 			}
 			combinedCodeContext += "GCP Context:\n" + gcpContext
 		}
+		if strings.TrimSpace(azureContext) != "" {
+			if combinedCodeContext != "" {
+				combinedCodeContext += "\n"
+			}
+			combinedCodeContext += "Azure Context:\n" + azureContext
+		}
 
 		// If no tools are enabled, skip the tool-calling pipeline entirely.
 		// This avoids confusing "selected operations" output that cannot execute.
@@ -810,6 +871,7 @@ func init() {
 
 	askCmd.Flags().Bool("aws", false, "Include AWS infrastructure context")
 	askCmd.Flags().Bool("gcp", false, "Include GCP infrastructure context")
+	askCmd.Flags().Bool("azure", false, "Include Azure infrastructure context")
 	askCmd.Flags().Bool("cloudflare", false, "Include Cloudflare infrastructure context")
 	askCmd.Flags().Bool("github", false, "Include GitHub repository context")
 	askCmd.Flags().Bool("terraform", false, "Include Terraform workspace context")
@@ -817,6 +879,7 @@ func init() {
 	askCmd.Flags().Bool("compliance", false, "Generate compliance report showing all services, ports, and protocols")
 	askCmd.Flags().String("profile", "", "AWS profile to use for infrastructure queries")
 	askCmd.Flags().String("gcp-project", "", "GCP project ID to use for infrastructure queries")
+	askCmd.Flags().String("azure-subscription", "", "Azure subscription ID to use for infrastructure queries")
 	askCmd.Flags().String("workspace", "", "Terraform workspace to use for infrastructure queries")
 	askCmd.Flags().String("ai-profile", "", "AI profile to use (default: 'default')")
 	askCmd.Flags().String("openai-key", "", "OpenAI API key (overrides config)")
@@ -826,7 +889,7 @@ func init() {
 	askCmd.Flags().String("anthropic-model", "", "Anthropic model to use (overrides config)")
 	askCmd.Flags().String("gemini-model", "", "Gemini model to use (overrides config)")
 	askCmd.Flags().Bool("agent-trace", false, "Show detailed coordinator agent lifecycle logs (overrides config)")
-	askCmd.Flags().Bool("maker", false, "Generate an AWS or GCP CLI plan (JSON) for infrastructure changes")
+	askCmd.Flags().Bool("maker", false, "Generate an AWS, GCP, Azure, or Cloudflare CLI plan (JSON) for infrastructure changes")
 	askCmd.Flags().Bool("destroyer", false, "Allow destructive operations when using --maker (requires explicit confirmation in UI/workflow)")
 	askCmd.Flags().Bool("apply", false, "Apply an approved maker plan (reads from stdin unless --plan-file is provided)")
 	askCmd.Flags().String("plan-file", "", "Optional path to maker plan JSON file for --apply")

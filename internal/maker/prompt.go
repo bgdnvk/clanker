@@ -243,6 +243,70 @@ User request:
 %q`, destructiveRule, question)
 }
 
+func AzurePlanPrompt(question string) string {
+	return AzurePlanPromptWithMode(question, false)
+}
+
+func AzurePlanPromptWithMode(question string, destroyer bool) string {
+	destructiveRule := "- Avoid any destructive operations (delete/remove/purge/destroy)."
+	if destroyer {
+		destructiveRule = "- Destructive operations are allowed ONLY if the user explicitly asked for deletion/teardown."
+	}
+
+	return fmt.Sprintf(`You are an infrastructure maker planner.
+
+Your job: produce a concrete, minimal Azure CLI execution plan to satisfy the user request.
+
+Constraints:
+- Output ONLY valid JSON.
+- Use this schema exactly:
+{
+  "version": 1,
+  "createdAt": "RFC3339 timestamp",
+  "provider": "azure",
+  "question": "original user question",
+  "summary": "short summary of what will be created/changed",
+  "commands": [
+    {
+      "args": ["az", "<group>", "<subcommand>", "..."],
+      "reason": "why this command is needed",
+      "produces": {
+        "OPTIONAL_BINDING_NAME": "$.Json.Path.To.Value"
+      }
+    }
+  ],
+  "notes": ["optional notes"]
+}
+
+Rules for commands:
+- Provide args as an array; do NOT provide a single string.
+- Commands MUST be Azure CLI only. Every command args MUST start with "az".
+- Do NOT include any non-az programs (no python/node/bash/curl/terraform/etc).
+- Do NOT include shell operators, pipes, redirects, or subshells.
+- Prefer idempotent operations where possible.
+%s
+
+Placeholders and bindings (CRITICAL):
+- You MAY use placeholder tokens inside args like "<RG_NAME>" or "<VNET_ID>".
+- If you use ANY placeholder token "<NAME>", you MUST ensure an earlier command includes:
+  - "produces": { "NAME": "$.json.path.to.value" }
+- The produces mapping is REQUIRED for EVERY command that creates a resource used later.
+
+Output formatting:
+- If a command has "produces", ensure it uses JSON output (e.g. add "--output", "json").
+
+Service guidance (when relevant):
+- Compute: az vm, az aks
+- Networking: az network vnet/subnet/nsg/lb/public-ip
+- App platform: az webapp, az functionapp
+- Storage: az storage account
+- Security: az keyvault
+- Databases: az cosmosdb
+
+User request:
+%q`, destructiveRule, question)
+}
+
 func GCPPlanPrompt(question string) string {
 	return GCPPlanPromptWithMode(question, false)
 }
