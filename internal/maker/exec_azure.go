@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -36,6 +37,7 @@ func ExecuteAzurePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		args := make([]string, 0, len(cmdSpec.Args)+10)
 		args = append(args, cmdSpec.Args...)
 		args = applyPlanBindings(args, bindings)
+		args = normalizeAzureAzArgs(args)
 		args = ensureAzJSONOutput(args, cmdSpec.Produces)
 		args = ensureAzSubscription(args, subscriptionID)
 		args = ensureAzOnlyShowErrors(args)
@@ -56,23 +58,23 @@ func ExecuteAzurePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		out, runErr := runAzCommandStreaming(ctx, args, opts.Writer)
 		if runErr != nil {
 			// If the subscription is valid but this resource provider isn't registered yet,
-			// try registering it once (similar spirit to gcloud auth hints, but action-based).
+			// try registering it (bounded attempts; only when it fails).
 			if subscriptionID != "" && isAzProviderRegistrationError(out) {
-				if ns := azureNamespaceForAzCommand(args); ns != "" {
-					_, _ = fmt.Fprintf(opts.Writer, "[maker] azure provider not registered: %s (attempting register)\n", ns)
-					if regErr := ensureAzureProviderRegistered(ctx, subscriptionID, ns, 90*time.Second); regErr == nil {
-						out2, runErr2 := runAzCommandStreaming(ctx, args, opts.Writer)
-						if runErr2 == nil {
-							out = out2
-							runErr = nil
-						} else {
-							hint := azErrorHint(out2)
-							if hint != "" {
-								return fmt.Errorf("az command %d failed: %w%s", idx+1, runErr2, hint)
-							}
-							return fmt.Errorf("az command %d failed: %w", idx+1, runErr2)
-						}
+				attempted := make(map[string]bool)
+				for attempt := 0; attempt < 2 && runErr != nil && isAzProviderRegistrationError(out); attempt++ {
+					ns := chooseAzureProviderNamespace(out, args, attempted)
+					if ns == "" {
+						break
 					}
+					attempted[ns] = true
+					_, _ = fmt.Fprintf(opts.Writer, "[maker] azure provider not registered: %s (attempting register)\n", ns)
+					if regErr := ensureAzureProviderRegistered(ctx, subscriptionID, ns, 2*time.Minute, opts.Writer); regErr != nil {
+						return fmt.Errorf("azure provider registration failed: %w", regErr)
+					}
+
+					out2, runErr2 := runAzCommandStreaming(ctx, args, opts.Writer)
+					out = out2
+					runErr = runErr2
 				}
 			}
 			if runErr == nil {
@@ -187,14 +189,34 @@ func azureNamespaceForAzCommand(args []string) string {
 		return "Microsoft.Storage"
 	}
 
+	// Resource groups / ARM.
+	if lower[0] == "group" || lower[0] == "resource" || lower[0] == "deployment" {
+		return "Microsoft.Resources"
+	}
+
 	// App Service / Functions.
 	if lower[0] == "functionapp" || lower[0] == "webapp" || lower[0] == "appservice" {
+		return "Microsoft.Web"
+	}
+
+	// Static Web Apps.
+	if lower[0] == "staticwebapp" {
 		return "Microsoft.Web"
 	}
 
 	// AKS.
 	if lower[0] == "aks" {
 		return "Microsoft.ContainerService"
+	}
+
+	// Container Registry.
+	if lower[0] == "acr" {
+		return "Microsoft.ContainerRegistry"
+	}
+
+	// Container Instances.
+	if lower[0] == "container" {
+		return "Microsoft.ContainerInstance"
 	}
 
 	// Key Vault.
@@ -212,15 +234,109 @@ func azureNamespaceForAzCommand(args []string) string {
 		return "Microsoft.App"
 	}
 
+	// App Configuration.
+	if lower[0] == "appconfig" {
+		return "Microsoft.AppConfiguration"
+	}
+
+	// API Management.
+	if lower[0] == "apim" {
+		return "Microsoft.ApiManagement"
+	}
+
+	// Monitor / Insights / Log Analytics.
+	if lower[0] == "monitor" {
+		return "Microsoft.Insights"
+	}
+
 	// Networking.
 	if lower[0] == "network" {
 		return "Microsoft.Network"
 	}
 
+	// Front Door / CDN.
+	if lower[0] == "cdn" || lower[0] == "frontdoor" {
+		return "Microsoft.Cdn"
+	}
+
+	// Messaging.
+	if lower[0] == "servicebus" {
+		return "Microsoft.ServiceBus"
+	}
+	if lower[0] == "eventhubs" {
+		return "Microsoft.EventHub"
+	}
+	if lower[0] == "eventgrid" {
+		return "Microsoft.EventGrid"
+	}
+
+	// Databases / cache.
+	if lower[0] == "sql" {
+		return "Microsoft.Sql"
+	}
+	if lower[0] == "postgres" {
+		return "Microsoft.DBforPostgreSQL"
+	}
+	if lower[0] == "mysql" {
+		return "Microsoft.DBforMySQL"
+	}
+	if lower[0] == "redis" {
+		return "Microsoft.Cache"
+	}
+
+	// Identity.
+	if lower[0] == "identity" {
+		return "Microsoft.ManagedIdentity"
+	}
+
+	// AI.
+	if lower[0] == "cognitiveservices" {
+		return "Microsoft.CognitiveServices"
+	}
+
+	// Realtime.
+	if lower[0] == "signalr" {
+		return "Microsoft.SignalRService"
+	}
+
 	return ""
 }
 
-func ensureAzureProviderRegistered(ctx context.Context, subscriptionID string, namespace string, timeout time.Duration) error {
+var azMicrosoftNamespaceRegexp = regexp.MustCompile(`(?i)\bmicrosoft\.[a-z0-9]+\b`)
+
+func azureNamespacesFromAzOutput(output string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, m := range azMicrosoftNamespaceRegexp.FindAllString(output, -1) {
+		ns := strings.TrimSpace(m)
+		if ns == "" {
+			continue
+		}
+		ns = "Microsoft." + strings.TrimPrefix(strings.TrimPrefix(ns, "microsoft."), "Microsoft.")
+		if seen[ns] {
+			continue
+		}
+		seen[ns] = true
+		out = append(out, ns)
+	}
+	return out
+}
+
+func chooseAzureProviderNamespace(output string, args []string, attempted map[string]bool) string {
+	for _, ns := range azureNamespacesFromAzOutput(output) {
+		if !attempted[ns] {
+			return ns
+		}
+	}
+
+	if ns := azureNamespaceForAzCommand(args); ns != "" && !attempted[ns] {
+		return ns
+	}
+
+	return ""
+}
+
+func ensureAzureProviderRegistered(ctx context.Context, subscriptionID string, namespace string, timeout time.Duration, w io.Writer) error {
 	if strings.TrimSpace(subscriptionID) == "" || strings.TrimSpace(namespace) == "" {
 		return fmt.Errorf("missing subscription or namespace")
 	}
@@ -230,14 +346,26 @@ func ensureAzureProviderRegistered(ctx context.Context, subscriptionID string, n
 		return nil
 	}
 
+	if w != nil {
+		_, _ = fmt.Fprintf(w, "[maker] registering Azure provider %s (this can take a minute)\n", namespace)
+	}
+
 	_, _ = runAzCommandCapture(ctx, []string{"provider", "register", "--namespace", namespace, "--subscription", subscriptionID, "--only-show-errors"})
 
 	deadline := time.Now().Add(timeout)
+	nextLog := time.Now()
 	for time.Now().Before(deadline) {
 		state, _ := runAzCommandCapture(ctx, []string{"provider", "show", "--namespace", namespace, "--subscription", subscriptionID, "--query", "registrationState", "-o", "tsv", "--only-show-errors"})
 		st := strings.TrimSpace(state)
 		if strings.EqualFold(st, "Registered") {
+			if w != nil {
+				_, _ = fmt.Fprintf(w, "[maker] Azure provider registered: %s\n", namespace)
+			}
 			return nil
+		}
+		if w != nil && time.Now().After(nextLog) {
+			_, _ = fmt.Fprintf(w, "[maker] waiting for Azure provider %s registration (state=%s)\n", namespace, st)
+			nextLog = time.Now().Add(10 * time.Second)
 		}
 		select {
 		case <-ctx.Done():
@@ -246,7 +374,7 @@ func ensureAzureProviderRegistered(ctx context.Context, subscriptionID string, n
 		}
 	}
 
-	return fmt.Errorf("provider %s still not registered after %s", namespace, timeout.String())
+	return fmt.Errorf("Azure provider %s is still registering after %s; wait a bit and click Apply again", namespace, timeout.String())
 }
 
 func azErrorHint(output string) string {
@@ -370,6 +498,67 @@ func formatAzArgsForLog(args []string) string {
 	out = append(out, "az")
 	out = append(out, args...)
 	return strings.Join(out, " ")
+}
+
+func normalizeAzureAzArgs(args []string) []string {
+	// Keep apply resilient against stale maker plans.
+	// Example: Azure Functions no longer supports Node 18; auto-bump to 24.
+	if len(args) < 3 {
+		return args
+	}
+
+	lower0 := strings.ToLower(strings.TrimSpace(args[0]))
+	lower1 := strings.ToLower(strings.TrimSpace(args[1]))
+	if lower0 != "functionapp" || lower1 != "create" {
+		return args
+	}
+
+	var runtimeIsNode bool
+	for i := 0; i < len(args); i++ {
+		if strings.EqualFold(strings.TrimSpace(args[i]), "--runtime") && i+1 < len(args) {
+			v := strings.ToLower(strings.Trim(strings.TrimSpace(args[i+1]), "\"'"))
+			if v == "node" {
+				runtimeIsNode = true
+			}
+			break
+		}
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(args[i])), "--runtime=") {
+			v := strings.ToLower(strings.Trim(strings.TrimSpace(strings.TrimPrefix(args[i], "--runtime=")), "\"'"))
+			if v == "node" {
+				runtimeIsNode = true
+			}
+			break
+		}
+	}
+	if !runtimeIsNode {
+		return args
+	}
+
+	for i := 0; i < len(args); i++ {
+		if strings.EqualFold(strings.TrimSpace(args[i]), "--runtime-version") {
+			if i+1 < len(args) {
+				v := strings.Trim(strings.TrimSpace(args[i+1]), "\"'")
+				if v == "18" {
+					out := append([]string{}, args...)
+					out[i+1] = "24"
+					return out
+				}
+			}
+			return args
+		}
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(args[i])), "--runtime-version=") {
+			v := strings.Trim(strings.TrimSpace(strings.TrimPrefix(args[i], "--runtime-version=")), "\"'")
+			if v == "18" {
+				out := append([]string{}, args...)
+				out[i] = "--runtime-version=24"
+				return out
+			}
+			return args
+		}
+	}
+
+	// No runtime version specified; leave as-is.
+	return args
 }
 
 func runAzCommandStreaming(ctx context.Context, args []string, w io.Writer) (string, error) {

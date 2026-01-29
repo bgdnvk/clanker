@@ -299,6 +299,7 @@ Service guidance (when relevant):
 - Compute: az vm, az aks
 - Networking: az network vnet/subnet/nsg/lb/public-ip
 - App platform: az webapp, az functionapp
+- For Azure Functions with Node.js: use "--runtime node --runtime-version 24" (do NOT use EOL Node versions like 18).
 - Storage: az storage account
 - Security: az keyvault
 - Databases: az cosmosdb
