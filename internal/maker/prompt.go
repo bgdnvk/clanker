@@ -300,6 +300,24 @@ Service guidance (when relevant):
 - Networking: az network vnet/subnet/nsg/lb/public-ip
 - App platform: az webapp, az functionapp
 - For Azure Functions with Node.js: use "--runtime node --runtime-version 24" (do NOT use EOL Node versions like 18).
+- Azure Functions hosting:
+  - Prefer Consumption by using "az functionapp create --consumption-plan-location <REGION>".
+  - Do NOT use "az functionapp plan create --sku Y1" (Y1 is not a valid sku for that command).
+  - Only create a plan if the user explicitly asked for Premium/Dedicated:
+    - Premium (Elastic): "az functionapp plan create ... --sku EP1" (or EP2/EP3).
+    - Dedicated App Service Plan: use "az appservice plan create" with a valid sku (e.g., B1/S1/P1v3) and then create the functionapp referencing "--plan".
+- Deploying Azure Functions code (zip deploy):
+  - After creating the function app, you may add a deployment step using zip deploy:
+    - "az functionapp deployment source config-zip --resource-group <RG_NAME> --name <APP_NAME> --src <ZIP_OR_TOKEN>"
+  - If you cannot reference local files, use one of these runner-supported tokens for "--src":
+    - Simple HTTP endpoint token:
+      - "__CLANKER_AZURE_ZIP_HTTP_B64__:<SPEC_B64>"
+      - SPEC_B64 = base64url(JSON) with fields: functionName, route, methods, status, body, contentType
+      - Example JSON shape (base64url-encode it): {"functionName":"hello","route":"hello","methods":["get"],"status":200,"body":"hi","contentType":"text/plain"}
+    - Full zip manifest token:
+      - "__CLANKER_AZURE_ZIP_MANIFEST_B64__:<MANIFEST_B64>"
+      - MANIFEST_B64 = base64url(JSON) like: {"filesB64": {"host.json":"<BASE64>","myfunc/function.json":"<BASE64>","myfunc/index.js":"<BASE64>"}}
+      - Each file content is standard base64 (not base64url) inside the JSON.
 - Storage: az storage account
 - Security: az keyvault
 - Databases: az cosmosdb

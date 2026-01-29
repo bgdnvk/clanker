@@ -1,14 +1,26 @@
 package maker
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+)
+
+const clankerAzureHealthZipToken = "__CLANKER_AZURE_HEALTH_ZIP__"
+
+const (
+	clankerAzureZipHTTPTokenPrefix     = "__CLANKER_AZURE_ZIP_HTTP_B64__:"
+	clankerAzureZipManifestTokenPrefix = "__CLANKER_AZURE_ZIP_MANIFEST_B64__:"
 )
 
 func ExecuteAzurePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
@@ -42,6 +54,15 @@ func ExecuteAzurePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		args = ensureAzSubscription(args, subscriptionID)
 		args = ensureAzOnlyShowErrors(args)
 
+		var cleanup func()
+		args, cleanup, zipErr := materializeAzureZipDeployIfNeeded(args)
+		if zipErr != nil {
+			return fmt.Errorf("command %d invalid zip deploy: %w", idx+1, zipErr)
+		}
+		if cleanup != nil {
+			defer cleanup()
+		}
+
 		// Similar to how we pin --project for gcloud: keep az's active subscription stable.
 		if subscriptionID != "" {
 			if err := setAzureSubscription(ctx, subscriptionID); err != nil {
@@ -56,6 +77,26 @@ func ExecuteAzurePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: %s\n", idx+1, len(plan.Commands), formatAzArgsForLog(args))
 
 		out, runErr := runAzCommandStreaming(ctx, args, opts.Writer)
+		if runErr != nil && isAzZipDeployCommand(args) && isAzTransientDeployError(out) {
+			for attempt := 1; attempt <= 4; attempt++ {
+				backoff := time.Duration(2*attempt) * time.Second
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] zipdeploy transient failure; retrying in %s (attempt %d/4)\n", backoff.String(), attempt)
+				select {
+				case <-ctx.Done():
+					return fmt.Errorf("az command %d cancelled: %w", idx+1, ctx.Err())
+				case <-time.After(backoff):
+				}
+				out2, runErr2 := runAzCommandStreaming(ctx, args, opts.Writer)
+				out = out2
+				runErr = runErr2
+				if runErr == nil {
+					break
+				}
+				if !isAzTransientDeployError(out) {
+					break
+				}
+			}
+		}
 		if runErr != nil {
 			// If the subscription is valid but this resource provider isn't registered yet,
 			// try registering it (bounded attempts; only when it fails).
@@ -579,4 +620,267 @@ func runAzCommandStreaming(ctx context.Context, args []string, w io.Writer) (str
 		return out, err
 	}
 	return out, nil
+}
+
+func isAzZipDeployCommand(args []string) bool {
+	if len(args) < 5 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(args[0]), "functionapp") &&
+		strings.EqualFold(strings.TrimSpace(args[1]), "deployment") &&
+		strings.EqualFold(strings.TrimSpace(args[2]), "source") &&
+		strings.EqualFold(strings.TrimSpace(args[3]), "config-zip")
+}
+
+func isAzTransientDeployError(output string) bool {
+	lower := strings.ToLower(output)
+	if strings.Contains(lower, "service is unavailable") {
+		return true
+	}
+	if strings.Contains(lower, "http/2 503") || strings.Contains(lower, " 503 ") {
+		return true
+	}
+	if strings.Contains(lower, "operation returned an invalid status") {
+		return true
+	}
+	if strings.Contains(lower, "jsondecodeerror") || strings.Contains(lower, "expecting value: line 1 column 1") {
+		return true
+	}
+	return false
+}
+
+func materializeAzureZipDeployIfNeeded(args []string) ([]string, func(), error) {
+	if !isAzZipDeployCommand(args) {
+		return args, nil, nil
+	}
+
+	srcIdx := -1
+	for i := 0; i < len(args); i++ {
+		a := strings.TrimSpace(args[i])
+		if strings.EqualFold(a, "--src") {
+			srcIdx = i + 1
+			break
+		}
+		if strings.HasPrefix(strings.ToLower(a), "--src=") {
+			srcIdx = i
+			break
+		}
+	}
+	if srcIdx == -1 {
+		return args, nil, nil
+	}
+
+	val := ""
+	if srcIdx < len(args) {
+		if strings.EqualFold(strings.TrimSpace(args[srcIdx-1]), "--src") {
+			val = strings.TrimSpace(args[srcIdx])
+		} else {
+			val = strings.TrimSpace(strings.TrimPrefix(args[srcIdx], "--src="))
+		}
+	}
+	if val == "" {
+		return args, nil, nil
+	}
+	if val != clankerAzureHealthZipToken &&
+		!strings.HasPrefix(val, clankerAzureZipHTTPTokenPrefix) &&
+		!strings.HasPrefix(val, clankerAzureZipManifestTokenPrefix) {
+		return args, nil, nil
+	}
+	zipBytes, err := createAzureZipDeployPayload(val)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	f, err := os.CreateTemp("", "clanker-azure-zipdeploy-*.zip")
+	if err != nil {
+		return nil, nil, err
+	}
+	zipPath := f.Name()
+	if _, err := f.Write(zipBytes); err != nil {
+		_ = f.Close()
+		_ = os.Remove(zipPath)
+		return nil, nil, err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(zipPath)
+		return nil, nil, err
+	}
+
+	out := append([]string{}, args...)
+	if strings.EqualFold(strings.TrimSpace(args[srcIdx-1]), "--src") {
+		out[srcIdx] = zipPath
+	} else {
+		out[srcIdx] = "--src=" + zipPath
+	}
+	cleanup := func() { _ = os.Remove(zipPath) }
+	return out, cleanup, nil
+}
+
+type azureZipHTTPSpec struct {
+	FunctionName string   `json:"functionName"`
+	Route        string   `json:"route"`
+	Methods      []string `json:"methods"`
+	Status       int      `json:"status"`
+	Body         string   `json:"body"`
+	ContentType  string   `json:"contentType"`
+}
+
+type azureZipManifest struct {
+	FilesB64 map[string]string `json:"filesB64"`
+}
+
+func createAzureZipDeployPayload(srcToken string) ([]byte, error) {
+	// Back-compat: fixed /api/health endpoint token.
+	if srcToken == clankerAzureHealthZipToken {
+		spec := azureZipHTTPSpec{
+			FunctionName: "health",
+			Route:        "health",
+			Methods:      []string{"get"},
+			Status:       200,
+			Body:         "ok",
+			ContentType:  "text/plain",
+		}
+		return buildAzureHTTPZip(spec)
+	}
+
+	if strings.HasPrefix(srcToken, clankerAzureZipHTTPTokenPrefix) {
+		b64 := strings.TrimPrefix(srcToken, clankerAzureZipHTTPTokenPrefix)
+		payload, err := base64.RawURLEncoding.DecodeString(b64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid azure zip http spec base64: %w", err)
+		}
+		var spec azureZipHTTPSpec
+		if err := json.Unmarshal(payload, &spec); err != nil {
+			return nil, fmt.Errorf("invalid azure zip http spec json: %w", err)
+		}
+		return buildAzureHTTPZip(spec)
+	}
+
+	if strings.HasPrefix(srcToken, clankerAzureZipManifestTokenPrefix) {
+		b64 := strings.TrimPrefix(srcToken, clankerAzureZipManifestTokenPrefix)
+		payload, err := base64.RawURLEncoding.DecodeString(b64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid azure zip manifest base64: %w", err)
+		}
+		var manifest azureZipManifest
+		if err := json.Unmarshal(payload, &manifest); err != nil {
+			return nil, fmt.Errorf("invalid azure zip manifest json: %w", err)
+		}
+		return buildAzureManifestZip(manifest)
+	}
+
+	return nil, fmt.Errorf("unsupported azure zip deploy token: %q", srcToken)
+}
+
+func buildAzureHTTPZip(spec azureZipHTTPSpec) ([]byte, error) {
+	name := strings.TrimSpace(spec.FunctionName)
+	if name == "" {
+		name = "handler"
+	}
+	name = strings.ReplaceAll(name, "/", "-")
+	name = strings.ReplaceAll(name, "\\", "-")
+	route := strings.TrimSpace(spec.Route)
+	if route == "" {
+		route = "health"
+	}
+	route = strings.TrimPrefix(route, "/")
+	methods := spec.Methods
+	if len(methods) == 0 {
+		methods = []string{"get"}
+	}
+	status := spec.Status
+	if status == 0 {
+		status = 200
+	}
+	contentType := strings.TrimSpace(spec.ContentType)
+	if contentType == "" {
+		contentType = "text/plain"
+	}
+
+	functionJSONBytes, err := json.MarshalIndent(map[string]any{
+		"bindings": []any{
+			map[string]any{
+				"authLevel": "anonymous",
+				"type":      "httpTrigger",
+				"direction": "in",
+				"name":      "req",
+				"methods":   methods,
+				"route":     route,
+			},
+			map[string]any{
+				"type":      "http",
+				"direction": "out",
+				"name":      "res",
+			},
+		},
+	}, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+
+	host := []byte("{\n  \"version\": \"2.0\",\n  \"extensionBundle\": {\n    \"id\": \"Microsoft.Azure.Functions.ExtensionBundle\",\n    \"version\": \"[4.*, 5.0.0)\"\n  }\n}\n")
+	indexJS := []byte(fmt.Sprintf(
+		"module.exports = async function (context, req) {\n  context.res = { status: %d, body: %s, headers: { 'content-type': %q } };\n};\n",
+		status,
+		strconvQuoteJSString(spec.Body),
+		contentType,
+	))
+
+	files := map[string][]byte{
+		"host.json": host,
+		filepath.ToSlash(filepath.Join(name, "function.json")): functionJSONBytes,
+		filepath.ToSlash(filepath.Join(name, "index.js")):      indexJS,
+	}
+	return buildZipFromFiles(files)
+}
+
+func buildAzureManifestZip(manifest azureZipManifest) ([]byte, error) {
+	if len(manifest.FilesB64) == 0 {
+		return nil, fmt.Errorf("azure zip manifest missing filesB64")
+	}
+
+	files := make(map[string][]byte, len(manifest.FilesB64))
+	for rawName, rawContentB64 := range manifest.FilesB64 {
+		name := strings.TrimSpace(rawName)
+		if name == "" {
+			return nil, fmt.Errorf("azure zip manifest contains empty filename")
+		}
+		clean := filepath.ToSlash(filepath.Clean(name))
+		if strings.HasPrefix(clean, "../") || clean == ".." || strings.HasPrefix(clean, "/") {
+			return nil, fmt.Errorf("azure zip manifest filename not allowed: %q", name)
+		}
+		content, err := base64.StdEncoding.DecodeString(strings.TrimSpace(rawContentB64))
+		if err != nil {
+			return nil, fmt.Errorf("azure zip manifest invalid base64 for %q: %w", name, err)
+		}
+		files[clean] = content
+	}
+
+	return buildZipFromFiles(files)
+}
+
+func buildZipFromFiles(files map[string][]byte) ([]byte, error) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, content := range files {
+		w, err := zw.Create(name)
+		if err != nil {
+			_ = zw.Close()
+			return nil, err
+		}
+		if _, err := w.Write(content); err != nil {
+			_ = zw.Close()
+			return nil, err
+		}
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func strconvQuoteJSString(s string) string {
+	// Minimal, deterministic JS string quoting. We use JSON quoting which matches JS string literal rules.
+	b, _ := json.Marshal(s)
+	return string(b)
 }
