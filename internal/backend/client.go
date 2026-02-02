@@ -106,7 +106,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 
 // GetAWSCredentials retrieves AWS credentials from the backend
 func (c *Client) GetAWSCredentials(ctx context.Context) (*AWSCredentials, error) {
-	respBody, err := c.doRequest(ctx, http.MethodGet, "/api/v1/cli/credentials/aws/raw", nil)
+	respBody, err := c.doRequest(ctx, http.MethodGet, "/api/v1/cli/credentials/aws", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -114,6 +114,7 @@ func (c *Client) GetAWSCredentials(ctx context.Context) (*AWSCredentials, error)
 	var response struct {
 		Success bool `json:"success"`
 		Data    struct {
+			Provider    string         `json:"provider"`
 			Credentials AWSCredentials `json:"credentials"`
 		} `json:"data"`
 	}
@@ -131,7 +132,7 @@ func (c *Client) GetAWSCredentials(ctx context.Context) (*AWSCredentials, error)
 
 // GetGCPCredentials retrieves GCP credentials from the backend
 func (c *Client) GetGCPCredentials(ctx context.Context) (*GCPCredentials, error) {
-	respBody, err := c.doRequest(ctx, http.MethodGet, "/api/v1/cli/credentials/gcp/raw", nil)
+	respBody, err := c.doRequest(ctx, http.MethodGet, "/api/v1/cli/credentials/gcp", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -139,6 +140,7 @@ func (c *Client) GetGCPCredentials(ctx context.Context) (*GCPCredentials, error)
 	var response struct {
 		Success bool `json:"success"`
 		Data    struct {
+			Provider    string         `json:"provider"`
 			Credentials GCPCredentials `json:"credentials"`
 		} `json:"data"`
 	}
@@ -156,7 +158,7 @@ func (c *Client) GetGCPCredentials(ctx context.Context) (*GCPCredentials, error)
 
 // GetCloudflareCredentials retrieves Cloudflare credentials from the backend
 func (c *Client) GetCloudflareCredentials(ctx context.Context) (*CloudflareCredentials, error) {
-	respBody, err := c.doRequest(ctx, http.MethodGet, "/api/v1/cli/credentials/cloudflare/raw", nil)
+	respBody, err := c.doRequest(ctx, http.MethodGet, "/api/v1/cli/credentials/cloudflare", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -164,6 +166,7 @@ func (c *Client) GetCloudflareCredentials(ctx context.Context) (*CloudflareCrede
 	var response struct {
 		Success bool `json:"success"`
 		Data    struct {
+			Provider    string                `json:"provider"`
 			Credentials CloudflareCredentials `json:"credentials"`
 		} `json:"data"`
 	}
@@ -181,7 +184,7 @@ func (c *Client) GetCloudflareCredentials(ctx context.Context) (*CloudflareCrede
 
 // GetKubernetesCredentials retrieves Kubernetes credentials from the backend
 func (c *Client) GetKubernetesCredentials(ctx context.Context) (*KubernetesCredentials, error) {
-	respBody, err := c.doRequest(ctx, http.MethodGet, "/api/v1/cli/credentials/kubernetes/raw", nil)
+	respBody, err := c.doRequest(ctx, http.MethodGet, "/api/v1/cli/credentials/kubernetes", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -189,6 +192,7 @@ func (c *Client) GetKubernetesCredentials(ctx context.Context) (*KubernetesCrede
 	var response struct {
 		Success bool `json:"success"`
 		Data    struct {
+			Provider    string                `json:"provider"`
 			Credentials KubernetesCredentials `json:"credentials"`
 		} `json:"data"`
 	}
@@ -207,6 +211,7 @@ func (c *Client) GetKubernetesCredentials(ctx context.Context) (*KubernetesCrede
 // StoreAWSCredentials stores AWS credentials in the backend
 func (c *Client) StoreAWSCredentials(ctx context.Context, creds *AWSCredentials) error {
 	body := map[string]interface{}{
+		"provider":    "aws",
 		"credentials": creds,
 	}
 
@@ -233,6 +238,7 @@ func (c *Client) StoreAWSCredentials(ctx context.Context, creds *AWSCredentials)
 // StoreGCPCredentials stores GCP credentials in the backend
 func (c *Client) StoreGCPCredentials(ctx context.Context, creds *GCPCredentials) error {
 	body := map[string]interface{}{
+		"provider":    "gcp",
 		"credentials": creds,
 	}
 
@@ -259,6 +265,7 @@ func (c *Client) StoreGCPCredentials(ctx context.Context, creds *GCPCredentials)
 // StoreCloudflareCredentials stores Cloudflare credentials in the backend
 func (c *Client) StoreCloudflareCredentials(ctx context.Context, creds *CloudflareCredentials) error {
 	body := map[string]interface{}{
+		"provider":    "cloudflare",
 		"credentials": creds,
 	}
 
@@ -283,8 +290,10 @@ func (c *Client) StoreCloudflareCredentials(ctx context.Context, creds *Cloudfla
 }
 
 // StoreKubernetesCredentials stores Kubernetes credentials in the backend
+// Note: kubernetes provider must be added to the backend for this to work
 func (c *Client) StoreKubernetesCredentials(ctx context.Context, creds *KubernetesCredentials) error {
 	body := map[string]interface{}{
+		"provider":    "kubernetes",
 		"credentials": creds,
 	}
 

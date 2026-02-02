@@ -35,7 +35,7 @@ func TestGetAWSCredentials(t *testing.T) {
 			return
 		}
 
-		if r.URL.Path != "/api/v1/cli/credentials/aws/raw" {
+		if r.URL.Path != "/api/v1/cli/credentials/aws" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -43,12 +43,15 @@ func TestGetAWSCredentials(t *testing.T) {
 		response := map[string]interface{}{
 			"success": true,
 			"data": map[string]interface{}{
+				"provider": "aws",
 				"credentials": map[string]string{
 					"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
 					"secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 					"region":            "us-east-1",
 					"session_token":     "",
 				},
+				"created_at": "2024-01-01T00:00:00Z",
+				"updated_at": "2024-01-02T00:00:00Z",
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
