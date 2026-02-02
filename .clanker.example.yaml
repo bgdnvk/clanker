@@ -122,7 +122,8 @@ infra:
 #   # API key for clanker backend authentication (or set CLANKER_BACKEND_API_KEY)
 #   api_key: ""
 #   # Backend environment: testing, staging, or production (or set CLANKER_BACKEND_ENV)
-#   env: "staging"
+#   # Default: testing
+#   env: "testing"
 #   # Custom backend URL, overrides env if set (or set CLANKER_BACKEND_URL)
 #   # url: "https://custom-url.example.com"
 #

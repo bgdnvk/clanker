@@ -25,8 +25,11 @@ func ResolveAPIKey(flagValue string) string {
 	return ""
 }
 
+// DefaultBackendEnv is the default backend environment when not specified
+const DefaultBackendEnv = "testing"
+
 // ResolveBackendURL returns the backend URL based on configuration
-// Priority: explicit URL > env URL > env name > config env > default (staging)
+// Priority: explicit URL > env URL > env name > config env > default (testing)
 func ResolveBackendURL() string {
 	// Priority 1: Explicit URL from config
 	if url := strings.TrimSpace(viper.GetString("backend.url")); url != "" {
@@ -44,9 +47,9 @@ func ResolveBackendURL() string {
 		env = strings.TrimSpace(os.Getenv("CLANKER_BACKEND_ENV"))
 	}
 
-	// Default to staging
+	// Default to testing
 	if env == "" {
-		env = "staging"
+		env = DefaultBackendEnv
 	}
 
 	// Look up URL for environment
@@ -54,8 +57,8 @@ func ResolveBackendURL() string {
 		return url
 	}
 
-	// Fallback to staging if environment not found or empty
-	return BackendURLs["staging"]
+	// Fallback to testing if environment not found or empty
+	return BackendURLs[DefaultBackendEnv]
 }
 
 // ResolveBackendEnv returns the backend environment name
@@ -70,8 +73,8 @@ func ResolveBackendEnv() string {
 		return env
 	}
 
-	// Default to staging
-	return "staging"
+	// Default to testing
+	return DefaultBackendEnv
 }
 
 // IsConfigured returns true if a backend API key is available
