@@ -146,6 +146,55 @@ func NewClientWithProfileAndDebug(ctx context.Context, profile string, debug boo
 	}, nil
 }
 
+// BackendAWSCredentials represents AWS credentials from the backend
+type BackendAWSCredentials struct {
+	AccessKeyID     string
+	SecretAccessKey string
+	Region          string
+	SessionToken    string
+}
+
+// NewClientWithCredentials creates a new AWS client using explicit credentials from the backend
+func NewClientWithCredentials(ctx context.Context, creds *BackendAWSCredentials, debug bool) (*Client, error) {
+	if creds == nil {
+		return nil, fmt.Errorf("credentials cannot be nil")
+	}
+
+	// Build config options
+	opts := []func(*config.LoadOptions) error{
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+			creds.AccessKeyID,
+			creds.SecretAccessKey,
+			creds.SessionToken,
+		)),
+	}
+
+	// Set region if provided
+	if creds.Region != "" {
+		opts = append(opts, config.WithRegion(creds.Region))
+	}
+
+	cfg, err := config.LoadDefaultConfig(ctx, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("unable to load SDK config with backend credentials: %w", err)
+	}
+
+	return &Client{
+		cfg:            cfg,
+		profile:        "backend",
+		debug:          debug,
+		ec2:            ec2.NewFromConfig(cfg),
+		ecs:            ecs.NewFromConfig(cfg),
+		iam:            iam.NewFromConfig(cfg),
+		lambda:         lambda.NewFromConfig(cfg),
+		rds:            rds.NewFromConfig(cfg),
+		s3:             s3.NewFromConfig(cfg),
+		batch:          batch.NewFromConfig(cfg),
+		cloudwatch:     cloudwatch.NewFromConfig(cfg),
+		cloudwatchlogs: cloudwatchlogs.NewFromConfig(cfg),
+	}, nil
+}
+
 func (c *Client) GetRelevantContext(ctx context.Context, question string) (string, error) {
 	var context strings.Builder
 
