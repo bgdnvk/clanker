@@ -117,5 +117,18 @@ infra:
 #   account_id: ""           # Cloudflare account ID (or set CLOUDFLARE_ACCOUNT_ID / CF_ACCOUNT_ID)
 #   default_zone: ""         # Default zone name for DNS operations
 
+# Backend integration (for storing and retrieving credentials across machines):
+# backend:
+#   # API key for clanker backend authentication (or set CLANKER_BACKEND_API_KEY)
+#   api_key: ""
+#   # Backend environment: testing, staging, or production (or set CLANKER_BACKEND_ENV)
+#   # Default: testing
+#   env: "testing"
+#   # Custom backend URL, overrides env if set (or set CLANKER_BACKEND_URL)
+#   # url: "https://custom-url.example.com"
+#
+# Use `clanker credentials store aws --profile <profile>` to upload your AWS credentials.
+# Then use `clanker ask "..." --api-key <key>` to query using backend credentials.
+
 # General settings:
 # timeout: 30

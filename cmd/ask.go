@@ -12,6 +12,7 @@ import (
 
 	"github.com/bgdnvk/clanker/internal/ai"
 	"github.com/bgdnvk/clanker/internal/aws"
+	"github.com/bgdnvk/clanker/internal/backend"
 	"github.com/bgdnvk/clanker/internal/cloudflare"
 	cfanalytics "github.com/bgdnvk/clanker/internal/cloudflare/analytics"
 	cfdns "github.com/bgdnvk/clanker/internal/cloudflare/dns"
@@ -529,26 +530,58 @@ Format as a professional compliance table suitable for government security docum
 			var awsClient *aws.Client
 			var err error
 
-			// Use specified profile or default from config
-			targetProfile := profile
-			if targetProfile == "" {
-				// Try infra config first
-				defaultEnv := viper.GetString("infra.default_environment")
-				if defaultEnv == "" {
-					defaultEnv = "dev"
-				}
-				targetProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
-				if targetProfile == "" {
-					targetProfile = viper.GetString("aws.default_profile")
-				}
-				if targetProfile == "" {
-					targetProfile = "default" // fallback
+			// Check for backend API key first
+			apiKeyFlag, _ := cmd.Flags().GetString("api-key")
+			if apiKeyFlag == "" {
+				apiKeyFlag, _ = cmd.Root().PersistentFlags().GetString("api-key")
+			}
+			backendAPIKey := backend.ResolveAPIKey(apiKeyFlag)
+
+			if backendAPIKey != "" {
+				// Try to get credentials from backend
+				backendClient := backend.NewClient(backendAPIKey, debug)
+				backendCreds, backendErr := backendClient.GetAWSCredentials(ctx)
+				if backendErr == nil {
+					if debug {
+						fmt.Println("[backend] Using AWS credentials from backend")
+					}
+					awsClient, err = aws.NewClientWithCredentials(ctx, &aws.BackendAWSCredentials{
+						AccessKeyID:     backendCreds.AccessKeyID,
+						SecretAccessKey: backendCreds.SecretAccessKey,
+						Region:          backendCreds.Region,
+						SessionToken:    backendCreds.SessionToken,
+					}, debug)
+					if err != nil {
+						return fmt.Errorf("failed to create AWS client with backend credentials: %w", err)
+					}
+				} else if debug {
+					fmt.Printf("[backend] No AWS credentials available (%v), falling back to local\n", backendErr)
 				}
 			}
 
-			awsClient, err = aws.NewClientWithProfileAndDebug(ctx, targetProfile, debug)
-			if err != nil {
-				return fmt.Errorf("failed to create AWS client with profile %s: %w", targetProfile, err)
+			// Fall back to local profile if backend credentials not available
+			if awsClient == nil {
+				// Use specified profile or default from config
+				targetProfile := profile
+				if targetProfile == "" {
+					// Try infra config first
+					defaultEnv := viper.GetString("infra.default_environment")
+					if defaultEnv == "" {
+						defaultEnv = "dev"
+					}
+					targetProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+					if targetProfile == "" {
+						targetProfile = viper.GetString("aws.default_profile")
+					}
+					if targetProfile == "" {
+						targetProfile = "default" // fallback
+					}
+				}
+
+				awsClient, err = aws.NewClientWithProfileAndDebug(ctx, targetProfile, debug)
+				if err != nil {
+					return fmt.Errorf("failed to create AWS client with profile %s: %w", targetProfile, err)
+				}
 			}
 
 			awsContext, err = awsClient.GetRelevantContext(ctx, question)
@@ -611,19 +644,58 @@ Format as a professional compliance table suitable for government security docum
 		}
 
 		if includeGCP {
-			projectID := gcpProject
-			if projectID == "" {
-				projectID = gcp.ResolveProjectID()
+			var gcpClient *gcp.Client
+			var gcpCredsFile string
+
+			// Check for backend API key first
+			apiKeyFlag, _ := cmd.Flags().GetString("api-key")
+			if apiKeyFlag == "" {
+				apiKeyFlag, _ = cmd.Root().PersistentFlags().GetString("api-key")
 			}
-			if projectID == "" {
-				return fmt.Errorf("gcp project_id is required (set infra.gcp.project_id or use --gcp-project)")
+			backendAPIKey := backend.ResolveAPIKey(apiKeyFlag)
+
+			if backendAPIKey != "" {
+				// Try to get credentials from backend
+				backendClient := backend.NewClient(backendAPIKey, debug)
+				backendCreds, backendErr := backendClient.GetGCPCredentials(ctx)
+				if backendErr == nil && backendCreds.ProjectID != "" {
+					if debug {
+						fmt.Println("[backend] Using GCP credentials from backend")
+					}
+					var err error
+					gcpClient, gcpCredsFile, err = gcp.NewClientWithCredentials(&gcp.BackendGCPCredentials{
+						ProjectID:          backendCreds.ProjectID,
+						ServiceAccountJSON: backendCreds.ServiceAccountJSON,
+					}, debug)
+					if err != nil {
+						return fmt.Errorf("failed to create GCP client with backend credentials: %w", err)
+					}
+					if gcpCredsFile != "" {
+						defer gcp.CleanupCredentialsFile(gcpCredsFile)
+					}
+				} else if debug {
+					fmt.Printf("[backend] No GCP credentials available (%v), falling back to local\n", backendErr)
+				}
 			}
 
-			gcpClient, err := gcp.NewClient(projectID, debug)
-			if err != nil {
-				return fmt.Errorf("failed to create GCP client: %w", err)
+			// Fall back to local config if backend credentials not available
+			if gcpClient == nil {
+				projectID := gcpProject
+				if projectID == "" {
+					projectID = gcp.ResolveProjectID()
+				}
+				if projectID == "" {
+					return fmt.Errorf("gcp project_id is required (set infra.gcp.project_id or use --gcp-project)")
+				}
+
+				var err error
+				gcpClient, err = gcp.NewClient(projectID, debug)
+				if err != nil {
+					return fmt.Errorf("failed to create GCP client: %w", err)
+				}
 			}
 
+			var err error
 			gcpContext, err = gcpClient.GetRelevantContext(ctx, question)
 			if err != nil {
 				return fmt.Errorf("failed to get GCP context: %w", err)
@@ -644,29 +716,61 @@ Format as a professional compliance table suitable for government security docum
 			var githubClient *ghclient.Client
 
 			if includeAWS {
-				// Use specified profile or default from config
-				targetProfile := profile
-				if targetProfile == "" {
-					// Try infra config first
-					defaultEnv := viper.GetString("infra.default_environment")
-					if defaultEnv == "" {
-						defaultEnv = "dev"
-					}
-					targetProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
-					if targetProfile == "" {
-						targetProfile = viper.GetString("aws.default_profile")
-					}
-					if targetProfile == "" {
-						targetProfile = "default" // fallback
+				// Check for backend API key first
+				apiKeyFlag, _ := cmd.Flags().GetString("api-key")
+				if apiKeyFlag == "" {
+					apiKeyFlag, _ = cmd.Root().PersistentFlags().GetString("api-key")
+				}
+				backendAPIKey := backend.ResolveAPIKey(apiKeyFlag)
+
+				if backendAPIKey != "" {
+					// Try to get credentials from backend
+					backendClient := backend.NewClient(backendAPIKey, debug)
+					backendCreds, backendErr := backendClient.GetAWSCredentials(ctx)
+					if backendErr == nil {
+						if debug {
+							fmt.Println("[backend] Using AWS credentials from backend for tool calling")
+						}
+						awsClient, err = aws.NewClientWithCredentials(ctx, &aws.BackendAWSCredentials{
+							AccessKeyID:     backendCreds.AccessKeyID,
+							SecretAccessKey: backendCreds.SecretAccessKey,
+							Region:          backendCreds.Region,
+							SessionToken:    backendCreds.SessionToken,
+						}, debug)
+						if err != nil {
+							return fmt.Errorf("failed to create AWS client with backend credentials: %w", err)
+						}
+					} else if debug {
+						fmt.Printf("[backend] No AWS credentials available for tools (%v), falling back to local\n", backendErr)
 					}
 				}
 
-				awsClient, err = aws.NewClientWithProfileAndDebug(ctx, targetProfile, debug)
-				if err != nil {
-					return fmt.Errorf("failed to create AWS client with profile %s: %w", targetProfile, err)
-				}
-				if debug {
-					fmt.Printf("Successfully created AWS client with profile: %s\n", targetProfile)
+				// Fall back to local profile if backend credentials not available
+				if awsClient == nil {
+					// Use specified profile or default from config
+					targetProfile := profile
+					if targetProfile == "" {
+						// Try infra config first
+						defaultEnv := viper.GetString("infra.default_environment")
+						if defaultEnv == "" {
+							defaultEnv = "dev"
+						}
+						targetProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+						if targetProfile == "" {
+							targetProfile = viper.GetString("aws.default_profile")
+						}
+						if targetProfile == "" {
+							targetProfile = "default" // fallback
+						}
+					}
+
+					awsClient, err = aws.NewClientWithProfileAndDebug(ctx, targetProfile, debug)
+					if err != nil {
+						return fmt.Errorf("failed to create AWS client with profile %s: %w", targetProfile, err)
+					}
+					if debug {
+						fmt.Printf("Successfully created AWS client with profile: %s\n", targetProfile)
+					}
 				}
 			}
 
@@ -989,16 +1093,43 @@ func handleCloudflareQuery(ctx context.Context, question string, debug bool) err
 		fmt.Println("Delegating query to Cloudflare agent...")
 	}
 
-	accountID := cloudflare.ResolveAccountID()
-	apiToken := cloudflare.ResolveAPIToken()
+	var client *cloudflare.Client
+	var err error
 
-	if apiToken == "" {
-		return fmt.Errorf("cloudflare api_token is required (set cloudflare.api_token, CLOUDFLARE_API_TOKEN, or CF_API_TOKEN)")
+	// Check for backend API key first
+	backendAPIKey := backend.ResolveAPIKey("")
+	if backendAPIKey != "" {
+		backendClient := backend.NewClient(backendAPIKey, debug)
+		backendCreds, backendErr := backendClient.GetCloudflareCredentials(ctx)
+		if backendErr == nil && backendCreds.APIToken != "" {
+			if debug {
+				fmt.Println("[backend] Using Cloudflare credentials from backend")
+			}
+			client, err = cloudflare.NewClientWithCredentials(&cloudflare.BackendCloudflareCredentials{
+				APIToken:  backendCreds.APIToken,
+				AccountID: backendCreds.AccountID,
+			}, debug)
+			if err != nil {
+				return fmt.Errorf("failed to create Cloudflare client with backend credentials: %w", err)
+			}
+		} else if debug {
+			fmt.Printf("[backend] No Cloudflare credentials available (%v), falling back to local\n", backendErr)
+		}
 	}
 
-	client, err := cloudflare.NewClient(accountID, apiToken, debug)
-	if err != nil {
-		return fmt.Errorf("failed to create Cloudflare client: %w", err)
+	// Fall back to local config if backend credentials not available
+	if client == nil {
+		accountID := cloudflare.ResolveAccountID()
+		apiToken := cloudflare.ResolveAPIToken()
+
+		if apiToken == "" {
+			return fmt.Errorf("cloudflare api_token is required (set cloudflare.api_token, CLOUDFLARE_API_TOKEN, or CF_API_TOKEN)")
+		}
+
+		client, err = cloudflare.NewClient(accountID, apiToken, debug)
+		if err != nil {
+			return fmt.Errorf("failed to create Cloudflare client: %w", err)
+		}
 	}
 
 	// Determine query type
@@ -1052,7 +1183,7 @@ func handleCloudflareQuery(ctx context.Context, question string, debug bool) err
 		// Use Workers subagent
 		workersAgent := cfworkers.NewSubAgent(client, debug)
 		opts := cfworkers.QueryOptions{
-			AccountID: accountID,
+			AccountID: client.GetAccountID(),
 		}
 
 		response, err := workersAgent.HandleQuery(ctx, question, opts)
@@ -1117,7 +1248,7 @@ func handleCloudflareQuery(ctx context.Context, question string, debug bool) err
 		// Use Zero Trust subagent
 		ztAgent := cfzerotrust.NewSubAgent(client, debug)
 		opts := cfzerotrust.QueryOptions{
-			AccountID: accountID,
+			AccountID: client.GetAccountID(),
 		}
 
 		response, err := ztAgent.HandleQuery(ctx, question, opts)
@@ -1230,6 +1361,32 @@ Provide a clear and helpful response.`, question, cfContext)
 func handleK8sQuery(ctx context.Context, question string, debug bool, kubeconfig string) error {
 	if debug {
 		fmt.Println("Delegating query to K8s agent...")
+	}
+
+	// Check for backend Kubernetes credentials first
+	var backendKubeconfigPath string
+	backendAPIKey := backend.ResolveAPIKey("")
+	if backendAPIKey != "" && kubeconfig == "" {
+		backendClient := backend.NewClient(backendAPIKey, debug)
+		backendCreds, backendErr := backendClient.GetKubernetesCredentials(ctx)
+		if backendErr == nil && backendCreds.KubeconfigContent != "" {
+			if debug {
+				fmt.Println("[backend] Using Kubernetes credentials from backend")
+			}
+			_, tempPath, err := k8s.NewClientWithCredentials(&k8s.BackendKubernetesCredentials{
+				KubeconfigContent: backendCreds.KubeconfigContent,
+				ContextName:       backendCreds.ContextName,
+			}, debug)
+			if err == nil {
+				kubeconfig = tempPath
+				backendKubeconfigPath = tempPath
+				defer k8s.CleanupKubeconfig(backendKubeconfigPath)
+			} else if debug {
+				fmt.Printf("[backend] Failed to use backend kubeconfig: %v\n", err)
+			}
+		} else if debug {
+			fmt.Printf("[backend] No Kubernetes credentials available (%v), falling back to local\n", backendErr)
+		}
 	}
 
 	// Create K8s agent with AWS profile and region for EKS support
