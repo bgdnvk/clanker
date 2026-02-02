@@ -61,6 +61,30 @@ func NewClient(accountID, apiToken string, debug bool) (*Client, error) {
 	}, nil
 }
 
+// BackendCloudflareCredentials represents Cloudflare credentials from the backend
+type BackendCloudflareCredentials struct {
+	APIToken  string
+	AccountID string
+	ZoneID    string
+}
+
+// NewClientWithCredentials creates a new Cloudflare client using credentials from the backend
+func NewClientWithCredentials(creds *BackendCloudflareCredentials, debug bool) (*Client, error) {
+	if creds == nil {
+		return nil, fmt.Errorf("credentials cannot be nil")
+	}
+
+	if strings.TrimSpace(creds.APIToken) == "" {
+		return nil, fmt.Errorf("cloudflare api_token is required")
+	}
+
+	return &Client{
+		accountID: creds.AccountID,
+		apiToken:  creds.APIToken,
+		debug:     debug,
+	}, nil
+}
+
 // GetAccountID returns the account ID
 func (c *Client) GetAccountID() string {
 	return c.accountID
