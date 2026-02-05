@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/bgdnvk/clanker/internal/aws"
+	"github.com/bgdnvk/clanker/internal/azure"
 	"github.com/bgdnvk/clanker/internal/cloudflare"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	"github.com/spf13/cobra"
@@ -59,6 +60,10 @@ func init() {
 	// Register GCP static commands
 	gcpCmd := gcp.CreateGCPCommands()
 	rootCmd.AddCommand(gcpCmd)
+
+	// Register Azure static commands
+	azureCmd := azure.CreateAzureCommands()
+	rootCmd.AddCommand(azureCmd)
 
 	// Register Cloudflare static commands and ask command
 	cfCmd := cloudflare.CreateCloudflareCommands()
