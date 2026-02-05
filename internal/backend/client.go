@@ -208,6 +208,32 @@ func (c *Client) GetKubernetesCredentials(ctx context.Context) (*KubernetesCrede
 	return &response.Data.Credentials, nil
 }
 
+// GetAzureCredentials retrieves Azure credentials from the backend
+func (c *Client) GetAzureCredentials(ctx context.Context) (*AzureCredentials, error) {
+	respBody, err := c.doRequest(ctx, http.MethodGet, "/api/v1/cli/credentials/azure", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Provider    string           `json:"provider"`
+			Credentials AzureCredentials `json:"credentials"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(respBody, &response); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !response.Success {
+		return nil, fmt.Errorf("failed to get Azure credentials")
+	}
+
+	return &response.Data.Credentials, nil
+}
+
 // StoreAWSCredentials stores AWS credentials in the backend
 func (c *Client) StoreAWSCredentials(ctx context.Context, creds *AWSCredentials) error {
 	body := map[string]interface{}{
@@ -298,6 +324,33 @@ func (c *Client) StoreKubernetesCredentials(ctx context.Context, creds *Kubernet
 	}
 
 	respBody, err := c.doRequest(ctx, http.MethodPut, "/api/v1/secrets/kubernetes", body)
+	if err != nil {
+		return err
+	}
+
+	var response APIResponse
+	if err := json.Unmarshal(respBody, &response); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !response.Success {
+		if response.Error != "" {
+			return fmt.Errorf("failed to store credentials: %s", response.Error)
+		}
+		return fmt.Errorf("failed to store credentials")
+	}
+
+	return nil
+}
+
+// StoreAzureCredentials stores Azure credentials in the backend
+func (c *Client) StoreAzureCredentials(ctx context.Context, creds *AzureCredentials) error {
+	body := map[string]interface{}{
+		"provider":    "azure",
+		"credentials": creds,
+	}
+
+	respBody, err := c.doRequest(ctx, http.MethodPut, "/api/v1/secrets/azure", body)
 	if err != nil {
 		return err
 	}

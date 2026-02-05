@@ -29,12 +29,21 @@ type KubernetesCredentials struct {
 	ContextName       string `json:"context_name,omitempty"`
 }
 
+// AzureCredentials represents Azure credentials stored in the backend
+type AzureCredentials struct {
+	SubscriptionID string `json:"subscription_id"`
+	TenantID       string `json:"tenant_id,omitempty"`
+	ClientID       string `json:"client_id,omitempty"`
+	ClientSecret   string `json:"client_secret,omitempty"`
+}
+
 // CredentialProvider represents supported credential providers
 type CredentialProvider string
 
 const (
 	ProviderAWS        CredentialProvider = "aws"
 	ProviderGCP        CredentialProvider = "gcp"
+	ProviderAzure      CredentialProvider = "azure"
 	ProviderCloudflare CredentialProvider = "cloudflare"
 	ProviderKubernetes CredentialProvider = "kubernetes"
 )
