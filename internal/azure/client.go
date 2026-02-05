@@ -37,6 +37,56 @@ func NewClient(subscriptionID string, debug bool) (*Client, error) {
 	return &Client{subscriptionID: strings.TrimSpace(subscriptionID), debug: debug}, nil
 }
 
+// BackendAzureCredentials represents Azure credentials from the backend
+type BackendAzureCredentials struct {
+	SubscriptionID string
+	TenantID       string
+	ClientID       string
+	ClientSecret   string
+}
+
+// NewClientWithCredentials creates a new Azure client using credentials from the backend.
+// If service principal credentials are provided (TenantID, ClientID, ClientSecret),
+// it performs az login with the service principal.
+func NewClientWithCredentials(creds *BackendAzureCredentials, debug bool) (*Client, error) {
+	if creds == nil {
+		return nil, fmt.Errorf("credentials cannot be nil")
+	}
+
+	if strings.TrimSpace(creds.SubscriptionID) == "" {
+		return nil, fmt.Errorf("azure subscription_id is required")
+	}
+
+	// If service principal credentials are provided, login with them
+	if creds.TenantID != "" && creds.ClientID != "" && creds.ClientSecret != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		args := []string{
+			"login",
+			"--service-principal",
+			"--username", creds.ClientID,
+			"--password", creds.ClientSecret,
+			"--tenant", creds.TenantID,
+			"--output", "none",
+		}
+
+		cmd := exec.CommandContext(ctx, "az", args...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+
+		if debug {
+			fmt.Printf("[azure] logging in with service principal (client_id: %s)\n", creds.ClientID)
+		}
+
+		if err := cmd.Run(); err != nil {
+			return nil, fmt.Errorf("az login with service principal failed: %w, stderr: %s", err, stderr.String())
+		}
+	}
+
+	return &Client{subscriptionID: strings.TrimSpace(creds.SubscriptionID), debug: debug}, nil
+}
+
 func (c *Client) execAz(ctx context.Context, args ...string) (string, error) {
 	if _, err := exec.LookPath("az"); err != nil {
 		return "", fmt.Errorf("az not found in PATH")
