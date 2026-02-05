@@ -740,17 +740,55 @@ Format as a professional compliance table suitable for government security docum
 		}
 
 		if includeAzure {
-			sub := strings.TrimSpace(azureSubscription)
-			if sub == "" {
-				sub = azure.ResolveSubscriptionID()
+			var azureClient *azure.Client
+
+			// Check for backend API key first
+			apiKeyFlag, _ := cmd.Flags().GetString("api-key")
+			if apiKeyFlag == "" {
+				apiKeyFlag, _ = cmd.Root().PersistentFlags().GetString("api-key")
 			}
-			if sub == "" {
-				return fmt.Errorf("azure subscription_id is required (set infra.azure.subscription_id, AZURE_SUBSCRIPTION_ID, or use --azure-subscription)")
+			backendAPIKey := backend.ResolveAPIKey(apiKeyFlag)
+
+			if backendAPIKey != "" {
+				// Try to get credentials from backend
+				backendClient := backend.NewClient(backendAPIKey, debug)
+				backendCreds, backendErr := backendClient.GetAzureCredentials(ctx)
+				if backendErr == nil && backendCreds.SubscriptionID != "" {
+					if debug {
+						fmt.Println("[backend] Using Azure credentials from backend")
+					}
+					var err error
+					azureClient, err = azure.NewClientWithCredentials(&azure.BackendAzureCredentials{
+						SubscriptionID: backendCreds.SubscriptionID,
+						TenantID:       backendCreds.TenantID,
+						ClientID:       backendCreds.ClientID,
+						ClientSecret:   backendCreds.ClientSecret,
+					}, debug)
+					if err != nil {
+						return fmt.Errorf("failed to create Azure client with backend credentials: %w", err)
+					}
+				} else if debug {
+					fmt.Printf("[backend] No Azure credentials available (%v), falling back to local\n", backendErr)
+				}
 			}
-			azureClient, err := azure.NewClient(sub, debug)
-			if err != nil {
-				return fmt.Errorf("failed to create Azure client: %w", err)
+
+			// Fall back to local config if backend credentials not available
+			if azureClient == nil {
+				sub := strings.TrimSpace(azureSubscription)
+				if sub == "" {
+					sub = azure.ResolveSubscriptionID()
+				}
+				if sub == "" {
+					return fmt.Errorf("azure subscription_id is required (set infra.azure.subscription_id, AZURE_SUBSCRIPTION_ID, or use --azure-subscription)")
+				}
+				var err error
+				azureClient, err = azure.NewClient(sub, debug)
+				if err != nil {
+					return fmt.Errorf("failed to create Azure client: %w", err)
+				}
 			}
+
+			var err error
 			azureContext, err = azureClient.GetRelevantContext(ctx, question)
 			if err != nil {
 				return fmt.Errorf("failed to get Azure context: %w", err)
