@@ -41,6 +41,61 @@ func NewClient(projectID string, debug bool) (*Client, error) {
 	return &Client{projectID: projectID, debug: debug}, nil
 }
 
+// BackendGCPCredentials represents GCP credentials from the backend
+type BackendGCPCredentials struct {
+	ProjectID          string
+	ServiceAccountJSON string
+}
+
+// clientWithCredentials holds a GCP client with backend credentials
+type clientWithCredentials struct {
+	*Client
+	serviceAccountPath string
+}
+
+// NewClientWithCredentials creates a new GCP client using credentials from the backend
+// If ServiceAccountJSON is provided, it writes to a temp file and sets GOOGLE_APPLICATION_CREDENTIALS
+func NewClientWithCredentials(creds *BackendGCPCredentials, debug bool) (*Client, string, error) {
+	if creds == nil {
+		return nil, "", fmt.Errorf("credentials cannot be nil")
+	}
+
+	if strings.TrimSpace(creds.ProjectID) == "" {
+		return nil, "", fmt.Errorf("gcp project_id is required")
+	}
+
+	var tempFilePath string
+
+	// If service account JSON is provided, write to temp file
+	if creds.ServiceAccountJSON != "" {
+		tmpFile, err := os.CreateTemp("", "gcp-backend-creds-*.json")
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to create temp credentials file: %w", err)
+		}
+
+		if _, err := tmpFile.WriteString(creds.ServiceAccountJSON); err != nil {
+			tmpFile.Close()
+			os.Remove(tmpFile.Name())
+			return nil, "", fmt.Errorf("failed to write credentials file: %w", err)
+		}
+		tmpFile.Close()
+		tempFilePath = tmpFile.Name()
+
+		// Set environment variable for gcloud commands
+		os.Setenv("GOOGLE_APPLICATION_CREDENTIALS", tempFilePath)
+	}
+
+	return &Client{projectID: creds.ProjectID, debug: debug}, tempFilePath, nil
+}
+
+// CleanupCredentialsFile removes the temporary credentials file created by NewClientWithCredentials
+func CleanupCredentialsFile(path string) {
+	if path != "" {
+		os.Remove(path)
+		os.Unsetenv("GOOGLE_APPLICATION_CREDENTIALS")
+	}
+}
+
 func (c *Client) execGcloud(ctx context.Context, args ...string) (string, error) {
 	if _, err := exec.LookPath("gcloud"); err != nil {
 		return "", fmt.Errorf("gcloud not found in PATH")

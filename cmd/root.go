@@ -36,10 +36,18 @@ func init() {
 	rootCmd.PersistentFlags().Bool("local-mode", true, "enable local mode with rate limiting to prevent system overload (default: true)")
 	rootCmd.PersistentFlags().Int("local-delay", 100, "delay in milliseconds between calls in local mode (default 100ms)")
 
+	// Backend integration flags
+	rootCmd.PersistentFlags().String("api-key", "", "Backend API key (or set CLANKER_BACKEND_API_KEY)")
+	rootCmd.PersistentFlags().String("backend-env", "", "Backend environment: testing, staging, production (or set CLANKER_BACKEND_ENV)")
+	rootCmd.PersistentFlags().String("backend-url", "", "Backend API URL, overrides backend-env (or set CLANKER_BACKEND_URL)")
+
 	// TODO: add error return here
 	viper.BindPFlag("debug", rootCmd.PersistentFlags().Lookup("debug"))
 	viper.BindPFlag("local_mode", rootCmd.PersistentFlags().Lookup("local-mode"))
 	viper.BindPFlag("local_delay_ms", rootCmd.PersistentFlags().Lookup("local-delay"))
+	viper.BindPFlag("backend.api_key", rootCmd.PersistentFlags().Lookup("api-key"))
+	viper.BindPFlag("backend.env", rootCmd.PersistentFlags().Lookup("backend-env"))
+	viper.BindPFlag("backend.url", rootCmd.PersistentFlags().Lookup("backend-url"))
 
 	// Set defaults for local mode
 	viper.SetDefault("local_mode", true)

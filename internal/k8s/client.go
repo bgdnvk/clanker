@@ -3,6 +3,7 @@ package k8s
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -27,6 +28,78 @@ func NewClient(kubeconfig, kubeContext string, debug bool) *Client {
 		namespace:  "default",
 		debug:      debug,
 	}
+}
+
+// BackendKubernetesCredentials represents Kubernetes credentials from the backend
+type BackendKubernetesCredentials struct {
+	KubeconfigContent string
+	ContextName       string
+}
+
+// NewClientWithCredentials creates a new K8s client using credentials from the backend
+// It writes the kubeconfig to a temp file and returns the client along with the temp file path
+// The caller is responsible for cleaning up the temp file using CleanupKubeconfig
+func NewClientWithCredentials(creds *BackendKubernetesCredentials, debug bool) (*Client, string, error) {
+	if creds == nil {
+		return nil, "", fmt.Errorf("credentials cannot be nil")
+	}
+
+	if creds.KubeconfigContent == "" {
+		return nil, "", fmt.Errorf("kubeconfig content is required")
+	}
+
+	// Decode base64 kubeconfig content
+	decodedConfig, err := base64DecodeString(creds.KubeconfigContent)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to decode kubeconfig: %w", err)
+	}
+
+	// Write to temp file
+	tmpFile, err := os.CreateTemp("", "kubeconfig-backend-*.yaml")
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to create temp kubeconfig file: %w", err)
+	}
+
+	if _, err := tmpFile.Write(decodedConfig); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+		return nil, "", fmt.Errorf("failed to write kubeconfig file: %w", err)
+	}
+	tmpFile.Close()
+
+	return &Client{
+		kubeconfig: tmpFile.Name(),
+		context:    creds.ContextName,
+		namespace:  "default",
+		debug:      debug,
+	}, tmpFile.Name(), nil
+}
+
+// CleanupKubeconfig removes the temporary kubeconfig file created by NewClientWithCredentials
+func CleanupKubeconfig(path string) {
+	if path != "" {
+		os.Remove(path)
+	}
+}
+
+// base64DecodeString decodes a base64 encoded string
+func base64DecodeString(s string) ([]byte, error) {
+	// Try standard base64 first
+	decoded, err := base64.StdEncoding.DecodeString(s)
+	if err == nil {
+		return decoded, nil
+	}
+	// Try URL-safe base64
+	decoded, err = base64.URLEncoding.DecodeString(s)
+	if err == nil {
+		return decoded, nil
+	}
+	// Try without padding
+	decoded, err = base64.RawStdEncoding.DecodeString(s)
+	if err == nil {
+		return decoded, nil
+	}
+	return base64.RawURLEncoding.DecodeString(s)
 }
 
 // SetNamespace sets the default namespace for operations
