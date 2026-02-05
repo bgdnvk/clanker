@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode"
 
 	"github.com/bgdnvk/clanker/internal/ai"
 	"github.com/spf13/viper"
@@ -19,6 +20,7 @@ type ServiceContext struct {
 	Terraform  bool
 	K8s        bool
 	GCP        bool
+	Azure      bool
 	Cloudflare bool
 	Code       bool
 }
@@ -125,6 +127,39 @@ func InferContext(question string) ServiceContext {
 		"cloud build", "cloud deploy", "cloud dns", "cloud armor", "cloud load balancing", "api gateway",
 	}
 
+	azureKeywords := []string{
+		// Explicit platform mentions
+		"microsoft azure",
+		"azure portal",
+		"azure devops",
+		"azure functions",
+		"azure app service",
+		"azure kubernetes service",
+		"azure key vault",
+		"azure monitor",
+		"azure policy",
+		"azure sql",
+		"azure container registry",
+		// Azure-unique product names
+		"cosmos db",
+		"entra id",
+		"microsoft entra",
+		"azure bicep",
+		"bicep",
+	}
+
+	azureTokenKeywords := []string{
+		// Azure-specific abbreviations / tokens (avoid generic words)
+		"azure",
+		"aks",
+		"vnet",
+		"nsg",
+		"keyvault",
+		"cosmosdb",
+		"appservice",
+		"entra",
+	}
+
 	cloudflareKeywords := []string{
 		// Only match if Cloudflare is explicitly mentioned
 		"cloudflare",
@@ -170,6 +205,10 @@ func InferContext(question string) ServiceContext {
 		}
 	}
 
+	if containsAzureSignal(questionLower, azureKeywords, azureTokenKeywords) {
+		ctx.Azure = true
+	}
+
 	for _, keyword := range cloudflareKeywords {
 		if contains(questionLower, keyword) {
 			ctx.Cloudflare = true
@@ -178,7 +217,7 @@ func InferContext(question string) ServiceContext {
 	}
 
 	// Default to AWS and GitHub context if nothing is detected
-	if !ctx.AWS && !ctx.GitHub && !ctx.Terraform && !ctx.K8s && !ctx.GCP && !ctx.Cloudflare {
+	if !ctx.AWS && !ctx.GitHub && !ctx.Terraform && !ctx.K8s && !ctx.GCP && !ctx.Azure && !ctx.Cloudflare {
 		ctx.AWS = true
 		ctx.GitHub = true
 	}
@@ -197,6 +236,7 @@ Available services:
 - aws: Amazon Web Services (EC2, Lambda, S3, RDS, VPC, Route53, CloudFront, IAM, ECS, etc.)
 - k8s: Kubernetes clusters, pods, deployments, services, helm, kubectl
 - gcp: Google Cloud Platform (Cloud Run, GKE, Cloud SQL, BigQuery, etc.)
+- azure: Microsoft Azure (VMs, AKS, App Service, Storage, Key Vault, Cosmos DB, VNets, etc.)
 - github: GitHub repositories, PRs, issues, actions, workflows
 - terraform: Infrastructure as code, Terraform plans, state, modules
 - general: General questions not specific to any cloud platform
@@ -209,7 +249,7 @@ IMPORTANT RULES:
 
 Respond with ONLY a JSON object:
 {
-    "service": "cloudflare|aws|k8s|gcp|github|terraform|general",
+	"service": "cloudflare|aws|k8s|gcp|azure|github|terraform|general",
     "confidence": "high|medium|low",
     "reason": "brief explanation of why this classification"
 }`, question)
@@ -286,6 +326,9 @@ func NeedsLLMClassification(ctx ServiceContext) bool {
 	if ctx.GCP {
 		count++
 	}
+	if ctx.Azure {
+		count++
+	}
 	if ctx.Cloudflare {
 		count++
 	}
@@ -303,20 +346,30 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Cloudflare = true
 		ctx.K8s = false
 		ctx.GCP = false
+		ctx.Azure = false
 		ctx.AWS = false
 	case "k8s":
 		ctx.K8s = true
 		ctx.Cloudflare = false
 		ctx.GCP = false
+		ctx.Azure = false
 	case "gcp":
 		ctx.GCP = true
 		ctx.Cloudflare = false
 		ctx.K8s = false
+		ctx.Azure = false
+	case "azure":
+		ctx.Azure = true
+		ctx.GCP = false
+		ctx.Cloudflare = false
+		ctx.K8s = false
+		ctx.AWS = false
 	case "aws":
 		ctx.AWS = true
 		ctx.Cloudflare = false
 		ctx.K8s = false
 		ctx.GCP = false
+		ctx.Azure = false
 	case "terraform":
 		ctx.Terraform = true
 		ctx.Cloudflare = false
@@ -328,10 +381,100 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.AWS = true
 		ctx.Cloudflare = false
 		ctx.K8s = false
+		ctx.Azure = false
 	}
 }
 
 // contains checks if s contains substr (case-insensitive)
 func contains(s, substr string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+}
+
+func containsAzureSignal(questionLower string, phraseKeywords []string, tokenKeywords []string) bool {
+	q := strings.ToLower(strings.TrimSpace(questionLower))
+	if q == "" {
+		return false
+	}
+
+	// Strong signal: Azure CLI usage like: "az vm list ...".
+	if hasAzCLIPrefix(q) {
+		return true
+	}
+
+	// Strong signal: explicit platform phrase keywords.
+	for _, kw := range phraseKeywords {
+		if kw == "" {
+			continue
+		}
+		if strings.Contains(q, strings.ToLower(kw)) {
+			return true
+		}
+	}
+
+	// Token-based Azure keywords (avoids substring false positives).
+	toks := splitTokens(q)
+	for _, kw := range tokenKeywords {
+		kw = strings.ToLower(strings.TrimSpace(kw))
+		if kw == "" {
+			continue
+		}
+		if toks[kw] {
+			return true
+		}
+	}
+
+	return false
+}
+
+func hasAzCLIPrefix(questionLower string) bool {
+	tokens := splitTokensOrdered(questionLower)
+	if len(tokens) < 2 {
+		return false
+	}
+
+	allowedNext := map[string]bool{
+		"account":     true,
+		"group":       true,
+		"resource":    true,
+		"vm":          true,
+		"aks":         true,
+		"webapp":      true,
+		"functionapp": true,
+		"storage":     true,
+		"keyvault":    true,
+		"cosmosdb":    true,
+		"network":     true,
+	}
+
+	for i := 0; i < len(tokens)-1; i++ {
+		if tokens[i] == "az" && allowedNext[tokens[i+1]] {
+			return true
+		}
+	}
+	return false
+}
+
+func splitTokens(s string) map[string]bool {
+	ordered := splitTokensOrdered(s)
+	set := make(map[string]bool, len(ordered))
+	for _, t := range ordered {
+		set[t] = true
+	}
+	return set
+}
+
+func splitTokensOrdered(s string) []string {
+	parts := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !(unicode.IsLetter(r) || unicode.IsNumber(r))
+	})
+
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
