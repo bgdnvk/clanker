@@ -32,7 +32,7 @@ import (
 )
 
 // askCmd represents the ask command
-const defaultGeminiModel = "gemini-2.5-flash"
+const defaultGeminiModel = "gemini-3-pro-preview"
 
 var askCmd = &cobra.Command{
 	Use:   "ask [question]",

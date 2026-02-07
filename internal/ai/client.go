@@ -643,28 +643,44 @@ func (c *Client) askGemini(ctx context.Context, prompt string) (string, error) {
 		return "", fmt.Errorf("failed to get AI profile for LLM calls: %w", err)
 	}
 
-	// Create content from text
-	content := genai.NewContentFromText(sanitizeASCII(prompt), genai.RoleUser)
+	primaryModel := profileLLMCall.Model
+	modelsToTry := []string{primaryModel}
 
-	// Generate content using the configured model
-	resp, err := c.geminiClient.Models.GenerateContent(ctx, profileLLMCall.Model, []*genai.Content{content}, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to generate content with Gemini: %w", err)
+	// Fallback logic: if the primary model is not gemini-2.5-pro, add it as a fallback
+	if primaryModel != "gemini-2.5-pro" {
+		modelsToTry = append(modelsToTry, "gemini-2.5-pro")
 	}
 
-	if len(resp.Candidates) == 0 {
-		return "", fmt.Errorf("no response candidates from Gemini")
-	}
+	var lastErr error
 
-	// Extract text from the first candidate
-	var result strings.Builder
-	for _, part := range resp.Candidates[0].Content.Parts {
-		if part.Text != "" {
-			result.WriteString(part.Text)
+	for _, model := range modelsToTry {
+		// Create content from text
+		content := genai.NewContentFromText(sanitizeASCII(prompt), genai.RoleUser)
+
+		// Generate content using the configured model
+		resp, err := c.geminiClient.Models.GenerateContent(ctx, model, []*genai.Content{content}, nil)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to generate content with Gemini model %s: %w", model, err)
+			continue
 		}
+
+		if len(resp.Candidates) == 0 {
+			lastErr = fmt.Errorf("no response candidates from Gemini model %s", model)
+			continue
+		}
+
+		// Extract text from the first candidate
+		var result strings.Builder
+		for _, part := range resp.Candidates[0].Content.Parts {
+			if part.Text != "" {
+				result.WriteString(part.Text)
+			}
+		}
+
+		return result.String(), nil
 	}
 
-	return result.String(), nil
+	return "", lastErr
 }
 
 func (c *Client) tryFallbackToOpenAI(reason error) {
