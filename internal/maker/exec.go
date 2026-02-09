@@ -317,12 +317,22 @@ func learnPlanBindings(args []string, output string, bindings map[string]string)
 	if len(args) < 2 {
 		return
 	}
-	if strings.TrimSpace(output) == "" {
+	output = strings.TrimSpace(output)
+	if output == "" {
 		return
 	}
 
 	service := strings.TrimSpace(args[0])
 	op := strings.TrimSpace(args[1])
+
+	// Handle plain text output for specific commands before trying JSON parse
+	if service == "ssm" && op == "get-parameters" {
+		// SSM with --output text returns just the value, e.g. "ami-0532be01f26a3de55"
+		if strings.HasPrefix(output, "ami-") && !strings.Contains(output, "{") {
+			bindings["AMI_ID"] = output
+			return
+		}
+	}
 
 	// Most create operations we care about return JSON.
 	var obj map[string]any
@@ -518,18 +528,24 @@ func learnPlanBindings(args []string, output string, bindings map[string]string)
 			if arn != "" {
 				bindings["ALB_ARN"] = arn
 			}
+			dns := deepString(obj, "LoadBalancers", "0", "DNSName")
+			if dns != "" {
+				bindings["ALB_DNS"] = dns
+				bindings["ALB_DNS_NAME"] = dns
+			}
 		case "create-target-group":
 			arn := deepString(obj, "TargetGroups", "0", "TargetGroupArn")
 			if arn != "" {
 				bindings["TG_ARN"] = arn
 			}
-		case "ssm":
-			if op == "get-parameters" {
-				// {"Parameters":[{"Name":"...","Value":"ami-..."}]}
-				val := deepString(obj, "Parameters", "0", "Value")
-				if val != "" && strings.HasPrefix(val, "ami-") {
-					bindings["AMI_ID"] = val
-				}
+		}
+	case "ssm":
+		switch op {
+		case "get-parameters":
+			// JSON output: {"Parameters":[{"Name":"...","Value":"ami-..."}]}
+			val := deepString(obj, "Parameters", "0", "Value")
+			if val != "" && strings.HasPrefix(val, "ami-") {
+				bindings["AMI_ID"] = val
 			}
 		}
 	case "lambda":
