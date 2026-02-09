@@ -1120,35 +1120,8 @@ func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts
 	b.WriteString("Get latest AL2023 AMI ID:\n")
 	b.WriteString("   aws ssm get-parameters --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64 --query 'Parameters[0].Value' --output text\n\n")
 
-	// User-data pulls from ECR instead of building
-	// Generate inline base64-encoded user-data so the plan is self-contained
-	b.WriteString("Launch instance with INLINE base64-encoded user-data (do NOT use file:// references):\n")
-	b.WriteString("CRITICAL: The user-data MUST be passed as a base64-encoded string directly in the command.\n")
-	b.WriteString("Generate the base64 user-data like this:\n")
-	b.WriteString("```bash\n")
-	b.WriteString("USER_DATA=$(cat <<'USERDATA' | base64 -w0\n")
-	b.WriteString("#!/bin/bash\n")
-	b.WriteString("set -ex\n")
-	b.WriteString("yum update -y\n")
-	b.WriteString("yum install -y docker\n")
-	b.WriteString("systemctl start docker\n")
-	b.WriteString("systemctl enable docker\n")
-	b.WriteString("aws ecr get-login-password --region <REGION> | docker login --username AWS --password-stdin <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com\n")
-	b.WriteString("docker pull <ECR_URI>:latest\n")
-	if len(p.Ports) > 0 {
-		portMappings := ""
-		for _, port := range p.Ports {
-			portMappings += fmt.Sprintf(" -p %d:%d", port, port)
-		}
-		b.WriteString(fmt.Sprintf("docker run -d --restart unless-stopped%s <ECR_URI>:latest\n", portMappings))
-	} else {
-		b.WriteString("docker run -d --restart unless-stopped <ECR_URI>:latest\n")
-	}
-	b.WriteString("USERDATA\n")
-	b.WriteString(")\n")
-	b.WriteString("```\n\n")
-
-	b.WriteString("Then run:\n")
+	// User-data is handled automatically by the maker using the <USER_DATA> placeholder
+	b.WriteString("Launch the instance with user-data placeholder (the maker will auto-generate the Docker startup script):\n\n")
 	b.WriteString("   aws ec2 run-instances \\\n")
 	b.WriteString(fmt.Sprintf("     --instance-type %s \\\n", instanceType))
 	b.WriteString("     --image-id <AMI_ID> \\\n")
@@ -1157,7 +1130,11 @@ func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts
 	b.WriteString("     --iam-instance-profile Name=clanker-ec2-profile \\\n")
 	b.WriteString("     --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=clanker-app},{Key=Project,Value=clanker-deploy}]' \\\n")
 	b.WriteString("     --metadata-options 'HttpTokens=required,HttpPutResponseHopLimit=2,HttpEndpoint=enabled' \\\n")
-	b.WriteString("     --user-data \"$USER_DATA\"\n\n")
+	b.WriteString("     --user-data <USER_DATA>\n\n")
+	b.WriteString("NOTE: The <USER_DATA> placeholder will be automatically replaced with a base64-encoded script that:\n")
+	b.WriteString("  - Installs Docker\n")
+	b.WriteString("  - Logs into ECR\n")
+	b.WriteString("  - Pulls and runs the container image\n\n")
 
 	b.WriteString("IMPORTANT: The run-instances command MUST include a produces field to capture INSTANCE_ID:\n")
 	b.WriteString("   \"produces\": {\"INSTANCE_ID\": \"$.Instances[0].InstanceId\"}\n\n")

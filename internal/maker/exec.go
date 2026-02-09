@@ -58,6 +58,10 @@ type ExecOptions struct {
 	// Cloudflare options
 	CloudflareAPIToken  string
 	CloudflareAccountID string
+
+	// OutputBindings is populated by ExecutePlan with the final resource bindings
+	// (e.g., ALB_DNS, INSTANCE_ID, etc.) for the caller to use
+	OutputBindings map[string]string
 }
 
 func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
@@ -109,6 +113,9 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		}
 		args = updatedArgs
 
+		// Handle EC2 user-data generation for run-instances
+		args = maybeGenerateEC2UserData(args, bindings, opts)
+
 		awsArgs := make([]string, 0, len(args)+6)
 		awsArgs = append(awsArgs, args...)
 		awsArgs = append(awsArgs, "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
@@ -155,6 +162,13 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 					return fmt.Errorf("aws command %d failed: %w", idx+1, synthErr)
 				}
 			}
+		}
+	}
+
+	// Populate output bindings for the caller
+	if opts.OutputBindings != nil {
+		for k, v := range bindings {
+			opts.OutputBindings[k] = v
 		}
 	}
 
@@ -998,6 +1012,85 @@ func resolveAWSAccountID(ctx context.Context, opts ExecOptions) (string, error) 
 	}
 
 	return accountID, nil
+}
+
+// maybeGenerateEC2UserData handles user-data generation for EC2 run-instances commands.
+// If the user-data argument contains a placeholder (like <USER_DATA> or $USER_DATA),
+// it generates a proper Docker startup script based on the available bindings.
+func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts ExecOptions) []string {
+	if len(args) < 2 || args[0] != "ec2" || args[1] != "run-instances" {
+		return args
+	}
+
+	// Find the --user-data argument
+	userDataIdx := -1
+	for i, arg := range args {
+		if arg == "--user-data" && i+1 < len(args) {
+			userDataIdx = i + 1
+			break
+		}
+	}
+	if userDataIdx < 0 {
+		return args
+	}
+
+	currentUserData := args[userDataIdx]
+	// Check if it needs to be generated (contains placeholder-like values)
+	if !strings.Contains(currentUserData, "<USER_DATA>") &&
+		!strings.Contains(currentUserData, "$USER_DATA") &&
+		!strings.Contains(currentUserData, "<user_data>") &&
+		currentUserData != "<USER_DATA>" &&
+		currentUserData != "$USER_DATA" {
+		// User-data looks real, leave it alone
+		return args
+	}
+
+	// Generate the user-data script based on bindings
+	region := opts.Region
+	accountID := bindings["ACCOUNT_ID"]
+	if accountID == "" {
+		accountID = bindings["AWS_ACCOUNT_ID"]
+	}
+
+	// Find ECR URI from bindings
+	ecrURI := bindings["ECR_URI"]
+	if ecrURI == "" {
+		// Try to construct from ECR_REPO
+		ecrRepo := bindings["ECR_REPO"]
+		if ecrRepo == "" {
+			ecrRepo = "clanker-app"
+		}
+		if accountID != "" && region != "" {
+			ecrURI = fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s", accountID, region, ecrRepo)
+		}
+	}
+
+	if ecrURI == "" || region == "" || accountID == "" {
+		// Missing required bindings, cannot generate user-data
+		return args
+	}
+
+	// Generate the startup script
+	script := fmt.Sprintf(`#!/bin/bash
+set -ex
+yum update -y
+yum install -y docker
+systemctl start docker
+systemctl enable docker
+aws ecr get-login-password --region %s | docker login --username AWS --password-stdin %s.dkr.ecr.%s.amazonaws.com
+docker pull %s:latest
+docker run -d --restart unless-stopped -p 3000:3000 %s:latest
+`, region, accountID, region, ecrURI, ecrURI)
+
+	// Base64 encode the script
+	encoded := base64.StdEncoding.EncodeToString([]byte(script))
+
+	// Replace the user-data argument
+	newArgs := make([]string, len(args))
+	copy(newArgs, args)
+	newArgs[userDataIdx] = encoded
+
+	return newArgs
 }
 
 func maybeInjectLambdaZipBytes(args []string, w io.Writer) ([]byte, []string, error) {
