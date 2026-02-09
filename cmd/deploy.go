@@ -192,7 +192,38 @@ Examples:
 			})
 		}
 
-		// 7. Output plan JSON (or apply)
+		// 7. Resolve placeholders before output (skip for Cloudflare and --new-vpc)
+		if targetProvider != "cloudflare" && !newVPC {
+			const maxPlaceholderRounds = 5
+			for round := 1; round <= maxPlaceholderRounds; round++ {
+				if !deploy.HasUnresolvedPlaceholders(plan) {
+					break
+				}
+
+				logf("[deploy] resolving placeholders (round %d/%d)...", round, maxPlaceholderRounds)
+				resolved, unresolved, err := deploy.ResolvePlanPlaceholders(
+					ctx, plan, intel.InfraSnap,
+					aiClient.AskPrompt, aiClient.CleanJSONResponse, logf,
+				)
+				if err != nil {
+					logf("[deploy] warning: placeholder resolution failed: %v", err)
+					break
+				}
+				plan = resolved
+
+				if len(unresolved) == 0 {
+					logf("[deploy] all placeholders resolved")
+					break
+				}
+
+				if round == maxPlaceholderRounds {
+					logf("[deploy] warning: %d placeholders remain unresolved after %d rounds: %v",
+						len(unresolved), maxPlaceholderRounds, unresolved)
+				}
+			}
+		}
+
+		// 8. Output plan JSON (or apply)
 		planJSON, err := json.MarshalIndent(plan, "", "  ")
 		if err != nil {
 			return err
