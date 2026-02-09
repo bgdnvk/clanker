@@ -8,16 +8,16 @@ import (
 
 // DeployStrategy controls how we deploy
 type DeployStrategy struct {
-	Provider  string // aws, gcp, azure
-	Method    string // ecs-fargate, ec2, lambda, cloud-run, app-engine, s3-cloudfront
+	Provider  string // aws, cloudflare
+	Method    string // ecs-fargate, ec2, lambda, s3-cloudfront, cf-pages, cf-workers, cf-containers
 	Region    string
 	Reasoning string // LLM's reasoning for the choice
 }
 
 // ArchitectDecision is the structured JSON response from the architect LLM call
 type ArchitectDecision struct {
-	Provider      string   `json:"provider"`                // aws, gcp, azure
-	Method        string   `json:"method"`                  // ecs-fargate, ec2, lambda, s3-cloudfront, cloud-run, app-engine
+	Provider      string   `json:"provider"`                // aws, cloudflare
+	Method        string   `json:"method"`                  // ecs-fargate, ec2, lambda, s3-cloudfront, cf-pages, cf-workers, cf-containers
 	Reasoning     string   `json:"reasoning"`               // why this architecture
 	BuildSteps    []string `json:"buildSteps"`              // how to build it
 	RunCmd        string   `json:"runCmd"`                  // simplest way to start it locally
@@ -90,7 +90,12 @@ func ParseArchitectDecision(raw string) (*ArchitectDecision, error) {
 		d.Method = "ecs-fargate"
 	}
 	if d.Provider == "" {
-		d.Provider = "aws"
+		// infer provider from method prefix
+		if strings.HasPrefix(d.Method, "cf-") {
+			d.Provider = "cloudflare"
+		} else {
+			d.Provider = "aws"
+		}
 	}
 
 	return &d, nil
@@ -111,6 +116,21 @@ func DefaultStrategy(p *RepoProfile) DeployStrategy {
 	s := DeployStrategy{
 		Provider: "aws",
 		Region:   "us-east-1",
+	}
+
+	// if wrangler.toml exists, default to cloudflare
+	for _, hint := range p.DeployHints {
+		if hint == "cloudflare" {
+			s.Provider = "cloudflare"
+			if p.HasDocker {
+				s.Method = "cf-containers"
+			} else if len(p.Ports) == 0 || p.Framework == "react" || p.Framework == "vite" {
+				s.Method = "cf-pages"
+			} else {
+				s.Method = "cf-workers"
+			}
+			return s
+		}
 	}
 
 	// Dockerized apps → ECS Fargate (most common, zero servers)

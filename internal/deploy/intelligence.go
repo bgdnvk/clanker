@@ -18,6 +18,7 @@ type IntelligenceResult struct {
 	Exploration  *ExplorationResult `json:"exploration,omitempty"`
 	DeepAnalysis *DeepAnalysis      `json:"deepAnalysis"`
 	InfraSnap    *InfraSnapshot     `json:"infraSnapshot,omitempty"`
+	CFInfraSnap  *CFInfraSnapshot   `json:"cfInfraSnapshot,omitempty"`
 	Architecture *ArchitectDecision `json:"architecture"`
 	Validation   *PlanValidation    `json:"validation,omitempty"`
 	// final enriched prompt for maker pipeline
@@ -48,8 +49,9 @@ type PlanValidation struct {
 // Phase 1: Deep Understanding (LLM analyzes all gathered context)
 // Phase 1.5: AWS infra scan (query account for existing resources)
 // Phase 2: Architecture Decision + Cost Estimation (LLM picks best option)
+// Phase 2: Architecture Decision + Cost Estimation
 // Both phases feed into the final enriched prompt for the maker plan generator.
-func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, clean CleanFunc, debug bool, awsProfile, awsRegion string, logf func(string, ...any)) (*IntelligenceResult, error) {
+func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, clean CleanFunc, debug bool, targetProvider, awsProfile, awsRegion string, logf func(string, ...any)) (*IntelligenceResult, error) {
 	result := &IntelligenceResult{}
 
 	// Phase 0: Agentic file exploration — LLM asks for files it needs
@@ -95,14 +97,22 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 		logf("[intelligence] deep analysis: %s (complexity: %s)", deep.AppDescription, deep.Complexity)
 	}
 
-	// Phase 1.5: Infra scan — query AWS for existing resources
-	logf("[intelligence] phase 1.5: scanning AWS infrastructure...")
-	infraSnap := ScanInfra(ctx, awsProfile, awsRegion, logf)
-	result.InfraSnap = infraSnap
+	// Phase 1.5: Infra scan — query cloud provider for existing resources
+	var infraSnap *InfraSnapshot
+	var cfInfraSnap *CFInfraSnapshot
+	if targetProvider == "cloudflare" {
+		logf("[intelligence] phase 1.5: scanning Cloudflare infrastructure...")
+		cfInfraSnap = ScanCFInfra(ctx, logf)
+		result.CFInfraSnap = cfInfraSnap
+	} else {
+		logf("[intelligence] phase 1.5: scanning AWS infrastructure...")
+		infraSnap = ScanInfra(ctx, awsProfile, awsRegion, logf)
+		result.InfraSnap = infraSnap
+	}
 
 	// Phase 2: Architecture Decision + Cost Estimation
 	logf("[intelligence] phase 2: architecture + cost estimation...")
-	archPrompt := buildSmartArchitectPrompt(profile, deep)
+	archPrompt := buildSmartArchitectPrompt(profile, deep, targetProvider)
 	archResp, err := ask(ctx, archPrompt)
 	if err != nil {
 		return nil, fmt.Errorf("phase 2 (architecture) failed: %w", err)
@@ -127,7 +137,7 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 
 	// build the final enriched prompt with all intelligence + infra context
 	strat := StrategyFromArchitect(arch)
-	result.EnrichedPrompt = buildIntelligentPrompt(profile, deep, arch, strat, infraSnap)
+	result.EnrichedPrompt = buildIntelligentPrompt(profile, deep, arch, strat, infraSnap, cfInfraSnap)
 
 	return result, nil
 }
@@ -252,7 +262,7 @@ func parseDeepAnalysis(raw string) (*DeepAnalysis, error) {
 
 // --- Phase 2: Smart Architecture ---
 
-func buildSmartArchitectPrompt(p *RepoProfile, deep *DeepAnalysis) string {
+func buildSmartArchitectPrompt(p *RepoProfile, deep *DeepAnalysis, targetProvider string) string {
 	var b strings.Builder
 
 	b.WriteString("You are a senior cloud architect. Based on this deep analysis, decide the BEST way to deploy this application.\n\n")
@@ -313,7 +323,54 @@ Think about:
 - Will it ACTUALLY work? (ports, env vars, build steps)
 - Does it need persistent storage, WebSockets, cron jobs?
 - If it has a Dockerfile, use it — don't reinvent the wheel
+`)
 
+	if targetProvider == "cloudflare" {
+		b.WriteString(`
+## Cloudflare Options to Consider
+1. **cf-pages** — Static sites, SPAs, SSR with Workers Functions. Deploy via wrangler pages deploy. (~$0-5/mo free tier)
+2. **cf-workers** — Edge serverless functions via wrangler deploy. Need wrangler.toml. Great for APIs, Hono, Remix on CF. (~$5/mo for paid plan, free tier generous)
+3. **cf-containers** — Docker containers on Cloudflare. Use wrangler containers build + push. For full server apps. (~$10-30/mo)
+
+## Cloudflare Services
+- D1 = SQLite database (free tier: 5GB)
+- KV = Key-value store (free tier: 100k reads/day)
+- R2 = Object storage, S3-compatible (free tier: 10GB)
+- Queues = Message queues
+- Hyperdrive = Postgres connection pooler
+
+## Deployment CLI
+All commands use npx wrangler. Auth via CLOUDFLARE_API_TOKEN env var.
+
+## Cost Estimation
+Estimate the MONTHLY cost in USD. Most small apps fit in free tier.
+
+## Response Format (JSON only, no markdown fences)
+{
+  "provider": "cloudflare",
+  "method": "cf-pages",
+  "reasoning": "This is a Vite React SPA with no server-side rendering. CF Pages handles static site deployment perfectly with automatic CDN, preview deployments, and generous free tier.",
+  "alternatives": [
+    {"method": "cf-workers", "why_not": "Overkill for a static site"},
+    {"method": "cf-containers", "why_not": "No need for containers with a static site"}
+  ],
+  "buildSteps": [
+    "Install dependencies with npm install",
+    "Build with npm run build",
+    "Create Pages project with npx wrangler pages project create",
+    "Deploy dist/ with npx wrangler pages deploy dist/"
+  ],
+  "runCmd": "npm run dev",
+  "notes": ["SPA routing needs _redirects file or _routes.json"],
+  "cpuMemory": "",
+  "needsAlb": false,
+  "needsDb": false,
+  "dbService": "",
+  "estMonthly": "$0 (free tier)",
+  "costBreakdown": ["Pages: free", "Bandwidth: free up to 100GB/mo"]
+}`)
+	} else {
+		b.WriteString(`
 ## AWS Options to Consider
 1. **ECS Fargate** — serverless containers, good for any Dockerized app (~$12-30/mo)
 2. **App Runner** — even simpler than Fargate, auto-scales, good for web apps (~$5-25/mo)
@@ -350,6 +407,7 @@ Break it down by service (compute, storage, networking, database).
   "estMonthly": "$15-25",
   "costBreakdown": ["Fargate 0.25vCPU/0.5GB: ~$9/mo", "ALB: ~$16/mo", "ECR: ~$1/mo"]
 }`)
+	}
 
 	return b.String()
 }
@@ -359,7 +417,7 @@ Break it down by service (compute, storage, networking, database).
 func buildValidationPrompt(planJSON string, p *RepoProfile, deep *DeepAnalysis) string {
 	var b strings.Builder
 
-	b.WriteString("You are a deployment QA engineer. Review this AWS deployment plan and check for correctness.\n\n")
+	b.WriteString("You are a deployment QA engineer. Review this cloud deployment plan and check for correctness.\n\n")
 
 	b.WriteString("## Application Context\n")
 	b.WriteString(fmt.Sprintf("- %s\n", deep.AppDescription))
@@ -443,10 +501,14 @@ func buildFixPrompt(v *PlanValidation) string {
 // --- Intelligent Prompt Builder ---
 
 // buildIntelligentPrompt creates the final enriched prompt using all intelligence phases
-func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, arch *ArchitectDecision, strat DeployStrategy, infraSnap *InfraSnapshot) string {
+func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, arch *ArchitectDecision, strat DeployStrategy, infraSnap *InfraSnapshot, cfInfraSnap *CFInfraSnapshot) string {
 	var b strings.Builder
 
-	b.WriteString(fmt.Sprintf("Deploy the application from %s to AWS.\n\n", p.RepoURL))
+	providerLabel := "AWS"
+	if strat.Provider == "cloudflare" {
+		providerLabel = "Cloudflare"
+	}
+	b.WriteString(fmt.Sprintf("Deploy the application from %s to %s.\n\n", p.RepoURL, providerLabel))
 
 	// inject existing infra context so LLM reuses resources
 	if infraSnap != nil {
@@ -454,6 +516,14 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, arch *ArchitectD
 		if infraCtx != "" {
 			b.WriteString("## Existing AWS Infrastructure\n")
 			b.WriteString(infraCtx)
+			b.WriteString("\n\n")
+		}
+	}
+	if cfInfraSnap != nil {
+		cfCtx := cfInfraSnap.FormatCFForPrompt()
+		if cfCtx != "" {
+			b.WriteString("## Existing Cloudflare Infrastructure\n")
+			b.WriteString(cfCtx)
 			b.WriteString("\n\n")
 		}
 	}
@@ -551,8 +621,18 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, arch *ArchitectD
 		b.WriteString(s3CloudfrontIntelligentPrompt(p))
 	case "lightsail":
 		b.WriteString(lightsailPrompt(p, arch))
+	case "cf-pages":
+		b.WriteString(cfPagesPrompt(p, deep))
+	case "cf-workers":
+		b.WriteString(cfWorkersPrompt(p, deep))
+	case "cf-containers":
+		b.WriteString(cfContainersPrompt(p, arch, deep))
 	default:
-		b.WriteString(smartECSPrompt(p, arch, deep))
+		if strat.Provider == "cloudflare" {
+			b.WriteString(cfWorkersPrompt(p, deep))
+		} else {
+			b.WriteString(smartECSPrompt(p, arch, deep))
+		}
 	}
 
 	// db provisioning
@@ -574,12 +654,22 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, arch *ArchitectD
 	}
 
 	b.WriteString("\n## Rules\n")
-	b.WriteString("- Use the default VPC and its existing subnets when possible\n")
-	b.WriteString("- Tag all resources with Project=clanker-deploy\n")
-	b.WriteString("- Prefer minimal, cost-effective resource sizes\n")
-	b.WriteString("- The plan must be fully executable with AWS CLI only\n")
-	b.WriteString("- Commands must be in the correct dependency order\n")
-	b.WriteString("- Every resource that's referenced must be created first\n")
+	if strat.Provider == "cloudflare" {
+		b.WriteString("- All commands use npx wrangler CLI\n")
+		b.WriteString("- Auth via CLOUDFLARE_API_TOKEN env var (already set)\n")
+		b.WriteString("- Tag/name resources with clanker-deploy prefix\n")
+		b.WriteString("- Prefer free tier where possible\n")
+		b.WriteString("- The plan must be fully executable with npx wrangler commands only\n")
+		b.WriteString("- Commands must be in the correct dependency order\n")
+		b.WriteString("- Every resource that's referenced must be created first\n")
+	} else {
+		b.WriteString("- Use the default VPC and its existing subnets when possible\n")
+		b.WriteString("- Tag all resources with Project=clanker-deploy\n")
+		b.WriteString("- Prefer minimal, cost-effective resource sizes\n")
+		b.WriteString("- The plan must be fully executable with AWS CLI only\n")
+		b.WriteString("- Commands must be in the correct dependency order\n")
+		b.WriteString("- Every resource that's referenced must be created first\n")
+	}
 
 	return b.String()
 }
@@ -707,7 +797,122 @@ func dbPrompt(dbType string) string {
 		return "- Create ElastiCache Redis (cache.t3.micro, 1 node)\n- Private subnets, security group port 6379 from app only\n"
 	case "mongo", "documentdb":
 		return "- Create DocumentDB cluster (MongoDB-compatible)\n- Private subnets, port 27017\n"
+	case "d1", "sqlite":
+		return "- Create D1 database: npx wrangler d1 create <name>\n- Add binding to wrangler.toml\n"
 	default:
 		return fmt.Sprintf("- Provision managed %s service (pick cheapest tier)\n", dbType)
 	}
+}
+
+// --- Cloudflare method-specific prompts ---
+
+func cfPagesPrompt(p *RepoProfile, deep *DeepAnalysis) string {
+	var b strings.Builder
+	b.WriteString("Deploy as a Cloudflare Pages project (static site + optional Workers Functions):\n")
+
+	buildCmd := p.BuildCmd
+	if buildCmd == "" {
+		buildCmd = "npm run build"
+	}
+
+	// detect output dir
+	outputDir := "dist"
+	switch p.Framework {
+	case "nextjs":
+		outputDir = ".vercel/output/static"
+	case "remix":
+		outputDir = "build/client"
+	case "gatsby":
+		outputDir = "public"
+	case "astro":
+		outputDir = "dist"
+	}
+
+	b.WriteString(fmt.Sprintf("1. Install dependencies: %s install\n", p.PackageManager))
+	b.WriteString(fmt.Sprintf("2. Build the project: %s\n", buildCmd))
+	b.WriteString(fmt.Sprintf("3. Create Pages project: npx wrangler pages project create <project-name> --production-branch main\n"))
+	b.WriteString(fmt.Sprintf("4. Deploy built assets: npx wrangler pages deploy %s --project-name <project-name>\n", outputDir))
+	b.WriteString("5. Pages provides an automatic *.pages.dev URL + HTTPS\n")
+
+	if len(p.EnvVars) > 0 {
+		b.WriteString("6. Set environment variables: npx wrangler pages secret put <KEY> --project-name <project-name>\n")
+	}
+
+	return b.String()
+}
+
+func cfWorkersPrompt(p *RepoProfile, deep *DeepAnalysis) string {
+	var b strings.Builder
+	b.WriteString("Deploy as a Cloudflare Worker (edge serverless):\n")
+
+	// check if wrangler.toml exists
+	hasWranglerConfig := false
+	for name := range p.KeyFiles {
+		if name == "wrangler.toml" || name == "wrangler.jsonc" || name == "wrangler.json" {
+			hasWranglerConfig = true
+			break
+		}
+	}
+
+	if hasWranglerConfig {
+		b.WriteString("1. The project already has a wrangler config — use it as-is\n")
+		b.WriteString("2. Install dependencies\n")
+		b.WriteString("3. Deploy with: npx wrangler deploy\n")
+	} else {
+		b.WriteString("1. Generate a wrangler.toml configuration file:\n")
+		b.WriteString("   - name = \"<project-name>\"\n")
+		b.WriteString("   - main = \"src/index.ts\" (or appropriate entry point)\n")
+		b.WriteString("   - compatibility_date = current date\n")
+		b.WriteString("2. Install dependencies\n")
+		b.WriteString("3. Deploy with: npx wrangler deploy\n")
+	}
+
+	b.WriteString("4. Worker provides an automatic *.workers.dev URL + HTTPS\n")
+
+	// secrets
+	if len(p.EnvVars) > 0 {
+		b.WriteString("5. Set secrets: npx wrangler secret put <KEY>\n")
+		b.WriteString(fmt.Sprintf("   Required: %s\n", strings.Join(p.EnvVars, ", ")))
+	}
+
+	// bindings
+	if p.HasDB {
+		switch p.DBType {
+		case "postgres":
+			b.WriteString("6. Set up Hyperdrive for Postgres: npx wrangler hyperdrive create <name> --connection-string <postgres-url>\n")
+		default:
+			b.WriteString("6. Create D1 database: npx wrangler d1 create <name>\n")
+		}
+	}
+
+	return b.String()
+}
+
+func cfContainersPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis) string {
+	var b strings.Builder
+	b.WriteString("Deploy as a Cloudflare Container (Docker on Cloudflare edge):\n")
+
+	if p.HasDocker {
+		b.WriteString("1. Build Docker image using existing Dockerfile:\n")
+		b.WriteString("   npx wrangler containers build . -t <project-name>:latest\n")
+	} else {
+		b.WriteString("1. Generate a Dockerfile for the application, then build:\n")
+		b.WriteString(fmt.Sprintf("   - Base image: %s\n", dockerBaseImage(p)))
+		b.WriteString("   npx wrangler containers build . -t <project-name>:latest\n")
+	}
+
+	b.WriteString("2. Push image to Cloudflare registry:\n")
+	b.WriteString("   npx wrangler containers push <project-name>:latest\n")
+	b.WriteString("3. Create a Worker that references the container\n")
+	b.WriteString("4. Deploy with: npx wrangler deploy\n")
+
+	if len(p.Ports) > 0 {
+		b.WriteString(fmt.Sprintf("5. Container exposes port %d\n", p.Ports[0]))
+	}
+
+	if len(p.EnvVars) > 0 {
+		b.WriteString(fmt.Sprintf("6. Set container secrets via wrangler for: %s\n", strings.Join(p.EnvVars, ", ")))
+	}
+
+	return b.String()
 }

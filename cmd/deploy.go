@@ -25,6 +25,7 @@ var deployCmd = &cobra.Command{
 Examples:
   clanker deploy https://github.com/user/repo
   clanker deploy https://github.com/user/repo --apply
+  clanker deploy https://github.com/user/repo --provider cloudflare
   clanker deploy https://github.com/user/repo --profile prod`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -37,6 +38,7 @@ Examples:
 		openaiKey, _ := cmd.Flags().GetString("openai-key")
 		anthropicKey, _ := cmd.Flags().GetString("anthropic-key")
 		geminiKey, _ := cmd.Flags().GetString("gemini-key")
+		targetProvider, _ := cmd.Flags().GetString("provider")
 
 		// 1. Clone + analyze
 		fmt.Fprintf(os.Stderr, "[deploy] cloning %s ...\n", repoURL)
@@ -85,14 +87,17 @@ Examples:
 		}
 
 		// 3. Resolve AWS profile/region early so intelligence pipeline can scan infra
-		targetProfile := resolveAWSProfile(profile)
-		region := resolveAWSRegion(ctx, targetProfile)
+		var targetProfile, region string
+		if targetProvider != "cloudflare" {
+			targetProfile = resolveAWSProfile(profile)
+			region = resolveAWSRegion(ctx, targetProfile)
+		}
 
 		// 4. Run multi-phase intelligence pipeline (explore → deep analysis → infra scan → architecture)
 		intel, err := deploy.RunIntelligence(ctx, rp,
 			aiClient.AskPrompt,
 			aiClient.CleanJSONResponse,
-			debug, targetProfile, region, logf,
+			debug, targetProvider, targetProfile, region, logf,
 		)
 		if err != nil {
 			return fmt.Errorf("intelligence pipeline failed: %w", err)
@@ -168,10 +173,12 @@ Examples:
 			enrichedQuestion += fixPrompt
 		}
 
-		// 6. Enrich w/ existing infra context
-		_ = maker.EnrichPlan(ctx, plan, maker.ExecOptions{
-			Profile: targetProfile, Region: region, Writer: io.Discard,
-		})
+		// 6. Enrich w/ existing infra context (skip for Cloudflare)
+		if targetProvider != "cloudflare" {
+			_ = maker.EnrichPlan(ctx, plan, maker.ExecOptions{
+				Profile: targetProfile, Region: region, Writer: io.Discard,
+			})
+		}
 
 		// 7. Output plan JSON (or apply)
 		planJSON, err := json.MarshalIndent(plan, "", "  ")
@@ -186,7 +193,7 @@ Examples:
 
 		// apply mode: execute the plan
 		fmt.Fprintf(os.Stderr, "[deploy] applying plan (%d commands)...\n", len(plan.Commands))
-		return maker.ExecutePlan(ctx, plan, maker.ExecOptions{
+		execOpts := maker.ExecOptions{
 			Profile:    targetProfile,
 			Region:     region,
 			Writer:     os.Stdout,
@@ -195,7 +202,12 @@ Examples:
 			AIAPIKey:   apiKey,
 			AIProfile:  aiProfile,
 			Debug:      debug,
-		})
+		}
+		if targetProvider == "cloudflare" {
+			execOpts.Profile = ""
+			execOpts.Region = ""
+		}
+		return maker.ExecutePlan(ctx, plan, execOpts)
 	},
 }
 
@@ -248,4 +260,5 @@ func init() {
 	deployCmd.Flags().String("anthropic-key", "", "Anthropic API key")
 	deployCmd.Flags().String("gemini-key", "", "Gemini API key")
 	deployCmd.Flags().Bool("apply", false, "Apply the plan immediately after generation")
+	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws or cloudflare")
 }

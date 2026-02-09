@@ -250,6 +250,9 @@ func detectDeployHints(dir string, p *RepoProfile) {
 		"serverless.yml":                "serverless",
 		"cdk.json":                      "aws-cdk",
 		"pulumi.yaml":                   "pulumi",
+		"wrangler.toml":                 "cloudflare",
+		"wrangler.jsonc":                "cloudflare",
+		"wrangler.json":                 "cloudflare",
 		".github/workflows/deploy.yml":  "github-actions",
 		".github/workflows/deploy.yaml": "github-actions",
 	}
@@ -555,6 +558,7 @@ func readKeyFiles(dir string) map[string]string {
 		"Procfile",
 		"vercel.json",
 		"netlify.toml",
+		"wrangler.toml", "wrangler.jsonc", "wrangler.json",
 		".env.example", ".env.sample", ".env.template",
 		"README.md", "readme.md", "README",
 		"pnpm-workspace.yaml",
