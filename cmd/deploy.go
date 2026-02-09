@@ -25,6 +25,8 @@ var deployCmd = &cobra.Command{
 Examples:
   clanker deploy https://github.com/user/repo
   clanker deploy https://github.com/user/repo --apply
+  clanker deploy https://github.com/user/repo --target ec2
+  clanker deploy https://github.com/user/repo --target eks
   clanker deploy https://github.com/user/repo --provider cloudflare
   clanker deploy https://github.com/user/repo --profile prod`,
 	Args: cobra.ExactArgs(1),
@@ -39,6 +41,9 @@ Examples:
 		anthropicKey, _ := cmd.Flags().GetString("anthropic-key")
 		geminiKey, _ := cmd.Flags().GetString("gemini-key")
 		targetProvider, _ := cmd.Flags().GetString("provider")
+		deployTarget, _ := cmd.Flags().GetString("target")
+		instanceType, _ := cmd.Flags().GetString("instance-type")
+		newVPC, _ := cmd.Flags().GetBool("new-vpc")
 
 		// 1. Clone + analyze
 		fmt.Fprintf(os.Stderr, "[deploy] cloning %s ...\n", repoURL)
@@ -93,11 +98,18 @@ Examples:
 			region = resolveAWSRegion(ctx, targetProfile)
 		}
 
+		// Build deploy options from flags
+		deployOpts := &deploy.DeployOptions{
+			Target:       deployTarget,
+			InstanceType: instanceType,
+			NewVPC:       newVPC,
+		}
+
 		// 4. Run multi-phase intelligence pipeline (explore → deep analysis → infra scan → architecture)
 		intel, err := deploy.RunIntelligence(ctx, rp,
 			aiClient.AskPrompt,
 			aiClient.CleanJSONResponse,
-			debug, targetProvider, targetProfile, region, logf,
+			debug, targetProvider, targetProfile, region, deployOpts, logf,
 		)
 		if err != nil {
 			return fmt.Errorf("intelligence pipeline failed: %w", err)
@@ -261,4 +273,7 @@ func init() {
 	deployCmd.Flags().String("gemini-key", "", "Gemini API key")
 	deployCmd.Flags().Bool("apply", false, "Apply the plan immediately after generation")
 	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws or cloudflare")
+	deployCmd.Flags().String("target", "fargate", "Deployment target: fargate (default), ec2, or eks")
+	deployCmd.Flags().String("instance-type", "t3.small", "EC2 instance type (only used with --target ec2)")
+	deployCmd.Flags().Bool("new-vpc", false, "Create a new VPC instead of using default")
 }

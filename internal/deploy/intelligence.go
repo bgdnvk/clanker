@@ -25,6 +25,74 @@ type IntelligenceResult struct {
 	EnrichedPrompt string `json:"enrichedPrompt"`
 }
 
+// DeployOptions contains user-specified deployment preferences
+type DeployOptions struct {
+	Target       string // fargate, ec2, eks
+	InstanceType string // for ec2: t3.small, t3.medium, etc.
+	NewVPC       bool   // create new VPC instead of using default
+}
+
+// shouldUseAPIGateway determines whether to use API Gateway or ALB based on app characteristics.
+// API Gateway is better for: pure REST APIs, low traffic, pay-per-request pricing
+// ALB is better for: web apps with frontend, WebSockets, high traffic, static content
+func shouldUseAPIGateway(p *RepoProfile, deep *DeepAnalysis) bool {
+	// Web apps with frontend should use ALB
+	frontendFrameworks := map[string]bool{
+		"react": true, "nextjs": true, "nuxt": true, "vue": true,
+		"angular": true, "svelte": true, "vite": true, "gatsby": true,
+		"remix": true, "astro": true,
+	}
+	if frontendFrameworks[p.Framework] {
+		return false // ALB for frontend apps
+	}
+
+	// Apps with docker-compose usually have multiple services - use ALB
+	if p.HasCompose {
+		return false
+	}
+
+	// Check deep analysis for WebSocket mentions
+	if deep != nil {
+		descLower := strings.ToLower(deep.AppDescription)
+		for _, service := range deep.Services {
+			serviceLower := strings.ToLower(service)
+			if strings.Contains(serviceLower, "websocket") ||
+				strings.Contains(serviceLower, "socket") ||
+				strings.Contains(serviceLower, "gateway") ||
+				strings.Contains(serviceLower, "realtime") {
+				return false // ALB for WebSocket apps
+			}
+		}
+		if strings.Contains(descLower, "websocket") ||
+			strings.Contains(descLower, "real-time") ||
+			strings.Contains(descLower, "realtime") {
+			return false
+		}
+	}
+
+	// Pure API frameworks should use API Gateway
+	apiFrameworks := map[string]bool{
+		"fastapi": true, "flask": true, "gin": true, "echo": true,
+		"fiber": true, "chi": true, "express": true, "fastify": true,
+		"actix": true, "axum": true, "rocket": true, "spring-boot": true,
+	}
+	if apiFrameworks[p.Framework] {
+		// But if it has static files or templates, use ALB
+		for filename := range p.KeyFiles {
+			if strings.Contains(filename, "static") ||
+				strings.Contains(filename, "templates") ||
+				strings.Contains(filename, "public") ||
+				strings.Contains(filename, "views") {
+				return false
+			}
+		}
+		return true // API Gateway for pure API apps
+	}
+
+	// Default to ALB for unknown cases (safer, more features)
+	return false
+}
+
 // DeepAnalysis is the LLM's understanding of what the app actually does
 type DeepAnalysis struct {
 	AppDescription string   `json:"appDescription"` // what does this app do
@@ -49,9 +117,15 @@ type PlanValidation struct {
 // Phase 1: Deep Understanding (LLM analyzes all gathered context)
 // Phase 1.5: AWS infra scan (query account for existing resources)
 // Phase 2: Architecture Decision + Cost Estimation (LLM picks best option)
-// Phase 2: Architecture Decision + Cost Estimation
 // Both phases feed into the final enriched prompt for the maker plan generator.
-func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, clean CleanFunc, debug bool, targetProvider, awsProfile, awsRegion string, logf func(string, ...any)) (*IntelligenceResult, error) {
+func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, clean CleanFunc, debug bool, targetProvider, awsProfile, awsRegion string, opts *DeployOptions, logf func(string, ...any)) (*IntelligenceResult, error) {
+	// default options if nil
+	if opts == nil {
+		opts = &DeployOptions{Target: "fargate", InstanceType: "t3.small"}
+	}
+	if opts.Target == "" {
+		opts.Target = "fargate"
+	}
 	result := &IntelligenceResult{}
 
 	// Phase 0: Agentic file exploration — LLM asks for files it needs
@@ -111,8 +185,8 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 	}
 
 	// Phase 2: Architecture Decision + Cost Estimation
-	logf("[intelligence] phase 2: architecture + cost estimation...")
-	archPrompt := buildSmartArchitectPrompt(profile, deep, targetProvider)
+	logf("[intelligence] phase 2: architecture + cost estimation (target: %s)...", opts.Target)
+	archPrompt := buildSmartArchitectPrompt(profile, deep, targetProvider, opts)
 	archResp, err := ask(ctx, archPrompt)
 	if err != nil {
 		return nil, fmt.Errorf("phase 2 (architecture) failed: %w", err)
@@ -135,9 +209,23 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 		logf("[intelligence] estimated cost: %s/month", arch.EstMonthly)
 	}
 
+	// Override architecture method if user specified a target
+	if opts.Target != "" && opts.Target != "fargate" {
+		switch opts.Target {
+		case "ec2":
+			arch.Method = "ec2"
+			arch.CpuMemory = opts.InstanceType
+		case "eks":
+			arch.Method = "eks"
+		}
+	}
+
+	// Auto-detect API Gateway vs ALB based on app type
+	arch.UseAPIGateway = shouldUseAPIGateway(profile, deep)
+
 	// build the final enriched prompt with all intelligence + infra context
 	strat := StrategyFromArchitect(arch)
-	result.EnrichedPrompt = buildIntelligentPrompt(profile, deep, arch, strat, infraSnap, cfInfraSnap)
+	result.EnrichedPrompt = buildIntelligentPrompt(profile, deep, arch, strat, infraSnap, cfInfraSnap, opts)
 
 	return result, nil
 }
@@ -262,7 +350,7 @@ func parseDeepAnalysis(raw string) (*DeepAnalysis, error) {
 
 // --- Phase 2: Smart Architecture ---
 
-func buildSmartArchitectPrompt(p *RepoProfile, deep *DeepAnalysis, targetProvider string) string {
+func buildSmartArchitectPrompt(p *RepoProfile, deep *DeepAnalysis, targetProvider string, opts *DeployOptions) string {
 	var b strings.Builder
 
 	b.WriteString("You are a senior cloud architect. Based on this deep analysis, decide the BEST way to deploy this application.\n\n")
@@ -370,14 +458,31 @@ Estimate the MONTHLY cost in USD. Most small apps fit in free tier.
   "costBreakdown": ["Pages: free", "Bandwidth: free up to 100GB/mo"]
 }`)
 	} else {
+		// Add user's deployment target preference
+		if opts != nil && opts.Target != "" && opts.Target != "fargate" {
+			b.WriteString(fmt.Sprintf("\n## USER PREFERENCE: Deploy to %s", strings.ToUpper(opts.Target)))
+			if opts.Target == "ec2" && opts.InstanceType != "" {
+				b.WriteString(fmt.Sprintf(" (%s instance)\n", opts.InstanceType))
+			} else {
+				b.WriteString("\n")
+			}
+			b.WriteString("The user has explicitly requested this deployment target. Respect their choice.\n")
+		}
+
 		b.WriteString(`
 ## AWS Options to Consider
 1. **ECS Fargate** — serverless containers, good for any Dockerized app (~$12-30/mo)
-2. **App Runner** — even simpler than Fargate, auto-scales, good for web apps (~$5-25/mo)
-3. **EC2** — full control, cheap with spot/t3.micro (~$4-15/mo)
-4. **Lambda** — event-driven/cron, not for long-running servers (~$0-5/mo)
-5. **S3 + CloudFront** — static sites only, nearly free (~$1-3/mo)
-6. **Lightsail** — cheapest for simple apps (~$3.50-10/mo)
+2. **EC2** — full control, SSH access, good for stateful apps or custom requirements (~$4-30/mo depending on instance)
+3. **EKS** — Kubernetes, good if user already has EKS cluster (~$73/mo for control plane + nodes)
+4. **App Runner** — even simpler than Fargate, auto-scales, good for web apps (~$5-25/mo)
+5. **Lambda** — event-driven/cron, not for long-running servers (~$0-5/mo)
+6. **S3 + CloudFront** — static sites only, nearly free (~$1-3/mo)
+7. **Lightsail** — cheapest for simple apps (~$3.50-10/mo)
+
+## Load Balancer / API Gateway Decision
+Choose based on the application type:
+- **API Gateway** — best for REST/HTTP APIs, serverless backends, pay-per-request pricing, built-in throttling/auth
+- **ALB** — best for web apps with WebSockets, high traffic, sticky sessions, HTTP/2
 
 ## Cost Estimation
 Estimate the MONTHLY cost in USD for your recommended architecture.
@@ -386,26 +491,26 @@ Break it down by service (compute, storage, networking, database).
 ## Response Format (JSON only, no markdown fences)
 {
   "provider": "aws",
-  "method": "ecs-fargate",
-  "reasoning": "This is a Dockerized Node.js monorepo with WebSocket support. ECS Fargate handles the Docker build natively and supports long-running connections. App Runner would be simpler but doesn't support WebSocket sticky sessions well.",
+  "method": "ec2",
+  "reasoning": "User requested EC2 deployment. This is a Dockerized Node.js app that will run well on a t3.small instance with docker compose.",
   "alternatives": [
-    {"method": "app-runner", "why_not": "No WebSocket sticky session support"},
-    {"method": "ec2", "why_not": "More ops overhead for a simple deployment"}
+    {"method": "ecs-fargate", "why_not": "User prefers EC2 for direct control"},
+    {"method": "app-runner", "why_not": "User explicitly requested EC2"}
   ],
   "buildSteps": [
-    "Create ECR repository",
-    "Clone repo and docker build using existing Dockerfile",
-    "Push image to ECR",
-    "Create ECS cluster + task definition + service"
+    "Create EC2 instance with Docker pre-installed",
+    "Clone repo to instance",
+    "Run docker compose up"
   ],
   "runCmd": "docker compose up",
-  "notes": ["Port 18789 must be exposed", "OPENAI_API_KEY env var required"],
-  "cpuMemory": "512/1024",
-  "needsAlb": true,
+  "notes": ["Port 3000 must be exposed in security group", "SSH access on port 22"],
+  "cpuMemory": "t3.small",
+  "needsAlb": false,
+  "useApiGateway": false,
   "needsDb": false,
   "dbService": "",
   "estMonthly": "$15-25",
-  "costBreakdown": ["Fargate 0.25vCPU/0.5GB: ~$9/mo", "ALB: ~$16/mo", "ECR: ~$1/mo"]
+  "costBreakdown": ["EC2 t3.small: ~$15/mo", "EBS 20GB: ~$2/mo"]
 }`)
 	}
 
@@ -501,7 +606,7 @@ func buildFixPrompt(v *PlanValidation) string {
 // --- Intelligent Prompt Builder ---
 
 // buildIntelligentPrompt creates the final enriched prompt using all intelligence phases
-func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, arch *ArchitectDecision, strat DeployStrategy, infraSnap *InfraSnapshot, cfInfraSnap *CFInfraSnapshot) string {
+func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, arch *ArchitectDecision, strat DeployStrategy, infraSnap *InfraSnapshot, cfInfraSnap *CFInfraSnapshot, opts *DeployOptions) string {
 	var b strings.Builder
 
 	providerLabel := "AWS"
@@ -613,6 +718,10 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, arch *ArchitectD
 	// deployment instructions based on chosen method
 	b.WriteString("\n## Deployment Instructions\n")
 	switch strat.Method {
+	case "ec2":
+		b.WriteString(ec2Prompt(p, arch, deep, opts))
+	case "eks":
+		b.WriteString(eksPrompt(p, arch, deep))
 	case "ecs-fargate":
 		b.WriteString(smartECSPrompt(p, arch, deep))
 	case "app-runner":
@@ -913,6 +1022,274 @@ func cfContainersPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnaly
 	if len(p.EnvVars) > 0 {
 		b.WriteString(fmt.Sprintf("6. Set container secrets via wrangler for: %s\n", strings.Join(p.EnvVars, ", ")))
 	}
+
+	return b.String()
+}
+
+// ec2Prompt generates deployment instructions for EC2
+func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts *DeployOptions) string {
+	var b strings.Builder
+
+	instanceType := "t3.small"
+	if opts != nil && opts.InstanceType != "" {
+		instanceType = opts.InstanceType
+	}
+
+	b.WriteString(fmt.Sprintf("Deploy to EC2 instance (%s) with Docker.\n\n", instanceType))
+	b.WriteString("IMPORTANT: Generate AWS CLI commands that are fully executable. Use elbv2 (not ec2) for load balancers.\n\n")
+
+	// VPC setup - be very explicit
+	if opts != nil && opts.NewVPC {
+		b.WriteString("## MANDATORY: Create a NEW VPC (do NOT use default VPC)\n")
+		b.WriteString("You MUST create all these resources in order:\n\n")
+		b.WriteString("1. Create VPC:\n")
+		b.WriteString("   aws ec2 create-vpc --cidr-block 10.0.0.0/16 --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=clanker-deploy-vpc},{Key=Project,Value=clanker-deploy}]'\n")
+		b.WriteString("   Save the VpcId from output.\n\n")
+		b.WriteString("2. Enable DNS hostnames on VPC:\n")
+		b.WriteString("   aws ec2 modify-vpc-attribute --vpc-id <VPC_ID> --enable-dns-hostnames '{\"Value\":true}'\n\n")
+		b.WriteString("3. Create public subnet in us-east-1a:\n")
+		b.WriteString("   aws ec2 create-subnet --vpc-id <VPC_ID> --cidr-block 10.0.1.0/24 --availability-zone us-east-1a --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=clanker-public-1a}]'\n")
+		b.WriteString("   Save the SubnetId.\n\n")
+		b.WriteString("4. Create public subnet in us-east-1b (for ALB):\n")
+		b.WriteString("   aws ec2 create-subnet --vpc-id <VPC_ID> --cidr-block 10.0.2.0/24 --availability-zone us-east-1b --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=clanker-public-1b}]'\n")
+		b.WriteString("   Save the SubnetId.\n\n")
+		b.WriteString("5. Create Internet Gateway:\n")
+		b.WriteString("   aws ec2 create-internet-gateway --tag-specifications 'ResourceType=internet-gateway,Tags=[{Key=Name,Value=clanker-igw}]'\n")
+		b.WriteString("   Save the InternetGatewayId.\n\n")
+		b.WriteString("6. Attach IGW to VPC:\n")
+		b.WriteString("   aws ec2 attach-internet-gateway --internet-gateway-id <IGW_ID> --vpc-id <VPC_ID>\n\n")
+		b.WriteString("7. Create route table:\n")
+		b.WriteString("   aws ec2 create-route-table --vpc-id <VPC_ID> --tag-specifications 'ResourceType=route-table,Tags=[{Key=Name,Value=clanker-public-rt}]'\n")
+		b.WriteString("   Save the RouteTableId.\n\n")
+		b.WriteString("8. Add route to Internet Gateway:\n")
+		b.WriteString("   aws ec2 create-route --route-table-id <RT_ID> --destination-cidr-block 0.0.0.0/0 --gateway-id <IGW_ID>\n\n")
+		b.WriteString("9. Associate route table with subnets:\n")
+		b.WriteString("   aws ec2 associate-route-table --route-table-id <RT_ID> --subnet-id <SUBNET_1A_ID>\n")
+		b.WriteString("   aws ec2 associate-route-table --route-table-id <RT_ID> --subnet-id <SUBNET_1B_ID>\n\n")
+		b.WriteString("10. Enable auto-assign public IP on subnets:\n")
+		b.WriteString("    aws ec2 modify-subnet-attribute --subnet-id <SUBNET_1A_ID> --map-public-ip-on-launch\n")
+		b.WriteString("    aws ec2 modify-subnet-attribute --subnet-id <SUBNET_1B_ID> --map-public-ip-on-launch\n\n")
+	}
+
+	b.WriteString("## Security Groups (CRITICAL: Follow least-privilege)\n")
+	b.WriteString("Create TWO security groups:\n\n")
+	b.WriteString("1. ALB Security Group (allows public HTTP/HTTPS):\n")
+	b.WriteString("   aws ec2 create-security-group --group-name clanker-alb-sg --description 'ALB security group' --vpc-id <VPC_ID>\n")
+	b.WriteString("   aws ec2 authorize-security-group-ingress --group-id <ALB_SG_ID> --protocol tcp --port 80 --cidr 0.0.0.0/0\n")
+	b.WriteString("   aws ec2 authorize-security-group-ingress --group-id <ALB_SG_ID> --protocol tcp --port 443 --cidr 0.0.0.0/0\n\n")
+	b.WriteString("2. EC2 Security Group (ONLY allows traffic from ALB, NOT from internet):\n")
+	b.WriteString("   aws ec2 create-security-group --group-name clanker-ec2-sg --description 'EC2 security group' --vpc-id <VPC_ID>\n")
+	if len(p.Ports) > 0 {
+		for _, port := range p.Ports {
+			b.WriteString(fmt.Sprintf("   aws ec2 authorize-security-group-ingress --group-id <EC2_SG_ID> --protocol tcp --port %d --source-group <ALB_SG_ID>\n", port))
+		}
+	}
+	b.WriteString("   DO NOT open SSH (22) to 0.0.0.0/0. Use SSM Session Manager instead.\n\n")
+
+	b.WriteString("## IAM Role and Instance Profile\n")
+	b.WriteString("Create IAM role AND instance profile (both required for EC2):\n\n")
+	b.WriteString("1. Create role:\n")
+	b.WriteString("   aws iam create-role --role-name clanker-ec2-role --assume-role-policy-document '{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}'\n\n")
+	b.WriteString("2. Attach policies:\n")
+	b.WriteString("   aws iam attach-role-policy --role-name clanker-ec2-role --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore\n")
+	b.WriteString("   aws iam attach-role-policy --role-name clanker-ec2-role --policy-arn arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy\n\n")
+	b.WriteString("3. Create instance profile:\n")
+	b.WriteString("   aws iam create-instance-profile --instance-profile-name clanker-ec2-profile\n\n")
+	b.WriteString("4. Add role to instance profile:\n")
+	b.WriteString("   aws iam add-role-to-instance-profile --instance-profile-name clanker-ec2-profile --role-name clanker-ec2-role\n\n")
+
+	b.WriteString("## Launch EC2 Instance\n")
+	b.WriteString(fmt.Sprintf("Launch %s instance with Amazon Linux 2023:\n\n", instanceType))
+	b.WriteString("Get latest AL2023 AMI ID:\n")
+	b.WriteString("   aws ssm get-parameters --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64 --query 'Parameters[0].Value' --output text\n\n")
+
+	// Inline user-data script as base64 or heredoc
+	b.WriteString("Launch instance with user-data script (MUST be base64 encoded or use file://):\n")
+	b.WriteString("   aws ec2 run-instances \\\n")
+	b.WriteString(fmt.Sprintf("     --instance-type %s \\\n", instanceType))
+	b.WriteString("     --image-id <AMI_ID> \\\n")
+	b.WriteString("     --subnet-id <SUBNET_1A_ID> \\\n")
+	b.WriteString("     --security-group-ids <EC2_SG_ID> \\\n")
+	b.WriteString("     --iam-instance-profile Name=clanker-ec2-profile \\\n")
+	b.WriteString("     --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=clanker-app},{Key=Project,Value=clanker-deploy}]' \\\n")
+	b.WriteString("     --user-data '")
+
+	// Inline user-data script
+	userDataScript := `#!/bin/bash
+set -e
+yum update -y
+yum install -y docker git
+systemctl start docker
+systemctl enable docker
+usermod -aG docker ec2-user
+curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+chmod +x /usr/local/bin/docker-compose
+`
+	// Add app deployment to user-data
+	userDataScript += fmt.Sprintf("cd /home/ec2-user\ngit clone %s app\ncd app\n", p.RepoURL)
+	if p.HasCompose {
+		userDataScript += "docker-compose up -d\n"
+	} else if p.HasDocker {
+		userDataScript += "docker build -t app .\n"
+		if len(p.Ports) > 0 {
+			portMappings := ""
+			for _, port := range p.Ports {
+				portMappings += fmt.Sprintf(" -p %d:%d", port, port)
+			}
+			userDataScript += fmt.Sprintf("docker run -d%s app\n", portMappings)
+		} else {
+			userDataScript += "docker run -d app\n"
+		}
+	}
+
+	// Base64 encode the script for the command
+	b.WriteString("IyEvYmluL2Jhc2gKc2V0IC1lCnl1bSB1cGRhdGUgLXkKeXVtIGluc3RhbGwgLXkgZG9ja2VyIGdpdApzeXN0ZW1jdGwgc3RhcnQgZG9ja2VyCnN5c3RlbWN0bCBlbmFibGUgZG9ja2VyCnVzZXJtb2QgLWFHIGRvY2tlciBlYzItdXNlcgpjdXJsIC1MICJodHRwczovL2dpdGh1Yi5jb20vZG9ja2VyL2NvbXBvc2UvcmVsZWFzZXMvbGF0ZXN0L2Rvd25sb2FkL2RvY2tlci1jb21wb3NlLSQodW5hbWUgLXMpLSQodW5hbWUgLW0pIiAtbyAvdXNyL2xvY2FsL2Jpbi9kb2NrZXItY29tcG9zZQpjaG1vZCAreCAvdXNyL2xvY2FsL2Jpbi9kb2NrZXItY29tcG9zZQ=='\n\n")
+
+	b.WriteString("Wait for instance to be running:\n")
+	b.WriteString("   aws ec2 wait instance-running --instance-ids <INSTANCE_ID>\n\n")
+
+	// env vars
+	if len(p.EnvVars) > 0 {
+		b.WriteString("## Environment Variables (Secrets Manager)\n")
+		b.WriteString("Store application secrets:\n")
+		for _, v := range p.EnvVars {
+			b.WriteString(fmt.Sprintf("   aws secretsmanager create-secret --name clanker/%s --secret-string '<value>'\n", v))
+		}
+		b.WriteString("\n")
+	}
+
+	// ALB setup - be very explicit about using elbv2
+	b.WriteString("## Application Load Balancer (use elbv2 commands, NOT ec2)\n")
+	b.WriteString("1. Create ALB:\n")
+	b.WriteString("   aws elbv2 create-load-balancer \\\n")
+	b.WriteString("     --name clanker-alb \\\n")
+	b.WriteString("     --subnets <SUBNET_1A_ID> <SUBNET_1B_ID> \\\n")
+	b.WriteString("     --security-groups <ALB_SG_ID> \\\n")
+	b.WriteString("     --scheme internet-facing \\\n")
+	b.WriteString("     --type application\n")
+	b.WriteString("   Save the LoadBalancerArn and DNSName.\n\n")
+
+	appPort := 80
+	if len(p.Ports) > 0 {
+		appPort = p.Ports[0]
+	}
+	b.WriteString("2. Create target group:\n")
+	b.WriteString(fmt.Sprintf("   aws elbv2 create-target-group \\\n"))
+	b.WriteString("     --name clanker-tg \\\n")
+	b.WriteString(fmt.Sprintf("     --protocol HTTP --port %d \\\n", appPort))
+	b.WriteString("     --vpc-id <VPC_ID> \\\n")
+	b.WriteString("     --target-type instance \\\n")
+	b.WriteString(fmt.Sprintf("     --health-check-path / --health-check-port %d\n", appPort))
+	b.WriteString("   Save the TargetGroupArn.\n\n")
+
+	b.WriteString("3. Register EC2 instance with target group:\n")
+	b.WriteString("   aws elbv2 register-targets --target-group-arn <TG_ARN> --targets Id=<INSTANCE_ID>\n\n")
+
+	b.WriteString("4. Create listener:\n")
+	b.WriteString("   aws elbv2 create-listener \\\n")
+	b.WriteString("     --load-balancer-arn <ALB_ARN> \\\n")
+	b.WriteString("     --protocol HTTP --port 80 \\\n")
+	b.WriteString("     --default-actions Type=forward,TargetGroupArn=<TG_ARN>\n\n")
+
+	b.WriteString("5. Wait for target to be healthy:\n")
+	b.WriteString("   aws elbv2 wait target-in-service --target-group-arn <TG_ARN> --targets Id=<INSTANCE_ID>\n\n")
+
+	b.WriteString("## Output\n")
+	b.WriteString("The application will be accessible at the ALB DNS name (from step 1).\n")
+	b.WriteString("DO NOT create any Lambda or CloudWatch Lambda alarms - this is an EC2 deployment.\n")
+
+	return b.String()
+}
+
+// eksPrompt generates deployment instructions for EKS
+func eksPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis) string {
+	var b strings.Builder
+	b.WriteString("Deploy to existing EKS cluster:\n\n")
+
+	b.WriteString("## Prerequisites\n")
+	b.WriteString("- Existing EKS cluster with kubectl configured\n")
+	b.WriteString("- ECR repository for container images\n\n")
+
+	b.WriteString("## Step 1: Build and Push Image\n")
+	b.WriteString("1. Create ECR repository if not exists\n")
+	b.WriteString("2. Authenticate Docker to ECR\n")
+	if p.HasDocker {
+		b.WriteString("3. Build using existing Dockerfile: docker build -t <ecr-uri>:latest .\n")
+	} else {
+		b.WriteString(fmt.Sprintf("3. Generate Dockerfile with base image %s, then build\n", dockerBaseImage(p)))
+	}
+	b.WriteString("4. Push to ECR: docker push <ecr-uri>:latest\n\n")
+
+	b.WriteString("## Step 2: Create Kubernetes Resources\n")
+	b.WriteString("Generate and apply these K8s manifests:\n\n")
+
+	b.WriteString("### Namespace\n")
+	b.WriteString("```yaml\n")
+	b.WriteString("apiVersion: v1\n")
+	b.WriteString("kind: Namespace\n")
+	b.WriteString("metadata:\n")
+	b.WriteString("  name: clanker-deploy\n")
+	b.WriteString("```\n\n")
+
+	b.WriteString("### Deployment\n")
+	b.WriteString("```yaml\n")
+	b.WriteString("apiVersion: apps/v1\n")
+	b.WriteString("kind: Deployment\n")
+	b.WriteString("metadata:\n")
+	b.WriteString("  name: app\n")
+	b.WriteString("  namespace: clanker-deploy\n")
+	b.WriteString("spec:\n")
+	b.WriteString("  replicas: 2\n")
+	b.WriteString("  selector:\n")
+	b.WriteString("    matchLabels:\n")
+	b.WriteString("      app: app\n")
+	b.WriteString("  template:\n")
+	b.WriteString("    metadata:\n")
+	b.WriteString("      labels:\n")
+	b.WriteString("        app: app\n")
+	b.WriteString("    spec:\n")
+	b.WriteString("      containers:\n")
+	b.WriteString("      - name: app\n")
+	b.WriteString("        image: <ecr-uri>:latest\n")
+	if len(p.Ports) > 0 {
+		b.WriteString("        ports:\n")
+		for _, port := range p.Ports {
+			b.WriteString(fmt.Sprintf("        - containerPort: %d\n", port))
+		}
+	}
+	if len(p.EnvVars) > 0 {
+		b.WriteString("        envFrom:\n")
+		b.WriteString("        - secretRef:\n")
+		b.WriteString("            name: app-secrets\n")
+	}
+	b.WriteString("```\n\n")
+
+	b.WriteString("### Service\n")
+	b.WriteString("```yaml\n")
+	b.WriteString("apiVersion: v1\n")
+	b.WriteString("kind: Service\n")
+	b.WriteString("metadata:\n")
+	b.WriteString("  name: app\n")
+	b.WriteString("  namespace: clanker-deploy\n")
+	b.WriteString("spec:\n")
+	b.WriteString("  type: LoadBalancer\n")
+	b.WriteString("  selector:\n")
+	b.WriteString("    app: app\n")
+	b.WriteString("  ports:\n")
+	if len(p.Ports) > 0 {
+		b.WriteString(fmt.Sprintf("  - port: 80\n    targetPort: %d\n", p.Ports[0]))
+	} else {
+		b.WriteString("  - port: 80\n    targetPort: 8080\n")
+	}
+	b.WriteString("```\n\n")
+
+	b.WriteString("## Step 3: Apply Resources\n")
+	b.WriteString("```bash\n")
+	b.WriteString("kubectl apply -f namespace.yaml\n")
+	b.WriteString("kubectl apply -f deployment.yaml\n")
+	b.WriteString("kubectl apply -f service.yaml\n")
+	b.WriteString("kubectl get svc -n clanker-deploy  # Get LoadBalancer URL\n")
+	b.WriteString("```\n")
 
 	return b.String()
 }

@@ -17,13 +17,14 @@ type DeployStrategy struct {
 // ArchitectDecision is the structured JSON response from the architect LLM call
 type ArchitectDecision struct {
 	Provider      string   `json:"provider"`                // aws, cloudflare
-	Method        string   `json:"method"`                  // ecs-fargate, ec2, lambda, s3-cloudfront, cf-pages, cf-workers, cf-containers
+	Method        string   `json:"method"`                  // ecs-fargate, ec2, eks, lambda, s3-cloudfront, cf-pages, cf-workers, cf-containers
 	Reasoning     string   `json:"reasoning"`               // why this architecture
 	BuildSteps    []string `json:"buildSteps"`              // how to build it
 	RunCmd        string   `json:"runCmd"`                  // simplest way to start it locally
 	Notes         []string `json:"notes"`                   // gotchas, warnings
-	CpuMemory     string   `json:"cpuMemory"`               // e.g. "256/512", "512/1024"
+	CpuMemory     string   `json:"cpuMemory"`               // e.g. "256/512", "512/1024", or instance type for EC2
 	NeedsALB      bool     `json:"needsAlb"`                // whether to put an ALB in front
+	UseAPIGateway bool     `json:"useApiGateway"`           // whether to use API Gateway instead of ALB
 	NeedsDB       bool     `json:"needsDb"`                 // whether to provision a managed DB
 	DBService     string   `json:"dbService"`               // rds-postgres, elasticache-redis, etc
 	EstMonthly    string   `json:"estMonthly"`              // estimated monthly cost e.g. "$15-25"
