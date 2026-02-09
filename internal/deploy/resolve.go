@@ -170,6 +170,25 @@ func buildInfraBindings(snap *InfraSnapshot) map[string]string {
 			bindings["ECS_SG_ID"] = sg.ID
 			bindings["SG_ECS_ID"] = sg.ID
 		}
+
+		// Lambda security groups
+		if strings.Contains(nameLower, "lambda") {
+			bindings["LAMBDA_SG_ID"] = sg.ID
+			bindings["SG_LAMBDA_ID"] = sg.ID
+		}
+	}
+
+	// ECR repositories - map first one as default
+	if len(snap.ECRRepos) > 0 {
+		bindings["ECR_REPO"] = snap.ECRRepos[0]
+		bindings["ECR_REPO_NAME"] = snap.ECRRepos[0]
+	}
+
+	// ECS clusters - map first one as default
+	if len(snap.ECSClusters) > 0 {
+		bindings["ECS_CLUSTER"] = snap.ECSClusters[0]
+		bindings["ECS_CLUSTER_NAME"] = snap.ECSClusters[0]
+		bindings["CLUSTER_NAME"] = snap.ECSClusters[0]
 	}
 
 	return bindings
