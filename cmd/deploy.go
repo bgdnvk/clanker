@@ -192,7 +192,13 @@ Examples:
 			})
 		}
 
-		// 7. Resolve placeholders before output (skip for Cloudflare and --new-vpc)
+		// 7. Resolve placeholders before output
+		// Always apply static bindings (AMI_ID, ACCOUNT_ID, REGION) - even with --new-vpc
+		if targetProvider != "cloudflare" && intel.InfraSnap != nil {
+			plan = deploy.ApplyStaticInfraBindings(plan, intel.InfraSnap)
+		}
+
+		// Full placeholder resolution (skip for Cloudflare and --new-vpc since those use 'produces' chaining)
 		if targetProvider != "cloudflare" && !newVPC {
 			const maxPlaceholderRounds = 5
 			for round := 1; round <= maxPlaceholderRounds; round++ {
