@@ -86,6 +86,16 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	remediationAttempted := make(map[int]bool)
 	bindings := make(map[string]string)
 
+	// Pre-populate bindings with account and region info for user-data generation
+	if accountID != "" {
+		bindings["ACCOUNT_ID"] = accountID
+		bindings["AWS_ACCOUNT_ID"] = accountID
+	}
+	if opts.Region != "" {
+		bindings["REGION"] = opts.Region
+		bindings["AWS_REGION"] = opts.Region
+	}
+
 	for idx, cmdSpec := range plan.Commands {
 		if err := validateCommand(cmdSpec.Args, opts.Destroyer); err != nil {
 			return fmt.Errorf("command %d rejected: %w", idx+1, err)

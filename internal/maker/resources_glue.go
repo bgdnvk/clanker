@@ -3313,6 +3313,9 @@ func remediateEC2InvalidInstanceProfileAndRetry(ctx context.Context, opts ExecOp
 			return fmt.Errorf("cannot remediate: failed to rewrite --iam-instance-profile")
 		}
 
+		// Also generate user-data if needed (it may have been skipped earlier due to missing bindings)
+		rewritten = maybeGenerateEC2UserData(rewritten, bindings, opts)
+
 		_, _ = fmt.Fprintf(w, "[maker] remediation attempted: rewriting ec2 run-instances --iam-instance-profile to use Arn=... and retrying\n")
 		rewrittenAWSArgs := append(append([]string{}, rewritten...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
 		out, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, w)
