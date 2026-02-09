@@ -1091,21 +1091,37 @@ func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts
 	b.WriteString("Create IAM role AND instance profile (both required for EC2):\n\n")
 	b.WriteString("1. Create role:\n")
 	b.WriteString("   aws iam create-role --role-name clanker-ec2-role --assume-role-policy-document '{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}'\n\n")
-	b.WriteString("2. Attach policies:\n")
+	b.WriteString("2. Attach policies (include ECR read for pulling images):\n")
 	b.WriteString("   aws iam attach-role-policy --role-name clanker-ec2-role --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore\n")
-	b.WriteString("   aws iam attach-role-policy --role-name clanker-ec2-role --policy-arn arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy\n\n")
+	b.WriteString("   aws iam attach-role-policy --role-name clanker-ec2-role --policy-arn arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy\n")
+	b.WriteString("   aws iam attach-role-policy --role-name clanker-ec2-role --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly\n\n")
 	b.WriteString("3. Create instance profile:\n")
 	b.WriteString("   aws iam create-instance-profile --instance-profile-name clanker-ec2-profile\n\n")
 	b.WriteString("4. Add role to instance profile:\n")
 	b.WriteString("   aws iam add-role-to-instance-profile --instance-profile-name clanker-ec2-profile --role-name clanker-ec2-role\n\n")
+
+	// ECR image build approach - build locally/CI and push to ECR
+	b.WriteString("## Container Image (Build locally and push to ECR)\n")
+	b.WriteString("IMPORTANT: Do NOT build Docker images on the EC2 instance. Small instances run out of memory.\n")
+	b.WriteString("Instead, build locally or use CI, then push to ECR and pull on EC2.\n\n")
+	b.WriteString("1. Create ECR repository:\n")
+	b.WriteString("   aws ecr create-repository --repository-name clanker-app --image-scanning-configuration scanOnPush=true\n")
+	b.WriteString("   Save the repositoryUri as <ECR_URI>.\n\n")
+	b.WriteString("2. Get ECR login token (for local build machine):\n")
+	b.WriteString("   aws ecr get-login-password --region <REGION> | docker login --username AWS --password-stdin <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com\n\n")
+	b.WriteString("3. Build and push image (run these commands on local machine or CI):\n")
+	b.WriteString(fmt.Sprintf("   git clone %s /tmp/app && cd /tmp/app\n", p.RepoURL))
+	b.WriteString("   docker build -t clanker-app .\n")
+	b.WriteString("   docker tag clanker-app:latest <ECR_URI>:latest\n")
+	b.WriteString("   docker push <ECR_URI>:latest\n\n")
 
 	b.WriteString("## Launch EC2 Instance\n")
 	b.WriteString(fmt.Sprintf("Launch %s instance with Amazon Linux 2023:\n\n", instanceType))
 	b.WriteString("Get latest AL2023 AMI ID:\n")
 	b.WriteString("   aws ssm get-parameters --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64 --query 'Parameters[0].Value' --output text\n\n")
 
-	// Inline user-data script as base64 or heredoc
-	b.WriteString("Launch instance with user-data script (MUST be base64 encoded or use file://):\n")
+	// User-data pulls from ECR instead of building
+	b.WriteString("Launch instance with user-data that pulls from ECR (no build on instance):\n")
 	b.WriteString("   aws ec2 run-instances \\\n")
 	b.WriteString(fmt.Sprintf("     --instance-type %s \\\n", instanceType))
 	b.WriteString("     --image-id <AMI_ID> \\\n")
@@ -1113,38 +1129,30 @@ func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts
 	b.WriteString("     --security-group-ids <EC2_SG_ID> \\\n")
 	b.WriteString("     --iam-instance-profile Name=clanker-ec2-profile \\\n")
 	b.WriteString("     --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=clanker-app},{Key=Project,Value=clanker-deploy}]' \\\n")
-	b.WriteString("     --user-data '")
+	b.WriteString("     --metadata-options 'HttpTokens=required,HttpPutResponseHopLimit=2,HttpEndpoint=enabled' \\\n")
+	b.WriteString("     --user-data file://user-data.sh\n\n")
 
-	// Inline user-data script
-	userDataScript := `#!/bin/bash
-set -e
-yum update -y
-yum install -y docker git
-systemctl start docker
-systemctl enable docker
-usermod -aG docker ec2-user
-curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-chmod +x /usr/local/bin/docker-compose
-`
-	// Add app deployment to user-data
-	userDataScript += fmt.Sprintf("cd /home/ec2-user\ngit clone %s app\ncd app\n", p.RepoURL)
-	if p.HasCompose {
-		userDataScript += "docker-compose up -d\n"
-	} else if p.HasDocker {
-		userDataScript += "docker build -t app .\n"
-		if len(p.Ports) > 0 {
-			portMappings := ""
-			for _, port := range p.Ports {
-				portMappings += fmt.Sprintf(" -p %d:%d", port, port)
-			}
-			userDataScript += fmt.Sprintf("docker run -d%s app\n", portMappings)
-		} else {
-			userDataScript += "docker run -d app\n"
+	b.WriteString("The user-data.sh script should contain:\n")
+	b.WriteString("```bash\n")
+	b.WriteString("#!/bin/bash\n")
+	b.WriteString("set -ex\n")
+	b.WriteString("yum update -y\n")
+	b.WriteString("yum install -y docker\n")
+	b.WriteString("systemctl start docker\n")
+	b.WriteString("systemctl enable docker\n")
+	b.WriteString("# Login to ECR and pull image\n")
+	b.WriteString("aws ecr get-login-password --region <REGION> | docker login --username AWS --password-stdin <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com\n")
+	b.WriteString("docker pull <ECR_URI>:latest\n")
+	if len(p.Ports) > 0 {
+		portMappings := ""
+		for _, port := range p.Ports {
+			portMappings += fmt.Sprintf(" -p %d:%d", port, port)
 		}
+		b.WriteString(fmt.Sprintf("docker run -d --restart unless-stopped%s <ECR_URI>:latest\n", portMappings))
+	} else {
+		b.WriteString("docker run -d --restart unless-stopped <ECR_URI>:latest\n")
 	}
-
-	// Base64 encode the script for the command
-	b.WriteString("IyEvYmluL2Jhc2gKc2V0IC1lCnl1bSB1cGRhdGUgLXkKeXVtIGluc3RhbGwgLXkgZG9ja2VyIGdpdApzeXN0ZW1jdGwgc3RhcnQgZG9ja2VyCnN5c3RlbWN0bCBlbmFibGUgZG9ja2VyCnVzZXJtb2QgLWFHIGRvY2tlciBlYzItdXNlcgpjdXJsIC1MICJodHRwczovL2dpdGh1Yi5jb20vZG9ja2VyL2NvbXBvc2UvcmVsZWFzZXMvbGF0ZXN0L2Rvd25sb2FkL2RvY2tlci1jb21wb3NlLSQodW5hbWUgLXMpLSQodW5hbWUgLW0pIiAtbyAvdXNyL2xvY2FsL2Jpbi9kb2NrZXItY29tcG9zZQpjaG1vZCAreCAvdXNyL2xvY2FsL2Jpbi9kb2NrZXItY29tcG9zZQ=='\n\n")
+	b.WriteString("```\n\n")
 
 	b.WriteString("Wait for instance to be running:\n")
 	b.WriteString("   aws ec2 wait instance-running --instance-ids <INSTANCE_ID>\n\n")
@@ -1197,6 +1205,9 @@ chmod +x /usr/local/bin/docker-compose
 
 	b.WriteString("## Output\n")
 	b.WriteString("The application will be accessible at the ALB DNS name (from step 1).\n")
+	b.WriteString("URLs for this app:\n")
+	b.WriteString("- Settings: http://<ALB_DNS>/settings\n")
+	b.WriteString("- Chat: http://<ALB_DNS>/chat\n")
 	b.WriteString("DO NOT create any Lambda or CloudWatch Lambda alarms - this is an EC2 deployment.\n")
 
 	return b.String()

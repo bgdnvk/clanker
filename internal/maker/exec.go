@@ -165,9 +165,31 @@ func learnPlanBindingsFromProduces(produces map[string]string, output string, bi
 	if len(produces) == 0 {
 		return
 	}
-	if strings.TrimSpace(output) == "" {
+	output = strings.TrimSpace(output)
+	if output == "" {
 		return
 	}
+
+	// Handle plain text output (e.g., SSM get-parameters with --output text)
+	if !strings.HasPrefix(output, "{") && !strings.HasPrefix(output, "[") {
+		// Check if any produce expects this to be a simple value
+		for key, path := range produces {
+			key = strings.TrimSpace(key)
+			if key == "" {
+				continue
+			}
+			// If path is $.Output or similar simple path, use raw output
+			if path == "$.Output" || path == "$" || path == "." {
+				bindings[key] = output
+			}
+			// Handle AMI_ID from plain text SSM output
+			if key == "AMI_ID" && strings.HasPrefix(output, "ami-") {
+				bindings[key] = output
+			}
+		}
+		return
+	}
+
 	var obj any
 	if err := json.Unmarshal([]byte(output), &obj); err != nil {
 		return
@@ -178,7 +200,7 @@ func learnPlanBindingsFromProduces(produces map[string]string, output string, bi
 		if key == "" || path == "" {
 			continue
 		}
-		if v, ok := jsonPathString(obj, path); ok {
+		if v, ok := jsonPathString(obj, path); ok && v != "" {
 			bindings[key] = v
 		}
 	}
