@@ -1121,26 +1121,18 @@ func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts
 	b.WriteString("   aws ssm get-parameters --names /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64 --query 'Parameters[0].Value' --output text\n\n")
 
 	// User-data pulls from ECR instead of building
-	b.WriteString("Launch instance with user-data that pulls from ECR (no build on instance):\n")
-	b.WriteString("   aws ec2 run-instances \\\n")
-	b.WriteString(fmt.Sprintf("     --instance-type %s \\\n", instanceType))
-	b.WriteString("     --image-id <AMI_ID> \\\n")
-	b.WriteString("     --subnet-id <SUBNET_1A_ID> \\\n")
-	b.WriteString("     --security-group-ids <EC2_SG_ID> \\\n")
-	b.WriteString("     --iam-instance-profile Name=clanker-ec2-profile \\\n")
-	b.WriteString("     --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=clanker-app},{Key=Project,Value=clanker-deploy}]' \\\n")
-	b.WriteString("     --metadata-options 'HttpTokens=required,HttpPutResponseHopLimit=2,HttpEndpoint=enabled' \\\n")
-	b.WriteString("     --user-data file://user-data.sh\n\n")
-
-	b.WriteString("The user-data.sh script should contain:\n")
+	// Generate inline base64-encoded user-data so the plan is self-contained
+	b.WriteString("Launch instance with INLINE base64-encoded user-data (do NOT use file:// references):\n")
+	b.WriteString("CRITICAL: The user-data MUST be passed as a base64-encoded string directly in the command.\n")
+	b.WriteString("Generate the base64 user-data like this:\n")
 	b.WriteString("```bash\n")
+	b.WriteString("USER_DATA=$(cat <<'USERDATA' | base64 -w0\n")
 	b.WriteString("#!/bin/bash\n")
 	b.WriteString("set -ex\n")
 	b.WriteString("yum update -y\n")
 	b.WriteString("yum install -y docker\n")
 	b.WriteString("systemctl start docker\n")
 	b.WriteString("systemctl enable docker\n")
-	b.WriteString("# Login to ECR and pull image\n")
 	b.WriteString("aws ecr get-login-password --region <REGION> | docker login --username AWS --password-stdin <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com\n")
 	b.WriteString("docker pull <ECR_URI>:latest\n")
 	if len(p.Ports) > 0 {
@@ -1152,7 +1144,23 @@ func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts
 	} else {
 		b.WriteString("docker run -d --restart unless-stopped <ECR_URI>:latest\n")
 	}
+	b.WriteString("USERDATA\n")
+	b.WriteString(")\n")
 	b.WriteString("```\n\n")
+
+	b.WriteString("Then run:\n")
+	b.WriteString("   aws ec2 run-instances \\\n")
+	b.WriteString(fmt.Sprintf("     --instance-type %s \\\n", instanceType))
+	b.WriteString("     --image-id <AMI_ID> \\\n")
+	b.WriteString("     --subnet-id <SUBNET_1A_ID> \\\n")
+	b.WriteString("     --security-group-ids <EC2_SG_ID> \\\n")
+	b.WriteString("     --iam-instance-profile Name=clanker-ec2-profile \\\n")
+	b.WriteString("     --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=clanker-app},{Key=Project,Value=clanker-deploy}]' \\\n")
+	b.WriteString("     --metadata-options 'HttpTokens=required,HttpPutResponseHopLimit=2,HttpEndpoint=enabled' \\\n")
+	b.WriteString("     --user-data \"$USER_DATA\"\n\n")
+
+	b.WriteString("IMPORTANT: The run-instances command MUST include a produces field to capture INSTANCE_ID:\n")
+	b.WriteString("   \"produces\": {\"INSTANCE_ID\": \"$.Instances[0].InstanceId\"}\n\n")
 
 	b.WriteString("Wait for instance to be running:\n")
 	b.WriteString("   aws ec2 wait instance-running --instance-ids <INSTANCE_ID>\n\n")
