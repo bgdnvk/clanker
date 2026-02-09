@@ -242,21 +242,38 @@ Examples:
 
 		// apply mode: execute the plan
 		fmt.Fprintf(os.Stderr, "[deploy] applying plan (%d commands)...\n", len(plan.Commands))
+		outputBindings := make(map[string]string)
 		execOpts := maker.ExecOptions{
-			Profile:    targetProfile,
-			Region:     region,
-			Writer:     os.Stdout,
-			Destroyer:  false,
-			AIProvider: provider,
-			AIAPIKey:   apiKey,
-			AIProfile:  aiProfile,
-			Debug:      debug,
+			Profile:        targetProfile,
+			Region:         region,
+			Writer:         os.Stdout,
+			Destroyer:      false,
+			AIProvider:     provider,
+			AIAPIKey:       apiKey,
+			AIProfile:      aiProfile,
+			Debug:          debug,
+			OutputBindings: outputBindings,
 		}
 		if targetProvider == "cloudflare" {
 			execOpts.Profile = ""
 			execOpts.Region = ""
 		}
-		return maker.ExecutePlan(ctx, plan, execOpts)
+		if err := maker.ExecutePlan(ctx, plan, execOpts); err != nil {
+			return err
+		}
+
+		// Print deployment summary with endpoint
+		fmt.Fprintf(os.Stderr, "\n[deploy] deployment complete!\n")
+		if albDNS := outputBindings["ALB_DNS"]; albDNS != "" {
+			fmt.Fprintf(os.Stderr, "\n========================================\n")
+			fmt.Fprintf(os.Stderr, "Application URL: http://%s\n", albDNS)
+			fmt.Fprintf(os.Stderr, "========================================\n\n")
+		} else if instanceIP := outputBindings["PUBLIC_IP"]; instanceIP != "" {
+			fmt.Fprintf(os.Stderr, "\n========================================\n")
+			fmt.Fprintf(os.Stderr, "Instance IP: %s\n", instanceIP)
+			fmt.Fprintf(os.Stderr, "========================================\n\n")
+		}
+		return nil
 	},
 }
 
