@@ -18,6 +18,7 @@ type InfraSnapshot struct {
 	ALBs           []string `json:"albs,omitempty"`           // existing ALBs
 	RDSInstances   []string `json:"rdsInstances,omitempty"`   // existing RDS instances
 	SecurityGroups []SGInfo `json:"securityGroups,omitempty"` // existing SGs in default VPC
+	LatestAMI      string   `json:"latestAmi,omitempty"`      // latest Amazon Linux 2023 AMI ID
 	Summary        string   `json:"summary"`
 }
 
@@ -110,6 +111,11 @@ func ScanInfra(ctx context.Context, profile, region string, logf func(string, ..
 		}
 	}
 
+	// Latest Amazon Linux 2023 AMI (for EC2 deployments)
+	if out := awsCLI(ctx, profile, region, "ssm", "get-parameters", "--names", "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64", "--query", "Parameters[0].Value", "--output", "text"); out != "" && out != "None" {
+		snap.LatestAMI = strings.TrimSpace(out)
+	}
+
 	snap.Summary = buildInfraSummary(snap)
 	logf("[infra-scan] %s", snap.Summary)
 
@@ -199,6 +205,11 @@ func (s *InfraSnapshot) FormatForPrompt() string {
 	if len(s.RDSInstances) > 0 {
 		b.WriteString(fmt.Sprintf("- Existing RDS instances: %s\n", strings.Join(s.RDSInstances, ", ")))
 		b.WriteString("  → Consider reusing if compatible\n")
+	}
+
+	if s.LatestAMI != "" {
+		b.WriteString(fmt.Sprintf("- Latest Amazon Linux 2023 AMI: %s\n", s.LatestAMI))
+		b.WriteString("  → Use this AMI ID directly for EC2 instances (no need to query SSM)\n")
 	}
 
 	return b.String()

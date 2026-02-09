@@ -90,6 +90,13 @@ func buildInfraBindings(snap *InfraSnapshot) map[string]string {
 		bindings["AWS_REGION"] = snap.Region
 	}
 
+	// Latest AMI (Amazon Linux 2023)
+	if snap.LatestAMI != "" {
+		bindings["AMI_ID"] = snap.LatestAMI
+		bindings["AMI"] = snap.LatestAMI
+		bindings["IMAGE_ID"] = snap.LatestAMI
+	}
+
 	// VPC and subnets
 	if snap.VPC != nil {
 		if snap.VPC.VPCID != "" {
