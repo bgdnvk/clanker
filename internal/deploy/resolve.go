@@ -384,6 +384,43 @@ func HasUnresolvedPlaceholders(plan *maker.Plan) bool {
 	return len(extractPlaceholdersFromPlan(plan)) > 0
 }
 
+// ApplyStaticInfraBindings applies only the "static" infrastructure bindings that
+// are always known regardless of whether a new VPC is being created. This includes
+// AMI_ID, ACCOUNT_ID, and REGION which come from the infra scan.
+// This function should be called even when --new-vpc is used.
+func ApplyStaticInfraBindings(plan *maker.Plan, infraSnap *InfraSnapshot) *maker.Plan {
+	if plan == nil || infraSnap == nil {
+		return plan
+	}
+
+	bindings := make(map[string]string)
+
+	// Account ID - always known
+	if infraSnap.AccountID != "" {
+		bindings["ACCOUNT_ID"] = infraSnap.AccountID
+		bindings["AWS_ACCOUNT_ID"] = infraSnap.AccountID
+	}
+
+	// Region - always known
+	if infraSnap.Region != "" {
+		bindings["REGION"] = infraSnap.Region
+		bindings["AWS_REGION"] = infraSnap.Region
+	}
+
+	// AMI ID - always known (fetched from SSM during infra scan)
+	if infraSnap.LatestAMI != "" {
+		bindings["AMI_ID"] = infraSnap.LatestAMI
+		bindings["AMI"] = infraSnap.LatestAMI
+		bindings["IMAGE_ID"] = infraSnap.LatestAMI
+	}
+
+	if len(bindings) == 0 {
+		return plan
+	}
+
+	return applyBindingsToPlan(plan, bindings)
+}
+
 // GetUnresolvedPlaceholders returns the list of unresolved placeholder tokens in a plan.
 func GetUnresolvedPlaceholders(plan *maker.Plan) []string {
 	return extractPlaceholdersFromPlan(plan)
