@@ -123,7 +123,7 @@ Examples:
 		// 4. Generate the maker plan via LLM
 		fmt.Fprintf(os.Stderr, "[deploy] phase 3: generating execution plan with %s ...\n", provider)
 
-		const maxValidationRounds = 2
+		const maxValidationRounds = 5
 		var plan *maker.Plan
 
 		for round := 0; round <= maxValidationRounds; round++ {
