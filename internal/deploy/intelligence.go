@@ -106,10 +106,11 @@ type DeepAnalysis struct {
 
 // PlanValidation is the LLM's review of its own generated plan
 type PlanValidation struct {
-	IsValid  bool     `json:"isValid"`
-	Issues   []string `json:"issues"`   // problems found
-	Fixes    []string `json:"fixes"`    // suggested fixes
-	Warnings []string `json:"warnings"` // non-blocking warnings
+	IsValid                bool     `json:"isValid"`
+	Issues                 []string `json:"issues"`                 // problems found
+	Fixes                  []string `json:"fixes"`                  // suggested fixes
+	Warnings               []string `json:"warnings"`               // non-blocking warnings
+	UnresolvedPlaceholders []string `json:"unresolvedPlaceholders"` // placeholders that need resolution
 }
 
 // RunIntelligence executes the multi-phase recursive reasoning pipeline.
