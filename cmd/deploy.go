@@ -32,7 +32,9 @@ Examples:
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repoURL := args[0]
-		ctx := context.Background()
+		// Create deployment context with 20-minute timeout
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+		defer cancel()
 		debug := viper.GetBool("debug")
 		profile, _ := cmd.Flags().GetString("profile")
 		applyMode, _ := cmd.Flags().GetBool("apply")
@@ -240,8 +242,12 @@ Examples:
 			return nil
 		}
 
-		// apply mode: execute the plan
+		// apply mode: execute the plan in phases
 		fmt.Fprintf(os.Stderr, "[deploy] applying plan (%d commands)...\n", len(plan.Commands))
+
+		// Split plan: infrastructure first, then app deployment (after Docker build)
+		infraPlan, appPlan := splitPlanAtDockerBuild(plan)
+
 		outputBindings := make(map[string]string)
 		execOpts := maker.ExecOptions{
 			Profile:        targetProfile,
@@ -258,13 +264,61 @@ Examples:
 			execOpts.Profile = ""
 			execOpts.Region = ""
 		}
-		if err := maker.ExecutePlan(ctx, plan, execOpts); err != nil {
-			return err
+
+		// Phase 1: Create infrastructure (ECR repo, VPC, security groups, IAM)
+		if len(infraPlan.Commands) > 0 {
+			fmt.Fprintf(os.Stderr, "[deploy] phase 1: creating infrastructure (%d commands)...\n", len(infraPlan.Commands))
+			if err := maker.ExecutePlan(ctx, infraPlan, execOpts); err != nil {
+				return fmt.Errorf("infrastructure creation failed: %w", err)
+			}
+		}
+
+		// Phase 2: Build and push Docker image (if applicable)
+		if rp.HasDocker && outputBindings["ECR_URI"] != "" && targetProvider != "cloudflare" {
+			if !maker.HasDockerInstalled() {
+				return fmt.Errorf("Docker is required for deployment but not installed locally")
+			}
+			fmt.Fprintf(os.Stderr, "[deploy] phase 2: building and pushing Docker image...\n")
+			imageURI, err := maker.BuildAndPushDockerImage(ctx, rp.ClonePath, outputBindings["ECR_URI"], targetProfile, region, os.Stdout)
+			if err != nil {
+				return fmt.Errorf("docker build/push failed: %w", err)
+			}
+			outputBindings["IMAGE_URI"] = imageURI
+			fmt.Fprintf(os.Stderr, "[deploy] image pushed: %s\n", imageURI)
+		}
+
+		// Phase 3: Launch application (EC2, ALB, etc.)
+		if len(appPlan.Commands) > 0 {
+			fmt.Fprintf(os.Stderr, "[deploy] phase 3: launching application (%d commands)...\n", len(appPlan.Commands))
+			if err := maker.ExecutePlan(ctx, appPlan, execOpts); err != nil {
+				return fmt.Errorf("application deployment failed: %w", err)
+			}
+		}
+
+		// Phase 4: Verify deployment is working
+		albDNS := outputBindings["ALB_DNS"]
+		if albDNS != "" && targetProvider != "cloudflare" {
+			fmt.Fprintf(os.Stderr, "[deploy] phase 4: verifying deployment health...\n")
+			endpoint := fmt.Sprintf("http://%s/", albDNS)
+
+			// Give the app time to start (container needs to pull and initialize)
+			fmt.Fprintf(os.Stderr, "[deploy] waiting 30s for container to start...\n")
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("deployment timed out during startup wait: %w", ctx.Err())
+			case <-time.After(30 * time.Second):
+			}
+
+			if err := maker.VerifyDeployment(ctx, endpoint, 5*time.Minute, os.Stdout); err != nil {
+				fmt.Fprintf(os.Stderr, "[deploy] health check failed: %v\n", err)
+				fmt.Fprintf(os.Stderr, "[deploy] tip: check EC2 instance logs via SSM Session Manager\n")
+				return fmt.Errorf("deployment verification failed: %w", err)
+			}
 		}
 
 		// Print deployment summary with endpoint
 		fmt.Fprintf(os.Stderr, "\n[deploy] deployment complete!\n")
-		if albDNS := outputBindings["ALB_DNS"]; albDNS != "" {
+		if albDNS != "" {
 			fmt.Fprintf(os.Stderr, "\n========================================\n")
 			fmt.Fprintf(os.Stderr, "Application URL: http://%s\n", albDNS)
 			fmt.Fprintf(os.Stderr, "========================================\n\n")
@@ -330,4 +384,33 @@ func init() {
 	deployCmd.Flags().String("target", "fargate", "Deployment target: fargate (default), ec2, or eks")
 	deployCmd.Flags().String("instance-type", "t3.small", "EC2 instance type (only used with --target ec2)")
 	deployCmd.Flags().Bool("new-vpc", false, "Create a new VPC instead of using default")
+}
+
+// splitPlanAtDockerBuild separates infrastructure setup from app deployment.
+// Infrastructure commands (ECR, VPC, security groups, IAM) run first,
+// then Docker build happens locally, then app deployment (EC2, ALB).
+func splitPlanAtDockerBuild(plan *maker.Plan) (*maker.Plan, *maker.Plan) {
+	infraCommands := []maker.Command{}
+	appCommands := []maker.Command{}
+
+	// Find the EC2 run-instances command as the split point
+	foundEC2 := false
+	for _, cmd := range plan.Commands {
+		if len(cmd.Args) >= 2 && cmd.Args[0] == "ec2" && cmd.Args[1] == "run-instances" {
+			foundEC2 = true
+		}
+		if foundEC2 {
+			appCommands = append(appCommands, cmd)
+		} else {
+			infraCommands = append(infraCommands, cmd)
+		}
+	}
+
+	// If no EC2 command found, don't split (could be Fargate or other deployment)
+	if !foundEC2 {
+		return plan, &maker.Plan{Commands: []maker.Command{}, Provider: plan.Provider}
+	}
+
+	return &maker.Plan{Commands: infraCommands, Provider: plan.Provider, Question: plan.Question},
+		&maker.Plan{Commands: appCommands, Provider: plan.Provider, Question: plan.Question}
 }
