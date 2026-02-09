@@ -1450,7 +1450,7 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 	if args0(args) == "ec2" && args1(args) == "run-instances" && failure.Category == FailureValidation {
 		lower := strings.ToLower(output)
 		if strings.Contains(lower, "iaminstanceprofile") && strings.Contains(lower, "invalid") && strings.Contains(lower, "instance profile") {
-			if err := remediateEC2InvalidInstanceProfileAndRetry(ctx, opts, args, stdinBytes, opts.Writer); err != nil {
+			if err := remediateEC2InvalidInstanceProfileAndRetry(ctx, opts, args, stdinBytes, opts.Writer, bindings); err != nil {
 				return true, err
 			}
 			return true, nil
@@ -3286,7 +3286,7 @@ func retryWithBackoff(ctx context.Context, w io.Writer, attempts int, fn func() 
 	return err
 }
 
-func remediateEC2InvalidInstanceProfileAndRetry(ctx context.Context, opts ExecOptions, args []string, stdinBytes []byte, w io.Writer) error {
+func remediateEC2InvalidInstanceProfileAndRetry(ctx context.Context, opts ExecOptions, args []string, stdinBytes []byte, w io.Writer, bindings map[string]string) error {
 	name := extractEC2RunInstancesInstanceProfileName(args)
 	if name == "" {
 		return fmt.Errorf("cannot remediate: missing --iam-instance-profile name")
@@ -3317,6 +3317,8 @@ func remediateEC2InvalidInstanceProfileAndRetry(ctx context.Context, opts ExecOp
 		rewrittenAWSArgs := append(append([]string{}, rewritten...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
 		out, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, w)
 		if err == nil {
+			// Learn bindings from successful run-instances output
+			learnPlanBindings(rewritten, out, bindings)
 			return nil
 		}
 
