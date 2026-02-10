@@ -3,7 +3,6 @@ package ai
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -586,8 +585,19 @@ func (c *Client) askBedrock(ctx context.Context, prompt string) (string, error) 
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	// Base64 encode to pass as inline body; ensures ASCII-only
-	encodedBody := base64.StdEncoding.EncodeToString(requestBody)
+	// Write request body to a temp file to avoid command line length limits
+	bodyFile, err := os.CreateTemp("", "bedrock-request-*.json")
+	if err != nil {
+		return "", fmt.Errorf("failed to create body temp file: %w", err)
+	}
+	bodyFilePath := bodyFile.Name()
+	if _, err := bodyFile.Write(requestBody); err != nil {
+		bodyFile.Close()
+		os.Remove(bodyFilePath)
+		return "", fmt.Errorf("failed to write body temp file: %w", err)
+	}
+	bodyFile.Close()
+	defer os.Remove(bodyFilePath)
 
 	// Create a cross-platform temporary file for the response
 	tmpFile, err := os.CreateTemp("", "bedrock-response-*.json")
@@ -599,9 +609,10 @@ func (c *Client) askBedrock(ctx context.Context, prompt string) (string, error) 
 	defer os.Remove(tmpFilePath)
 
 	// Call AWS CLI with LLM profile from config (for Bedrock API access)
+	// Use fileb:// to read body from file as binary blob to avoid command line length limits
 	cmd := exec.CommandContext(ctx, "aws", "bedrock-runtime", "invoke-model",
 		"--model-id", profileLLMCall.Model,
-		"--body", encodedBody,
+		"--body", "fileb://"+bodyFilePath,
 		"--profile", profileLLMCall.AWSProfile,
 		"--region", profileLLMCall.Region,
 		tmpFilePath)
