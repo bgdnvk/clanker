@@ -86,6 +86,13 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	remediationAttempted := make(map[int]bool)
 	bindings := make(map[string]string)
 
+	// Initialize bindings from OutputBindings if provided (for multi-phase execution)
+	if opts.OutputBindings != nil {
+		for k, v := range opts.OutputBindings {
+			bindings[k] = v
+		}
+	}
+
 	// Pre-populate bindings with account and region info for user-data generation
 	if accountID != "" {
 		bindings["ACCOUNT_ID"] = accountID
