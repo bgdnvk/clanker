@@ -117,6 +117,32 @@ Examples:
 			return fmt.Errorf("intelligence pipeline failed: %w", err)
 		}
 
+		// 4.5. Prompt user for required configuration (Node.js apps)
+		var userConfig *deploy.UserConfig
+		if intel.DeepAnalysis != nil && rp.Language == "node" {
+			// Show detected app info
+			if intel.DeepAnalysis.ListeningPort > 0 {
+				fmt.Fprintf(os.Stderr, "[deploy] detected port from analysis: %d\n", intel.DeepAnalysis.ListeningPort)
+				// Update RepoProfile with detected port
+				if len(rp.Ports) == 0 || rp.Ports[0] != intel.DeepAnalysis.ListeningPort {
+					rp.Ports = []int{intel.DeepAnalysis.ListeningPort}
+				}
+			}
+
+			// Collect user config if there are required env vars
+			if len(intel.DeepAnalysis.RequiredEnvVars) > 0 || len(intel.DeepAnalysis.OptionalEnvVars) > 0 {
+				userConfig, err = deploy.PromptForConfig(intel.DeepAnalysis, rp)
+				if err != nil {
+					return fmt.Errorf("configuration failed: %w", err)
+				}
+			}
+		}
+
+		// Default config if none collected
+		if userConfig == nil {
+			userConfig = deploy.DefaultUserConfig(intel.DeepAnalysis, rp)
+		}
+
 		enrichedQuestion := intel.EnrichedPrompt
 		if debug {
 			fmt.Fprintf(os.Stderr, "[deploy] enriched prompt:\n%s\n", enrichedQuestion)
@@ -249,6 +275,21 @@ Examples:
 		infraPlan, appPlan := splitPlanAtDockerBuild(plan)
 
 		outputBindings := make(map[string]string)
+
+		// Inject user config into output bindings for native Node.js deployment
+		if userConfig != nil {
+			for name, value := range userConfig.EnvVars {
+				outputBindings["ENV_"+name] = value
+			}
+			outputBindings["APP_PORT"] = fmt.Sprintf("%d", userConfig.AppPort)
+			outputBindings["DEPLOY_MODE"] = userConfig.DeployMode
+
+			// Generate native Node.js user-data if not using Docker
+			if userConfig.DeployMode == "native" {
+				outputBindings["NODEJS_USER_DATA"] = deploy.GenerateNodeJSUserData(rp.RepoURL, intel.DeepAnalysis, userConfig)
+				fmt.Fprintf(os.Stderr, "[deploy] using native Node.js deployment (PM2)\n")
+			}
+		}
 		execOpts := maker.ExecOptions{
 			Profile:        targetProfile,
 			Region:         region,
@@ -273,8 +314,9 @@ Examples:
 			}
 		}
 
-		// Phase 2: Build and push Docker image (if applicable)
-		if rp.HasDocker && outputBindings["ECR_URI"] != "" && targetProvider != "cloudflare" {
+		// Phase 2: Build and push Docker image (if applicable, skip for native deployment)
+		isNativeDeployment := userConfig != nil && userConfig.DeployMode == "native"
+		if !isNativeDeployment && rp.HasDocker && outputBindings["ECR_URI"] != "" && targetProvider != "cloudflare" {
 			if !maker.HasDockerInstalled() {
 				return fmt.Errorf("Docker is required for deployment but not installed locally")
 			}
@@ -285,6 +327,8 @@ Examples:
 			}
 			outputBindings["IMAGE_URI"] = imageURI
 			fmt.Fprintf(os.Stderr, "[deploy] image pushed: %s\n", imageURI)
+		} else if isNativeDeployment {
+			fmt.Fprintf(os.Stderr, "[deploy] phase 2: skipping Docker build (native Node.js deployment)\n")
 		}
 
 		// Phase 3: Launch application (EC2, ALB, etc.)
@@ -299,17 +343,34 @@ Examples:
 		albDNS := outputBindings["ALB_DNS"]
 		if albDNS != "" && targetProvider != "cloudflare" {
 			fmt.Fprintf(os.Stderr, "[deploy] phase 4: verifying deployment health...\n")
-			endpoint := fmt.Sprintf("http://%s/", albDNS)
 
-			// Give the app time to start (container needs to pull and initialize)
-			fmt.Fprintf(os.Stderr, "[deploy] waiting 30s for container to start...\n")
+			// Give the app time to start
+			fmt.Fprintf(os.Stderr, "[deploy] waiting 30s for application to start...\n")
 			select {
 			case <-ctx.Done():
 				return fmt.Errorf("deployment timed out during startup wait: %w", ctx.Err())
 			case <-time.After(30 * time.Second):
 			}
 
-			if err := maker.VerifyDeployment(ctx, endpoint, 5*time.Minute, os.Stdout); err != nil {
+			// Build health check config based on app type
+			appPort := 3000
+			if userConfig != nil && userConfig.AppPort > 0 {
+				appPort = userConfig.AppPort
+			}
+
+			healthConfig := maker.HealthCheckConfig{
+				Host:        albDNS,
+				Port:        appPort,
+				ExposesHTTP: true, // default to HTTP
+			}
+
+			// Use deep analysis to determine health check type
+			if intel.DeepAnalysis != nil {
+				healthConfig.ExposesHTTP = intel.DeepAnalysis.ExposesHTTP
+				healthConfig.HTTPEndpoint = intel.DeepAnalysis.HealthEndpoint
+			}
+
+			if err := maker.VerifyNodeJSDeployment(ctx, healthConfig, 5*time.Minute, os.Stdout); err != nil {
 				fmt.Fprintf(os.Stderr, "[deploy] health check failed: %v\n", err)
 				fmt.Fprintf(os.Stderr, "[deploy] tip: check EC2 instance logs via SSM Session Manager\n")
 				return fmt.Errorf("deployment verification failed: %w", err)
