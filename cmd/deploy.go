@@ -282,6 +282,8 @@ Examples:
 				outputBindings["ENV_"+name] = value
 			}
 			outputBindings["APP_PORT"] = fmt.Sprintf("%d", userConfig.AppPort)
+			// Also pass PORT as env var so the container knows which port to listen on
+			outputBindings["ENV_PORT"] = fmt.Sprintf("%d", userConfig.AppPort)
 			outputBindings["DEPLOY_MODE"] = userConfig.DeployMode
 
 			// Generate native Node.js user-data if not using Docker

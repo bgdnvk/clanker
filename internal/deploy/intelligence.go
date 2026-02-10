@@ -195,6 +195,13 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 	}
 	result.DeepAnalysis = deep
 
+	// CRITICAL: Update profile.Ports with detected listening port from deep analysis
+	// This ensures the port is used correctly in EC2/ECS prompts for target groups
+	if deep.ListeningPort > 0 && (len(profile.Ports) == 0 || profile.Ports[0] != deep.ListeningPort) {
+		logf("[intelligence] detected listening port from README/code: %d", deep.ListeningPort)
+		profile.Ports = []int{deep.ListeningPort}
+	}
+
 	if debug {
 		logf("[intelligence] deep analysis: %s (complexity: %s)", deep.AppDescription, deep.Complexity)
 	}
