@@ -286,6 +286,18 @@ Examples:
 			outputBindings["ENV_PORT"] = fmt.Sprintf("%d", userConfig.AppPort)
 			outputBindings["DEPLOY_MODE"] = userConfig.DeployMode
 
+			// Pass start command with port for containers that need --port flag
+			if intel.DeepAnalysis != nil && intel.DeepAnalysis.StartCommand != "" && userConfig.AppPort > 0 {
+				// Build start command with correct port (e.g., "node app.js --port 18789")
+				startCmd := intel.DeepAnalysis.StartCommand
+				// Replace common port placeholders or append port flag
+				if !strings.Contains(startCmd, fmt.Sprintf("%d", userConfig.AppPort)) {
+					// If the command doesn't already include the correct port, append it
+					startCmd = fmt.Sprintf("%s --port %d", startCmd, userConfig.AppPort)
+				}
+				outputBindings["START_COMMAND"] = startCmd
+			}
+
 			// Generate native Node.js user-data if not using Docker
 			if userConfig.DeployMode == "native" {
 				outputBindings["NODEJS_USER_DATA"] = deploy.GenerateNodeJSUserData(rp.RepoURL, intel.DeepAnalysis, userConfig)

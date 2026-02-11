@@ -1120,6 +1120,21 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 		}
 	}
 
+	// Check if we have a specific start command that includes the port
+	// This handles apps that need --port flag instead of PORT env var
+	startCmd := bindings["START_COMMAND"]
+
+	var dockerRunCmd string
+	if startCmd != "" {
+		// Use the detected start command (handles apps needing --port flag)
+		dockerRunCmd = fmt.Sprintf("docker run -d --restart unless-stopped -p %s:%s %s%s:latest %s",
+			appPort, appPort, envFlags.String(), ecrURI, startCmd)
+	} else {
+		// Default: just pass env vars and use container's default CMD
+		dockerRunCmd = fmt.Sprintf("docker run -d --restart unless-stopped -p %s:%s %s%s:latest",
+			appPort, appPort, envFlags.String(), ecrURI)
+	}
+
 	// Generate the startup script
 	script := fmt.Sprintf(`#!/bin/bash
 set -ex
@@ -1130,9 +1145,9 @@ systemctl start docker
 systemctl enable docker
 aws ecr get-login-password --region %s | docker login --username AWS --password-stdin %s.dkr.ecr.%s.amazonaws.com
 docker pull %s:latest
-docker run -d --restart unless-stopped -p %s:%s %s%s:latest
+%s
 echo 'Deployment complete!'
-`, region, accountID, region, ecrURI, appPort, appPort, envFlags.String(), ecrURI)
+`, region, accountID, region, ecrURI, dockerRunCmd)
 
 	// Base64 encode the script
 	encoded := base64.StdEncoding.EncodeToString([]byte(script))
