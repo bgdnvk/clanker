@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bgdnvk/clanker/internal/ai"
+	"github.com/bgdnvk/clanker/internal/gcp"
 	"github.com/bgdnvk/clanker/internal/k8s"
 	"github.com/bgdnvk/clanker/internal/k8s/cluster"
 	"github.com/bgdnvk/clanker/internal/k8s/plan"
@@ -22,7 +23,7 @@ import (
 var k8sCmd = &cobra.Command{
 	Use:   "k8s",
 	Short: "Kubernetes cluster management",
-	Long:  `Manage Kubernetes clusters (EKS, kubeadm, k3s) and workloads.`,
+	Long:  `Manage Kubernetes clusters (EKS, GKE, kubeadm, k3s) and workloads.`,
 }
 
 var k8sCreateCmd = &cobra.Command{
@@ -55,6 +56,18 @@ Example:
 	RunE: runCreateKubeadm,
 }
 
+var k8sCreateGKECmd = &cobra.Command{
+	Use:   "gke [cluster-name]",
+	Short: "Create a GKE cluster",
+	Long: `Create a new Google Kubernetes Engine (GKE) cluster.
+
+Example:
+  clanker k8s create gke my-cluster --gcp-project my-project --nodes 2 --node-type e2-standard-2
+  clanker k8s create gke my-cluster --gcp-project my-project --gcp-region us-central1 --plan`,
+	Args: cobra.ExactArgs(1),
+	RunE: runCreateGKE,
+}
+
 var k8sDeleteCmd = &cobra.Command{
 	Use:   "delete [cluster-type] [cluster-name]",
 	Short: "Delete a Kubernetes cluster",
@@ -62,6 +75,7 @@ var k8sDeleteCmd = &cobra.Command{
 
 Example:
   clanker k8s delete eks my-cluster
+  clanker k8s delete gke my-cluster --gcp-project my-project
   clanker k8s delete kubeadm my-cluster`,
 	Args: cobra.ExactArgs(2),
 	RunE: runDeleteCluster,
@@ -74,6 +88,7 @@ var k8sListCmd = &cobra.Command{
 
 Example:
   clanker k8s list eks
+  clanker k8s list gke --gcp-project my-project
   clanker k8s list kubeadm`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runListClusters,
@@ -98,6 +113,7 @@ var k8sGetKubeconfigCmd = &cobra.Command{
 
 Example:
   clanker k8s kubeconfig eks my-cluster
+  clanker k8s kubeconfig gke my-cluster --gcp-project my-project
   clanker k8s kubeconfig kubeadm my-cluster`,
 	Args: cobra.ExactArgs(2),
 	RunE: runGetKubeconfig,
@@ -196,6 +212,7 @@ Conversation history is maintained per cluster for follow-up questions.
 Examples:
   clanker k8s ask "how many pods are running"
   clanker k8s ask --cluster test-cluster --profile myaws "show me all deployments"
+  clanker k8s ask --gcp --gcp-project my-project --cluster my-gke-cluster "show me all pods"
   clanker k8s ask --cluster prod "give me error logs for nginx pod"
   clanker k8s ask "which pods are using the most memory"
   clanker k8s ask "why is my pod crashing"
@@ -239,6 +256,11 @@ var (
 	k8sAskContext    string
 	k8sAskAIProfile  string
 	k8sAskDebug      bool
+	// GKE flags
+	k8sGCPMode       bool
+	k8sGCPProject    string
+	k8sGCPRegion     string
+	k8sGKEPreemptible bool
 )
 
 func init() {
@@ -254,6 +276,7 @@ func init() {
 
 	k8sCreateCmd.AddCommand(k8sCreateEKSCmd)
 	k8sCreateCmd.AddCommand(k8sCreateKubeadmCmd)
+	k8sCreateCmd.AddCommand(k8sCreateGKECmd)
 
 	// EKS create flags
 	k8sCreateEKSCmd.Flags().IntVar(&k8sNodes, "nodes", 1, "Number of worker nodes")
@@ -270,6 +293,17 @@ func init() {
 	k8sCreateKubeadmCmd.Flags().StringVar(&k8sK8sVersion, "version", "1.29", "Kubernetes version")
 	k8sCreateKubeadmCmd.Flags().BoolVar(&k8sPlanOnly, "plan", false, "Show plan without applying")
 	k8sCreateKubeadmCmd.Flags().BoolVar(&k8sApply, "apply", false, "Apply the plan (default prompts for confirmation)")
+
+	// GKE create flags
+	k8sCreateGKECmd.Flags().StringVar(&k8sGCPProject, "gcp-project", "", "GCP project ID (required)")
+	k8sCreateGKECmd.Flags().StringVar(&k8sGCPRegion, "gcp-region", "us-central1", "GCP region for the cluster")
+	k8sCreateGKECmd.Flags().IntVar(&k8sNodes, "nodes", 1, "Number of worker nodes")
+	k8sCreateGKECmd.Flags().StringVar(&k8sNodeType, "node-type", "e2-standard-2", "GCE machine type for nodes")
+	k8sCreateGKECmd.Flags().StringVar(&k8sK8sVersion, "version", "", "Kubernetes version (default: GKE default)")
+	k8sCreateGKECmd.Flags().BoolVar(&k8sGKEPreemptible, "preemptible", false, "Use preemptible VMs for nodes")
+	k8sCreateGKECmd.Flags().BoolVar(&k8sPlanOnly, "plan", false, "Show plan without applying")
+	k8sCreateGKECmd.Flags().BoolVar(&k8sApply, "apply", false, "Apply the plan (default prompts for confirmation)")
+	k8sCreateGKECmd.MarkFlagRequired("gcp-project")
 
 	// Deploy flags
 	k8sDeployCmd.Flags().StringVar(&k8sDeployName, "name", "", "Deployment name (default: image name)")
@@ -323,13 +357,24 @@ func init() {
 	k8sCmd.AddCommand(k8sAskCmd)
 
 	// Ask command flags
-	k8sAskCmd.Flags().StringVar(&k8sAskCluster, "cluster", "", "Kubernetes cluster name (EKS cluster name)")
+	k8sAskCmd.Flags().StringVar(&k8sAskCluster, "cluster", "", "Kubernetes cluster name (EKS or GKE cluster name)")
 	k8sAskCmd.Flags().StringVar(&k8sAskProfile, "profile", "", "AWS profile for EKS clusters")
 	k8sAskCmd.Flags().StringVar(&k8sAskKubeconfig, "kubeconfig", "", "Path to kubeconfig file (default: ~/.kube/config)")
 	k8sAskCmd.Flags().StringVar(&k8sAskContext, "context", "", "kubectl context to use (overrides --cluster)")
 	k8sAskCmd.Flags().StringVarP(&k8sNamespace, "namespace", "n", "", "Default namespace for queries (default: all namespaces)")
 	k8sAskCmd.Flags().StringVar(&k8sAskAIProfile, "ai-profile", "", "AI profile to use for LLM queries")
 	k8sAskCmd.Flags().BoolVar(&k8sAskDebug, "debug", false, "Enable debug output")
+	k8sAskCmd.Flags().BoolVar(&k8sGCPMode, "gcp", false, "Use GKE cluster instead of EKS")
+	k8sAskCmd.Flags().StringVar(&k8sGCPProject, "gcp-project", "", "GCP project ID for GKE clusters")
+	k8sAskCmd.Flags().StringVar(&k8sGCPRegion, "gcp-region", "", "GCP region for GKE clusters")
+
+	// GKE flags for list, delete, kubeconfig commands
+	k8sListCmd.Flags().StringVar(&k8sGCPProject, "gcp-project", "", "GCP project ID for GKE clusters")
+	k8sListCmd.Flags().StringVar(&k8sGCPRegion, "gcp-region", "", "GCP region for GKE clusters")
+	k8sDeleteCmd.Flags().StringVar(&k8sGCPProject, "gcp-project", "", "GCP project ID for GKE clusters")
+	k8sDeleteCmd.Flags().StringVar(&k8sGCPRegion, "gcp-region", "", "GCP region for GKE clusters")
+	k8sGetKubeconfigCmd.Flags().StringVar(&k8sGCPProject, "gcp-project", "", "GCP project ID for GKE clusters")
+	k8sGetKubeconfigCmd.Flags().StringVar(&k8sGCPRegion, "gcp-region", "", "GCP region for GKE clusters")
 }
 
 func getK8sAgent() (*k8s.Agent, string, string) {
@@ -365,6 +410,44 @@ func getK8sAgent() (*k8s.Agent, string, string) {
 	})
 
 	return agent, awsProfile, awsRegion
+}
+
+// getGCPConfig resolves GCP project and region from flags, config, or environment
+func getGCPConfig() (string, string) {
+	// Resolve GCP project
+	gcpProject := k8sGCPProject
+	if gcpProject == "" {
+		gcpProject = gcp.ResolveProjectID()
+	}
+
+	// Resolve GCP region
+	gcpRegion := k8sGCPRegion
+	if gcpRegion == "" {
+		gcpRegion = viper.GetString("infra.gcp.region")
+	}
+	if gcpRegion == "" {
+		gcpRegion = "us-central1"
+	}
+
+	return gcpProject, gcpRegion
+}
+
+// getK8sAgentWithGKE returns an agent with GKE provider registered
+func getK8sAgentWithGKE() (*k8s.Agent, string, string, error) {
+	debug := viper.GetBool("debug")
+
+	gcpProject, gcpRegion := getGCPConfig()
+	if gcpProject == "" {
+		return nil, "", "", fmt.Errorf("GCP project is required. Use --gcp-project flag or set GCP_PROJECT environment variable")
+	}
+
+	agent := k8s.NewAgentWithOptions(k8s.AgentOptions{
+		Debug: debug,
+	})
+
+	agent.RegisterGKEProvider(gcpProject, gcpRegion)
+
+	return agent, gcpProject, gcpRegion, nil
 }
 
 func runCreateEKS(cmd *cobra.Command, args []string) error {
@@ -599,11 +682,144 @@ func runCreateKubeadm(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runCreateGKE(cmd *cobra.Command, args []string) error {
+	clusterName := args[0]
+	ctx := context.Background()
+	debug := viper.GetBool("debug")
+
+	agent, gcpProject, gcpRegion, err := getK8sAgentWithGKE()
+	if err != nil {
+		return err
+	}
+
+	// Generate the plan
+	gkePlan := plan.GenerateGKECreatePlan(plan.GKECreateOptions{
+		ClusterName:       clusterName,
+		Project:           gcpProject,
+		Region:            gcpRegion,
+		NodeCount:         k8sNodes,
+		NodeType:          k8sNodeType,
+		KubernetesVersion: k8sK8sVersion,
+		Preemptible:       k8sGKEPreemptible,
+	})
+
+	// Display the plan
+	plan.DisplayPlan(os.Stdout, gkePlan, plan.PlanDisplayOptions{
+		ShowCommands: debug,
+		Verbose:      debug,
+	})
+
+	// If --plan flag, show JSON and exit
+	if k8sPlanOnly {
+		fmt.Println()
+		fmt.Println("Plan JSON:")
+		planJSON, _ := json.MarshalIndent(gkePlan, "", "  ")
+		fmt.Println(string(planJSON))
+		return nil
+	}
+
+	// Confirm unless --apply
+	if !k8sApply {
+		fmt.Print("Do you want to create this cluster? [y/N]: ")
+		var response string
+		fmt.Scanln(&response)
+		if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
+			fmt.Println("Cancelled.")
+			return nil
+		}
+	}
+
+	fmt.Println()
+
+	// Execute using agent
+	opts := cluster.CreateOptions{
+		Name:              clusterName,
+		Region:            gcpRegion,
+		WorkerCount:       k8sNodes,
+		WorkerType:        k8sNodeType,
+		KubernetesVersion: k8sK8sVersion,
+		GCPProject:        gcpProject,
+		Preemptible:       k8sGKEPreemptible,
+	}
+
+	info, err := agent.CreateGKECluster(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("failed to create GKE cluster: %w", err)
+	}
+
+	// Build result
+	result := &plan.ExecResult{
+		Success: true,
+		Connection: &plan.Connection{
+			Kubeconfig: "~/.kube/config",
+			Endpoint:   info.Endpoint,
+			Commands: []string{
+				"kubectl get nodes",
+				"kubectl get pods -A",
+			},
+		},
+	}
+
+	// Get kubeconfig
+	kubeconfigPath, err := agent.GetGKEKubeconfig(ctx, clusterName)
+	if err != nil {
+		if debug {
+			fmt.Printf("[k8s] warning: failed to update kubeconfig: %v\n", err)
+		}
+	} else {
+		result.Connection.Kubeconfig = kubeconfigPath
+	}
+
+	// Display result
+	plan.DisplayResult(os.Stdout, gkePlan, result)
+
+	return nil
+}
+
 func runDeleteCluster(cmd *cobra.Command, args []string) error {
 	clusterType := args[0]
 	clusterName := args[1]
 	ctx := context.Background()
 
+	// Handle GKE separately
+	if clusterType == "gke" {
+		agent, gcpProject, gcpRegion, err := getK8sAgentWithGKE()
+		if err != nil {
+			return err
+		}
+
+		// Generate delete plan
+		deletePlan := plan.GenerateDeletePlan(plan.DeleteOptions{
+			ClusterType: clusterType,
+			ClusterName: clusterName,
+			Region:      gcpRegion,
+			Profile:     gcpProject,
+		})
+
+		// Display the plan
+		plan.DisplayPlan(os.Stdout, deletePlan, plan.PlanDisplayOptions{})
+
+		// Confirm
+		fmt.Print("Are you sure you want to delete this cluster? [y/N]: ")
+		var response string
+		fmt.Scanln(&response)
+		if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
+			fmt.Println("Cancelled.")
+			return nil
+		}
+
+		fmt.Println()
+		fmt.Printf("[k8s] deleting GKE cluster '%s' in project '%s'...\n", clusterName, gcpProject)
+
+		if err := agent.DeleteGKECluster(ctx, clusterName); err != nil {
+			return fmt.Errorf("failed to delete GKE cluster: %w", err)
+		}
+
+		fmt.Printf("[k8s] cluster '%s' deleted successfully.\n", clusterName)
+		return nil
+	}
+
+	// Handle EKS and kubeadm
 	agent, awsProfile, awsRegion := getK8sAgent()
 
 	// Generate delete plan
@@ -644,7 +860,7 @@ func runDeleteCluster(cmd *cobra.Command, args []string) error {
 		}
 		err = provider.Delete(ctx, clusterName)
 	default:
-		return fmt.Errorf("unsupported cluster type: %s (use 'eks' or 'kubeadm')", clusterType)
+		return fmt.Errorf("unsupported cluster type: %s (use 'eks', 'gke', or 'kubeadm')", clusterType)
 	}
 
 	if err != nil {
@@ -658,8 +874,6 @@ func runDeleteCluster(cmd *cobra.Command, args []string) error {
 func runListClusters(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
-	agent, awsProfile, awsRegion := getK8sAgent()
-
 	clusterType := "eks"
 	if len(args) > 0 {
 		clusterType = args[0]
@@ -669,9 +883,21 @@ func runListClusters(cmd *cobra.Command, args []string) error {
 	var err error
 
 	switch clusterType {
+	case "gke":
+		agent, gcpProject, _, gkeErr := getK8sAgentWithGKE()
+		if gkeErr != nil {
+			return gkeErr
+		}
+		clusters, err = agent.ListGKEClusters(ctx)
+		if err == nil && len(clusters) == 0 {
+			fmt.Printf("No GKE clusters found in project '%s'.\n", gcpProject)
+			return nil
+		}
 	case "eks":
+		agent, _, _ := getK8sAgent()
 		clusters, err = agent.ListEKSClusters(ctx)
 	case "kubeadm":
+		agent, awsProfile, awsRegion := getK8sAgent()
 		agent.RegisterKubeadmProvider(k8s.KubeadmProviderOptions{
 			AWSProfile: awsProfile,
 			Region:     awsRegion,
@@ -682,7 +908,7 @@ func runListClusters(cmd *cobra.Command, args []string) error {
 		}
 		clusters, err = provider.ListClusters(ctx)
 	default:
-		return fmt.Errorf("unsupported cluster type: %s (use 'eks' or 'kubeadm')", clusterType)
+		return fmt.Errorf("unsupported cluster type: %s (use 'eks', 'gke', or 'kubeadm')", clusterType)
 	}
 
 	if err != nil {
@@ -817,15 +1043,21 @@ func runGetKubeconfig(cmd *cobra.Command, args []string) error {
 	clusterName := args[1]
 	ctx := context.Background()
 
-	agent, awsProfile, awsRegion := getK8sAgent()
-
 	var kubeconfigPath string
 	var err error
 
 	switch clusterType {
+	case "gke":
+		agent, _, _, gkeErr := getK8sAgentWithGKE()
+		if gkeErr != nil {
+			return gkeErr
+		}
+		kubeconfigPath, err = agent.GetGKEKubeconfig(ctx, clusterName)
 	case "eks":
+		agent, _, _ := getK8sAgent()
 		kubeconfigPath, err = agent.GetEKSKubeconfig(ctx, clusterName)
 	case "kubeadm":
+		agent, awsProfile, awsRegion := getK8sAgent()
 		agent.RegisterKubeadmProvider(k8s.KubeadmProviderOptions{
 			AWSProfile: awsProfile,
 			Region:     awsRegion,
@@ -836,7 +1068,7 @@ func runGetKubeconfig(cmd *cobra.Command, args []string) error {
 		}
 		kubeconfigPath, err = provider.GetKubeconfig(ctx, clusterName)
 	default:
-		return fmt.Errorf("unsupported cluster type: %s (use 'eks' or 'kubeadm')", clusterType)
+		return fmt.Errorf("unsupported cluster type: %s (use 'eks', 'gke', or 'kubeadm')", clusterType)
 	}
 
 	if err != nil {
@@ -1665,13 +1897,28 @@ func runK8sAsk(cmd *cobra.Command, args []string) error {
 		awsRegion = "us-east-1"
 	}
 
-	// If cluster is specified, update kubeconfig for EKS
+	// If cluster is specified, update kubeconfig for EKS or GKE
 	if k8sAskCluster != "" && k8sAskContext == "" {
-		if debug {
-			fmt.Printf("[k8s ask] Updating kubeconfig for EKS cluster: %s\n", k8sAskCluster)
-		}
-		if err := updateKubeconfigForEKS(ctx, k8sAskCluster, awsProfile, awsRegion, debug); err != nil {
-			return fmt.Errorf("failed to update kubeconfig for cluster %s: %w", k8sAskCluster, err)
+		if k8sGCPMode {
+			// GKE cluster
+			gcpProject, gcpRegion := getGCPConfig()
+			if gcpProject == "" {
+				return fmt.Errorf("GCP project is required for GKE. Use --gcp-project flag or set GCP_PROJECT environment variable")
+			}
+			if debug {
+				fmt.Printf("[k8s ask] Updating kubeconfig for GKE cluster: %s (project: %s)\n", k8sAskCluster, gcpProject)
+			}
+			if err := updateKubeconfigForGKE(ctx, k8sAskCluster, gcpProject, gcpRegion, debug); err != nil {
+				return fmt.Errorf("failed to update kubeconfig for GKE cluster %s: %w", k8sAskCluster, err)
+			}
+		} else {
+			// EKS cluster (default)
+			if debug {
+				fmt.Printf("[k8s ask] Updating kubeconfig for EKS cluster: %s\n", k8sAskCluster)
+			}
+			if err := updateKubeconfigForEKS(ctx, k8sAskCluster, awsProfile, awsRegion, debug); err != nil {
+				return fmt.Errorf("failed to update kubeconfig for cluster %s: %w", k8sAskCluster, err)
+			}
 		}
 	}
 
@@ -1824,6 +2071,31 @@ func updateKubeconfigForEKS(ctx context.Context, clusterName, awsProfile, awsReg
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("aws eks update-kubeconfig failed: %w\nOutput: %s", err, string(output))
+	}
+
+	if debug {
+		fmt.Printf("[k8s ask] Kubeconfig updated: %s\n", strings.TrimSpace(string(output)))
+	}
+
+	return nil
+}
+
+// updateKubeconfigForGKE updates kubeconfig for a GKE cluster
+func updateKubeconfigForGKE(ctx context.Context, clusterName, gcpProject, gcpRegion string, debug bool) error {
+	args := []string{
+		"container", "clusters", "get-credentials", clusterName,
+		"--project", gcpProject,
+		"--region", gcpRegion,
+	}
+
+	if debug {
+		fmt.Printf("[k8s ask] Running: gcloud %s\n", strings.Join(args, " "))
+	}
+
+	cmd := exec.CommandContext(ctx, "gcloud", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gcloud container clusters get-credentials failed: %w\nOutput: %s", err, string(output))
 	}
 
 	if debug {
