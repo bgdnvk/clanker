@@ -13,6 +13,7 @@ type ClusterType = cluster.ClusterType
 // Cluster type constants
 const (
 	ClusterTypeEKS      = cluster.ClusterTypeEKS
+	ClusterTypeGKE      = cluster.ClusterTypeGKE
 	ClusterTypeKubeadm  = cluster.ClusterTypeKubeadm
 	ClusterTypeKops     = cluster.ClusterTypeKops
 	ClusterTypeK3s      = cluster.ClusterTypeK3s

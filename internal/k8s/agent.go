@@ -1911,6 +1911,80 @@ func (a *Agent) CheckEKSHealth(ctx context.Context, clusterName string) (*Health
 	return provider.Health(ctx, clusterName)
 }
 
+// GKE Provider methods
+
+// RegisterGKEProvider registers the GKE provider with the agent
+func (a *Agent) RegisterGKEProvider(projectID, region string) {
+	a.clusterMgr.RegisterProvider(cluster.NewGKEProvider(cluster.GKEProviderOptions{
+		ProjectID: projectID,
+		Region:    region,
+		Debug:     a.debug,
+	}))
+}
+
+// ListGKEClusters lists all GKE clusters in the project
+func (a *Agent) ListGKEClusters(ctx context.Context) ([]ClusterInfo, error) {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeGKE)
+	if !ok {
+		return nil, fmt.Errorf("GKE provider not registered; call RegisterGKEProvider first")
+	}
+	return provider.ListClusters(ctx)
+}
+
+// GetGKECluster gets information about a specific GKE cluster
+func (a *Agent) GetGKECluster(ctx context.Context, clusterName string) (*ClusterInfo, error) {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeGKE)
+	if !ok {
+		return nil, fmt.Errorf("GKE provider not registered; call RegisterGKEProvider first")
+	}
+	return provider.GetCluster(ctx, clusterName)
+}
+
+// CreateGKECluster creates a new GKE cluster
+func (a *Agent) CreateGKECluster(ctx context.Context, opts cluster.CreateOptions) (*ClusterInfo, error) {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeGKE)
+	if !ok {
+		return nil, fmt.Errorf("GKE provider not registered; call RegisterGKEProvider first")
+	}
+	return provider.Create(ctx, opts)
+}
+
+// DeleteGKECluster deletes a GKE cluster
+func (a *Agent) DeleteGKECluster(ctx context.Context, clusterName string) error {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeGKE)
+	if !ok {
+		return fmt.Errorf("GKE provider not registered; call RegisterGKEProvider first")
+	}
+	return provider.Delete(ctx, clusterName)
+}
+
+// ScaleGKECluster scales a GKE cluster node pool
+func (a *Agent) ScaleGKECluster(ctx context.Context, clusterName string, opts cluster.ScaleOptions) error {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeGKE)
+	if !ok {
+		return fmt.Errorf("GKE provider not registered; call RegisterGKEProvider first")
+	}
+	return provider.Scale(ctx, clusterName, opts)
+}
+
+// GetGKEKubeconfig updates kubeconfig for a GKE cluster
+func (a *Agent) GetGKEKubeconfig(ctx context.Context, clusterName string) (string, error) {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeGKE)
+	if !ok {
+		return "", fmt.Errorf("GKE provider not registered; call RegisterGKEProvider first")
+	}
+	return provider.GetKubeconfig(ctx, clusterName)
+}
+
+// CheckGKEHealth checks the health of a GKE cluster
+func (a *Agent) CheckGKEHealth(ctx context.Context, clusterName string) (*HealthStatus, error) {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeGKE)
+	if !ok {
+		return nil, fmt.Errorf("GKE provider not registered; call RegisterGKEProvider first")
+	}
+	return provider.Health(ctx, clusterName)
+}
+
 // GetClusterResources fetches all K8s resources from the current cluster for visualization
 func (a *Agent) GetClusterResources(ctx context.Context, clusterName string, opts QueryOptions) (*ClusterResources, error) {
 	if a.debug {
