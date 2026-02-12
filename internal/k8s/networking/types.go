@@ -392,3 +392,55 @@ const (
 	// EKSAnnotationLBScheme specifies internal or internet-facing
 	EKSAnnotationLBScheme = "service.beta.kubernetes.io/aws-load-balancer-scheme"
 )
+
+// AKS Ingress classes
+const (
+	// AKSIngressClassAGIC is the Application Gateway Ingress Controller
+	AKSIngressClassAGIC = "azure/application-gateway"
+	// AKSIngressClassNginx is nginx ingress on AKS
+	AKSIngressClassNginx = "nginx"
+	// AKSIngressClassWebAppRouting is AKS Web App Routing addon
+	AKSIngressClassWebAppRouting = "webapprouting.kubernetes.azure.com"
+)
+
+// AKS Service annotations for Azure Load Balancer
+const (
+	// AKSAnnotationLBInternal creates an internal load balancer
+	AKSAnnotationLBInternal = "service.beta.kubernetes.io/azure-load-balancer-internal"
+	// AKSAnnotationLBResourceGroup specifies resource group for LB
+	AKSAnnotationLBResourceGroup = "service.beta.kubernetes.io/azure-load-balancer-resource-group"
+	// AKSAnnotationLBHealthProbeProtocol specifies health probe protocol
+	AKSAnnotationLBHealthProbeProtocol = "service.beta.kubernetes.io/azure-load-balancer-health-probe-protocol"
+	// AKSAnnotationLBIdleTimeout specifies idle timeout in minutes
+	AKSAnnotationLBIdleTimeout = "service.beta.kubernetes.io/azure-load-balancer-tcp-idle-timeout"
+	// AKSAnnotationPIPName specifies public IP name
+	AKSAnnotationPIPName = "service.beta.kubernetes.io/azure-pip-name"
+	// AKSAnnotationDNSLabelName specifies DNS label for public IP
+	AKSAnnotationDNSLabelName = "service.beta.kubernetes.io/azure-dns-label-name"
+	// AKSAnnotationLBSubnet specifies subnet for internal LB
+	AKSAnnotationLBSubnet = "service.beta.kubernetes.io/azure-load-balancer-internal-subnet"
+)
+
+// AGIC (Application Gateway Ingress Controller) annotations
+const (
+	// AGICAnnotationBackendPathPrefix sets backend path prefix
+	AGICAnnotationBackendPathPrefix = "appgw.ingress.kubernetes.io/backend-path-prefix"
+	// AGICAnnotationSSLRedirect enables SSL redirect
+	AGICAnnotationSSLRedirect = "appgw.ingress.kubernetes.io/ssl-redirect"
+	// AGICAnnotationWAFPolicy specifies WAF policy resource ID
+	AGICAnnotationWAFPolicy = "appgw.ingress.kubernetes.io/waf-policy-for-path"
+	// AGICAnnotationAppGWSSLCert specifies SSL certificate name
+	AGICAnnotationAppGWSSLCert = "appgw.ingress.kubernetes.io/appgw-ssl-certificate"
+	// AGICAnnotationHealthProbeHostname sets health probe hostname
+	AGICAnnotationHealthProbeHostname = "appgw.ingress.kubernetes.io/health-probe-hostname"
+	// AGICAnnotationHealthProbePath sets health probe path
+	AGICAnnotationHealthProbePath = "appgw.ingress.kubernetes.io/health-probe-path"
+	// AGICAnnotationBackendHostname sets backend hostname
+	AGICAnnotationBackendHostname = "appgw.ingress.kubernetes.io/backend-hostname"
+	// AGICAnnotationConnectionDraining enables connection draining
+	AGICAnnotationConnectionDraining = "appgw.ingress.kubernetes.io/connection-draining"
+	// AGICAnnotationCookieBasedAffinity enables cookie-based session affinity
+	AGICAnnotationCookieBasedAffinity = "appgw.ingress.kubernetes.io/cookie-based-affinity"
+	// AGICAnnotationRequestTimeout sets request timeout in seconds
+	AGICAnnotationRequestTimeout = "appgw.ingress.kubernetes.io/request-timeout"
+)
