@@ -172,16 +172,17 @@ func (a *telemetryClientAdapter) GetJSON(ctx context.Context, resourceType, name
 
 // Agent is the main K8s orchestrator that receives delegated queries from the main agent
 type Agent struct {
-	client       *Client
-	clusterMgr   *cluster.Manager
-	workloads    *workloads.SubAgent
-	networking   *networking.SubAgent
-	storage      *storage.SubAgent
-	helm         *helm.SubAgent
-	sre          *sre.SubAgent
-	telemetry    *telemetry.SubAgent
-	debug        bool
-	aiDecisionFn AIDecisionFunc
+	client        *Client
+	clusterMgr    *cluster.Manager
+	workloads     *workloads.SubAgent
+	networking    *networking.SubAgent
+	storage       *storage.SubAgent
+	helm          *helm.SubAgent
+	sre           *sre.SubAgent
+	telemetry     *telemetry.SubAgent
+	debug         bool
+	aiDecisionFn  AIDecisionFunc
+	cloudProvider CloudProvider
 }
 
 // AgentOptions contains options for creating a K8s agent
@@ -2571,4 +2572,189 @@ func IsK8sQuery(question string) bool {
 	}
 
 	return false
+}
+
+// DetectCloudProvider determines the cloud provider from various context sources
+func DetectCloudProvider(contextName, clusterName string) CloudProvider {
+	// Check context name patterns
+	if provider := DetectCloudProviderFromContext(contextName); provider != CloudProviderUnknown {
+		return provider
+	}
+
+	// Check cluster name patterns
+	if provider := DetectCloudProviderFromClusterName(clusterName); provider != CloudProviderUnknown {
+		return provider
+	}
+
+	return CloudProviderUnknown
+}
+
+// DetectCloudProviderFromContext detects cloud provider from kubeconfig context name
+func DetectCloudProviderFromContext(contextName string) CloudProvider {
+	contextLower := strings.ToLower(contextName)
+
+	// GKE context pattern: gke_PROJECT_REGION_CLUSTER
+	if strings.HasPrefix(contextLower, "gke_") {
+		return CloudProviderGCP
+	}
+
+	// EKS context pattern: arn:aws:eks:REGION:ACCOUNT:cluster/CLUSTER
+	if strings.Contains(contextLower, "arn:aws:eks") {
+		return CloudProviderAWS
+	}
+
+	// AKS context pattern often contains aks or azure
+	if strings.Contains(contextLower, "aks") || strings.Contains(contextLower, "azure") {
+		return CloudProviderAzure
+	}
+
+	// Additional GCP indicators
+	if strings.Contains(contextLower, "gke") || strings.Contains(contextLower, "gcp") {
+		return CloudProviderGCP
+	}
+
+	// Additional AWS indicators
+	if strings.Contains(contextLower, "eks") || strings.Contains(contextLower, "aws") {
+		return CloudProviderAWS
+	}
+
+	return CloudProviderUnknown
+}
+
+// DetectCloudProviderFromClusterName detects cloud provider from cluster name patterns
+func DetectCloudProviderFromClusterName(clusterName string) CloudProvider {
+	nameLower := strings.ToLower(clusterName)
+
+	// GKE clusters often have gke in the name
+	if strings.Contains(nameLower, "gke") {
+		return CloudProviderGCP
+	}
+
+	// EKS clusters often have eks in the name
+	if strings.Contains(nameLower, "eks") {
+		return CloudProviderAWS
+	}
+
+	// AKS clusters often have aks in the name
+	if strings.Contains(nameLower, "aks") {
+		return CloudProviderAzure
+	}
+
+	return CloudProviderUnknown
+}
+
+// DetectCloudProviderFromQuery analyzes a query to detect cloud provider hints
+func DetectCloudProviderFromQuery(query string) CloudProvider {
+	queryLower := strings.ToLower(query)
+
+	// GKE-specific terms
+	gkeTerms := []string{
+		"gke", "gcp", "google cloud", "artifact registry",
+		"preemptible", "pd-standard", "pd-ssd", "pd-balanced",
+		"cloud.google.com", "workload identity", "gce-internal",
+	}
+	for _, term := range gkeTerms {
+		if strings.Contains(queryLower, term) {
+			return CloudProviderGCP
+		}
+	}
+
+	// EKS-specific terms
+	eksTerms := []string{
+		"eks", "aws", "amazon", "ecr", "ebs",
+		"fargate", "spot instance", "node group",
+		"eks.amazonaws.com", "irsa",
+	}
+	for _, term := range eksTerms {
+		if strings.Contains(queryLower, term) {
+			return CloudProviderAWS
+		}
+	}
+
+	// AKS-specific terms
+	aksTerms := []string{
+		"aks", "azure", "acr", "azure disk",
+	}
+	for _, term := range aksTerms {
+		if strings.Contains(queryLower, term) {
+			return CloudProviderAzure
+		}
+	}
+
+	return CloudProviderUnknown
+}
+
+// GetCloudProvider returns the currently detected cloud provider
+func (a *Agent) GetCloudProvider() CloudProvider {
+	return a.cloudProvider
+}
+
+// SetCloudProvider sets the cloud provider for the agent
+func (a *Agent) SetCloudProvider(provider CloudProvider) {
+	a.cloudProvider = provider
+}
+
+// DetectAndSetCloudProvider detects and sets the cloud provider from context
+func (a *Agent) DetectAndSetCloudProvider(ctx context.Context) CloudProvider {
+	if a.client == nil {
+		return CloudProviderUnknown
+	}
+
+	// Try to detect from current context
+	currentContext, err := a.client.GetCurrentContext(ctx)
+	if err == nil && currentContext != "" {
+		provider := DetectCloudProviderFromContext(currentContext)
+		if provider != CloudProviderUnknown {
+			a.cloudProvider = provider
+			return provider
+		}
+	}
+
+	return CloudProviderUnknown
+}
+
+// ParseGKEContextInfo extracts project, region, and cluster from a GKE context name
+// GKE context format: gke_PROJECT_REGION_CLUSTER
+func ParseGKEContextInfo(contextName string) (project, region, cluster string, ok bool) {
+	if !strings.HasPrefix(strings.ToLower(contextName), "gke_") {
+		return "", "", "", false
+	}
+
+	parts := strings.Split(contextName, "_")
+	if len(parts) < 4 {
+		return "", "", "", false
+	}
+
+	// gke_PROJECT_REGION_CLUSTER (cluster may contain underscores)
+	project = parts[1]
+	region = parts[2]
+	cluster = strings.Join(parts[3:], "_")
+	return project, region, cluster, true
+}
+
+// ParseEKSContextInfo extracts region, account, and cluster from an EKS context ARN
+// EKS context format: arn:aws:eks:REGION:ACCOUNT:cluster/CLUSTER
+func ParseEKSContextInfo(contextName string) (region, account, cluster string, ok bool) {
+	if !strings.Contains(contextName, "arn:aws:eks") {
+		return "", "", "", false
+	}
+
+	// Split ARN parts
+	parts := strings.Split(contextName, ":")
+	if len(parts) < 6 {
+		return "", "", "", false
+	}
+
+	region = parts[3]
+	account = parts[4]
+
+	// Extract cluster name from the last part (cluster/NAME)
+	clusterPart := parts[5]
+	if strings.HasPrefix(clusterPart, "cluster/") {
+		cluster = strings.TrimPrefix(clusterPart, "cluster/")
+	} else {
+		cluster = clusterPart
+	}
+
+	return region, account, cluster, true
 }
