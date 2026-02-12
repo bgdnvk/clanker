@@ -325,3 +325,45 @@ const (
 	// EKSStorageTypeIO2 is provisioned IOPS SSD (io2)
 	EKSStorageTypeIO2 = "io2"
 )
+
+// AKS CSI Provisioners
+const (
+	// AKSProvisionerDisk is the Azure Disk CSI driver
+	AKSProvisionerDisk = "disk.csi.azure.com"
+	// AKSProvisionerFile is the Azure Files CSI driver
+	AKSProvisionerFile = "file.csi.azure.com"
+	// AKSProvisionerBlob is the Azure Blob CSI driver
+	AKSProvisionerBlob = "blob.csi.azure.com"
+)
+
+// AKS Disk storage types (SKU names)
+const (
+	// AKSStorageTypeStandardHDD is Standard HDD (Standard_LRS)
+	AKSStorageTypeStandardHDD = "Standard_LRS"
+	// AKSStorageTypeStandardSSD is Standard SSD (StandardSSD_LRS)
+	AKSStorageTypeStandardSSD = "StandardSSD_LRS"
+	// AKSStorageTypePremiumSSD is Premium SSD (Premium_LRS)
+	AKSStorageTypePremiumSSD = "Premium_LRS"
+	// AKSStorageTypePremiumSSDv2 is Premium SSD v2 (PremiumV2_LRS)
+	AKSStorageTypePremiumSSDv2 = "PremiumV2_LRS"
+	// AKSStorageTypeUltraSSD is Ultra SSD (UltraSSD_LRS)
+	AKSStorageTypeUltraSSD = "UltraSSD_LRS"
+)
+
+// AKS Azure Files tiers
+const (
+	// AKSFilesStandard is Standard Azure Files
+	AKSFilesStandard = "Standard"
+	// AKSFilesPremium is Premium Azure Files (SSD-backed)
+	AKSFilesPremium = "Premium"
+)
+
+// AKS Disk caching modes
+const (
+	// AKSCachingModeNone disables caching
+	AKSCachingModeNone = "None"
+	// AKSCachingModeReadOnly enables read-only caching
+	AKSCachingModeReadOnly = "ReadOnly"
+	// AKSCachingModeReadWrite enables read-write caching
+	AKSCachingModeReadWrite = "ReadWrite"
+)
