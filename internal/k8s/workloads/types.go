@@ -264,3 +264,61 @@ type ExecOptions struct {
 	Stdin     bool
 	TTY       bool
 }
+
+// GKE node labels
+const (
+	// GKELabelNodePool identifies the GKE node pool
+	GKELabelNodePool = "cloud.google.com/gke-nodepool"
+	// GKELabelPreemptible marks preemptible VM nodes
+	GKELabelPreemptible = "cloud.google.com/gke-preemptible"
+	// GKELabelSpot marks Spot VM nodes
+	GKELabelSpot = "cloud.google.com/gke-spot"
+	// GKELabelMachineType identifies the GCE machine type
+	GKELabelMachineType = "node.kubernetes.io/instance-type"
+	// GKELabelAcceleratorType identifies GPU accelerator type
+	GKELabelAcceleratorType = "cloud.google.com/gke-accelerator"
+	// GKELabelAcceleratorCount identifies GPU accelerator count
+	GKELabelAcceleratorCount = "cloud.google.com/gke-accelerator-count"
+	// GKELabelBootDiskType identifies the boot disk type
+	GKELabelBootDiskType = "cloud.google.com/gke-boot-disk"
+	// GKELabelOS identifies the operating system
+	GKELabelOS = "kubernetes.io/os"
+	// GKELabelArch identifies the architecture
+	GKELabelArch = "kubernetes.io/arch"
+)
+
+// GKE taint keys
+const (
+	// GKETaintPreemptible is the taint key for preemptible nodes
+	GKETaintPreemptible = "cloud.google.com/gke-preemptible"
+	// GKETaintSpot is the taint key for Spot VM nodes
+	GKETaintSpot = "cloud.google.com/gke-spot"
+	// GKETaintGPU is the taint key for GPU nodes
+	GKETaintGPU = "nvidia.com/gpu"
+)
+
+// GKE Autopilot resource class
+const (
+	// GKEAutopilotResourceClassGeneral is the general-purpose resource class
+	GKEAutopilotResourceClassGeneral = "general-purpose"
+	// GKEAutopilotResourceClassBalanced is the balanced resource class
+	GKEAutopilotResourceClassBalanced = "balanced"
+	// GKEAutopilotResourceClassScaleOut is the scale-out resource class
+	GKEAutopilotResourceClassScaleOut = "scale-out"
+)
+
+// EKS node labels for comparison
+const (
+	// EKSLabelNodeGroup identifies the EKS node group
+	EKSLabelNodeGroup = "eks.amazonaws.com/nodegroup"
+	// EKSLabelCapacityType identifies capacity type (ON_DEMAND, SPOT)
+	EKSLabelCapacityType = "eks.amazonaws.com/capacityType"
+	// EKSLabelInstanceType identifies the EC2 instance type
+	EKSLabelInstanceType = "node.kubernetes.io/instance-type"
+)
+
+// EKS taint keys for comparison
+const (
+	// EKSTaintSpot is the taint key for Spot instances
+	EKSTaintSpot = "eks.amazonaws.com/capacityType"
+)
