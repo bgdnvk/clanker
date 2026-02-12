@@ -324,3 +324,71 @@ type NetworkPolicyPeerSpec struct {
 	CIDR              string
 	Except            []string
 }
+
+// GKE Ingress classes
+const (
+	// GKEIngressClass is the default GKE ingress class for external load balancers
+	GKEIngressClass = "gce"
+	// GKEIngressClassInternal is the GKE ingress class for internal load balancers
+	GKEIngressClassInternal = "gce-internal"
+)
+
+// GKE Ingress annotations
+const (
+	// GKEAnnotationNEG enables Network Endpoint Groups for container-native load balancing
+	GKEAnnotationNEG = "cloud.google.com/neg"
+	// GKEAnnotationBackendConfig specifies the BackendConfig for the service
+	GKEAnnotationBackendConfig = "cloud.google.com/backend-config"
+	// GKEAnnotationStaticIP specifies a reserved static IP for the ingress
+	GKEAnnotationStaticIP = "kubernetes.io/ingress.global-static-ip-name"
+	// GKEAnnotationStaticIPRegional specifies a regional static IP for the ingress
+	GKEAnnotationStaticIPRegional = "kubernetes.io/ingress.regional-static-ip-name"
+	// GKEAnnotationAllowHTTP controls HTTP to HTTPS redirect
+	GKEAnnotationAllowHTTP = "kubernetes.io/ingress.allow-http"
+	// GKEAnnotationPreSharedCert specifies pre-shared SSL certificates
+	GKEAnnotationPreSharedCert = "ingress.gcp.kubernetes.io/pre-shared-cert"
+)
+
+// GKE Service annotations
+const (
+	// GKELBAnnotationType specifies the load balancer type (Internal or External)
+	GKELBAnnotationType = "cloud.google.com/load-balancer-type"
+	// GKELBAnnotationNetworkTier specifies the network tier (Premium or Standard)
+	GKELBAnnotationNetworkTier = "cloud.google.com/network-tier"
+	// GKELBAnnotationSubnetwork specifies the subnetwork for internal LB
+	GKELBAnnotationSubnetwork = "cloud.google.com/load-balancer-subnetwork"
+)
+
+// GKE Network Endpoint Group types
+const (
+	// GKENEGTypeIngress uses NEG with Ingress for container-native LB
+	GKENEGTypeIngress = `{"ingress": true}`
+	// GKENEGExposedPorts specifies which ports to expose via NEG
+	GKENEGExposedPorts = `{"exposed_ports": {"%d": {}}}`
+)
+
+// GKE Load Balancer types
+const (
+	// GKELBTypeInternal creates an internal TCP/UDP load balancer
+	GKELBTypeInternal = "Internal"
+	// GKELBTypeExternal is the default external load balancer
+	GKELBTypeExternal = "External"
+)
+
+// GKE Network tiers
+const (
+	// GKENetworkTierPremium uses Google's premium network
+	GKENetworkTierPremium = "Premium"
+	// GKENetworkTierStandard uses standard network tier
+	GKENetworkTierStandard = "Standard"
+)
+
+// EKS/AWS annotations for comparison
+const (
+	// EKSAnnotationLBType specifies the load balancer type for AWS
+	EKSAnnotationLBType = "service.beta.kubernetes.io/aws-load-balancer-type"
+	// EKSAnnotationLBInternal marks the load balancer as internal
+	EKSAnnotationLBInternal = "service.beta.kubernetes.io/aws-load-balancer-internal"
+	// EKSAnnotationLBScheme specifies internal or internet-facing
+	EKSAnnotationLBScheme = "service.beta.kubernetes.io/aws-load-balancer-scheme"
+)
