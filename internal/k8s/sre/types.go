@@ -52,6 +52,24 @@ const (
 	CategoryNodeUnreachable IssueCategory = "node_unreachable"
 )
 
+// AKS-specific issue categories
+const (
+	// CategoryAKSNodePool indicates AKS node pool issues
+	CategoryAKSNodePool IssueCategory = "aks_node_pool"
+	// CategoryAKSManagedIdentity indicates Managed Identity issues
+	CategoryAKSManagedIdentity IssueCategory = "aks_managed_identity"
+	// CategoryAKSSpotEviction indicates Spot VM eviction
+	CategoryAKSSpotEviction IssueCategory = "aks_spot_eviction"
+	// CategoryAKSQuotaExceeded indicates Azure quota exceeded
+	CategoryAKSQuotaExceeded IssueCategory = "aks_quota_exceeded"
+	// CategoryAKSNetworkPolicy indicates network policy issues
+	CategoryAKSNetworkPolicy IssueCategory = "aks_network_policy"
+	// CategoryAKSVirtualNode indicates Virtual Node issues
+	CategoryAKSVirtualNode IssueCategory = "aks_virtual_node"
+	// CategoryAKSAutoscaling indicates autoscaler issues
+	CategoryAKSAutoscaling IssueCategory = "aks_autoscaling"
+)
+
 // Issue represents a detected problem in the cluster
 type Issue struct {
 	ID           string        `json:"id"`
