@@ -275,3 +275,53 @@ const (
 	VolumeBindingImmediate            VolumeBindingMode = "Immediate"
 	VolumeBindingWaitForFirstConsumer VolumeBindingMode = "WaitForFirstConsumer"
 )
+
+// GKE CSI Provisioners
+const (
+	// GKEProvisionerPD is the GKE CSI driver for Persistent Disk
+	GKEProvisionerPD = "pd.csi.storage.gke.io"
+	// GKEProvisionerFilestore is the GKE CSI driver for Filestore
+	GKEProvisionerFilestore = "filestore.csi.storage.gke.io"
+)
+
+// GKE Persistent Disk storage types
+const (
+	// GKEStorageTypePDStandard is standard persistent disk (HDD)
+	GKEStorageTypePDStandard = "pd-standard"
+	// GKEStorageTypePDBalanced is balanced persistent disk (SSD with lower IOPS)
+	GKEStorageTypePDBalanced = "pd-balanced"
+	// GKEStorageTypePDSSD is SSD persistent disk (higher IOPS)
+	GKEStorageTypePDSSD = "pd-ssd"
+	// GKEStorageTypePDExtreme is extreme persistent disk (highest IOPS)
+	GKEStorageTypePDExtreme = "pd-extreme"
+)
+
+// GKE Filestore tiers
+const (
+	// GKEFilestoreTierStandard is standard tier Filestore
+	GKEFilestoreTierStandard = "standard"
+	// GKEFilestoreTierPremium is premium tier Filestore
+	GKEFilestoreTierPremium = "premium"
+	// GKEFilestoreTierEnterprise is enterprise tier Filestore
+	GKEFilestoreTierEnterprise = "enterprise"
+)
+
+// EKS CSI Provisioners for comparison
+const (
+	// EKSProvisionerEBS is the EKS CSI driver for EBS volumes
+	EKSProvisionerEBS = "ebs.csi.aws.com"
+	// EKSProvisionerEFS is the EKS CSI driver for EFS file systems
+	EKSProvisionerEFS = "efs.csi.aws.com"
+)
+
+// EKS EBS volume types for comparison
+const (
+	// EKSStorageTypeGP3 is general purpose SSD (gp3)
+	EKSStorageTypeGP3 = "gp3"
+	// EKSStorageTypeGP2 is general purpose SSD (gp2)
+	EKSStorageTypeGP2 = "gp2"
+	// EKSStorageTypeIO1 is provisioned IOPS SSD (io1)
+	EKSStorageTypeIO1 = "io1"
+	// EKSStorageTypeIO2 is provisioned IOPS SSD (io2)
+	EKSStorageTypeIO2 = "io2"
+)
