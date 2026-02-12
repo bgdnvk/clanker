@@ -7,15 +7,15 @@ import (
 
 // GKEIngressOptions contains options for creating a GKE-optimized ingress
 type GKEIngressOptions struct {
-	Name             string
-	Namespace        string
-	Internal         bool
-	StaticIPName     string
-	ManagedCert      string
-	PreSharedCert    string
-	AllowHTTP        bool
-	EnableNEG        bool
-	BackendConfig    string
+	Name              string
+	Namespace         string
+	Internal          bool
+	StaticIPName      string
+	ManagedCert       string
+	PreSharedCert     string
+	AllowHTTP         bool
+	EnableNEG         bool
+	BackendConfig     string
 	CustomAnnotations map[string]string
 }
 
@@ -70,12 +70,12 @@ func GKEIngressClassName(internal bool) string {
 
 // GKELoadBalancerOptions contains options for creating a GKE load balancer service
 type GKELoadBalancerOptions struct {
-	Internal      bool
-	NetworkTier   string // "Premium" or "Standard"
-	Subnetwork    string // Required for internal LB
-	StaticIP      string
-	EnableNEG     bool
-	NEGPorts      []int
+	Internal    bool
+	NetworkTier string // "Premium" or "Standard"
+	Subnetwork  string // Required for internal LB
+	StaticIP    string
+	EnableNEG   bool
+	NEGPorts    []int
 }
 
 // GKELoadBalancerAnnotations returns the appropriate annotations for a GKE load balancer
@@ -152,10 +152,10 @@ func GKENetworkingRecommendation(useCase string) NetworkingRecommendation {
 	// Internal services
 	if containsAny(useCaseLower, []string{"internal", "private", "vpc", "backend"}) {
 		return NetworkingRecommendation{
-			ServiceType:   string(ServiceTypeClusterIP),
-			IngressClass:  GKEIngressClassInternal,
-			UseNEG:        true,
-			Reason:        "Internal services should use ClusterIP with internal ingress for VPC-only access",
+			ServiceType:  string(ServiceTypeClusterIP),
+			IngressClass: GKEIngressClassInternal,
+			UseNEG:       true,
+			Reason:       "Internal services should use ClusterIP with internal ingress for VPC-only access",
 			Considerations: []string{
 				"Use gce-internal ingress class for internal HTTP(S) load balancer",
 				"Enable NEG for container-native load balancing",
@@ -167,10 +167,10 @@ func GKENetworkingRecommendation(useCase string) NetworkingRecommendation {
 	// Public web services
 	if containsAny(useCaseLower, []string{"public", "web", "api", "external", "internet"}) {
 		return NetworkingRecommendation{
-			ServiceType:   string(ServiceTypeLoadBalancer),
-			IngressClass:  GKEIngressClass,
-			UseNEG:        true,
-			Reason:        "Public services should use external load balancer with NEG for optimal performance",
+			ServiceType:  string(ServiceTypeLoadBalancer),
+			IngressClass: GKEIngressClass,
+			UseNEG:       true,
+			Reason:       "Public services should use external load balancer with NEG for optimal performance",
 			Considerations: []string{
 				"Use Google-managed SSL certificates for HTTPS",
 				"Enable Cloud CDN via BackendConfig for static content",
@@ -183,10 +183,10 @@ func GKENetworkingRecommendation(useCase string) NetworkingRecommendation {
 	// Microservices
 	if containsAny(useCaseLower, []string{"microservice", "service mesh", "istio", "grpc"}) {
 		return NetworkingRecommendation{
-			ServiceType:   string(ServiceTypeClusterIP),
-			IngressClass:  "",
-			UseNEG:        false,
-			Reason:        "Microservices typically use ClusterIP with service mesh for internal communication",
+			ServiceType:  string(ServiceTypeClusterIP),
+			IngressClass: "",
+			UseNEG:       false,
+			Reason:       "Microservices typically use ClusterIP with service mesh for internal communication",
 			Considerations: []string{
 				"Use Istio or Anthos Service Mesh for advanced traffic management",
 				"Consider headless services for direct pod-to-pod communication",
@@ -198,10 +198,10 @@ func GKENetworkingRecommendation(useCase string) NetworkingRecommendation {
 	// WebSocket or long-lived connections
 	if containsAny(useCaseLower, []string{"websocket", "streaming", "long-lived", "realtime"}) {
 		return NetworkingRecommendation{
-			ServiceType:   string(ServiceTypeLoadBalancer),
-			IngressClass:  GKEIngressClass,
-			UseNEG:        true,
-			Reason:        "WebSocket and streaming services require proper timeout configuration",
+			ServiceType:  string(ServiceTypeLoadBalancer),
+			IngressClass: GKEIngressClass,
+			UseNEG:       true,
+			Reason:       "WebSocket and streaming services require proper timeout configuration",
 			Considerations: []string{
 				"Configure BackendConfig with appropriate timeout settings",
 				"GKE Ingress supports WebSocket natively",
@@ -212,10 +212,10 @@ func GKENetworkingRecommendation(useCase string) NetworkingRecommendation {
 
 	// Default recommendation
 	return NetworkingRecommendation{
-		ServiceType:   string(ServiceTypeClusterIP),
-		IngressClass:  GKEIngressClass,
-		UseNEG:        true,
-		Reason:        "ClusterIP with Ingress provides flexible HTTP(S) routing",
+		ServiceType:  string(ServiceTypeClusterIP),
+		IngressClass: GKEIngressClass,
+		UseNEG:       true,
+		Reason:       "ClusterIP with Ingress provides flexible HTTP(S) routing",
 		Considerations: []string{
 			"Use Ingress for HTTP(S) traffic routing",
 			"Enable NEG for container-native load balancing",

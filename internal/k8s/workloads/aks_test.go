@@ -83,12 +83,12 @@ func TestAKSTolerationForVirtualNode(t *testing.T) {
 
 func TestGetAKSSchedulingRecommendation(t *testing.T) {
 	tests := []struct {
-		name           string
-		useCase        string
-		wantSpot       bool
+		name            string
+		useCase         string
+		wantSpot        bool
 		wantVirtualNode bool
-		wantGPU        bool
-		wantHA         bool
+		wantGPU         bool
+		wantHA          bool
 	}{
 		{
 			name:     "Batch processing",
@@ -101,13 +101,13 @@ func TestGetAKSSchedulingRecommendation(t *testing.T) {
 			wantGPU: true,
 		},
 		{
-			name:   "Production HA",
+			name:    "Production HA",
 			useCase: "production critical service",
-			wantHA: true,
+			wantHA:  true,
 		},
 		{
-			name:           "Burst workload",
-			useCase:        "serverless burst scaling",
+			name:            "Burst workload",
+			useCase:         "serverless burst scaling",
 			wantVirtualNode: true,
 		},
 		{
@@ -168,10 +168,10 @@ func TestGetAKSSchedulingRecommendation(t *testing.T) {
 
 func TestGetAKSNodePoolRecommendation(t *testing.T) {
 	tests := []struct {
-		name              string
-		workloadType      string
-		wantVMSizePrefix  string
-		wantReason        bool
+		name             string
+		workloadType     string
+		wantVMSizePrefix string
+		wantReason       bool
 	}{
 		{
 			name:             "Memory workload",
@@ -332,9 +332,9 @@ func TestGKEWorkloadComparison(t *testing.T) {
 
 func TestAKSPodSpecForPool(t *testing.T) {
 	tests := []struct {
-		name     string
-		poolName string
-		spot     bool
+		name         string
+		poolName     string
+		spot         bool
 		wantContains []string
 	}{
 		{

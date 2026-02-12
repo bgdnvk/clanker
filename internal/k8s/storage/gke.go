@@ -148,10 +148,10 @@ func GetGKEStorageRecommendation(useCase string) StorageRecommendation {
 	// Database workloads
 	if containsAny(useCaseLower, []string{"database", "mysql", "postgres", "mongodb", "redis", "cassandra"}) {
 		return StorageRecommendation{
-			StorageClass:   "premium-rwo",
-			DiskType:       GKEStorageTypePDSSD,
-			AccessMode:     string(AccessModeReadWriteOnce),
-			Reason:         "Databases require high IOPS and low latency provided by SSD persistent disks",
+			StorageClass: "premium-rwo",
+			DiskType:     GKEStorageTypePDSSD,
+			AccessMode:   string(AccessModeReadWriteOnce),
+			Reason:       "Databases require high IOPS and low latency provided by SSD persistent disks",
 			Considerations: []string{
 				"Consider pd-extreme for very high IOPS requirements",
 				"Use regional-pd for high availability if your database supports it",
@@ -163,10 +163,10 @@ func GetGKEStorageRecommendation(useCase string) StorageRecommendation {
 	// High availability workloads
 	if containsAny(useCaseLower, []string{"high availability", "ha ", "regional", "multi-zone", "disaster recovery"}) {
 		return StorageRecommendation{
-			StorageClass:   "premium-rwx",
-			DiskType:       GKEStorageTypePDSSD,
-			AccessMode:     string(AccessModeReadWriteOnce),
-			Reason:         "Regional persistent disks replicate data across zones for high availability",
+			StorageClass: "premium-rwx",
+			DiskType:     GKEStorageTypePDSSD,
+			AccessMode:   string(AccessModeReadWriteOnce),
+			Reason:       "Regional persistent disks replicate data across zones for high availability",
 			Considerations: []string{
 				"Regional PDs have slightly higher latency due to replication",
 				"Cost is approximately 2x standard PDs due to replication",
@@ -178,10 +178,10 @@ func GetGKEStorageRecommendation(useCase string) StorageRecommendation {
 	// Logging and analytics
 	if containsAny(useCaseLower, []string{"log", "elastic", "analytics", "data lake", "archiv"}) {
 		return StorageRecommendation{
-			StorageClass:   "standard-rwo",
-			DiskType:       GKEStorageTypePDStandard,
-			AccessMode:     string(AccessModeReadWriteOnce),
-			Reason:         "Standard persistent disks are cost effective for sequential read/write workloads",
+			StorageClass: "standard-rwo",
+			DiskType:     GKEStorageTypePDStandard,
+			AccessMode:   string(AccessModeReadWriteOnce),
+			Reason:       "Standard persistent disks are cost effective for sequential read/write workloads",
 			Considerations: []string{
 				"Standard PDs offer good sequential throughput",
 				"Consider pd-balanced for mixed workloads",
@@ -193,10 +193,10 @@ func GetGKEStorageRecommendation(useCase string) StorageRecommendation {
 	// Shared file storage
 	if containsAny(useCaseLower, []string{"shared", "nfs", "file", "readwritemany", "rwx"}) {
 		return StorageRecommendation{
-			StorageClass:   "filestore-standard",
-			DiskType:       "filestore",
-			AccessMode:     string(AccessModeReadWriteMany),
-			Reason:         "Filestore provides NFS-based shared file storage accessible by multiple pods",
+			StorageClass: "filestore-standard",
+			DiskType:     "filestore",
+			AccessMode:   string(AccessModeReadWriteMany),
+			Reason:       "Filestore provides NFS-based shared file storage accessible by multiple pods",
 			Considerations: []string{
 				"Minimum capacity is 1TB for standard tier",
 				"Use premium tier for higher performance requirements",
@@ -208,10 +208,10 @@ func GetGKEStorageRecommendation(useCase string) StorageRecommendation {
 	// Build and CI/CD
 	if containsAny(useCaseLower, []string{"build", "ci", "cd", "pipeline", "jenkins", "cache"}) {
 		return StorageRecommendation{
-			StorageClass:   "balanced-rwo",
-			DiskType:       GKEStorageTypePDBalanced,
-			AccessMode:     string(AccessModeReadWriteOnce),
-			Reason:         "Balanced persistent disks provide good performance for build workloads at moderate cost",
+			StorageClass: "balanced-rwo",
+			DiskType:     GKEStorageTypePDBalanced,
+			AccessMode:   string(AccessModeReadWriteOnce),
+			Reason:       "Balanced persistent disks provide good performance for build workloads at moderate cost",
 			Considerations: []string{
 				"Consider SSD for faster build times if budget allows",
 				"Enable volume expansion for growing cache",
@@ -222,10 +222,10 @@ func GetGKEStorageRecommendation(useCase string) StorageRecommendation {
 
 	// Default recommendation
 	return StorageRecommendation{
-		StorageClass:   "standard-rwo",
-		DiskType:       GKEStorageTypePDStandard,
-		AccessMode:     string(AccessModeReadWriteOnce),
-		Reason:         "Standard persistent disks offer a good balance of cost and performance for general workloads",
+		StorageClass: "standard-rwo",
+		DiskType:     GKEStorageTypePDStandard,
+		AccessMode:   string(AccessModeReadWriteOnce),
+		Reason:       "Standard persistent disks offer a good balance of cost and performance for general workloads",
 		Considerations: []string{
 			"Upgrade to pd-balanced or pd-ssd for better performance",
 			"Use regional PDs for high availability requirements",

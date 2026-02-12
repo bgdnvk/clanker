@@ -257,9 +257,9 @@ var (
 	k8sAskAIProfile  string
 	k8sAskDebug      bool
 	// GKE flags
-	k8sGCPMode       bool
-	k8sGCPProject    string
-	k8sGCPRegion     string
+	k8sGCPMode        bool
+	k8sGCPProject     string
+	k8sGCPRegion      string
 	k8sGKEPreemptible bool
 )
 

@@ -78,10 +78,10 @@ func TestAKSRecommendedRepos(t *testing.T) {
 
 func TestGetAKSChartRecommendations(t *testing.T) {
 	tests := []struct {
-		name        string
-		useCase     string
-		wantChart   string
-		wantCount   int
+		name      string
+		useCase   string
+		wantChart string
+		wantCount int
 	}{
 		{
 			name:      "KEDA autoscaling",

@@ -21,23 +21,23 @@ type AKSMetricType string
 
 const (
 	// AKS container metrics (Container Insights)
-	AKSMetricContainerCPU          AKSMetricType = "cpuUsageMillicores"
-	AKSMetricContainerMemory       AKSMetricType = "memoryWorkingSetBytes"
-	AKSMetricContainerMemoryRss    AKSMetricType = "memoryRssBytes"
-	AKSMetricContainerRestarts     AKSMetricType = "restartCount"
+	AKSMetricContainerCPU       AKSMetricType = "cpuUsageMillicores"
+	AKSMetricContainerMemory    AKSMetricType = "memoryWorkingSetBytes"
+	AKSMetricContainerMemoryRss AKSMetricType = "memoryRssBytes"
+	AKSMetricContainerRestarts  AKSMetricType = "restartCount"
 
 	// AKS node metrics
-	AKSMetricNodeCPUPercent        AKSMetricType = "cpuUsagePercentage"
-	AKSMetricNodeMemoryPercent     AKSMetricType = "memoryWorkingSetPercentage"
-	AKSMetricNodeDiskUsedPercent   AKSMetricType = "diskUsedPercentage"
-	AKSMetricNodeNetworkIn         AKSMetricType = "networkRxBytes"
-	AKSMetricNodeNetworkOut        AKSMetricType = "networkTxBytes"
+	AKSMetricNodeCPUPercent      AKSMetricType = "cpuUsagePercentage"
+	AKSMetricNodeMemoryPercent   AKSMetricType = "memoryWorkingSetPercentage"
+	AKSMetricNodeDiskUsedPercent AKSMetricType = "diskUsedPercentage"
+	AKSMetricNodeNetworkIn       AKSMetricType = "networkRxBytes"
+	AKSMetricNodeNetworkOut      AKSMetricType = "networkTxBytes"
 
 	// AKS cluster metrics
-	AKSMetricClusterPodCount       AKSMetricType = "podCount"
-	AKSMetricClusterNodeCount      AKSMetricType = "nodeCount"
-	AKSMetricClusterCPUPercent     AKSMetricType = "clusterCpuUsagePercentage"
-	AKSMetricClusterMemoryPercent  AKSMetricType = "clusterMemoryWorkingSetPercentage"
+	AKSMetricClusterPodCount      AKSMetricType = "podCount"
+	AKSMetricClusterNodeCount     AKSMetricType = "nodeCount"
+	AKSMetricClusterCPUPercent    AKSMetricType = "clusterCpuUsagePercentage"
+	AKSMetricClusterMemoryPercent AKSMetricType = "clusterMemoryWorkingSetPercentage"
 )
 
 // GetAKSAzureMonitorHints returns guidance for Azure Monitor integration
@@ -293,12 +293,12 @@ func GetAKSMetricsRecommendation(useCase string) AKSMetricsRecommendation {
 // AKSLoggingIntegration returns information about AKS logging integration
 func AKSLoggingIntegration() map[string]string {
 	return map[string]string{
-		"default_sink":    "Log Analytics workspace",
-		"log_types":       "container, pod, node, audit, Kubernetes events",
-		"retention":       "30 days default, configurable up to 730 days",
-		"query_language":  "Kusto Query Language (KQL)",
-		"export_options":  "Storage Account, Event Hubs, Azure Sentinel",
-		"dashboard_url":   "https://portal.azure.com/#blade/Microsoft_Azure_Monitoring_Logs/LogsBlade",
+		"default_sink":   "Log Analytics workspace",
+		"log_types":      "container, pod, node, audit, Kubernetes events",
+		"retention":      "30 days default, configurable up to 730 days",
+		"query_language": "Kusto Query Language (KQL)",
+		"export_options": "Storage Account, Event Hubs, Azure Sentinel",
+		"dashboard_url":  "https://portal.azure.com/#blade/Microsoft_Azure_Monitoring_Logs/LogsBlade",
 	}
 }
 
@@ -350,21 +350,20 @@ func AKSTelemetryNotes() []string {
 // GKETelemetryComparisonWithAKS returns comparison notes between AKS and GKE telemetry
 func GKETelemetryComparisonWithAKS() map[string]string {
 	return map[string]string{
-		"aks_monitoring":  "Azure Monitor / Container Insights",
-		"gke_monitoring":  "Cloud Monitoring (built-in)",
-		"eks_monitoring":  "CloudWatch Container Insights (opt-in)",
-		"aks_prometheus":  "Azure Managed Prometheus",
-		"gke_prometheus":  "GKE Managed Prometheus (GMP)",
-		"eks_prometheus":  "Amazon Managed Prometheus (AMP)",
-		"aks_logging":     "Log Analytics (Container Insights)",
-		"gke_logging":     "Cloud Logging (built-in)",
-		"eks_logging":     "CloudWatch Logs (opt-in)",
-		"aks_dashboard":   "Azure Portal / Azure Workbooks",
-		"gke_dashboard":   "GKE Observability Dashboard",
-		"eks_dashboard":   "CloudWatch Container Insights Dashboard",
-		"aks_grafana":     "Azure Managed Grafana",
-		"gke_grafana":     "Self-managed or Cloud Marketplace",
-		"eks_grafana":     "Amazon Managed Grafana",
+		"aks_monitoring": "Azure Monitor / Container Insights",
+		"gke_monitoring": "Cloud Monitoring (built-in)",
+		"eks_monitoring": "CloudWatch Container Insights (opt-in)",
+		"aks_prometheus": "Azure Managed Prometheus",
+		"gke_prometheus": "GKE Managed Prometheus (GMP)",
+		"eks_prometheus": "Amazon Managed Prometheus (AMP)",
+		"aks_logging":    "Log Analytics (Container Insights)",
+		"gke_logging":    "Cloud Logging (built-in)",
+		"eks_logging":    "CloudWatch Logs (opt-in)",
+		"aks_dashboard":  "Azure Portal / Azure Workbooks",
+		"gke_dashboard":  "GKE Observability Dashboard",
+		"eks_dashboard":  "CloudWatch Container Insights Dashboard",
+		"aks_grafana":    "Azure Managed Grafana",
+		"gke_grafana":    "Self-managed or Cloud Marketplace",
+		"eks_grafana":    "Amazon Managed Grafana",
 	}
 }
-

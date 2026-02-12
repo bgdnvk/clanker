@@ -9,13 +9,13 @@ import (
 
 // GKE-specific issue categories
 const (
-	CategoryGKENodePool       IssueCategory = "gke_node_pool"
-	CategoryGKEWorkloadID     IssueCategory = "gke_workload_identity"
-	CategoryGKEAutoscaling    IssueCategory = "gke_autoscaling"
-	CategoryGKENetworkPolicy  IssueCategory = "gke_network_policy"
-	CategoryGKEPreemption     IssueCategory = "gke_preemption"
-	CategoryGKEQuotaExceeded  IssueCategory = "gke_quota_exceeded"
-	CategoryGKEAutopilot      IssueCategory = "gke_autopilot"
+	CategoryGKENodePool      IssueCategory = "gke_node_pool"
+	CategoryGKEWorkloadID    IssueCategory = "gke_workload_identity"
+	CategoryGKEAutoscaling   IssueCategory = "gke_autoscaling"
+	CategoryGKENetworkPolicy IssueCategory = "gke_network_policy"
+	CategoryGKEPreemption    IssueCategory = "gke_preemption"
+	CategoryGKEQuotaExceeded IssueCategory = "gke_quota_exceeded"
+	CategoryGKEAutopilot     IssueCategory = "gke_autopilot"
 )
 
 // GKEHealthCheck contains GKE-specific health check methods
@@ -34,27 +34,27 @@ func NewGKEHealthCheck(client K8sClient, debug bool) *GKEHealthCheck {
 
 // GKEClusterHealth represents GKE-specific cluster health information
 type GKEClusterHealth struct {
-	ControlPlaneHealthy   bool              `json:"control_plane_healthy"`
-	NodePoolsHealthy      bool              `json:"node_pools_healthy"`
-	WorkloadIdentityOK    bool              `json:"workload_identity_ok"`
-	AutoscalingStatus     string            `json:"autoscaling_status"`
-	NetworkPolicyEnabled  bool              `json:"network_policy_enabled"`
-	NodePoolStatuses      []NodePoolStatus  `json:"node_pool_statuses,omitempty"`
-	GKESpecificIssues     []Issue           `json:"gke_specific_issues,omitempty"`
-	Recommendations       []string          `json:"recommendations,omitempty"`
+	ControlPlaneHealthy  bool             `json:"control_plane_healthy"`
+	NodePoolsHealthy     bool             `json:"node_pools_healthy"`
+	WorkloadIdentityOK   bool             `json:"workload_identity_ok"`
+	AutoscalingStatus    string           `json:"autoscaling_status"`
+	NetworkPolicyEnabled bool             `json:"network_policy_enabled"`
+	NodePoolStatuses     []NodePoolStatus `json:"node_pool_statuses,omitempty"`
+	GKESpecificIssues    []Issue          `json:"gke_specific_issues,omitempty"`
+	Recommendations      []string         `json:"recommendations,omitempty"`
 }
 
 // NodePoolStatus represents the status of a GKE node pool
 type NodePoolStatus struct {
-	Name          string `json:"name"`
-	Status        string `json:"status"`
-	NodeCount     int    `json:"node_count"`
-	ReadyCount    int    `json:"ready_count"`
-	Preemptible   bool   `json:"preemptible"`
-	Spot          bool   `json:"spot"`
-	AutoscaleMin  int    `json:"autoscale_min,omitempty"`
-	AutoscaleMax  int    `json:"autoscale_max,omitempty"`
-	MachineType   string `json:"machine_type,omitempty"`
+	Name         string `json:"name"`
+	Status       string `json:"status"`
+	NodeCount    int    `json:"node_count"`
+	ReadyCount   int    `json:"ready_count"`
+	Preemptible  bool   `json:"preemptible"`
+	Spot         bool   `json:"spot"`
+	AutoscaleMin int    `json:"autoscale_min,omitempty"`
+	AutoscaleMax int    `json:"autoscale_max,omitempty"`
+	MachineType  string `json:"machine_type,omitempty"`
 }
 
 // CheckGKEClusterHealth performs GKE-specific health checks
@@ -285,12 +285,12 @@ func (g *GKEHealthCheck) checkWorkloadIdentity(ctx context.Context) []Issue {
 
 	if len(misconfiguredSAs) > 0 {
 		issues = append(issues, Issue{
-			ID:           "gke-workload-identity-misconfigured",
-			Severity:     SeverityWarning,
-			Category:     CategoryGKEWorkloadID,
-			Message:      fmt.Sprintf("Found %d service accounts with potentially misconfigured Workload Identity", len(misconfiguredSAs)),
-			Details:      strings.Join(misconfiguredSAs, ", "),
-			Timestamp:    time.Now(),
+			ID:        "gke-workload-identity-misconfigured",
+			Severity:  SeverityWarning,
+			Category:  CategoryGKEWorkloadID,
+			Message:   fmt.Sprintf("Found %d service accounts with potentially misconfigured Workload Identity", len(misconfiguredSAs)),
+			Details:   strings.Join(misconfiguredSAs, ", "),
+			Timestamp: time.Now(),
 			Suggestions: []string{
 				"Verify GCP service account email format",
 				"Ensure IAM binding exists between K8s SA and GCP SA",
@@ -376,8 +376,8 @@ func GKERemediationSteps(issue Issue, resourceName, namespace string) []Remediat
 				"<GCP_SA_EMAIL>",
 				"--role", "roles/iam.workloadIdentityUser",
 				"--member", "serviceAccount:<PROJECT>.svc.id.goog[<NAMESPACE>/<K8S_SA>]"},
-			Risk:        "medium",
-			Automated:   false,
+			Risk:      "medium",
+			Automated: false,
 		})
 
 	case CategoryGKEPreemption:

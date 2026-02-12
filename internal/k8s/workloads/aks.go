@@ -306,20 +306,20 @@ func IsAKSNodeLabel(key string) bool {
 // GKEWorkloadComparison returns comparison notes between AKS and GKE
 func GKEWorkloadComparison() map[string]string {
 	return map[string]string{
-		"aks_node_pool_label":     AKSLabelNodePool,
-		"gke_node_pool_label":     GKELabelNodePool,
-		"eks_node_pool_label":     EKSLabelNodeGroup,
-		"aks_spot_label":          AKSLabelSpot,
-		"gke_spot_label":          GKELabelSpot,
-		"eks_spot_label":          EKSLabelCapacityType,
-		"aks_gpu_taint":           AKSTaintGPU,
-		"gke_gpu_taint":           GKETaintGPU,
-		"aks_serverless":          "Virtual Nodes (ACI)",
-		"gke_serverless":          "GKE Autopilot",
-		"eks_serverless":          "Fargate",
-		"aks_general_purpose_vm":  "Standard_D4s_v5",
-		"gke_general_purpose_vm":  "e2-standard-4",
-		"eks_general_purpose_vm":  "m5.xlarge",
+		"aks_node_pool_label":    AKSLabelNodePool,
+		"gke_node_pool_label":    GKELabelNodePool,
+		"eks_node_pool_label":    EKSLabelNodeGroup,
+		"aks_spot_label":         AKSLabelSpot,
+		"gke_spot_label":         GKELabelSpot,
+		"eks_spot_label":         EKSLabelCapacityType,
+		"aks_gpu_taint":          AKSTaintGPU,
+		"gke_gpu_taint":          GKETaintGPU,
+		"aks_serverless":         "Virtual Nodes (ACI)",
+		"gke_serverless":         "GKE Autopilot",
+		"eks_serverless":         "Fargate",
+		"aks_general_purpose_vm": "Standard_D4s_v5",
+		"gke_general_purpose_vm": "e2-standard-4",
+		"eks_general_purpose_vm": "m5.xlarge",
 	}
 }
 

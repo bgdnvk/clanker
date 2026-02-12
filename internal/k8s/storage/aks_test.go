@@ -77,10 +77,10 @@ func TestAKSFileStorageClasses(t *testing.T) {
 
 func TestAKSStorageClassManifest(t *testing.T) {
 	tests := []struct {
-		name           string
-		storageClass   AKSStorageClass
+		name            string
+		storageClass    AKSStorageClass
 		wantProvisioner string
-		wantSKU        string
+		wantSKU         string
 	}{
 		{
 			name: "Premium SSD",
@@ -94,7 +94,7 @@ func TestAKSStorageClassManifest(t *testing.T) {
 				CachingMode:          AKSCachingModeReadOnly,
 			},
 			wantProvisioner: AKSProvisionerDisk,
-			wantSKU:        AKSStorageTypePremiumSSD,
+			wantSKU:         AKSStorageTypePremiumSSD,
 		},
 		{
 			name: "Azure Files",
@@ -106,7 +106,7 @@ func TestAKSStorageClassManifest(t *testing.T) {
 				AllowVolumeExpansion: true,
 			},
 			wantProvisioner: AKSProvisionerFile,
-			wantSKU:        AKSFilesPremium,
+			wantSKU:         AKSFilesPremium,
 		},
 		{
 			name: "Azure Files NFS",
@@ -118,7 +118,7 @@ func TestAKSStorageClassManifest(t *testing.T) {
 				AllowVolumeExpansion: true,
 			},
 			wantProvisioner: AKSProvisionerFile,
-			wantSKU:        AKSFilesPremium,
+			wantSKU:         AKSFilesPremium,
 		},
 	}
 
@@ -171,51 +171,51 @@ func TestAKSStorageClassManifestDefault(t *testing.T) {
 
 func TestGetAKSStorageRecommendation(t *testing.T) {
 	tests := []struct {
-		name                string
-		useCase             string
-		wantStorageClass    string
+		name                 string
+		useCase              string
+		wantStorageClass     string
 		wantDiskTypeContains string
 	}{
 		{
-			name:                "Database",
-			useCase:             "postgresql database",
-			wantStorageClass:    "managed-csi-premium",
+			name:                 "Database",
+			useCase:              "postgresql database",
+			wantStorageClass:     "managed-csi-premium",
 			wantDiskTypeContains: "Premium",
 		},
 		{
-			name:                "High Performance",
-			useCase:             "ultra high iops workload",
-			wantStorageClass:    "managed-csi-ultra",
+			name:                 "High Performance",
+			useCase:              "ultra high iops workload",
+			wantStorageClass:     "managed-csi-ultra",
 			wantDiskTypeContains: "Ultra",
 		},
 		{
-			name:                "Logging",
-			useCase:             "elasticsearch logging",
-			wantStorageClass:    "managed-csi-hdd",
+			name:                 "Logging",
+			useCase:              "elasticsearch logging",
+			wantStorageClass:     "managed-csi-hdd",
 			wantDiskTypeContains: "Standard",
 		},
 		{
-			name:                "Shared Storage",
-			useCase:             "shared nfs volume",
-			wantStorageClass:    "azurefile-csi-premium",
+			name:                 "Shared Storage",
+			useCase:              "shared nfs volume",
+			wantStorageClass:     "azurefile-csi-premium",
 			wantDiskTypeContains: "Premium",
 		},
 		{
-			name:                "CI/CD",
-			useCase:             "jenkins build cache",
-			wantStorageClass:    "managed-csi-standard",
+			name:                 "CI/CD",
+			useCase:              "jenkins build cache",
+			wantStorageClass:     "managed-csi-standard",
 			wantDiskTypeContains: "Standard",
 		},
 		{
-			name:                "Development",
-			useCase:             "dev test environment",
-			wantStorageClass:    "managed-csi-standard",
+			name:                 "Development",
+			useCase:              "dev test environment",
+			wantStorageClass:     "managed-csi-standard",
 			wantDiskTypeContains: "Standard",
 		},
 		{
-			name:                "Default",
-			useCase:             "general application",
-			wantStorageClass:    "managed-csi",
+			name:                 "Default",
+			useCase:              "general application",
+			wantStorageClass:     "managed-csi",
 			wantDiskTypeContains: "Premium",
 		},
 	}

@@ -23,14 +23,14 @@ func NewAKSHealthCheck(client K8sClient, debug bool) *AKSHealthCheck {
 
 // AKSClusterHealth represents AKS-specific cluster health information
 type AKSClusterHealth struct {
-	ControlPlaneHealthy   bool               `json:"control_plane_healthy"`
-	NodePoolsHealthy      bool               `json:"node_pools_healthy"`
-	ManagedIdentityOK     bool               `json:"managed_identity_ok"`
-	NetworkPolicyStatus   string             `json:"network_policy_status"`
-	VirtualNodeStatus     string             `json:"virtual_node_status"`
-	NodePoolStatuses      []AKSNodePoolStatus `json:"node_pool_statuses,omitempty"`
-	AKSSpecificIssues     []Issue            `json:"aks_specific_issues,omitempty"`
-	Recommendations       []string           `json:"recommendations,omitempty"`
+	ControlPlaneHealthy bool                `json:"control_plane_healthy"`
+	NodePoolsHealthy    bool                `json:"node_pools_healthy"`
+	ManagedIdentityOK   bool                `json:"managed_identity_ok"`
+	NetworkPolicyStatus string              `json:"network_policy_status"`
+	VirtualNodeStatus   string              `json:"virtual_node_status"`
+	NodePoolStatuses    []AKSNodePoolStatus `json:"node_pool_statuses,omitempty"`
+	AKSSpecificIssues   []Issue             `json:"aks_specific_issues,omitempty"`
+	Recommendations     []string            `json:"recommendations,omitempty"`
 }
 
 // AKSNodePoolStatus represents the status of an AKS node pool
@@ -288,12 +288,12 @@ func (a *AKSHealthCheck) checkManagedIdentity(ctx context.Context) []Issue {
 
 	if len(misconfiguredSAs) > 0 {
 		issues = append(issues, Issue{
-			ID:           "aks-managed-identity-misconfigured",
-			Severity:     SeverityWarning,
-			Category:     CategoryAKSManagedIdentity,
-			Message:      fmt.Sprintf("Found %d service accounts with potentially misconfigured Workload Identity", len(misconfiguredSAs)),
-			Details:      strings.Join(misconfiguredSAs, ", "),
-			Timestamp:    time.Now(),
+			ID:        "aks-managed-identity-misconfigured",
+			Severity:  SeverityWarning,
+			Category:  CategoryAKSManagedIdentity,
+			Message:   fmt.Sprintf("Found %d service accounts with potentially misconfigured Workload Identity", len(misconfiguredSAs)),
+			Details:   strings.Join(misconfiguredSAs, ", "),
+			Timestamp: time.Now(),
 			Suggestions: []string{
 				"Verify client ID is a valid Azure AD application ID",
 				"Ensure federated identity credential is configured",
@@ -434,8 +434,8 @@ func AKSRemediationSteps(issue Issue, resourceName, namespace string) []Remediat
 				"--resource-group", "<RESOURCE_GROUP>",
 				"--issuer", "<OIDC_ISSUER>",
 				"--subject", "system:serviceaccount:<NAMESPACE>:<SA_NAME>"},
-			Risk:        "medium",
-			Automated:   false,
+			Risk:      "medium",
+			Automated: false,
 		})
 
 	case CategoryAKSSpotEviction:
@@ -590,17 +590,17 @@ func AKSManagedIdentityChecks() []string {
 // GKESREComparison returns comparison notes between AKS and GKE SRE
 func GKESREComparison() map[string]string {
 	return map[string]string{
-		"aks_identity":         "Workload Identity (federated credentials)",
-		"gke_identity":         "Workload Identity (IAM binding)",
-		"eks_identity":         "IRSA (IAM Roles for Service Accounts)",
-		"aks_node_pool_check":  "az aks nodepool show",
-		"gke_node_pool_check":  "gcloud container node-pools describe",
-		"eks_node_pool_check":  "aws eks describe-nodegroup",
-		"aks_spot_eviction":    "Azure Spot VM eviction",
-		"gke_preemption":       "GKE preemptible/spot preemption",
-		"eks_spot_eviction":    "EC2 Spot interruption",
-		"aks_diagnostics":      "AKS Diagnostics (Azure Portal)",
-		"gke_diagnostics":      "GKE Dashboard",
-		"eks_diagnostics":      "CloudWatch Container Insights",
+		"aks_identity":        "Workload Identity (federated credentials)",
+		"gke_identity":        "Workload Identity (IAM binding)",
+		"eks_identity":        "IRSA (IAM Roles for Service Accounts)",
+		"aks_node_pool_check": "az aks nodepool show",
+		"gke_node_pool_check": "gcloud container node-pools describe",
+		"eks_node_pool_check": "aws eks describe-nodegroup",
+		"aks_spot_eviction":   "Azure Spot VM eviction",
+		"gke_preemption":      "GKE preemptible/spot preemption",
+		"eks_spot_eviction":   "EC2 Spot interruption",
+		"aks_diagnostics":     "AKS Diagnostics (Azure Portal)",
+		"gke_diagnostics":     "GKE Dashboard",
+		"eks_diagnostics":     "CloudWatch Container Insights",
 	}
 }

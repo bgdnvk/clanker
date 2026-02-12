@@ -202,34 +202,34 @@ func TestAKSAlertingPolicySuggestions(t *testing.T) {
 
 func TestGetAKSMetricsRecommendation(t *testing.T) {
 	tests := []struct {
-		name            string
-		useCase         string
-		wantSolution    string
-		wantComponents  int
+		name           string
+		useCase        string
+		wantSolution   string
+		wantComponents int
 	}{
 		{
-			name:            "Production",
-			useCase:         "production critical workload",
-			wantSolution:    "Container Insights with Azure Managed Prometheus",
-			wantComponents:  3,
+			name:           "Production",
+			useCase:        "production critical workload",
+			wantSolution:   "Container Insights with Azure Managed Prometheus",
+			wantComponents: 3,
 		},
 		{
-			name:            "Cost-sensitive",
-			useCase:         "budget cost minimal",
-			wantSolution:    "Built-in metrics-server only",
-			wantComponents:  1,
+			name:           "Cost-sensitive",
+			useCase:        "budget cost minimal",
+			wantSolution:   "Built-in metrics-server only",
+			wantComponents: 1,
 		},
 		{
-			name:            "Prometheus",
-			useCase:         "existing prometheus grafana setup",
-			wantSolution:    "Azure Managed Prometheus",
-			wantComponents:  3,
+			name:           "Prometheus",
+			useCase:        "existing prometheus grafana setup",
+			wantSolution:   "Azure Managed Prometheus",
+			wantComponents: 3,
 		},
 		{
-			name:            "Default",
-			useCase:         "general application",
-			wantSolution:    "Container Insights",
-			wantComponents:  2,
+			name:           "Default",
+			useCase:        "general application",
+			wantSolution:   "Container Insights",
+			wantComponents: 2,
 		},
 	}
 

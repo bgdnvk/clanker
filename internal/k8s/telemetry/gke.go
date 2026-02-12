@@ -25,13 +25,13 @@ const (
 
 // GKEMetricsConfig represents configuration for GKE metrics collection
 type GKEMetricsConfig struct {
-	ProjectID          string `json:"projectId"`
-	ClusterName        string `json:"clusterName"`
-	Location           string `json:"location"`
-	CloudMonitoring    bool   `json:"cloudMonitoringEnabled"`
-	ManagedPrometheus  bool   `json:"managedPrometheusEnabled"`
-	SystemMetrics      bool   `json:"systemMetricsEnabled"`
-	ControlPlaneMetrics bool  `json:"controlPlaneMetricsEnabled"`
+	ProjectID           string `json:"projectId"`
+	ClusterName         string `json:"clusterName"`
+	Location            string `json:"location"`
+	CloudMonitoring     bool   `json:"cloudMonitoringEnabled"`
+	ManagedPrometheus   bool   `json:"managedPrometheusEnabled"`
+	SystemMetrics       bool   `json:"systemMetricsEnabled"`
+	ControlPlaneMetrics bool   `json:"controlPlaneMetricsEnabled"`
 }
 
 // GKEMetricType represents GKE-specific metric types
@@ -39,26 +39,26 @@ type GKEMetricType string
 
 const (
 	// GKE container metrics
-	GKEMetricContainerCPU           GKEMetricType = "kubernetes.io/container/cpu/core_usage_time"
-	GKEMetricContainerMemory        GKEMetricType = "kubernetes.io/container/memory/used_bytes"
-	GKEMetricContainerRestarts      GKEMetricType = "kubernetes.io/container/restart_count"
-	GKEMetricContainerUptime        GKEMetricType = "kubernetes.io/container/uptime"
+	GKEMetricContainerCPU      GKEMetricType = "kubernetes.io/container/cpu/core_usage_time"
+	GKEMetricContainerMemory   GKEMetricType = "kubernetes.io/container/memory/used_bytes"
+	GKEMetricContainerRestarts GKEMetricType = "kubernetes.io/container/restart_count"
+	GKEMetricContainerUptime   GKEMetricType = "kubernetes.io/container/uptime"
 
 	// GKE pod metrics
-	GKEMetricPodNetworkReceived     GKEMetricType = "kubernetes.io/pod/network/received_bytes_count"
-	GKEMetricPodNetworkSent         GKEMetricType = "kubernetes.io/pod/network/sent_bytes_count"
-	GKEMetricPodVolumeTotalBytes    GKEMetricType = "kubernetes.io/pod/volume/total_bytes"
-	GKEMetricPodVolumeUsedBytes     GKEMetricType = "kubernetes.io/pod/volume/used_bytes"
+	GKEMetricPodNetworkReceived  GKEMetricType = "kubernetes.io/pod/network/received_bytes_count"
+	GKEMetricPodNetworkSent      GKEMetricType = "kubernetes.io/pod/network/sent_bytes_count"
+	GKEMetricPodVolumeTotalBytes GKEMetricType = "kubernetes.io/pod/volume/total_bytes"
+	GKEMetricPodVolumeUsedBytes  GKEMetricType = "kubernetes.io/pod/volume/used_bytes"
 
 	// GKE node metrics
-	GKEMetricNodeCPU                GKEMetricType = "kubernetes.io/node/cpu/core_usage_time"
-	GKEMetricNodeMemory             GKEMetricType = "kubernetes.io/node/memory/used_bytes"
-	GKEMetricNodePIDUsed            GKEMetricType = "kubernetes.io/node/pid_used"
+	GKEMetricNodeCPU     GKEMetricType = "kubernetes.io/node/cpu/core_usage_time"
+	GKEMetricNodeMemory  GKEMetricType = "kubernetes.io/node/memory/used_bytes"
+	GKEMetricNodePIDUsed GKEMetricType = "kubernetes.io/node/pid_used"
 
 	// GKE control plane metrics
-	GKEMetricAPIServerRequestRate   GKEMetricType = "kubernetes.io/master/api_server/requests"
-	GKEMetricAPIServerLatency       GKEMetricType = "kubernetes.io/master/api_server/request_latencies"
-	GKEMetricSchedulerLatency       GKEMetricType = "kubernetes.io/master/scheduler/schedule_attempts"
+	GKEMetricAPIServerRequestRate GKEMetricType = "kubernetes.io/master/api_server/requests"
+	GKEMetricAPIServerLatency     GKEMetricType = "kubernetes.io/master/api_server/request_latencies"
+	GKEMetricSchedulerLatency     GKEMetricType = "kubernetes.io/master/scheduler/schedule_attempts"
 )
 
 // GetGKECloudMonitoringHints returns guidance for Cloud Monitoring integration
@@ -118,13 +118,13 @@ func GKEMetricsExplorerURL(project string) string {
 // GKEPrometheusQueries returns common Prometheus queries for GKE
 func GKEPrometheusQueries() map[string]string {
 	return map[string]string{
-		"container_cpu_usage": `sum(rate(container_cpu_usage_seconds_total{container!="POD",container!=""}[5m])) by (namespace, pod, container)`,
-		"container_memory_usage": `sum(container_memory_usage_bytes{container!="POD",container!=""}) by (namespace, pod, container)`,
-		"pod_restart_rate": `sum(rate(kube_pod_container_status_restarts_total[1h])) by (namespace, pod)`,
-		"node_cpu_utilization": `100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) by (instance))`,
+		"container_cpu_usage":     `sum(rate(container_cpu_usage_seconds_total{container!="POD",container!=""}[5m])) by (namespace, pod, container)`,
+		"container_memory_usage":  `sum(container_memory_usage_bytes{container!="POD",container!=""}) by (namespace, pod, container)`,
+		"pod_restart_rate":        `sum(rate(kube_pod_container_status_restarts_total[1h])) by (namespace, pod)`,
+		"node_cpu_utilization":    `100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) by (instance))`,
 		"node_memory_utilization": `100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)`,
-		"network_receive_bytes": `sum(rate(container_network_receive_bytes_total[5m])) by (namespace, pod)`,
-		"network_transmit_bytes": `sum(rate(container_network_transmit_bytes_total[5m])) by (namespace, pod)`,
+		"network_receive_bytes":   `sum(rate(container_network_receive_bytes_total[5m])) by (namespace, pod)`,
+		"network_transmit_bytes":  `sum(rate(container_network_transmit_bytes_total[5m])) by (namespace, pod)`,
 		"persistent_volume_usage": `kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes * 100`,
 	}
 }
@@ -265,12 +265,12 @@ type GKEMetricsRecommendation struct {
 // GKELoggingIntegration returns information about GKE logging integration
 func GKELoggingIntegration() map[string]string {
 	return map[string]string{
-		"default_sink":    "Cloud Logging",
-		"log_types":       "container, pod, node, audit, control plane",
-		"retention":       "30 days default, configurable up to 3650 days",
-		"query_language":  "Cloud Logging query language",
-		"export_options":  "BigQuery, Cloud Storage, Pub/Sub",
-		"log_router_url":  "https://console.cloud.google.com/logs/router",
+		"default_sink":   "Cloud Logging",
+		"log_types":      "container, pod, node, audit, control plane",
+		"retention":      "30 days default, configurable up to 3650 days",
+		"query_language": "Cloud Logging query language",
+		"export_options": "BigQuery, Cloud Storage, Pub/Sub",
+		"log_router_url": "https://console.cloud.google.com/logs/router",
 	}
 }
 
@@ -321,15 +321,15 @@ func GKETelemetryNotes() []string {
 // EKSTelemetryComparison returns comparison notes between GKE and EKS telemetry
 func EKSTelemetryComparison() map[string]string {
 	return map[string]string{
-		"gke_monitoring":        "Cloud Monitoring (built-in)",
-		"eks_monitoring":        "CloudWatch Container Insights (opt-in)",
-		"gke_prometheus":        "Managed Prometheus (GMP)",
-		"eks_prometheus":        "Amazon Managed Prometheus (AMP)",
-		"gke_logging":           "Cloud Logging (built-in)",
-		"eks_logging":           "CloudWatch Logs (opt-in)",
-		"gke_dashboard":         "GKE Observability Dashboard",
-		"eks_dashboard":         "CloudWatch Container Insights Dashboard",
-		"gke_tracing":           "Cloud Trace",
-		"eks_tracing":           "AWS X-Ray",
+		"gke_monitoring": "Cloud Monitoring (built-in)",
+		"eks_monitoring": "CloudWatch Container Insights (opt-in)",
+		"gke_prometheus": "Managed Prometheus (GMP)",
+		"eks_prometheus": "Amazon Managed Prometheus (AMP)",
+		"gke_logging":    "Cloud Logging (built-in)",
+		"eks_logging":    "CloudWatch Logs (opt-in)",
+		"gke_dashboard":  "GKE Observability Dashboard",
+		"eks_dashboard":  "CloudWatch Container Insights Dashboard",
+		"gke_tracing":    "Cloud Trace",
+		"eks_tracing":    "AWS X-Ray",
 	}
 }

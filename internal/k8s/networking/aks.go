@@ -137,10 +137,10 @@ func AKSNetworkingRecommendation(useCase string) NetworkingRecommendation {
 	// Internal services
 	if containsAny(useCaseLower, []string{"internal", "private", "vnet", "backend"}) {
 		return NetworkingRecommendation{
-			ServiceType:   string(ServiceTypeClusterIP),
-			IngressClass:  AKSIngressClassAGIC,
-			UseNEG:        false,
-			Reason:        "Internal services should use ClusterIP with AGIC for private VNet access",
+			ServiceType:  string(ServiceTypeClusterIP),
+			IngressClass: AKSIngressClassAGIC,
+			UseNEG:       false,
+			Reason:       "Internal services should use ClusterIP with AGIC for private VNet access",
 			Considerations: []string{
 				"Use internal load balancer annotation for internal TCP/UDP services",
 				"AGIC can be configured for internal-only access",
@@ -153,10 +153,10 @@ func AKSNetworkingRecommendation(useCase string) NetworkingRecommendation {
 	// Public web services with WAF
 	if containsAny(useCaseLower, []string{"waf", "firewall", "security", "ddos"}) {
 		return NetworkingRecommendation{
-			ServiceType:   string(ServiceTypeClusterIP),
-			IngressClass:  AKSIngressClassAGIC,
-			UseNEG:        false,
-			Reason:        "Application Gateway provides WAF and DDoS protection for public services",
+			ServiceType:  string(ServiceTypeClusterIP),
+			IngressClass: AKSIngressClassAGIC,
+			UseNEG:       false,
+			Reason:       "Application Gateway provides WAF and DDoS protection for public services",
 			Considerations: []string{
 				"Configure WAF policy with OWASP rules",
 				"Use Application Gateway v2 for autoscaling",
@@ -169,10 +169,10 @@ func AKSNetworkingRecommendation(useCase string) NetworkingRecommendation {
 	// Public web services
 	if containsAny(useCaseLower, []string{"public", "web", "api", "external", "internet"}) {
 		return NetworkingRecommendation{
-			ServiceType:   string(ServiceTypeClusterIP),
-			IngressClass:  AKSIngressClassAGIC,
-			UseNEG:        false,
-			Reason:        "AGIC with Application Gateway provides L7 load balancing with SSL termination",
+			ServiceType:  string(ServiceTypeClusterIP),
+			IngressClass: AKSIngressClassAGIC,
+			UseNEG:       false,
+			Reason:       "AGIC with Application Gateway provides L7 load balancing with SSL termination",
 			Considerations: []string{
 				"Use AGIC for HTTP(S) traffic with Application Gateway features",
 				"Enable SSL redirect for HTTPS enforcement",
@@ -185,10 +185,10 @@ func AKSNetworkingRecommendation(useCase string) NetworkingRecommendation {
 	// Microservices
 	if containsAny(useCaseLower, []string{"microservice", "service mesh", "istio", "grpc", "linkerd"}) {
 		return NetworkingRecommendation{
-			ServiceType:   string(ServiceTypeClusterIP),
-			IngressClass:  "",
-			UseNEG:        false,
-			Reason:        "Microservices typically use ClusterIP with service mesh for internal communication",
+			ServiceType:  string(ServiceTypeClusterIP),
+			IngressClass: "",
+			UseNEG:       false,
+			Reason:       "Microservices typically use ClusterIP with service mesh for internal communication",
 			Considerations: []string{
 				"Use Open Service Mesh (OSM) for managed service mesh on AKS",
 				"Consider Istio for advanced traffic management",
@@ -201,10 +201,10 @@ func AKSNetworkingRecommendation(useCase string) NetworkingRecommendation {
 	// WebSocket or long-lived connections
 	if containsAny(useCaseLower, []string{"websocket", "streaming", "long-lived", "realtime"}) {
 		return NetworkingRecommendation{
-			ServiceType:   string(ServiceTypeClusterIP),
-			IngressClass:  AKSIngressClassAGIC,
-			UseNEG:        false,
-			Reason:        "Application Gateway supports WebSocket with proper timeout configuration",
+			ServiceType:  string(ServiceTypeClusterIP),
+			IngressClass: AKSIngressClassAGIC,
+			UseNEG:       false,
+			Reason:       "Application Gateway supports WebSocket with proper timeout configuration",
 			Considerations: []string{
 				"Configure request timeout with appgw.ingress.kubernetes.io/request-timeout",
 				"AGIC supports WebSocket natively",
@@ -217,10 +217,10 @@ func AKSNetworkingRecommendation(useCase string) NetworkingRecommendation {
 	// TCP/UDP services
 	if containsAny(useCaseLower, []string{"tcp", "udp", "database", "redis", "mqtt"}) {
 		return NetworkingRecommendation{
-			ServiceType:   string(ServiceTypeLoadBalancer),
-			IngressClass:  "",
-			UseNEG:        false,
-			Reason:        "TCP/UDP services require Azure Load Balancer (L4)",
+			ServiceType:  string(ServiceTypeLoadBalancer),
+			IngressClass: "",
+			UseNEG:       false,
+			Reason:       "TCP/UDP services require Azure Load Balancer (L4)",
 			Considerations: []string{
 				"Use Standard Load Balancer SKU (default in AKS)",
 				"Configure health probes appropriately",
@@ -232,10 +232,10 @@ func AKSNetworkingRecommendation(useCase string) NetworkingRecommendation {
 
 	// Default recommendation
 	return NetworkingRecommendation{
-		ServiceType:   string(ServiceTypeClusterIP),
-		IngressClass:  AKSIngressClassWebAppRouting,
-		UseNEG:        false,
-		Reason:        "Web App Routing provides simple ingress for HTTP(S) services",
+		ServiceType:  string(ServiceTypeClusterIP),
+		IngressClass: AKSIngressClassWebAppRouting,
+		UseNEG:       false,
+		Reason:       "Web App Routing provides simple ingress for HTTP(S) services",
 		Considerations: []string{
 			"Web App Routing is an AKS addon for easy ingress setup",
 			"Use AGIC for advanced L7 features and WAF",
@@ -341,21 +341,20 @@ type AGICBackendOptions struct {
 // GKENetworkingComparison returns comparison notes between AKS and GKE networking
 func GKENetworkingComparison() map[string]string {
 	return map[string]string{
-		"aks_l7_lb":         "Application Gateway (AGIC)",
-		"gke_l7_lb":         "GKE Ingress (gce)",
-		"eks_l7_lb":         "ALB Ingress Controller",
-		"aks_internal_lb":   "azure-load-balancer-internal annotation",
-		"gke_internal_lb":   "gce-internal ingress class",
-		"eks_internal_lb":   "aws-load-balancer-scheme: internal",
-		"aks_waf":           "Azure WAF (Application Gateway)",
-		"gke_waf":           "Cloud Armor",
-		"eks_waf":           "AWS WAF",
-		"aks_service_mesh":  "Open Service Mesh (OSM)",
-		"gke_service_mesh":  "Anthos Service Mesh",
-		"eks_service_mesh":  "App Mesh",
+		"aks_l7_lb":          "Application Gateway (AGIC)",
+		"gke_l7_lb":          "GKE Ingress (gce)",
+		"eks_l7_lb":          "ALB Ingress Controller",
+		"aks_internal_lb":    "azure-load-balancer-internal annotation",
+		"gke_internal_lb":    "gce-internal ingress class",
+		"eks_internal_lb":    "aws-load-balancer-scheme: internal",
+		"aks_waf":            "Azure WAF (Application Gateway)",
+		"gke_waf":            "Cloud Armor",
+		"eks_waf":            "AWS WAF",
+		"aks_service_mesh":   "Open Service Mesh (OSM)",
+		"gke_service_mesh":   "Anthos Service Mesh",
+		"eks_service_mesh":   "App Mesh",
 		"aks_simple_ingress": "Web App Routing addon",
 		"gke_simple_ingress": "GKE native Ingress",
 		"eks_simple_ingress": "AWS Load Balancer Controller",
 	}
 }
-

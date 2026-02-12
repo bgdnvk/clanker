@@ -269,46 +269,46 @@ func TestGKEBackendConfigAnnotationWithPorts(t *testing.T) {
 
 func TestGKENetworkingRecommendation(t *testing.T) {
 	tests := []struct {
-		name           string
-		useCase        string
-		wantService    string
-		wantIngress    string
-		wantNEG        bool
+		name        string
+		useCase     string
+		wantService string
+		wantIngress string
+		wantNEG     bool
 	}{
 		{
-			name:           "Internal service",
-			useCase:        "internal backend api",
-			wantService:    string(ServiceTypeClusterIP),
-			wantIngress:    GKEIngressClassInternal,
-			wantNEG:        true,
+			name:        "Internal service",
+			useCase:     "internal backend api",
+			wantService: string(ServiceTypeClusterIP),
+			wantIngress: GKEIngressClassInternal,
+			wantNEG:     true,
 		},
 		{
-			name:           "Public web service",
-			useCase:        "public web application",
-			wantService:    string(ServiceTypeLoadBalancer),
-			wantIngress:    GKEIngressClass,
-			wantNEG:        true,
+			name:        "Public web service",
+			useCase:     "public web application",
+			wantService: string(ServiceTypeLoadBalancer),
+			wantIngress: GKEIngressClass,
+			wantNEG:     true,
 		},
 		{
-			name:           "Microservice",
-			useCase:        "microservice in service mesh",
-			wantService:    string(ServiceTypeClusterIP),
-			wantIngress:    "",
-			wantNEG:        false,
+			name:        "Microservice",
+			useCase:     "microservice in service mesh",
+			wantService: string(ServiceTypeClusterIP),
+			wantIngress: "",
+			wantNEG:     false,
 		},
 		{
-			name:           "WebSocket service",
-			useCase:        "websocket streaming",
-			wantService:    string(ServiceTypeLoadBalancer),
-			wantIngress:    GKEIngressClass,
-			wantNEG:        true,
+			name:        "WebSocket service",
+			useCase:     "websocket streaming",
+			wantService: string(ServiceTypeLoadBalancer),
+			wantIngress: GKEIngressClass,
+			wantNEG:     true,
 		},
 		{
-			name:           "Default case",
-			useCase:        "general application",
-			wantService:    string(ServiceTypeClusterIP),
-			wantIngress:    GKEIngressClass,
-			wantNEG:        true,
+			name:        "Default case",
+			useCase:     "general application",
+			wantService: string(ServiceTypeClusterIP),
+			wantIngress: GKEIngressClass,
+			wantNEG:     true,
 		},
 	}
 

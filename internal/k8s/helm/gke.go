@@ -338,10 +338,10 @@ func GKEChartSourceRecommendation(useCase string) GKEChartSourceRec {
 	// Enterprise/production
 	if containsAny(useCaseLower, []string{"enterprise", "production", "secure", "compliance"}) {
 		return GKEChartSourceRec{
-			Source:      "Artifact Registry",
-			Reason:      "Private OCI registry with IAM integration and vulnerability scanning",
-			Setup:       "Create Artifact Registry repo, push charts as OCI artifacts",
-			AuthMethod:  "Workload Identity",
+			Source:     "Artifact Registry",
+			Reason:     "Private OCI registry with IAM integration and vulnerability scanning",
+			Setup:      "Create Artifact Registry repo, push charts as OCI artifacts",
+			AuthMethod: "Workload Identity",
 			Advantages: []string{
 				"IAM-based access control",
 				"Vulnerability scanning for container images",
@@ -354,10 +354,10 @@ func GKEChartSourceRecommendation(useCase string) GKEChartSourceRec {
 	// Internal/private
 	if containsAny(useCaseLower, []string{"internal", "private", "organization"}) {
 		return GKEChartSourceRec{
-			Source:      "Artifact Registry",
-			Reason:      "Private registry for organization-internal charts",
-			Setup:       "Create Artifact Registry repo with appropriate IAM",
-			AuthMethod:  "Workload Identity or Service Account",
+			Source:     "Artifact Registry",
+			Reason:     "Private registry for organization-internal charts",
+			Setup:      "Create Artifact Registry repo with appropriate IAM",
+			AuthMethod: "Workload Identity or Service Account",
 			Advantages: []string{
 				"Private by default",
 				"Integration with Cloud Build",
@@ -368,10 +368,10 @@ func GKEChartSourceRecommendation(useCase string) GKEChartSourceRec {
 
 	// Default for development
 	return GKEChartSourceRec{
-		Source:      "Public Helm repositories",
-		Reason:      "Easy access to community charts for development",
-		Setup:       "Use helm repo add for public repositories",
-		AuthMethod:  "None required",
+		Source:     "Public Helm repositories",
+		Reason:     "Easy access to community charts for development",
+		Setup:      "Use helm repo add for public repositories",
+		AuthMethod: "None required",
 		Advantages: []string{
 			"Quick setup",
 			"Access to popular charts (bitnami, grafana, etc.)",
@@ -382,10 +382,10 @@ func GKEChartSourceRecommendation(useCase string) GKEChartSourceRec {
 
 // GKEChartSourceRec represents a chart source recommendation
 type GKEChartSourceRec struct {
-	Source      string   `json:"source"`
-	Reason      string   `json:"reason"`
-	Setup       string   `json:"setup"`
-	AuthMethod  string   `json:"authMethod"`
+	Source     string   `json:"source"`
+	Reason     string   `json:"reason"`
+	Setup      string   `json:"setup"`
+	AuthMethod string   `json:"authMethod"`
 	Advantages []string `json:"advantages"`
 }
 

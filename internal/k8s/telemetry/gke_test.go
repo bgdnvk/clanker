@@ -178,28 +178,28 @@ func TestGKEAlertingPolicySuggestions(t *testing.T) {
 
 func TestGetGKEMetricsRecommendation(t *testing.T) {
 	tests := []struct {
-		name               string
-		useCase            string
+		name                 string
+		useCase              string
 		wantSolutionContains string
 	}{
 		{
-			name:               "Production workload",
-			useCase:            "production web service with SLA",
+			name:                 "Production workload",
+			useCase:              "production web service with SLA",
 			wantSolutionContains: "Cloud Monitoring",
 		},
 		{
-			name:               "Cost-sensitive",
-			useCase:            "budget-conscious deployment",
+			name:                 "Cost-sensitive",
+			useCase:              "budget-conscious deployment",
 			wantSolutionContains: "metrics-server",
 		},
 		{
-			name:               "Prometheus user",
-			useCase:            "existing prometheus dashboards",
+			name:                 "Prometheus user",
+			useCase:              "existing prometheus dashboards",
 			wantSolutionContains: "Prometheus",
 		},
 		{
-			name:               "Default case",
-			useCase:            "general application",
+			name:                 "Default case",
+			useCase:              "general application",
 			wantSolutionContains: "Cloud Monitoring",
 		},
 	}
@@ -352,12 +352,12 @@ func TestEKSTelemetryComparison(t *testing.T) {
 
 func TestGKEMetricsConfig(t *testing.T) {
 	config := GKEMetricsConfig{
-		ProjectID:          "my-project",
-		ClusterName:        "my-cluster",
-		Location:           "us-central1",
-		CloudMonitoring:    true,
-		ManagedPrometheus:  true,
-		SystemMetrics:      true,
+		ProjectID:           "my-project",
+		ClusterName:         "my-cluster",
+		Location:            "us-central1",
+		CloudMonitoring:     true,
+		ManagedPrometheus:   true,
+		SystemMetrics:       true,
 		ControlPlaneMetrics: false,
 	}
 

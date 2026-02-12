@@ -174,10 +174,10 @@ func GetAKSStorageRecommendation(useCase string) StorageRecommendation {
 	// Database workloads
 	if containsAny(useCaseLower, []string{"database", "mysql", "postgres", "mongodb", "redis", "cassandra", "sql"}) {
 		return StorageRecommendation{
-			StorageClass:   "managed-csi-premium",
-			DiskType:       AKSStorageTypePremiumSSD,
-			AccessMode:     string(AccessModeReadWriteOnce),
-			Reason:         "Databases require high IOPS and low latency provided by Premium SSD",
+			StorageClass: "managed-csi-premium",
+			DiskType:     AKSStorageTypePremiumSSD,
+			AccessMode:   string(AccessModeReadWriteOnce),
+			Reason:       "Databases require high IOPS and low latency provided by Premium SSD",
 			Considerations: []string{
 				"Consider Premium SSD v2 for customizable IOPS and throughput",
 				"Use Ultra SSD for mission-critical databases requiring highest performance",
@@ -190,10 +190,10 @@ func GetAKSStorageRecommendation(useCase string) StorageRecommendation {
 	// High performance workloads
 	if containsAny(useCaseLower, []string{"high performance", "iops", "latency", "ultra", "mission critical"}) {
 		return StorageRecommendation{
-			StorageClass:   "managed-csi-ultra",
-			DiskType:       AKSStorageTypeUltraSSD,
-			AccessMode:     string(AccessModeReadWriteOnce),
-			Reason:         "Ultra SSD provides highest IOPS and throughput for demanding workloads",
+			StorageClass: "managed-csi-ultra",
+			DiskType:     AKSStorageTypeUltraSSD,
+			AccessMode:   string(AccessModeReadWriteOnce),
+			Reason:       "Ultra SSD provides highest IOPS and throughput for demanding workloads",
 			Considerations: []string{
 				"Ultra SSD requires specific VM sizes that support it",
 				"Available in limited regions",
@@ -206,10 +206,10 @@ func GetAKSStorageRecommendation(useCase string) StorageRecommendation {
 	// Logging and analytics
 	if containsAny(useCaseLower, []string{"log", "elastic", "analytics", "data lake", "archiv", "backup"}) {
 		return StorageRecommendation{
-			StorageClass:   "managed-csi-hdd",
-			DiskType:       AKSStorageTypeStandardHDD,
-			AccessMode:     string(AccessModeReadWriteOnce),
-			Reason:         "Standard HDD is cost effective for sequential read/write workloads",
+			StorageClass: "managed-csi-hdd",
+			DiskType:     AKSStorageTypeStandardHDD,
+			AccessMode:   string(AccessModeReadWriteOnce),
+			Reason:       "Standard HDD is cost effective for sequential read/write workloads",
 			Considerations: []string{
 				"Good throughput for large sequential operations",
 				"Consider Standard SSD for better random I/O performance",
@@ -221,10 +221,10 @@ func GetAKSStorageRecommendation(useCase string) StorageRecommendation {
 	// Shared file storage
 	if containsAny(useCaseLower, []string{"shared", "nfs", "file", "readwritemany", "rwx", "smb"}) {
 		return StorageRecommendation{
-			StorageClass:   "azurefile-csi-premium",
-			DiskType:       AKSFilesPremium,
-			AccessMode:     string(AccessModeReadWriteMany),
-			Reason:         "Azure Files provides shared file storage accessible by multiple pods",
+			StorageClass: "azurefile-csi-premium",
+			DiskType:     AKSFilesPremium,
+			AccessMode:   string(AccessModeReadWriteMany),
+			Reason:       "Azure Files provides shared file storage accessible by multiple pods",
 			Considerations: []string{
 				"Use NFS protocol for Linux workloads (azurefile-csi-nfs)",
 				"SMB protocol available for Windows workloads",
@@ -237,10 +237,10 @@ func GetAKSStorageRecommendation(useCase string) StorageRecommendation {
 	// Build and CI/CD
 	if containsAny(useCaseLower, []string{"build", "ci", "cd", "pipeline", "jenkins", "cache"}) {
 		return StorageRecommendation{
-			StorageClass:   "managed-csi-standard",
-			DiskType:       AKSStorageTypeStandardSSD,
-			AccessMode:     string(AccessModeReadWriteOnce),
-			Reason:         "Standard SSD provides good performance for build workloads at moderate cost",
+			StorageClass: "managed-csi-standard",
+			DiskType:     AKSStorageTypeStandardSSD,
+			AccessMode:   string(AccessModeReadWriteOnce),
+			Reason:       "Standard SSD provides good performance for build workloads at moderate cost",
 			Considerations: []string{
 				"Consider Premium SSD for faster build times",
 				"Enable volume expansion for growing cache",
@@ -252,10 +252,10 @@ func GetAKSStorageRecommendation(useCase string) StorageRecommendation {
 	// Development and testing
 	if containsAny(useCaseLower, []string{"dev", "test", "staging", "preview", "ephemeral"}) {
 		return StorageRecommendation{
-			StorageClass:   "managed-csi-standard",
-			DiskType:       AKSStorageTypeStandardSSD,
-			AccessMode:     string(AccessModeReadWriteOnce),
-			Reason:         "Standard SSD offers good balance for development workloads",
+			StorageClass: "managed-csi-standard",
+			DiskType:     AKSStorageTypeStandardSSD,
+			AccessMode:   string(AccessModeReadWriteOnce),
+			Reason:       "Standard SSD offers good balance for development workloads",
 			Considerations: []string{
 				"Use Standard HDD for lowest cost non-production workloads",
 				"Consider ephemeral OS disks for stateless workloads",
@@ -265,10 +265,10 @@ func GetAKSStorageRecommendation(useCase string) StorageRecommendation {
 
 	// Default recommendation
 	return StorageRecommendation{
-		StorageClass:   "managed-csi",
-		DiskType:       AKSStorageTypePremiumSSD,
-		AccessMode:     string(AccessModeReadWriteOnce),
-		Reason:         "Premium SSD is the default storage class for AKS with good performance",
+		StorageClass: "managed-csi",
+		DiskType:     AKSStorageTypePremiumSSD,
+		AccessMode:   string(AccessModeReadWriteOnce),
+		Reason:       "Premium SSD is the default storage class for AKS with good performance",
 		Considerations: []string{
 			"Default storage class in AKS clusters",
 			"Use Standard SSD or HDD for cost optimization",
@@ -320,18 +320,18 @@ func IsAKSProvisioner(provisioner string) bool {
 // EKSStorageComparison returns comparison notes between AKS and EKS storage
 func EKSStorageComparison() map[string]string {
 	return map[string]string{
-		"aks_block_storage":   "Azure Disk (managed-csi)",
-		"eks_block_storage":   "EBS (ebs-csi)",
-		"gke_block_storage":   "Persistent Disk (pd-csi)",
-		"aks_file_storage":    "Azure Files (azurefile-csi)",
-		"eks_file_storage":    "EFS (efs-csi)",
-		"gke_file_storage":    "Filestore (filestore-csi)",
-		"aks_default_class":   "managed-csi (Premium SSD)",
-		"eks_default_class":   "gp2 or gp3",
-		"gke_default_class":   "standard (pd-standard)",
-		"aks_high_perf":       "Ultra SSD, Premium SSD v2",
-		"eks_high_perf":       "io2 Block Express",
-		"gke_high_perf":       "pd-extreme",
+		"aks_block_storage": "Azure Disk (managed-csi)",
+		"eks_block_storage": "EBS (ebs-csi)",
+		"gke_block_storage": "Persistent Disk (pd-csi)",
+		"aks_file_storage":  "Azure Files (azurefile-csi)",
+		"eks_file_storage":  "EFS (efs-csi)",
+		"gke_file_storage":  "Filestore (filestore-csi)",
+		"aks_default_class": "managed-csi (Premium SSD)",
+		"eks_default_class": "gp2 or gp3",
+		"gke_default_class": "standard (pd-standard)",
+		"aks_high_perf":     "Ultra SSD, Premium SSD v2",
+		"eks_high_perf":     "io2 Block Express",
+		"gke_high_perf":     "pd-extreme",
 	}
 }
 

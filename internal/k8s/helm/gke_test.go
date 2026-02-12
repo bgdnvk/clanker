@@ -81,48 +81,48 @@ func TestGKERecommendedRepos(t *testing.T) {
 
 func TestGetGKEChartRecommendations(t *testing.T) {
 	tests := []struct {
-		name                 string
-		useCase              string
+		name                  string
+		useCase               string
 		wantChartNameContains string
 	}{
 		{
-			name:                 "Config Connector",
-			useCase:              "manage gcp resources",
+			name:                  "Config Connector",
+			useCase:               "manage gcp resources",
 			wantChartNameContains: "Config Connector",
 		},
 		{
-			name:                 "Ingress",
-			useCase:              "ingress with tls",
+			name:                  "Ingress",
+			useCase:               "ingress with tls",
 			wantChartNameContains: "cert-manager",
 		},
 		{
-			name:                 "Monitoring",
-			useCase:              "prometheus monitoring",
+			name:                  "Monitoring",
+			useCase:               "prometheus monitoring",
 			wantChartNameContains: "Prometheus",
 		},
 		{
-			name:                 "Service Mesh",
-			useCase:              "istio service mesh",
+			name:                  "Service Mesh",
+			useCase:               "istio service mesh",
 			wantChartNameContains: "Istio",
 		},
 		{
-			name:                 "Secrets",
-			useCase:              "secrets management",
+			name:                  "Secrets",
+			useCase:               "secrets management",
 			wantChartNameContains: "Secrets",
 		},
 		{
-			name:                 "CI/CD",
-			useCase:              "argocd deployment",
+			name:                  "CI/CD",
+			useCase:               "argocd deployment",
 			wantChartNameContains: "Argo",
 		},
 		{
-			name:                 "Database",
-			useCase:              "postgresql database",
+			name:                  "Database",
+			useCase:               "postgresql database",
 			wantChartNameContains: "PG",
 		},
 		{
-			name:                 "Default",
-			useCase:              "general application",
+			name:                  "Default",
+			useCase:               "general application",
 			wantChartNameContains: "nginx",
 		},
 	}
@@ -300,23 +300,23 @@ func TestParseGKEArtifactRegistryURL(t *testing.T) {
 
 func TestGKEChartSourceRecommendation(t *testing.T) {
 	tests := []struct {
-		name              string
-		useCase           string
+		name               string
+		useCase            string
 		wantSourceContains string
 	}{
 		{
-			name:              "Enterprise",
-			useCase:           "enterprise production deployment",
+			name:               "Enterprise",
+			useCase:            "enterprise production deployment",
 			wantSourceContains: "Artifact Registry",
 		},
 		{
-			name:              "Internal",
-			useCase:           "internal organization charts",
+			name:               "Internal",
+			useCase:            "internal organization charts",
 			wantSourceContains: "Artifact Registry",
 		},
 		{
-			name:              "Development",
-			useCase:           "development testing",
+			name:               "Development",
+			useCase:            "development testing",
 			wantSourceContains: "Public",
 		},
 	}
