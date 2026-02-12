@@ -322,3 +322,47 @@ const (
 	// EKSTaintSpot is the taint key for Spot instances
 	EKSTaintSpot = "eks.amazonaws.com/capacityType"
 )
+
+// AKS node labels
+const (
+	// AKSLabelNodePool identifies the AKS node pool (agentpool)
+	AKSLabelNodePool = "agentpool"
+	// AKSLabelNodePoolName identifies node pool by kubernetes.azure.com label
+	AKSLabelNodePoolName = "kubernetes.azure.com/agentpool"
+	// AKSLabelVMSize identifies the Azure VM size
+	AKSLabelVMSize = "node.kubernetes.io/instance-type"
+	// AKSLabelSpot marks Azure Spot VM nodes
+	AKSLabelSpot = "kubernetes.azure.com/scalesetpriority"
+	// AKSLabelSpotValue is the value for Spot nodes
+	AKSLabelSpotValue = "spot"
+	// AKSLabelOS identifies the operating system
+	AKSLabelOS = "kubernetes.io/os"
+	// AKSLabelArch identifies the architecture
+	AKSLabelArch = "kubernetes.io/arch"
+	// AKSLabelZone identifies the availability zone
+	AKSLabelZone = "topology.kubernetes.io/zone"
+	// AKSLabelMode identifies node pool mode (System or User)
+	AKSLabelMode = "kubernetes.azure.com/mode"
+)
+
+// AKS taint keys
+const (
+	// AKSTaintSpot is the taint key for Spot VM nodes
+	AKSTaintSpot = "kubernetes.azure.com/scalesetpriority"
+	// AKSTaintGPU is the taint key for GPU nodes
+	AKSTaintGPU = "sku"
+	// AKSTaintVirtualNode is the taint key for virtual nodes
+	AKSTaintVirtualNode = "virtual-kubelet.io/provider"
+)
+
+// AKS Virtual Nodes labels
+const (
+	// AKSLabelVirtualNode identifies virtual kubelet nodes
+	AKSLabelVirtualNode = "type"
+	// AKSLabelVirtualNodeValue is the value for virtual nodes
+	AKSLabelVirtualNodeValue = "virtual-kubelet"
+	// AKSLabelVirtualNodeProvider identifies the virtual node provider
+	AKSLabelVirtualNodeProvider = "virtual-kubelet.io/provider"
+	// AKSLabelVirtualNodeProviderValue is the value for ACI provider
+	AKSLabelVirtualNodeProviderValue = "azure"
+)
