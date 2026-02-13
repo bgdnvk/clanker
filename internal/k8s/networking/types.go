@@ -324,3 +324,123 @@ type NetworkPolicyPeerSpec struct {
 	CIDR              string
 	Except            []string
 }
+
+// GKE Ingress classes
+const (
+	// GKEIngressClass is the default GKE ingress class for external load balancers
+	GKEIngressClass = "gce"
+	// GKEIngressClassInternal is the GKE ingress class for internal load balancers
+	GKEIngressClassInternal = "gce-internal"
+)
+
+// GKE Ingress annotations
+const (
+	// GKEAnnotationNEG enables Network Endpoint Groups for container-native load balancing
+	GKEAnnotationNEG = "cloud.google.com/neg"
+	// GKEAnnotationBackendConfig specifies the BackendConfig for the service
+	GKEAnnotationBackendConfig = "cloud.google.com/backend-config"
+	// GKEAnnotationStaticIP specifies a reserved static IP for the ingress
+	GKEAnnotationStaticIP = "kubernetes.io/ingress.global-static-ip-name"
+	// GKEAnnotationStaticIPRegional specifies a regional static IP for the ingress
+	GKEAnnotationStaticIPRegional = "kubernetes.io/ingress.regional-static-ip-name"
+	// GKEAnnotationAllowHTTP controls HTTP to HTTPS redirect
+	GKEAnnotationAllowHTTP = "kubernetes.io/ingress.allow-http"
+	// GKEAnnotationPreSharedCert specifies pre-shared SSL certificates
+	GKEAnnotationPreSharedCert = "ingress.gcp.kubernetes.io/pre-shared-cert"
+)
+
+// GKE Service annotations
+const (
+	// GKELBAnnotationType specifies the load balancer type (Internal or External)
+	GKELBAnnotationType = "cloud.google.com/load-balancer-type"
+	// GKELBAnnotationNetworkTier specifies the network tier (Premium or Standard)
+	GKELBAnnotationNetworkTier = "cloud.google.com/network-tier"
+	// GKELBAnnotationSubnetwork specifies the subnetwork for internal LB
+	GKELBAnnotationSubnetwork = "cloud.google.com/load-balancer-subnetwork"
+)
+
+// GKE Network Endpoint Group types
+const (
+	// GKENEGTypeIngress uses NEG with Ingress for container-native LB
+	GKENEGTypeIngress = `{"ingress": true}`
+	// GKENEGExposedPorts specifies which ports to expose via NEG
+	GKENEGExposedPorts = `{"exposed_ports": {"%d": {}}}`
+)
+
+// GKE Load Balancer types
+const (
+	// GKELBTypeInternal creates an internal TCP/UDP load balancer
+	GKELBTypeInternal = "Internal"
+	// GKELBTypeExternal is the default external load balancer
+	GKELBTypeExternal = "External"
+)
+
+// GKE Network tiers
+const (
+	// GKENetworkTierPremium uses Google's premium network
+	GKENetworkTierPremium = "Premium"
+	// GKENetworkTierStandard uses standard network tier
+	GKENetworkTierStandard = "Standard"
+)
+
+// EKS/AWS annotations for comparison
+const (
+	// EKSAnnotationLBType specifies the load balancer type for AWS
+	EKSAnnotationLBType = "service.beta.kubernetes.io/aws-load-balancer-type"
+	// EKSAnnotationLBInternal marks the load balancer as internal
+	EKSAnnotationLBInternal = "service.beta.kubernetes.io/aws-load-balancer-internal"
+	// EKSAnnotationLBScheme specifies internal or internet-facing
+	EKSAnnotationLBScheme = "service.beta.kubernetes.io/aws-load-balancer-scheme"
+)
+
+// AKS Ingress classes
+const (
+	// AKSIngressClassAGIC is the Application Gateway Ingress Controller
+	AKSIngressClassAGIC = "azure/application-gateway"
+	// AKSIngressClassNginx is nginx ingress on AKS
+	AKSIngressClassNginx = "nginx"
+	// AKSIngressClassWebAppRouting is AKS Web App Routing addon
+	AKSIngressClassWebAppRouting = "webapprouting.kubernetes.azure.com"
+)
+
+// AKS Service annotations for Azure Load Balancer
+const (
+	// AKSAnnotationLBInternal creates an internal load balancer
+	AKSAnnotationLBInternal = "service.beta.kubernetes.io/azure-load-balancer-internal"
+	// AKSAnnotationLBResourceGroup specifies resource group for LB
+	AKSAnnotationLBResourceGroup = "service.beta.kubernetes.io/azure-load-balancer-resource-group"
+	// AKSAnnotationLBHealthProbeProtocol specifies health probe protocol
+	AKSAnnotationLBHealthProbeProtocol = "service.beta.kubernetes.io/azure-load-balancer-health-probe-protocol"
+	// AKSAnnotationLBIdleTimeout specifies idle timeout in minutes
+	AKSAnnotationLBIdleTimeout = "service.beta.kubernetes.io/azure-load-balancer-tcp-idle-timeout"
+	// AKSAnnotationPIPName specifies public IP name
+	AKSAnnotationPIPName = "service.beta.kubernetes.io/azure-pip-name"
+	// AKSAnnotationDNSLabelName specifies DNS label for public IP
+	AKSAnnotationDNSLabelName = "service.beta.kubernetes.io/azure-dns-label-name"
+	// AKSAnnotationLBSubnet specifies subnet for internal LB
+	AKSAnnotationLBSubnet = "service.beta.kubernetes.io/azure-load-balancer-internal-subnet"
+)
+
+// AGIC (Application Gateway Ingress Controller) annotations
+const (
+	// AGICAnnotationBackendPathPrefix sets backend path prefix
+	AGICAnnotationBackendPathPrefix = "appgw.ingress.kubernetes.io/backend-path-prefix"
+	// AGICAnnotationSSLRedirect enables SSL redirect
+	AGICAnnotationSSLRedirect = "appgw.ingress.kubernetes.io/ssl-redirect"
+	// AGICAnnotationWAFPolicy specifies WAF policy resource ID
+	AGICAnnotationWAFPolicy = "appgw.ingress.kubernetes.io/waf-policy-for-path"
+	// AGICAnnotationAppGWSSLCert specifies SSL certificate name
+	AGICAnnotationAppGWSSLCert = "appgw.ingress.kubernetes.io/appgw-ssl-certificate"
+	// AGICAnnotationHealthProbeHostname sets health probe hostname
+	AGICAnnotationHealthProbeHostname = "appgw.ingress.kubernetes.io/health-probe-hostname"
+	// AGICAnnotationHealthProbePath sets health probe path
+	AGICAnnotationHealthProbePath = "appgw.ingress.kubernetes.io/health-probe-path"
+	// AGICAnnotationBackendHostname sets backend hostname
+	AGICAnnotationBackendHostname = "appgw.ingress.kubernetes.io/backend-hostname"
+	// AGICAnnotationConnectionDraining enables connection draining
+	AGICAnnotationConnectionDraining = "appgw.ingress.kubernetes.io/connection-draining"
+	// AGICAnnotationCookieBasedAffinity enables cookie-based session affinity
+	AGICAnnotationCookieBasedAffinity = "appgw.ingress.kubernetes.io/cookie-based-affinity"
+	// AGICAnnotationRequestTimeout sets request timeout in seconds
+	AGICAnnotationRequestTimeout = "appgw.ingress.kubernetes.io/request-timeout"
+)

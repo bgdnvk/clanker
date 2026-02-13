@@ -196,3 +196,18 @@ const (
 	StatusSuperseded   ReleaseStatus = "superseded"
 	StatusUnknown      ReleaseStatus = "unknown"
 )
+
+// AKS Azure Container Registry constants
+const (
+	// AKSACRURLFormat is the OCI format for Azure Container Registry
+	// Format: oci://{registry}.azurecr.io/{repository}
+	AKSACRURLFormat = "oci://%s.azurecr.io/%s"
+)
+
+// AKS recommended repositories
+const (
+	// AKSRepoAzureMarketplace is the Azure Marketplace charts
+	AKSRepoAzureMarketplace = "https://marketplace.azurecr.io/helm/v1/repo"
+	// AKSRepoMicrosoft is the Microsoft charts repository
+	AKSRepoMicrosoft = "https://microsoft.github.io/charts"
+)

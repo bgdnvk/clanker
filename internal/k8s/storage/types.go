@@ -275,3 +275,95 @@ const (
 	VolumeBindingImmediate            VolumeBindingMode = "Immediate"
 	VolumeBindingWaitForFirstConsumer VolumeBindingMode = "WaitForFirstConsumer"
 )
+
+// GKE CSI Provisioners
+const (
+	// GKEProvisionerPD is the GKE CSI driver for Persistent Disk
+	GKEProvisionerPD = "pd.csi.storage.gke.io"
+	// GKEProvisionerFilestore is the GKE CSI driver for Filestore
+	GKEProvisionerFilestore = "filestore.csi.storage.gke.io"
+)
+
+// GKE Persistent Disk storage types
+const (
+	// GKEStorageTypePDStandard is standard persistent disk (HDD)
+	GKEStorageTypePDStandard = "pd-standard"
+	// GKEStorageTypePDBalanced is balanced persistent disk (SSD with lower IOPS)
+	GKEStorageTypePDBalanced = "pd-balanced"
+	// GKEStorageTypePDSSD is SSD persistent disk (higher IOPS)
+	GKEStorageTypePDSSD = "pd-ssd"
+	// GKEStorageTypePDExtreme is extreme persistent disk (highest IOPS)
+	GKEStorageTypePDExtreme = "pd-extreme"
+)
+
+// GKE Filestore tiers
+const (
+	// GKEFilestoreTierStandard is standard tier Filestore
+	GKEFilestoreTierStandard = "standard"
+	// GKEFilestoreTierPremium is premium tier Filestore
+	GKEFilestoreTierPremium = "premium"
+	// GKEFilestoreTierEnterprise is enterprise tier Filestore
+	GKEFilestoreTierEnterprise = "enterprise"
+)
+
+// EKS CSI Provisioners for comparison
+const (
+	// EKSProvisionerEBS is the EKS CSI driver for EBS volumes
+	EKSProvisionerEBS = "ebs.csi.aws.com"
+	// EKSProvisionerEFS is the EKS CSI driver for EFS file systems
+	EKSProvisionerEFS = "efs.csi.aws.com"
+)
+
+// EKS EBS volume types for comparison
+const (
+	// EKSStorageTypeGP3 is general purpose SSD (gp3)
+	EKSStorageTypeGP3 = "gp3"
+	// EKSStorageTypeGP2 is general purpose SSD (gp2)
+	EKSStorageTypeGP2 = "gp2"
+	// EKSStorageTypeIO1 is provisioned IOPS SSD (io1)
+	EKSStorageTypeIO1 = "io1"
+	// EKSStorageTypeIO2 is provisioned IOPS SSD (io2)
+	EKSStorageTypeIO2 = "io2"
+)
+
+// AKS CSI Provisioners
+const (
+	// AKSProvisionerDisk is the Azure Disk CSI driver
+	AKSProvisionerDisk = "disk.csi.azure.com"
+	// AKSProvisionerFile is the Azure Files CSI driver
+	AKSProvisionerFile = "file.csi.azure.com"
+	// AKSProvisionerBlob is the Azure Blob CSI driver
+	AKSProvisionerBlob = "blob.csi.azure.com"
+)
+
+// AKS Disk storage types (SKU names)
+const (
+	// AKSStorageTypeStandardHDD is Standard HDD (Standard_LRS)
+	AKSStorageTypeStandardHDD = "Standard_LRS"
+	// AKSStorageTypeStandardSSD is Standard SSD (StandardSSD_LRS)
+	AKSStorageTypeStandardSSD = "StandardSSD_LRS"
+	// AKSStorageTypePremiumSSD is Premium SSD (Premium_LRS)
+	AKSStorageTypePremiumSSD = "Premium_LRS"
+	// AKSStorageTypePremiumSSDv2 is Premium SSD v2 (PremiumV2_LRS)
+	AKSStorageTypePremiumSSDv2 = "PremiumV2_LRS"
+	// AKSStorageTypeUltraSSD is Ultra SSD (UltraSSD_LRS)
+	AKSStorageTypeUltraSSD = "UltraSSD_LRS"
+)
+
+// AKS Azure Files tiers
+const (
+	// AKSFilesStandard is Standard Azure Files
+	AKSFilesStandard = "Standard"
+	// AKSFilesPremium is Premium Azure Files (SSD-backed)
+	AKSFilesPremium = "Premium"
+)
+
+// AKS Disk caching modes
+const (
+	// AKSCachingModeNone disables caching
+	AKSCachingModeNone = "None"
+	// AKSCachingModeReadOnly enables read-only caching
+	AKSCachingModeReadOnly = "ReadOnly"
+	// AKSCachingModeReadWrite enables read-write caching
+	AKSCachingModeReadWrite = "ReadWrite"
+)

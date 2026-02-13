@@ -24,6 +24,24 @@ const (
 	SourceResourceSpecs MetricsSource = "resource-specs"
 )
 
+// AKS Metrics sources
+const (
+	// SourceAKSAzureMonitor indicates metrics from Azure Monitor
+	SourceAKSAzureMonitor MetricsSource = "azure-monitor"
+	// SourceAKSContainerInsights indicates metrics from Container Insights
+	SourceAKSContainerInsights MetricsSource = "container-insights"
+	// SourceAKSManagedPrometheus indicates metrics from Azure Managed Prometheus
+	SourceAKSManagedPrometheus MetricsSource = "azure-managed-prometheus"
+)
+
+// AKS Metrics endpoints
+const (
+	// AKSEndpointAzureMonitor is the Azure Monitor endpoint
+	AKSEndpointAzureMonitor = "monitor.azure.com"
+	// AKSEndpointManagedPrometheus is Azure Managed Prometheus endpoint
+	AKSEndpointManagedPrometheus = "prometheus.monitor.azure.com"
+)
+
 // ResponseType indicates the type of response
 type ResponseType string
 

@@ -15,6 +15,17 @@ type EKSCreateOptions struct {
 	KubernetesVersion string
 }
 
+// GKECreateOptions holds options for GKE cluster creation
+type GKECreateOptions struct {
+	ClusterName       string
+	Project           string
+	Region            string
+	NodeCount         int
+	NodeType          string
+	KubernetesVersion string
+	Preemptible       bool
+}
+
 // KubeadmCreateOptions holds options for kubeadm cluster creation
 type KubeadmCreateOptions struct {
 	ClusterName       string
@@ -146,6 +157,130 @@ func GenerateEKSCreatePlan(opts EKSCreateOptions) *K8sPlan {
 			"kubectl get nodes",
 			"kubectl get pods -A",
 			fmt.Sprintf("kubectl config use-context arn:aws:eks:%s:*:cluster/%s", opts.Region, opts.ClusterName),
+		},
+	}
+
+	return plan
+}
+
+// GenerateGKECreatePlan generates a plan for creating a GKE cluster
+func GenerateGKECreatePlan(opts GKECreateOptions) *K8sPlan {
+	plan := &K8sPlan{
+		Version:     CurrentPlanVersion,
+		CreatedAt:   time.Now(),
+		Operation:   "create-cluster",
+		ClusterType: "gke",
+		ClusterName: opts.ClusterName,
+		Region:      opts.Region,
+		Profile:     opts.Project,
+		Summary:     fmt.Sprintf("Create GKE cluster '%s' with %d worker nodes", opts.ClusterName, opts.NodeCount),
+		Steps:       []Step{},
+		Notes: []string{
+			"Cluster creation typically takes 5-10 minutes",
+			"Default addons will be installed automatically",
+			fmt.Sprintf("Worker nodes: %d x %s", opts.NodeCount, opts.NodeType),
+			fmt.Sprintf("Project: %s", opts.Project),
+			fmt.Sprintf("Region: %s", opts.Region),
+		},
+	}
+
+	if opts.Preemptible {
+		plan.Notes = append(plan.Notes, "Using preemptible VMs (lower cost, may be terminated)")
+	}
+
+	// Build gcloud create command args
+	createArgs := []string{
+		"container", "clusters", "create", opts.ClusterName,
+		"--project", opts.Project,
+		"--region", opts.Region,
+		"--num-nodes", fmt.Sprintf("%d", opts.NodeCount),
+		"--machine-type", opts.NodeType,
+	}
+
+	if opts.KubernetesVersion != "" {
+		createArgs = append(createArgs, "--cluster-version", opts.KubernetesVersion)
+	}
+
+	if opts.Preemptible {
+		createArgs = append(createArgs, "--preemptible")
+	}
+
+	// Step 1: Create GKE cluster
+	plan.Steps = append(plan.Steps, Step{
+		ID:          "create-cluster",
+		Description: "Create GKE cluster with gcloud",
+		Command:     "gcloud",
+		Args:        createArgs,
+		Reason:      "gcloud handles VPC, subnets, node pools, and networking automatically",
+		Produces: map[string]string{
+			"CLUSTER_ENDPOINT": "endpoint",
+		},
+		ConfigChange: &ConfigChange{
+			File:        "~/.kube/config",
+			Description: "kubeconfig will be updated with new cluster context",
+		},
+	})
+
+	// Step 2: Wait for cluster to be running
+	plan.Steps = append(plan.Steps, Step{
+		ID:          "wait-cluster",
+		Description: "Wait for cluster to be RUNNING",
+		Command:     "gcloud",
+		Args: []string{
+			"container", "clusters", "describe", opts.ClusterName,
+			"--project", opts.Project,
+			"--region", opts.Region,
+			"--format", "value(status)",
+		},
+		WaitFor: &WaitConfig{
+			Type:        "cluster-ready",
+			Resource:    opts.ClusterName,
+			Timeout:     15 * time.Minute,
+			Interval:    30 * time.Second,
+			Description: "waiting for GKE cluster to be RUNNING",
+		},
+	})
+
+	// Step 3: Get credentials
+	plan.Steps = append(plan.Steps, Step{
+		ID:          "get-credentials",
+		Description: "Get cluster credentials and update kubeconfig",
+		Command:     "gcloud",
+		Args: []string{
+			"container", "clusters", "get-credentials", opts.ClusterName,
+			"--project", opts.Project,
+			"--region", opts.Region,
+		},
+		Produces: map[string]string{
+			"KUBECONFIG": "kubeconfig",
+		},
+		ConfigChange: &ConfigChange{
+			File:        "~/.kube/config",
+			Description: fmt.Sprintf("Adding context for cluster %s", opts.ClusterName),
+		},
+	})
+
+	// Step 4: Wait for nodes to be ready
+	plan.Steps = append(plan.Steps, Step{
+		ID:          "wait-nodes",
+		Description: "Wait for worker nodes to be Ready",
+		Command:     "kubectl",
+		Args:        []string{"get", "nodes"},
+		WaitFor: &WaitConfig{
+			Type:        "node-ready",
+			Timeout:     10 * time.Minute,
+			Interval:    20 * time.Second,
+			Description: "waiting for nodes to join and be Ready",
+		},
+	})
+
+	// Connection info
+	plan.Connection = &Connection{
+		Kubeconfig: "~/.kube/config",
+		Commands: []string{
+			"kubectl get nodes",
+			"kubectl get pods -A",
+			fmt.Sprintf("gcloud container clusters get-credentials %s --project %s --region %s", opts.ClusterName, opts.Project, opts.Region),
 		},
 	}
 
@@ -500,6 +635,20 @@ func GenerateDeletePlan(opts DeleteOptions) *K8sPlan {
 				"--wait",
 			},
 			Reason: "eksctl handles cleanup of VPC, subnets, IAM roles, and node groups",
+		})
+
+	case "gke":
+		plan.Steps = append(plan.Steps, Step{
+			ID:          "delete-cluster",
+			Description: "Delete GKE cluster with gcloud",
+			Command:     "gcloud",
+			Args: []string{
+				"container", "clusters", "delete", opts.ClusterName,
+				"--project", opts.Profile,
+				"--region", opts.Region,
+				"--quiet",
+			},
+			Reason: "gcloud handles cleanup of VPC, subnets, node pools, and networking",
 		})
 
 	case "kubeadm":
