@@ -18,6 +18,30 @@ const (
 	ClusterTypeExisting ClusterType = "existing"
 )
 
+// Standard timeout constants for cluster operations
+const (
+	// DefaultClusterCreateTimeout is the default timeout for cluster creation
+	DefaultClusterCreateTimeout = 20 * time.Minute
+
+	// DefaultNodeGroupCreateTimeout is the default timeout for node group creation
+	DefaultNodeGroupCreateTimeout = 15 * time.Minute
+
+	// DefaultNodeGroupDeleteTimeout is the default timeout for node group deletion
+	DefaultNodeGroupDeleteTimeout = 10 * time.Minute
+
+	// DefaultSSHConnectTimeout is the default timeout for SSH connection
+	DefaultSSHConnectTimeout = 5 * time.Minute
+
+	// DefaultNodeReadyTimeout is the default timeout for node to become ready
+	DefaultNodeReadyTimeout = 5 * time.Minute
+
+	// DefaultPollInterval is the standard polling interval for status checks
+	DefaultPollInterval = 30 * time.Second
+
+	// DefaultCommandTimeout is the default timeout for CLI command execution
+	DefaultCommandTimeout = 2 * time.Minute
+)
+
 // NodeInfo contains information about a cluster node
 type NodeInfo struct {
 	Name       string            `json:"name"`

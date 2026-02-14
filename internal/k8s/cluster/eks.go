@@ -693,13 +693,12 @@ func (p *EKSProvider) createNodeGroupWithAWSCLI(ctx context.Context, clusterName
 }
 
 func (p *EKSProvider) waitForNodeGroupActive(ctx context.Context, clusterName, nodeGroupName string) error {
-	timeout := 15 * time.Minute
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(DefaultNodeGroupCreateTimeout)
 
 	for time.Now().Before(deadline) {
 		ng, err := p.describeNodeGroup(ctx, clusterName, nodeGroupName)
 		if err != nil {
-			time.Sleep(30 * time.Second)
+			time.Sleep(DefaultPollInterval)
 			continue
 		}
 
@@ -714,7 +713,7 @@ func (p *EKSProvider) waitForNodeGroupActive(ctx context.Context, clusterName, n
 			return fmt.Errorf("node group creation failed")
 		}
 
-		time.Sleep(30 * time.Second)
+		time.Sleep(DefaultPollInterval)
 	}
 
 	return fmt.Errorf("timeout waiting for node group to become active")
@@ -911,14 +910,14 @@ func (p *EKSProvider) deleteNodeGroup(ctx context.Context, clusterName, nodeGrou
 
 func (p *EKSProvider) waitForClusterActive(ctx context.Context, clusterName, profile, region string, timeout time.Duration) error {
 	if timeout <= 0 {
-		timeout = 20 * time.Minute
+		timeout = DefaultClusterCreateTimeout
 	}
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		cluster, err := p.describeCluster(ctx, clusterName)
 		if err != nil {
-			time.Sleep(30 * time.Second)
+			time.Sleep(DefaultPollInterval)
 			continue
 		}
 
@@ -933,15 +932,14 @@ func (p *EKSProvider) waitForClusterActive(ctx context.Context, clusterName, pro
 			return fmt.Errorf("cluster creation failed")
 		}
 
-		time.Sleep(30 * time.Second)
+		time.Sleep(DefaultPollInterval)
 	}
 
 	return fmt.Errorf("timeout waiting for cluster to become active")
 }
 
 func (p *EKSProvider) waitForNodeGroupDeleted(ctx context.Context, clusterName, nodeGroupName string) error {
-	timeout := 10 * time.Minute
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(DefaultNodeGroupDeleteTimeout)
 
 	for time.Now().Before(deadline) {
 		_, err := p.describeNodeGroup(ctx, clusterName, nodeGroupName)
@@ -954,7 +952,7 @@ func (p *EKSProvider) waitForNodeGroupDeleted(ctx context.Context, clusterName, 
 			fmt.Printf("[aws] waiting for node group %s deletion\n", nodeGroupName)
 		}
 
-		time.Sleep(30 * time.Second)
+		time.Sleep(DefaultPollInterval)
 	}
 
 	return fmt.Errorf("timeout waiting for node group deletion")
