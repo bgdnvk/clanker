@@ -303,3 +303,76 @@ type ErrInvalidConfiguration struct {
 func (e *ErrInvalidConfiguration) Error() string {
 	return "invalid cluster configuration: " + e.Message
 }
+
+// Security Best Practices
+//
+// These guidelines should be followed when provisioning clusters and resources.
+
+// SecurityWarnings contains common security warnings to include in plans
+var SecurityWarnings = map[string]string{
+	"public-endpoint":    "Warning: Enabling public endpoints exposes the cluster to the internet. Consider using private endpoints with VPN/bastion access for production workloads.",
+	"public-service":     "Warning: Services of type LoadBalancer expose your application to the internet. Consider using internal load balancers or Ingress with authentication.",
+	"no-network-policy":  "Note: No network policy specified. Consider adding network policies to restrict pod-to-pod traffic for defense in depth.",
+	"secrets-plain":      "Warning: Secrets should be managed using a secrets management solution (e.g., HashiCorp Vault, AWS Secrets Manager, Azure Key Vault) rather than plain Kubernetes secrets.",
+	"root-container":     "Warning: Running containers as root is a security risk. Consider using non-root users in your container images.",
+	"privileged":         "Warning: Privileged containers have full access to the host. Only use when absolutely necessary.",
+	"host-network":       "Warning: Using host network bypasses network policies. Consider using standard pod networking.",
+	"no-resource-limits": "Note: No resource limits specified. Consider adding CPU/memory limits to prevent resource exhaustion.",
+}
+
+// SecurityRecommendations contains security recommendations for different scenarios
+var SecurityRecommendations = map[string][]string{
+	"new-cluster": {
+		"Enable private endpoint access when possible",
+		"Configure network policies to restrict pod communication",
+		"Enable pod security standards (restricted or baseline)",
+		"Set up audit logging for security monitoring",
+		"Use managed node groups with automatic updates",
+	},
+	"new-deployment": {
+		"Use non-root containers where possible",
+		"Set resource requests and limits",
+		"Configure readiness and liveness probes",
+		"Use read-only root filesystem when possible",
+		"Drop unnecessary Linux capabilities",
+	},
+	"new-service": {
+		"Use ClusterIP for internal-only services",
+		"Use internal load balancers for private traffic",
+		"Consider Ingress with TLS termination for HTTP services",
+		"Add network policies to control service access",
+	},
+	"secrets": {
+		"Use external secrets management (Vault, AWS Secrets Manager, etc.)",
+		"Enable encryption at rest for etcd",
+		"Rotate secrets regularly",
+		"Limit secret access using RBAC",
+	},
+}
+
+// GetSecurityWarning returns a security warning for the given key
+func GetSecurityWarning(key string) string {
+	if warning, ok := SecurityWarnings[key]; ok {
+		return warning
+	}
+	return ""
+}
+
+// GetSecurityRecommendations returns security recommendations for the given scenario
+func GetSecurityRecommendations(scenario string) []string {
+	if recs, ok := SecurityRecommendations[scenario]; ok {
+		return recs
+	}
+	return nil
+}
+
+// IsPublicEndpoint checks if cluster configuration has public endpoint enabled
+func IsPublicEndpoint(opts CreateOptions) bool {
+	return opts.EnablePublicEndpoint && !opts.EnablePrivateEndpoint
+}
+
+// ShouldWarnPublicAccess checks if a public access warning should be shown
+func ShouldWarnPublicAccess(opts CreateOptions) bool {
+	// Warn if only public endpoint is enabled without private
+	return opts.EnablePublicEndpoint && !opts.EnablePrivateEndpoint
+}
