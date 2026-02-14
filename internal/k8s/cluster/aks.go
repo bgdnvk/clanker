@@ -832,13 +832,4 @@ func (p *AKSProvider) errorHint(stderr string) string {
 	}
 }
 
-// NodeGroupOptions for creating node pools (used by AKS)
-type NodeGroupOptions struct {
-	Name         string
-	DesiredSize  int
-	MinSize      int
-	MaxSize      int
-	InstanceType string
-	DiskSize     int
-	Labels       map[string]string
-}
+// Note: NodeGroupOptions is defined in eks.go and shared across providers
