@@ -58,6 +58,10 @@ type ExecOptions struct {
 	// Cloudflare options
 	CloudflareAPIToken  string
 	CloudflareAccountID string
+
+	// OutputBindings is populated by ExecutePlan with the final resource bindings
+	// (e.g., ALB_DNS, INSTANCE_ID, etc.) for the caller to use
+	OutputBindings map[string]string
 }
 
 func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
@@ -81,6 +85,22 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 
 	remediationAttempted := make(map[int]bool)
 	bindings := make(map[string]string)
+
+	// Initialize bindings from OutputBindings if provided (for multi-phase execution)
+	if opts.OutputBindings != nil {
+		for k, v := range opts.OutputBindings {
+			bindings[k] = v
+		}
+	}
+	// Pre-populate bindings with account and region info for user-data generation
+	if accountID != "" {
+		bindings["ACCOUNT_ID"] = accountID
+		bindings["AWS_ACCOUNT_ID"] = accountID
+	}
+	if opts.Region != "" {
+		bindings["REGION"] = opts.Region
+		bindings["AWS_REGION"] = opts.Region
+	}
 
 	for idx, cmdSpec := range plan.Commands {
 		if err := validateCommand(cmdSpec.Args, opts.Destroyer); err != nil {
@@ -108,6 +128,9 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 			return fmt.Errorf("command %d prepare failed: %w", idx+1, err)
 		}
 		args = updatedArgs
+
+		// Handle EC2 user-data generation for run-instances
+		args = maybeGenerateEC2UserData(args, bindings, opts)
 
 		awsArgs := make([]string, 0, len(args)+6)
 		awsArgs = append(awsArgs, args...)
@@ -158,6 +181,13 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		}
 	}
 
+	// Populate output bindings for the caller
+	if opts.OutputBindings != nil {
+		for k, v := range bindings {
+			opts.OutputBindings[k] = v
+		}
+	}
+
 	return nil
 }
 
@@ -165,9 +195,31 @@ func learnPlanBindingsFromProduces(produces map[string]string, output string, bi
 	if len(produces) == 0 {
 		return
 	}
-	if strings.TrimSpace(output) == "" {
+	output = strings.TrimSpace(output)
+	if output == "" {
 		return
 	}
+
+	// Handle plain text output (e.g., SSM get-parameters with --output text)
+	if !strings.HasPrefix(output, "{") && !strings.HasPrefix(output, "[") {
+		// Check if any produce expects this to be a simple value
+		for key, path := range produces {
+			key = strings.TrimSpace(key)
+			if key == "" {
+				continue
+			}
+			// If path is $.Output or similar simple path, use raw output
+			if path == "$.Output" || path == "$" || path == "." {
+				bindings[key] = output
+			}
+			// Handle AMI_ID from plain text SSM output
+			if key == "AMI_ID" && strings.HasPrefix(output, "ami-") {
+				bindings[key] = output
+			}
+		}
+		return
+	}
+
 	var obj any
 	if err := json.Unmarshal([]byte(output), &obj); err != nil {
 		return
@@ -178,7 +230,7 @@ func learnPlanBindingsFromProduces(produces map[string]string, output string, bi
 		if key == "" || path == "" {
 			continue
 		}
-		if v, ok := jsonPathString(obj, path); ok {
+		if v, ok := jsonPathString(obj, path); ok && v != "" {
 			bindings[key] = v
 		}
 	}
@@ -317,12 +369,22 @@ func learnPlanBindings(args []string, output string, bindings map[string]string)
 	if len(args) < 2 {
 		return
 	}
-	if strings.TrimSpace(output) == "" {
+	output = strings.TrimSpace(output)
+	if output == "" {
 		return
 	}
 
 	service := strings.TrimSpace(args[0])
 	op := strings.TrimSpace(args[1])
+
+	// Handle plain text output for specific commands before trying JSON parse
+	if service == "ssm" && op == "get-parameters" {
+		// SSM with --output text returns just the value, e.g. "ami-0532be01f26a3de55"
+		if strings.HasPrefix(output, "ami-") && !strings.Contains(output, "{") {
+			bindings["AMI_ID"] = output
+			return
+		}
+	}
 
 	// Most create operations we care about return JSON.
 	var obj map[string]any
@@ -518,18 +580,24 @@ func learnPlanBindings(args []string, output string, bindings map[string]string)
 			if arn != "" {
 				bindings["ALB_ARN"] = arn
 			}
+			dns := deepString(obj, "LoadBalancers", "0", "DNSName")
+			if dns != "" {
+				bindings["ALB_DNS"] = dns
+				bindings["ALB_DNS_NAME"] = dns
+			}
 		case "create-target-group":
 			arn := deepString(obj, "TargetGroups", "0", "TargetGroupArn")
 			if arn != "" {
 				bindings["TG_ARN"] = arn
 			}
-		case "ssm":
-			if op == "get-parameters" {
-				// {"Parameters":[{"Name":"...","Value":"ami-..."}]}
-				val := deepString(obj, "Parameters", "0", "Value")
-				if val != "" && strings.HasPrefix(val, "ami-") {
-					bindings["AMI_ID"] = val
-				}
+		}
+	case "ssm":
+		switch op {
+		case "get-parameters":
+			// JSON output: {"Parameters":[{"Name":"...","Value":"ami-..."}]}
+			val := deepString(obj, "Parameters", "0", "Value")
+			if val != "" && strings.HasPrefix(val, "ami-") {
+				bindings["AMI_ID"] = val
 			}
 		}
 	case "lambda":
@@ -962,6 +1030,135 @@ func resolveAWSAccountID(ctx context.Context, opts ExecOptions) (string, error) 
 	return accountID, nil
 }
 
+// maybeGenerateEC2UserData handles user-data generation for EC2 run-instances commands.
+// If the user-data argument contains a placeholder (like <USER_DATA> or $USER_DATA),
+// it generates a proper startup script based on the available bindings.
+// Supports both Docker deployment (default) and native Node.js deployment (DEPLOY_MODE=native).
+func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts ExecOptions) []string {
+	if len(args) < 2 || args[0] != "ec2" || args[1] != "run-instances" {
+		return args
+	}
+
+	// Find the --user-data argument
+	userDataIdx := -1
+	for i, arg := range args {
+		if arg == "--user-data" && i+1 < len(args) {
+			userDataIdx = i + 1
+			break
+		}
+	}
+	if userDataIdx < 0 {
+		return args
+	}
+
+	currentUserData := args[userDataIdx]
+	// Check if it needs to be generated (contains placeholder-like values)
+	if !strings.Contains(currentUserData, "<USER_DATA>") &&
+		!strings.Contains(currentUserData, "$USER_DATA") &&
+		!strings.Contains(currentUserData, "<user_data>") &&
+		currentUserData != "<USER_DATA>" &&
+		currentUserData != "$USER_DATA" {
+		// User-data looks real, leave it alone
+		return args
+	}
+
+	// Check if native Node.js deployment mode (pre-generated user-data)
+	deployMode := bindings["DEPLOY_MODE"]
+	if deployMode == "native" {
+		// Use pre-generated Node.js user-data script
+		if script := bindings["NODEJS_USER_DATA"]; script != "" {
+			encoded := base64.StdEncoding.EncodeToString([]byte(script))
+			newArgs := make([]string, len(args))
+			copy(newArgs, args)
+			newArgs[userDataIdx] = encoded
+			return newArgs
+		}
+	}
+
+	// Docker deployment mode
+	region := opts.Region
+	accountID := bindings["ACCOUNT_ID"]
+	if accountID == "" {
+		accountID = bindings["AWS_ACCOUNT_ID"]
+	}
+
+	// Find ECR URI from bindings
+	ecrURI := bindings["ECR_URI"]
+	if ecrURI == "" {
+		// Try to construct from ECR_REPO
+		ecrRepo := bindings["ECR_REPO"]
+		if ecrRepo == "" {
+			ecrRepo = "clanker-app"
+		}
+		if accountID != "" && region != "" {
+			ecrURI = fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s", accountID, region, ecrRepo)
+		}
+	}
+
+	if ecrURI == "" || region == "" || accountID == "" {
+		// Missing required bindings, cannot generate user-data
+		return args
+	}
+
+	// Get app port from bindings or default to 3000
+	appPort := bindings["APP_PORT"]
+	if appPort == "" {
+		appPort = "3000"
+	}
+
+	// Build docker run command with environment variables
+	var envFlags strings.Builder
+	for key, value := range bindings {
+		if strings.HasPrefix(key, "ENV_") {
+			envName := strings.TrimPrefix(key, "ENV_")
+			// Escape special characters for shell
+			escaped := strings.ReplaceAll(value, `"`, `\"`)
+			escaped = strings.ReplaceAll(escaped, `$`, `\$`)
+			escaped = strings.ReplaceAll(escaped, "`", "\\`")
+			envFlags.WriteString(fmt.Sprintf("-e \"%s=%s\" ", envName, escaped))
+		}
+	}
+
+	// Check if we have a specific start command that includes the port
+	// This handles apps that need --port flag instead of PORT env var
+	startCmd := bindings["START_COMMAND"]
+
+	var dockerRunCmd string
+	if startCmd != "" {
+		// Use the detected start command (handles apps needing --port flag)
+		dockerRunCmd = fmt.Sprintf("docker run -d --restart unless-stopped -p %s:%s %s%s:latest %s",
+			appPort, appPort, envFlags.String(), ecrURI, startCmd)
+	} else {
+		// Default: just pass env vars and use container's default CMD
+		dockerRunCmd = fmt.Sprintf("docker run -d --restart unless-stopped -p %s:%s %s%s:latest",
+			appPort, appPort, envFlags.String(), ecrURI)
+	}
+
+	// Generate the startup script
+	script := fmt.Sprintf(`#!/bin/bash
+set -ex
+exec > /var/log/user-data.log 2>&1
+yum update -y
+yum install -y docker
+systemctl start docker
+systemctl enable docker
+aws ecr get-login-password --region %s | docker login --username AWS --password-stdin %s.dkr.ecr.%s.amazonaws.com
+docker pull %s:latest
+%s
+echo 'Deployment complete!'
+`, region, accountID, region, ecrURI, dockerRunCmd)
+
+	// Base64 encode the script
+	encoded := base64.StdEncoding.EncodeToString([]byte(script))
+
+	// Replace the user-data argument
+	newArgs := make([]string, len(args))
+	copy(newArgs, args)
+	newArgs[userDataIdx] = encoded
+
+	return newArgs
+}
+
 func maybeInjectLambdaZipBytes(args []string, w io.Writer) ([]byte, []string, error) {
 	if len(args) < 2 {
 		return nil, args, nil
@@ -1389,6 +1586,8 @@ func resolveAWSBinary() (string, []string, error) {
 }
 
 func runAWSCommandStreaming(ctx context.Context, args []string, stdinBytes []byte, w io.Writer) (string, error) {
+	args = sanitizeAWSCLIArgs(args, w)
+
 	awsBin, attempts, resolveErr := resolveAWSBinary()
 	if resolveErr != nil {
 		return "", fmt.Errorf("%v; install AWS CLI v2 or set %s. Tried: %s", resolveErr, envAWSCLIPath, strings.Join(attempts, ", "))
@@ -1417,6 +1616,57 @@ func runAWSCommandStreaming(ctx context.Context, args []string, stdinBytes []byt
 	}
 
 	return out, nil
+}
+
+func sanitizeAWSCLIArgs(args []string, w io.Writer) []string {
+	if len(args) < 2 {
+		return args
+	}
+	if args[0] != "lightsail" {
+		return args
+	}
+
+	op := strings.TrimSpace(args[1])
+	if op == "" {
+		return args
+	}
+
+	removeTagsForOp := op == "allocate-static-ip" || op == "attach-static-ip" || op == "open-instance-public-ports"
+	out := make([]string, 0, len(args))
+	out = append(out, args[0], args[1])
+
+	for i := 2; i < len(args); i++ {
+		token := strings.TrimSpace(args[i])
+
+		if op == "allocate-static-ip" && token == "ignore" {
+			if w != nil {
+				_, _ = fmt.Fprintln(w, "[maker] sanitizing command: removed stray token 'ignore' from lightsail allocate-static-ip")
+			}
+			continue
+		}
+
+		if removeTagsForOp {
+			if token == "--tags" {
+				if w != nil {
+					_, _ = fmt.Fprintf(w, "[maker] sanitizing command: removed unsupported --tags for lightsail %s\n", op)
+				}
+				if i+1 < len(args) && !strings.HasPrefix(strings.TrimSpace(args[i+1]), "--") {
+					i++
+				}
+				continue
+			}
+			if strings.HasPrefix(token, "--tags=") {
+				if w != nil {
+					_, _ = fmt.Fprintf(w, "[maker] sanitizing command: removed unsupported --tags for lightsail %s\n", op)
+				}
+				continue
+			}
+		}
+
+		out = append(out, args[i])
+	}
+
+	return out
 }
 
 func isLambdaCreateFunction(args []string) bool {
