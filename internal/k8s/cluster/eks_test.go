@@ -263,3 +263,127 @@ func TestProviderManagerIntegration(t *testing.T) {
 		t.Error("EKS not found in provider list")
 	}
 }
+
+func TestEKSProviderErrorHints(t *testing.T) {
+	provider := NewEKSProvider(EKSProviderOptions{
+		Region: "us-east-1",
+	})
+
+	tests := []struct {
+		name     string
+		stderr   string
+		contains string
+	}{
+		{
+			name:     "access denied",
+			stderr:   "AccessDenied: User is not authorized",
+			contains: "IAM permissions",
+		},
+		{
+			name:     "authorization error",
+			stderr:   "AuthorizationError: not authorized to perform operation",
+			contains: "IAM user/role lacks required permissions",
+		},
+		{
+			name:     "resource not found",
+			stderr:   "ResourceNotFoundException: cluster not found",
+			contains: "does not exist",
+		},
+		{
+			name:     "invalid parameter",
+			stderr:   "InvalidParameterException: invalid value for region",
+			contains: "check parameter values",
+		},
+		{
+			name:     "resource in use",
+			stderr:   "ResourceInUseException: cluster is being updated",
+			contains: "currently in use",
+		},
+		{
+			name:     "cluster already exists",
+			stderr:   "ClusterAlreadyExists: cluster test-cluster already exists",
+			contains: "already exists",
+		},
+		{
+			name:     "limit exceeded",
+			stderr:   "LimitExceeded: maximum number of clusters reached",
+			contains: "quota exceeded",
+		},
+		{
+			name:     "no credentials",
+			stderr:   "Unable to locate credentials",
+			contains: "aws configure",
+		},
+		{
+			name:     "expired token",
+			stderr:   "ExpiredToken: security token has expired",
+			contains: "session token expired",
+		},
+		{
+			name:     "invalid region",
+			stderr:   "Invalid region: us-invalid-1",
+			contains: "check region name",
+		},
+		{
+			name:     "vpc not found",
+			stderr:   "VPC vpc-123 not found",
+			contains: "VPC does not exist",
+		},
+		{
+			name:     "subnet not found",
+			stderr:   "Subnet subnet-123 not found",
+			contains: "subnet does not exist",
+		},
+		{
+			name:     "security group not found",
+			stderr:   "Security group sg-123 not found",
+			contains: "security group does not exist",
+		},
+		{
+			name:     "role not found",
+			stderr:   "Role arn:aws:iam::123:role/invalid not found",
+			contains: "IAM role ARN is invalid",
+		},
+		{
+			name:     "throttling",
+			stderr:   "Throttling: Rate exceeded",
+			contains: "rate limit exceeded",
+		},
+		{
+			name:     "unknown error",
+			stderr:   "Some unknown error occurred",
+			contains: "", // No hint expected
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hint := provider.errorHint(tt.stderr)
+			if tt.contains == "" {
+				if hint != "" {
+					t.Errorf("expected no hint, got %q", hint)
+				}
+			} else {
+				if hint == "" {
+					t.Errorf("expected hint containing %q, got empty", tt.contains)
+				} else if !containsSubstring(hint, tt.contains) {
+					t.Errorf("expected hint containing %q, got %q", tt.contains, hint)
+				}
+			}
+		})
+	}
+}
+
+// containsSubstring checks if s contains substr (case-insensitive)
+func containsSubstring(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || findInString(s, substr))
+}
+
+func findInString(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
