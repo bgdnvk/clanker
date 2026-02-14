@@ -264,3 +264,105 @@ type ExecOptions struct {
 	Stdin     bool
 	TTY       bool
 }
+
+// GKE node labels
+const (
+	// GKELabelNodePool identifies the GKE node pool
+	GKELabelNodePool = "cloud.google.com/gke-nodepool"
+	// GKELabelPreemptible marks preemptible VM nodes
+	GKELabelPreemptible = "cloud.google.com/gke-preemptible"
+	// GKELabelSpot marks Spot VM nodes
+	GKELabelSpot = "cloud.google.com/gke-spot"
+	// GKELabelMachineType identifies the GCE machine type
+	GKELabelMachineType = "node.kubernetes.io/instance-type"
+	// GKELabelAcceleratorType identifies GPU accelerator type
+	GKELabelAcceleratorType = "cloud.google.com/gke-accelerator"
+	// GKELabelAcceleratorCount identifies GPU accelerator count
+	GKELabelAcceleratorCount = "cloud.google.com/gke-accelerator-count"
+	// GKELabelBootDiskType identifies the boot disk type
+	GKELabelBootDiskType = "cloud.google.com/gke-boot-disk"
+	// GKELabelOS identifies the operating system
+	GKELabelOS = "kubernetes.io/os"
+	// GKELabelArch identifies the architecture
+	GKELabelArch = "kubernetes.io/arch"
+)
+
+// GKE taint keys
+const (
+	// GKETaintPreemptible is the taint key for preemptible nodes
+	GKETaintPreemptible = "cloud.google.com/gke-preemptible"
+	// GKETaintSpot is the taint key for Spot VM nodes
+	GKETaintSpot = "cloud.google.com/gke-spot"
+	// GKETaintGPU is the taint key for GPU nodes
+	GKETaintGPU = "nvidia.com/gpu"
+)
+
+// GKE Autopilot resource class
+const (
+	// GKEAutopilotResourceClassGeneral is the general-purpose resource class
+	GKEAutopilotResourceClassGeneral = "general-purpose"
+	// GKEAutopilotResourceClassBalanced is the balanced resource class
+	GKEAutopilotResourceClassBalanced = "balanced"
+	// GKEAutopilotResourceClassScaleOut is the scale-out resource class
+	GKEAutopilotResourceClassScaleOut = "scale-out"
+)
+
+// EKS node labels for comparison
+const (
+	// EKSLabelNodeGroup identifies the EKS node group
+	EKSLabelNodeGroup = "eks.amazonaws.com/nodegroup"
+	// EKSLabelCapacityType identifies capacity type (ON_DEMAND, SPOT)
+	EKSLabelCapacityType = "eks.amazonaws.com/capacityType"
+	// EKSLabelInstanceType identifies the EC2 instance type
+	EKSLabelInstanceType = "node.kubernetes.io/instance-type"
+)
+
+// EKS taint keys for comparison
+const (
+	// EKSTaintSpot is the taint key for Spot instances
+	EKSTaintSpot = "eks.amazonaws.com/capacityType"
+)
+
+// AKS node labels
+const (
+	// AKSLabelNodePool identifies the AKS node pool (agentpool)
+	AKSLabelNodePool = "agentpool"
+	// AKSLabelNodePoolName identifies node pool by kubernetes.azure.com label
+	AKSLabelNodePoolName = "kubernetes.azure.com/agentpool"
+	// AKSLabelVMSize identifies the Azure VM size
+	AKSLabelVMSize = "node.kubernetes.io/instance-type"
+	// AKSLabelSpot marks Azure Spot VM nodes
+	AKSLabelSpot = "kubernetes.azure.com/scalesetpriority"
+	// AKSLabelSpotValue is the value for Spot nodes
+	AKSLabelSpotValue = "spot"
+	// AKSLabelOS identifies the operating system
+	AKSLabelOS = "kubernetes.io/os"
+	// AKSLabelArch identifies the architecture
+	AKSLabelArch = "kubernetes.io/arch"
+	// AKSLabelZone identifies the availability zone
+	AKSLabelZone = "topology.kubernetes.io/zone"
+	// AKSLabelMode identifies node pool mode (System or User)
+	AKSLabelMode = "kubernetes.azure.com/mode"
+)
+
+// AKS taint keys
+const (
+	// AKSTaintSpot is the taint key for Spot VM nodes
+	AKSTaintSpot = "kubernetes.azure.com/scalesetpriority"
+	// AKSTaintGPU is the taint key for GPU nodes
+	AKSTaintGPU = "sku"
+	// AKSTaintVirtualNode is the taint key for virtual nodes
+	AKSTaintVirtualNode = "virtual-kubelet.io/provider"
+)
+
+// AKS Virtual Nodes labels
+const (
+	// AKSLabelVirtualNode identifies virtual kubelet nodes
+	AKSLabelVirtualNode = "type"
+	// AKSLabelVirtualNodeValue is the value for virtual nodes
+	AKSLabelVirtualNodeValue = "virtual-kubelet"
+	// AKSLabelVirtualNodeProvider identifies the virtual node provider
+	AKSLabelVirtualNodeProvider = "virtual-kubelet.io/provider"
+	// AKSLabelVirtualNodeProviderValue is the value for ACI provider
+	AKSLabelVirtualNodeProviderValue = "azure"
+)

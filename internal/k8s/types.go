@@ -13,10 +13,26 @@ type ClusterType = cluster.ClusterType
 // Cluster type constants
 const (
 	ClusterTypeEKS      = cluster.ClusterTypeEKS
+	ClusterTypeGKE      = cluster.ClusterTypeGKE
+	ClusterTypeAKS      = cluster.ClusterTypeAKS
 	ClusterTypeKubeadm  = cluster.ClusterTypeKubeadm
 	ClusterTypeKops     = cluster.ClusterTypeKops
 	ClusterTypeK3s      = cluster.ClusterTypeK3s
 	ClusterTypeExisting = cluster.ClusterTypeExisting
+)
+
+// CloudProvider represents the cloud provider for a Kubernetes cluster
+type CloudProvider string
+
+const (
+	// CloudProviderUnknown indicates unknown or undetected cloud provider
+	CloudProviderUnknown CloudProvider = ""
+	// CloudProviderAWS indicates Amazon Web Services (EKS)
+	CloudProviderAWS CloudProvider = "aws"
+	// CloudProviderGCP indicates Google Cloud Platform (GKE)
+	CloudProviderGCP CloudProvider = "gcp"
+	// CloudProviderAzure indicates Microsoft Azure (AKS)
+	CloudProviderAzure CloudProvider = "azure"
 )
 
 // ResponseType indicates the type of response from the K8s agent
@@ -30,13 +46,15 @@ const (
 
 // QueryOptions contains options for handling K8s queries
 type QueryOptions struct {
-	ClusterName string
-	ClusterType ClusterType
-	Namespace   string
-	AWSProfile  string
-	Region      string
-	MakerMode   bool
-	Kubeconfig  string
+	ClusterName   string
+	ClusterType   ClusterType
+	Namespace     string
+	AWSProfile    string
+	GCPProject    string
+	Region        string
+	MakerMode     bool
+	Kubeconfig    string
+	CloudProvider CloudProvider
 }
 
 // ApplyOptions contains options for applying K8s plans

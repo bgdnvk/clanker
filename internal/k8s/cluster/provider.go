@@ -10,6 +10,8 @@ type ClusterType string
 
 const (
 	ClusterTypeEKS      ClusterType = "eks"
+	ClusterTypeGKE      ClusterType = "gke"
+	ClusterTypeAKS      ClusterType = "aks"
 	ClusterTypeKubeadm  ClusterType = "kubeadm"
 	ClusterTypeKops     ClusterType = "kops"
 	ClusterTypeK3s      ClusterType = "k3s"
@@ -105,6 +107,18 @@ type CreateOptions struct {
 	SubnetIds        []string
 	SecurityGroupIds []string
 	KeyPairName      string
+
+	// GCP specific (for GKE)
+	GCPProject    string
+	GCPNetwork    string
+	GCPSubnetwork string
+	Preemptible   bool
+
+	// Azure specific (for AKS)
+	AzureSubscription  string
+	AzureResourceGroup string
+	AzureVNetName      string
+	AzureSubnetName    string
 
 	// Access configuration
 	EnablePrivateEndpoint bool
