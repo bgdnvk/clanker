@@ -93,6 +93,15 @@ func shouldUseAPIGateway(p *RepoProfile, deep *DeepAnalysis) bool {
 	return false
 }
 
+// EnvVarSpec describes a required or optional environment variable
+type EnvVarSpec struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Required    bool   `json:"required"`
+	Default     string `json:"default"` // default value if known
+	Example     string `json:"example"`
+}
+
 // DeepAnalysis is the LLM's understanding of what the app actually does
 type DeepAnalysis struct {
 	AppDescription string   `json:"appDescription"` // what does this app do
@@ -102,6 +111,24 @@ type DeepAnalysis struct {
 	RunLocally     string   `json:"runLocally"`     // simplest way to run locally
 	Complexity     string   `json:"complexity"`     // simple, moderate, complex
 	Concerns       []string `json:"concerns"`       // things that could go wrong
+
+	// Node.js app characteristics (detected from README and code)
+	ListeningPort int    `json:"listeningPort"` // port the app listens on
+	StartCommand  string `json:"startCommand"`  // how to start: "npm start", "node index.js"
+	BuildCommand  string `json:"buildCommand"`  // build step if needed: "npm run build"
+	NodeVersion   string `json:"nodeVersion"`   // required Node version
+
+	// Config requirements (extracted from README and .env files)
+	RequiredEnvVars []EnvVarSpec `json:"requiredEnvVars"` // MUST have values to run
+	OptionalEnvVars []EnvVarSpec `json:"optionalEnvVars"` // nice to have, has defaults
+
+	// Health verification
+	HealthEndpoint string `json:"healthEndpoint"` // e.g., "/health", "/api/status"
+	ExposesHTTP    bool   `json:"exposesHTTP"`    // does it serve HTTP?
+
+	// Deployment method
+	PreferDocker  bool   `json:"preferDocker"`  // true if Dockerfile exists and is recommended
+	GlobalInstall string `json:"globalInstall"` // e.g., "npm install -g appname"
 }
 
 // PlanValidation is the LLM's review of its own generated plan
@@ -167,6 +194,13 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 		}
 	}
 	result.DeepAnalysis = deep
+
+	// CRITICAL: Update profile.Ports with detected listening port from deep analysis
+	// This ensures the port is used correctly in EC2/ECS prompts for target groups
+	if deep.ListeningPort > 0 && (len(profile.Ports) == 0 || profile.Ports[0] != deep.ListeningPort) {
+		logf("[intelligence] detected listening port from README/code: %d", deep.ListeningPort)
+		profile.Ports = []int{deep.ListeningPort}
+	}
 
 	if debug {
 		logf("[intelligence] deep analysis: %s (complexity: %s)", deep.AppDescription, deep.Complexity)
@@ -310,7 +344,9 @@ func buildDeepAnalysisPrompt(p *RepoProfile) string {
 	b.WriteString("\n```\n\n")
 
 	b.WriteString(`## Your Task
-Analyze the repo deeply and respond with JSON:
+Analyze the repo deeply and respond with JSON. READ THE README AND PACKAGE.JSON CAREFULLY.
+
+### Core Analysis
 1. What does this application DO? (1-2 sentences)
 2. What services/components does it have? (e.g. "API server", "WebSocket gateway", "React frontend", "worker")
 3. What external dependencies does it need? (databases, APIs, message queues)
@@ -319,17 +355,70 @@ Analyze the repo deeply and respond with JSON:
 6. How complex is this to deploy? (simple/moderate/complex)
 7. What could go wrong during deployment?
 
-Think step by step. READ the Dockerfile, package.json, README carefully.
+### Node.js App Analysis (CRITICAL - read README carefully!)
+8. listeningPort: What port does this app listen on?
+   - Check README for "port", "PORT", "listens on", ":3000"
+   - Check package.json scripts for --port flags
+   - Check source code for .listen() calls
+   - Default to 3000 ONLY if truly unknown
+
+9. startCommand: How do you start this app?
+   - Check package.json "scripts.start"
+   - Check README for startup instructions
+
+10. buildCommand: Does it need a build step?
+    - Check package.json "scripts.build"
+    - TypeScript apps need "npm run build"
+
+11. nodeVersion: What Node.js version is required?
+    - Check package.json "engines.node"
+    - Check README for version requirements
+
+12. requiredEnvVars: What environment variables are REQUIRED to run?
+    - Check README for "configuration", "environment variables", "setup"
+    - Check .env.example, .env.sample files
+    - Include: name, description, required=true, example
+
+13. optionalEnvVars: What env vars are optional with defaults?
+
+14. healthEndpoint: Does it have a health check endpoint?
+    - Check for /health, /healthz, /api/health routes
+    - Leave empty if none
+
+15. exposesHTTP: Does this app serve HTTP requests?
+    - true for web servers, APIs, frontends
+    - false for CLI tools, workers, bots that don't serve HTTP
+
+16. preferDocker: Should we use Docker?
+    - true if Dockerfile exists and README recommends it
+    - false if README shows simpler install
+
+17. globalInstall: Can it be installed globally?
+    - e.g., "npm install -g packagename"
 
 ## Response Format (JSON only, no markdown fences)
 {
   "appDescription": "...",
   "services": ["service1", "service2"],
-  "externalDeps": ["postgres", "redis", "openai-api"],
-  "buildPipeline": "git clone && docker build -t app .",
-  "runLocally": "docker compose up",
+  "externalDeps": ["postgres", "redis"],
+  "buildPipeline": "npm install && npm run build",
+  "runLocally": "npm start",
   "complexity": "moderate",
-  "concerns": ["needs OPENAI_API_KEY", "WebSocket requires sticky sessions"]
+  "concerns": ["needs API_KEY"],
+  "listeningPort": 3000,
+  "startCommand": "npm start",
+  "buildCommand": "npm run build",
+  "nodeVersion": ">=18",
+  "requiredEnvVars": [
+    {"name": "API_KEY", "description": "API authentication key", "required": true, "example": "sk-xxx"}
+  ],
+  "optionalEnvVars": [
+    {"name": "LOG_LEVEL", "description": "Logging verbosity", "required": false, "default": "info"}
+  ],
+  "healthEndpoint": "/health",
+  "exposesHTTP": true,
+  "preferDocker": false,
+  "globalInstall": ""
 }`)
 
 	return b.String()

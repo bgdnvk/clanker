@@ -32,7 +32,9 @@ Examples:
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		repoURL := args[0]
-		ctx := context.Background()
+		// Create deployment context with 20-minute timeout
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+		defer cancel()
 		debug := viper.GetBool("debug")
 		profile, _ := cmd.Flags().GetString("profile")
 		applyMode, _ := cmd.Flags().GetBool("apply")
@@ -113,6 +115,32 @@ Examples:
 		)
 		if err != nil {
 			return fmt.Errorf("intelligence pipeline failed: %w", err)
+		}
+
+		// 4.5. Prompt user for required configuration (Node.js apps)
+		var userConfig *deploy.UserConfig
+		if intel.DeepAnalysis != nil && rp.Language == "node" {
+			// Show detected app info
+			if intel.DeepAnalysis.ListeningPort > 0 {
+				fmt.Fprintf(os.Stderr, "[deploy] detected port from analysis: %d\n", intel.DeepAnalysis.ListeningPort)
+				// Update RepoProfile with detected port
+				if len(rp.Ports) == 0 || rp.Ports[0] != intel.DeepAnalysis.ListeningPort {
+					rp.Ports = []int{intel.DeepAnalysis.ListeningPort}
+				}
+			}
+
+			// Collect user config if there are required env vars
+			if len(intel.DeepAnalysis.RequiredEnvVars) > 0 || len(intel.DeepAnalysis.OptionalEnvVars) > 0 {
+				userConfig, err = deploy.PromptForConfig(intel.DeepAnalysis, rp)
+				if err != nil {
+					return fmt.Errorf("configuration failed: %w", err)
+				}
+			}
+		}
+
+		// Default config if none collected
+		if userConfig == nil {
+			userConfig = deploy.DefaultUserConfig(intel.DeepAnalysis, rp)
 		}
 
 		enrichedQuestion := intel.EnrichedPrompt
@@ -240,9 +268,42 @@ Examples:
 			return nil
 		}
 
-		// apply mode: execute the plan
+		// apply mode: execute the plan in phases
 		fmt.Fprintf(os.Stderr, "[deploy] applying plan (%d commands)...\n", len(plan.Commands))
+
+		// Split plan: infrastructure first, then app deployment (after Docker build)
+		infraPlan, appPlan := splitPlanAtDockerBuild(plan)
+
 		outputBindings := make(map[string]string)
+
+		// Inject user config into output bindings for native Node.js deployment
+		if userConfig != nil {
+			for name, value := range userConfig.EnvVars {
+				outputBindings["ENV_"+name] = value
+			}
+			outputBindings["APP_PORT"] = fmt.Sprintf("%d", userConfig.AppPort)
+			// Also pass PORT as env var so the container knows which port to listen on
+			outputBindings["ENV_PORT"] = fmt.Sprintf("%d", userConfig.AppPort)
+			outputBindings["DEPLOY_MODE"] = userConfig.DeployMode
+
+			// Pass start command with port for containers that need --port flag
+			if intel.DeepAnalysis != nil && intel.DeepAnalysis.StartCommand != "" && userConfig.AppPort > 0 {
+				// Build start command with correct port (e.g., "node app.js --port 18789")
+				startCmd := intel.DeepAnalysis.StartCommand
+				// Replace common port placeholders or append port flag
+				if !strings.Contains(startCmd, fmt.Sprintf("%d", userConfig.AppPort)) {
+					// If the command doesn't already include the correct port, append it
+					startCmd = fmt.Sprintf("%s --port %d", startCmd, userConfig.AppPort)
+				}
+				outputBindings["START_COMMAND"] = startCmd
+			}
+
+			// Generate native Node.js user-data if not using Docker
+			if userConfig.DeployMode == "native" {
+				outputBindings["NODEJS_USER_DATA"] = deploy.GenerateNodeJSUserData(rp.RepoURL, intel.DeepAnalysis, userConfig)
+				fmt.Fprintf(os.Stderr, "[deploy] using native Node.js deployment (PM2)\n")
+			}
+		}
 		execOpts := maker.ExecOptions{
 			Profile:        targetProfile,
 			Region:         region,
@@ -258,13 +319,81 @@ Examples:
 			execOpts.Profile = ""
 			execOpts.Region = ""
 		}
-		if err := maker.ExecutePlan(ctx, plan, execOpts); err != nil {
-			return err
+
+		// Phase 1: Create infrastructure (ECR repo, VPC, security groups, IAM)
+		if len(infraPlan.Commands) > 0 {
+			fmt.Fprintf(os.Stderr, "[deploy] phase 1: creating infrastructure (%d commands)...\n", len(infraPlan.Commands))
+			if err := maker.ExecutePlan(ctx, infraPlan, execOpts); err != nil {
+				return fmt.Errorf("infrastructure creation failed: %w", err)
+			}
+		}
+
+		// Phase 2: Build and push Docker image (if applicable, skip for native deployment)
+		isNativeDeployment := userConfig != nil && userConfig.DeployMode == "native"
+		if !isNativeDeployment && rp.HasDocker && outputBindings["ECR_URI"] != "" && targetProvider != "cloudflare" {
+			if !maker.HasDockerInstalled() {
+				return fmt.Errorf("Docker is required for deployment but not installed locally")
+			}
+			fmt.Fprintf(os.Stderr, "[deploy] phase 2: building and pushing Docker image...\n")
+			imageURI, err := maker.BuildAndPushDockerImage(ctx, rp.ClonePath, outputBindings["ECR_URI"], targetProfile, region, os.Stdout)
+			if err != nil {
+				return fmt.Errorf("docker build/push failed: %w", err)
+			}
+			outputBindings["IMAGE_URI"] = imageURI
+			fmt.Fprintf(os.Stderr, "[deploy] image pushed: %s\n", imageURI)
+		} else if isNativeDeployment {
+			fmt.Fprintf(os.Stderr, "[deploy] phase 2: skipping Docker build (native Node.js deployment)\n")
+		}
+
+		// Phase 3: Launch application (EC2, ALB, etc.)
+		if len(appPlan.Commands) > 0 {
+			fmt.Fprintf(os.Stderr, "[deploy] phase 3: launching application (%d commands)...\n", len(appPlan.Commands))
+			if err := maker.ExecutePlan(ctx, appPlan, execOpts); err != nil {
+				return fmt.Errorf("application deployment failed: %w", err)
+			}
+		}
+
+		// Phase 4: Verify deployment is working
+		albDNS := outputBindings["ALB_DNS"]
+		if albDNS != "" && targetProvider != "cloudflare" {
+			fmt.Fprintf(os.Stderr, "[deploy] phase 4: verifying deployment health...\n")
+
+			// Give the app time to start
+			fmt.Fprintf(os.Stderr, "[deploy] waiting 30s for application to start...\n")
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("deployment timed out during startup wait: %w", ctx.Err())
+			case <-time.After(30 * time.Second):
+			}
+
+			// Build health check config based on app type
+			appPort := 3000
+			if userConfig != nil && userConfig.AppPort > 0 {
+				appPort = userConfig.AppPort
+			}
+
+			healthConfig := maker.HealthCheckConfig{
+				Host:        albDNS,
+				Port:        appPort,
+				ExposesHTTP: true, // default to HTTP
+			}
+
+			// Use deep analysis to determine health check type
+			if intel.DeepAnalysis != nil {
+				healthConfig.ExposesHTTP = intel.DeepAnalysis.ExposesHTTP
+				healthConfig.HTTPEndpoint = intel.DeepAnalysis.HealthEndpoint
+			}
+
+			if err := maker.VerifyNodeJSDeployment(ctx, healthConfig, 5*time.Minute, os.Stdout); err != nil {
+				fmt.Fprintf(os.Stderr, "[deploy] health check failed: %v\n", err)
+				fmt.Fprintf(os.Stderr, "[deploy] tip: check EC2 instance logs via SSM Session Manager\n")
+				return fmt.Errorf("deployment verification failed: %w", err)
+			}
 		}
 
 		// Print deployment summary with endpoint
 		fmt.Fprintf(os.Stderr, "\n[deploy] deployment complete!\n")
-		if albDNS := outputBindings["ALB_DNS"]; albDNS != "" {
+		if albDNS != "" {
 			fmt.Fprintf(os.Stderr, "\n========================================\n")
 			fmt.Fprintf(os.Stderr, "Application URL: http://%s\n", albDNS)
 			fmt.Fprintf(os.Stderr, "========================================\n\n")
@@ -330,4 +459,33 @@ func init() {
 	deployCmd.Flags().String("target", "fargate", "Deployment target: fargate (default), ec2, or eks")
 	deployCmd.Flags().String("instance-type", "t3.small", "EC2 instance type (only used with --target ec2)")
 	deployCmd.Flags().Bool("new-vpc", false, "Create a new VPC instead of using default")
+}
+
+// splitPlanAtDockerBuild separates infrastructure setup from app deployment.
+// Infrastructure commands (ECR, VPC, security groups, IAM) run first,
+// then Docker build happens locally, then app deployment (EC2, ALB).
+func splitPlanAtDockerBuild(plan *maker.Plan) (*maker.Plan, *maker.Plan) {
+	infraCommands := []maker.Command{}
+	appCommands := []maker.Command{}
+
+	// Find the EC2 run-instances command as the split point
+	foundEC2 := false
+	for _, cmd := range plan.Commands {
+		if len(cmd.Args) >= 2 && cmd.Args[0] == "ec2" && cmd.Args[1] == "run-instances" {
+			foundEC2 = true
+		}
+		if foundEC2 {
+			appCommands = append(appCommands, cmd)
+		} else {
+			infraCommands = append(infraCommands, cmd)
+		}
+	}
+
+	// If no EC2 command found, don't split (could be Fargate or other deployment)
+	if !foundEC2 {
+		return plan, &maker.Plan{Commands: []maker.Command{}, Provider: plan.Provider}
+	}
+
+	return &maker.Plan{Commands: infraCommands, Provider: plan.Provider, Question: plan.Question},
+		&maker.Plan{Commands: appCommands, Provider: plan.Provider, Question: plan.Question}
 }

@@ -86,6 +86,12 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	remediationAttempted := make(map[int]bool)
 	bindings := make(map[string]string)
 
+	// Initialize bindings from OutputBindings if provided (for multi-phase execution)
+	if opts.OutputBindings != nil {
+		for k, v := range opts.OutputBindings {
+			bindings[k] = v
+		}
+	}
 	// Pre-populate bindings with account and region info for user-data generation
 	if accountID != "" {
 		bindings["ACCOUNT_ID"] = accountID
@@ -1026,7 +1032,8 @@ func resolveAWSAccountID(ctx context.Context, opts ExecOptions) (string, error) 
 
 // maybeGenerateEC2UserData handles user-data generation for EC2 run-instances commands.
 // If the user-data argument contains a placeholder (like <USER_DATA> or $USER_DATA),
-// it generates a proper Docker startup script based on the available bindings.
+// it generates a proper startup script based on the available bindings.
+// Supports both Docker deployment (default) and native Node.js deployment (DEPLOY_MODE=native).
 func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts ExecOptions) []string {
 	if len(args) < 2 || args[0] != "ec2" || args[1] != "run-instances" {
 		return args
@@ -1055,7 +1062,20 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 		return args
 	}
 
-	// Generate the user-data script based on bindings
+	// Check if native Node.js deployment mode (pre-generated user-data)
+	deployMode := bindings["DEPLOY_MODE"]
+	if deployMode == "native" {
+		// Use pre-generated Node.js user-data script
+		if script := bindings["NODEJS_USER_DATA"]; script != "" {
+			encoded := base64.StdEncoding.EncodeToString([]byte(script))
+			newArgs := make([]string, len(args))
+			copy(newArgs, args)
+			newArgs[userDataIdx] = encoded
+			return newArgs
+		}
+	}
+
+	// Docker deployment mode
 	region := opts.Region
 	accountID := bindings["ACCOUNT_ID"]
 	if accountID == "" {
@@ -1080,17 +1100,53 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 		return args
 	}
 
+	// Get app port from bindings or default to 3000
+	appPort := bindings["APP_PORT"]
+	if appPort == "" {
+		appPort = "3000"
+	}
+
+	// Build docker run command with environment variables
+	var envFlags strings.Builder
+	for key, value := range bindings {
+		if strings.HasPrefix(key, "ENV_") {
+			envName := strings.TrimPrefix(key, "ENV_")
+			// Escape special characters for shell
+			escaped := strings.ReplaceAll(value, `"`, `\"`)
+			escaped = strings.ReplaceAll(escaped, `$`, `\$`)
+			escaped = strings.ReplaceAll(escaped, "`", "\\`")
+			envFlags.WriteString(fmt.Sprintf("-e \"%s=%s\" ", envName, escaped))
+		}
+	}
+
+	// Check if we have a specific start command that includes the port
+	// This handles apps that need --port flag instead of PORT env var
+	startCmd := bindings["START_COMMAND"]
+
+	var dockerRunCmd string
+	if startCmd != "" {
+		// Use the detected start command (handles apps needing --port flag)
+		dockerRunCmd = fmt.Sprintf("docker run -d --restart unless-stopped -p %s:%s %s%s:latest %s",
+			appPort, appPort, envFlags.String(), ecrURI, startCmd)
+	} else {
+		// Default: just pass env vars and use container's default CMD
+		dockerRunCmd = fmt.Sprintf("docker run -d --restart unless-stopped -p %s:%s %s%s:latest",
+			appPort, appPort, envFlags.String(), ecrURI)
+	}
+
 	// Generate the startup script
 	script := fmt.Sprintf(`#!/bin/bash
 set -ex
+exec > /var/log/user-data.log 2>&1
 yum update -y
 yum install -y docker
 systemctl start docker
 systemctl enable docker
 aws ecr get-login-password --region %s | docker login --username AWS --password-stdin %s.dkr.ecr.%s.amazonaws.com
 docker pull %s:latest
-docker run -d --restart unless-stopped -p 3000:3000 %s:latest
-`, region, accountID, region, ecrURI, ecrURI)
+%s
+echo 'Deployment complete!'
+`, region, accountID, region, ecrURI, dockerRunCmd)
 
 	// Base64 encode the script
 	encoded := base64.StdEncoding.EncodeToString([]byte(script))
