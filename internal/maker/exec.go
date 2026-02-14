@@ -1586,6 +1586,8 @@ func resolveAWSBinary() (string, []string, error) {
 }
 
 func runAWSCommandStreaming(ctx context.Context, args []string, stdinBytes []byte, w io.Writer) (string, error) {
+	args = sanitizeAWSCLIArgs(args, w)
+
 	awsBin, attempts, resolveErr := resolveAWSBinary()
 	if resolveErr != nil {
 		return "", fmt.Errorf("%v; install AWS CLI v2 or set %s. Tried: %s", resolveErr, envAWSCLIPath, strings.Join(attempts, ", "))
@@ -1614,6 +1616,57 @@ func runAWSCommandStreaming(ctx context.Context, args []string, stdinBytes []byt
 	}
 
 	return out, nil
+}
+
+func sanitizeAWSCLIArgs(args []string, w io.Writer) []string {
+	if len(args) < 2 {
+		return args
+	}
+	if args[0] != "lightsail" {
+		return args
+	}
+
+	op := strings.TrimSpace(args[1])
+	if op == "" {
+		return args
+	}
+
+	removeTagsForOp := op == "allocate-static-ip" || op == "attach-static-ip" || op == "open-instance-public-ports"
+	out := make([]string, 0, len(args))
+	out = append(out, args[0], args[1])
+
+	for i := 2; i < len(args); i++ {
+		token := strings.TrimSpace(args[i])
+
+		if op == "allocate-static-ip" && token == "ignore" {
+			if w != nil {
+				_, _ = fmt.Fprintln(w, "[maker] sanitizing command: removed stray token 'ignore' from lightsail allocate-static-ip")
+			}
+			continue
+		}
+
+		if removeTagsForOp {
+			if token == "--tags" {
+				if w != nil {
+					_, _ = fmt.Fprintf(w, "[maker] sanitizing command: removed unsupported --tags for lightsail %s\n", op)
+				}
+				if i+1 < len(args) && !strings.HasPrefix(strings.TrimSpace(args[i+1]), "--") {
+					i++
+				}
+				continue
+			}
+			if strings.HasPrefix(token, "--tags=") {
+				if w != nil {
+					_, _ = fmt.Fprintf(w, "[maker] sanitizing command: removed unsupported --tags for lightsail %s\n", op)
+				}
+				continue
+			}
+		}
+
+		out = append(out, args[i])
+	}
+
+	return out
 }
 
 func isLambdaCreateFunction(args []string) bool {

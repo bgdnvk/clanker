@@ -209,14 +209,17 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 	// Phase 1.5: Infra scan — query cloud provider for existing resources
 	var infraSnap *InfraSnapshot
 	var cfInfraSnap *CFInfraSnapshot
-	if targetProvider == "cloudflare" {
+	switch strings.ToLower(strings.TrimSpace(targetProvider)) {
+	case "cloudflare":
 		logf("[intelligence] phase 1.5: scanning Cloudflare infrastructure...")
 		cfInfraSnap = ScanCFInfra(ctx, logf)
 		result.CFInfraSnap = cfInfraSnap
-	} else {
+	case "aws", "":
 		logf("[intelligence] phase 1.5: scanning AWS infrastructure...")
 		infraSnap = ScanInfra(ctx, awsProfile, awsRegion, logf)
 		result.InfraSnap = infraSnap
+	default:
+		logf("[intelligence] phase 1.5: skipping infrastructure scan for provider=%s", targetProvider)
 	}
 
 	// Phase 2: Architecture Decision + Cost Estimation
@@ -268,10 +271,10 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 // ValidatePlan runs the LLM validation phase on a generated plan.
 // Call this AFTER the maker plan is generated.
 // Returns validation result and an optional revised prompt if issues were found.
-func ValidatePlan(ctx context.Context, planJSON string, profile *RepoProfile, deep *DeepAnalysis, ask AskFunc, clean CleanFunc, logf func(string, ...any)) (*PlanValidation, string, error) {
+func ValidatePlan(ctx context.Context, planJSON string, profile *RepoProfile, deep *DeepAnalysis, requireDockerCommandsInPlan bool, ask AskFunc, clean CleanFunc, logf func(string, ...any)) (*PlanValidation, string, error) {
 	logf("[intelligence] phase 4: plan validation...")
 
-	prompt := buildValidationPrompt(planJSON, profile, deep)
+	prompt := buildValidationPrompt(planJSON, profile, deep, requireDockerCommandsInPlan)
 	resp, err := ask(ctx, prompt)
 	if err != nil {
 		return nil, "", fmt.Errorf("validation failed: %w", err)
@@ -503,7 +506,8 @@ Think about:
 - If it has a Dockerfile, use it — don't reinvent the wheel
 `)
 
-	if targetProvider == "cloudflare" {
+	switch strings.ToLower(strings.TrimSpace(targetProvider)) {
+	case "cloudflare":
 		b.WriteString(`
 ## Cloudflare Options to Consider
 1. **cf-pages** — Static sites, SPAs, SSR with Workers Functions. Deploy via wrangler pages deploy. (~$0-5/mo free tier)
@@ -547,7 +551,94 @@ Estimate the MONTHLY cost in USD. Most small apps fit in free tier.
   "estMonthly": "$0 (free tier)",
   "costBreakdown": ["Pages: free", "Bandwidth: free up to 100GB/mo"]
 }`)
-	} else {
+	case "gcp":
+		b.WriteString(`
+## GCP Options to Consider
+1. **gcp-compute-engine** — VM + Docker Compose (best for long-running gateway services) (~$8-30/mo)
+2. **cloud-run** — managed containers (good for stateless HTTP apps, less ideal for stateful local-first gateway workflows)
+3. **gke** — Kubernetes (overkill unless explicitly requested)
+
+## GCP Services
+- Compute Engine for always-on gateway
+- Persistent disk for OpenClaw state/workspace
+- Secret Manager for API keys and channel tokens
+- Cloud DNS + HTTPS LB only if public exposure is required
+
+## Deployment CLI
+All commands must use gcloud CLI only.
+
+## Cost Estimation
+Estimate the MONTHLY cost in USD.
+
+## Response Format (JSON only, no markdown fences)
+{
+	"provider": "gcp",
+	"method": "gcp-compute-engine",
+	"reasoning": "OpenClaw is a long-running gateway with persistent state and channel credentials. A Compute Engine VM with Docker Compose is the most reliable and simplest path.",
+	"alternatives": [
+		{"method": "cloud-run", "why_not": "Less suitable for persistent workspace/state and interactive gateway workflows"},
+		{"method": "gke", "why_not": "Operationally complex for this use case"}
+	],
+	"buildSteps": [
+		"Create Compute Engine VM",
+		"Install Docker + Docker Compose",
+		"Clone repo and configure .env",
+		"Run docker compose build && docker compose up -d"
+	],
+	"runCmd": "docker compose up -d openclaw-gateway",
+	"notes": ["Expose only required ports", "Persist OpenClaw config/workspace on disk"],
+	"cpuMemory": "e2-standard-2",
+	"needsAlb": false,
+	"useApiGateway": false,
+	"needsDb": false,
+	"dbService": "",
+	"estMonthly": "$12-25",
+	"costBreakdown": ["Compute Engine VM", "Persistent disk", "Network egress"]
+}`)
+	case "azure":
+		b.WriteString(`
+## Azure Options to Consider
+1. **azure-vm** — VM + Docker Compose (best for long-running gateway services) (~$10-35/mo)
+2. **azure-container-apps** — managed containers (good for stateless services)
+3. **aks** — Kubernetes (overkill unless explicitly requested)
+
+## Azure Services
+- VM for always-on gateway runtime
+- Managed disk for persistent OpenClaw state/workspace
+- Key Vault for API keys and channel tokens
+
+## Deployment CLI
+All commands must use az CLI only.
+
+## Cost Estimation
+Estimate the MONTHLY cost in USD.
+
+## Response Format (JSON only, no markdown fences)
+{
+	"provider": "azure",
+	"method": "azure-vm",
+	"reasoning": "OpenClaw runs best as an always-on gateway with persistent local state. Azure VM with Docker Compose is the most direct and operationally simple option.",
+	"alternatives": [
+		{"method": "azure-container-apps", "why_not": "Less ideal for persistent local-first runtime patterns"},
+		{"method": "aks", "why_not": "Unnecessary complexity for this workload"}
+	],
+	"buildSteps": [
+		"Create resource group and VM",
+		"Install Docker + Docker Compose",
+		"Clone repo and configure .env",
+		"Run docker compose build && docker compose up -d"
+	],
+	"runCmd": "docker compose up -d openclaw-gateway",
+	"notes": ["Persist OpenClaw directories on disk", "Restrict inbound network rules"],
+	"cpuMemory": "Standard_B2s",
+	"needsAlb": false,
+	"useApiGateway": false,
+	"needsDb": false,
+	"dbService": "",
+	"estMonthly": "$12-30",
+	"costBreakdown": ["VM", "Managed disk", "Public IP/Bandwidth"]
+}`)
+	default:
 		// Add user's deployment target preference
 		if opts != nil && opts.Target != "" && opts.Target != "fargate" {
 			b.WriteString(fmt.Sprintf("\n## USER PREFERENCE: Deploy to %s", strings.ToUpper(opts.Target)))
@@ -609,7 +700,7 @@ Break it down by service (compute, storage, networking, database).
 
 // --- Phase 4: Validation ---
 
-func buildValidationPrompt(planJSON string, p *RepoProfile, deep *DeepAnalysis) string {
+func buildValidationPrompt(planJSON string, p *RepoProfile, deep *DeepAnalysis, requireDockerCommandsInPlan bool) string {
 	var b strings.Builder
 
 	b.WriteString("You are a deployment QA engineer. Review this cloud deployment plan and check for correctness.\n\n")
@@ -640,15 +731,21 @@ func buildValidationPrompt(planJSON string, p *RepoProfile, deep *DeepAnalysis) 
 	b.WriteString(planJSON)
 	b.WriteString("\n```\n\n")
 
-	b.WriteString(`## Check For
-1. Are commands in the right ORDER? (e.g. ECR repo before docker push)
-2. Are ALL required ports exposed in security groups and task definitions?
-3. Are environment variables passed to the container?
-4. Does the plan use the existing Dockerfile (not try to build from scratch)?
-5. Are IAM roles and policies created BEFORE they're referenced?
-6. Will the app actually be accessible from the internet after deployment?
-7. Are there any missing steps?
-8. Are resource references (ARNs, IDs) properly chained?
+	b.WriteString("## Check For\n")
+	b.WriteString("1. Are commands in the right ORDER?\n")
+	b.WriteString("2. Are ALL required ports exposed in security groups and task definitions?\n")
+	b.WriteString("3. Are environment variables passed to the container?\n")
+	b.WriteString("4. Does the plan use the existing Dockerfile (not try to build from scratch)?\n")
+	b.WriteString("5. Are IAM roles and policies created BEFORE they're referenced?\n")
+	b.WriteString("6. Will the app actually be accessible from the internet after deployment?\n")
+	b.WriteString("7. Are there any missing steps?\n")
+	b.WriteString("8. Are resource references (ARNs, IDs) properly chained?\n")
+	if requireDockerCommandsInPlan {
+		b.WriteString("9. If Docker deployment is used, does the plan include docker build/push steps in the command list (and before workload launch)?\n")
+	} else {
+		b.WriteString("9. If Docker build/push is handled outside the command list by the deploy orchestrator, do NOT mark missing docker build/push commands as an issue.\n")
+	}
+	b.WriteString(`
 
 ## Response Format (JSON only, no markdown fences)
 {
@@ -700,8 +797,13 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, arch *ArchitectD
 	var b strings.Builder
 
 	providerLabel := "AWS"
-	if strat.Provider == "cloudflare" {
+	switch strings.ToLower(strings.TrimSpace(strat.Provider)) {
+	case "cloudflare":
 		providerLabel = "Cloudflare"
+	case "gcp":
+		providerLabel = "GCP"
+	case "azure":
+		providerLabel = "Azure"
 	}
 	b.WriteString(fmt.Sprintf("Deploy the application from %s to %s.\n\n", p.RepoURL, providerLabel))
 
@@ -804,6 +906,15 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, arch *ArchitectD
 	if p.HasDB {
 		b.WriteString(fmt.Sprintf("- Database: %s\n", p.DBType))
 	}
+	if isOpenClawRepo(p) {
+		b.WriteString("\n## OpenClaw Deployment Requirements\n")
+		b.WriteString("- Runtime must be Node.js 22+\n")
+		b.WriteString("- Prefer Docker-based gateway deployment\n")
+		b.WriteString("- Persist OpenClaw state and workspace directories\n")
+		b.WriteString("- Configure gateway token via environment variable\n")
+		b.WriteString("- Expose gateway port (default 18789) intentionally and securely\n")
+		b.WriteString("- Use environment variables for channel/provider secrets; avoid committing tokens\n")
+	}
 
 	// deployment instructions based on chosen method
 	b.WriteString("\n## Deployment Instructions\n")
@@ -826,10 +937,19 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, arch *ArchitectD
 		b.WriteString(cfWorkersPrompt(p, deep))
 	case "cf-containers":
 		b.WriteString(cfContainersPrompt(p, arch, deep))
+	case "gcp-compute-engine":
+		b.WriteString(gcpComputeEnginePrompt(p, deep))
+	case "azure-vm":
+		b.WriteString(azureVMPrompt(p, deep))
 	default:
-		if strat.Provider == "cloudflare" {
+		switch strings.ToLower(strings.TrimSpace(strat.Provider)) {
+		case "cloudflare":
 			b.WriteString(cfWorkersPrompt(p, deep))
-		} else {
+		case "gcp":
+			b.WriteString(gcpComputeEnginePrompt(p, deep))
+		case "azure":
+			b.WriteString(azureVMPrompt(p, deep))
+		default:
 			b.WriteString(smartECSPrompt(p, arch, deep))
 		}
 	}
@@ -847,13 +967,23 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, arch *ArchitectD
 	// env vars
 	if len(p.EnvVars) > 0 {
 		b.WriteString("\n## Environment Variables\n")
-		b.WriteString("- Store sensitive env vars in AWS Secrets Manager or SSM Parameter Store\n")
-		b.WriteString("- Pass them to the container via secrets/environment mapping in task definition\n")
+		switch strings.ToLower(strings.TrimSpace(strat.Provider)) {
+		case "cloudflare":
+			b.WriteString("- Store sensitive values via Wrangler secrets\n")
+		case "gcp":
+			b.WriteString("- Store sensitive values in GCP Secret Manager\n")
+		case "azure":
+			b.WriteString("- Store sensitive values in Azure Key Vault\n")
+		default:
+			b.WriteString("- Store sensitive env vars in AWS Secrets Manager or SSM Parameter Store\n")
+		}
+		b.WriteString("- Pass them to the runtime via secure environment injection\n")
 		b.WriteString(fmt.Sprintf("- Required: %s\n", strings.Join(p.EnvVars, ", ")))
 	}
 
 	b.WriteString("\n## Rules\n")
-	if strat.Provider == "cloudflare" {
+	switch strings.ToLower(strings.TrimSpace(strat.Provider)) {
+	case "cloudflare":
 		b.WriteString("- All commands use npx wrangler CLI\n")
 		b.WriteString("- Auth via CLOUDFLARE_API_TOKEN env var (already set)\n")
 		b.WriteString("- Tag/name resources with clanker-deploy prefix\n")
@@ -861,7 +991,17 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, arch *ArchitectD
 		b.WriteString("- The plan must be fully executable with npx wrangler commands only\n")
 		b.WriteString("- Commands must be in the correct dependency order\n")
 		b.WriteString("- Every resource that's referenced must be created first\n")
-	} else {
+	case "gcp":
+		b.WriteString("- The plan must be fully executable with gcloud CLI only\n")
+		b.WriteString("- Prefer minimal, cost-effective machine sizes\n")
+		b.WriteString("- Persist state/workspace on disk\n")
+		b.WriteString("- Commands must be in dependency order\n")
+	case "azure":
+		b.WriteString("- The plan must be fully executable with az CLI only\n")
+		b.WriteString("- Prefer minimal, cost-effective VM sizes\n")
+		b.WriteString("- Persist state/workspace on managed disk\n")
+		b.WriteString("- Commands must be in dependency order\n")
+	default:
 		b.WriteString("- Use the default VPC and its existing subnets when possible\n")
 		b.WriteString("- Tag all resources with Project=clanker-deploy\n")
 		b.WriteString("- Prefer minimal, cost-effective resource sizes\n")
@@ -924,6 +1064,50 @@ func smartECSPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis)
 	}
 
 	return b.String()
+}
+
+func gcpComputeEnginePrompt(p *RepoProfile, deep *DeepAnalysis) string {
+	var b strings.Builder
+	b.WriteString("Deploy using GCP Compute Engine (VM + Docker Compose):\n")
+	b.WriteString("1. Create a VPC firewall rule for required inbound ports\n")
+	b.WriteString("2. Create a Compute Engine VM (Ubuntu LTS)\n")
+	b.WriteString("3. Install Docker and Docker Compose on the VM\n")
+	b.WriteString(fmt.Sprintf("4. Clone repository: %s\n", p.RepoURL))
+	b.WriteString("5. Create .env with gateway token and required secrets\n")
+	b.WriteString("6. Create persistent directories for OpenClaw config/workspace\n")
+	b.WriteString("7. Build and start with: docker compose build && docker compose up -d openclaw-gateway\n")
+	b.WriteString("8. Verify gateway health and endpoint readiness\n")
+	return b.String()
+}
+
+func azureVMPrompt(p *RepoProfile, deep *DeepAnalysis) string {
+	var b strings.Builder
+	b.WriteString("Deploy using Azure VM (Docker Compose):\n")
+	b.WriteString("1. Create resource group and network security group with least-privilege inbound rules\n")
+	b.WriteString("2. Create Ubuntu VM with managed disk\n")
+	b.WriteString("3. Install Docker and Docker Compose\n")
+	b.WriteString(fmt.Sprintf("4. Clone repository: %s\n", p.RepoURL))
+	b.WriteString("5. Create .env with gateway token and required secrets\n")
+	b.WriteString("6. Create persistent directories for OpenClaw config/workspace\n")
+	b.WriteString("7. Build and start with: docker compose build && docker compose up -d openclaw-gateway\n")
+	b.WriteString("8. Verify gateway health and endpoint readiness\n")
+	return b.String()
+}
+
+func isOpenClawRepo(p *RepoProfile) bool {
+	repo := strings.ToLower(strings.TrimSpace(p.RepoURL))
+	if strings.Contains(repo, "openclaw/openclaw") {
+		return true
+	}
+	if strings.Contains(strings.ToLower(p.Summary), "openclaw") {
+		return true
+	}
+	for name := range p.KeyFiles {
+		if strings.EqualFold(strings.TrimSpace(name), "openclaw.mjs") {
+			return true
+		}
+	}
+	return false
 }
 
 func appRunnerPrompt(p *RepoProfile, arch *ArchitectDecision) string {

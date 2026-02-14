@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/bgdnvk/clanker/internal/ai"
+	"github.com/bgdnvk/clanker/internal/azure"
+	"github.com/bgdnvk/clanker/internal/cloudflare"
 	"github.com/bgdnvk/clanker/internal/deploy"
 	"github.com/bgdnvk/clanker/internal/maker"
 	"github.com/spf13/cobra"
@@ -46,6 +48,8 @@ Examples:
 		deployTarget, _ := cmd.Flags().GetString("target")
 		instanceType, _ := cmd.Flags().GetString("instance-type")
 		newVPC, _ := cmd.Flags().GetBool("new-vpc")
+		gcpProject, _ := cmd.Flags().GetString("gcp-project")
+		azureSubscription, _ := cmd.Flags().GetString("azure-subscription")
 
 		// 1. Clone + analyze
 		fmt.Fprintf(os.Stderr, "[deploy] cloning %s ...\n", repoURL)
@@ -95,7 +99,7 @@ Examples:
 
 		// 3. Resolve AWS profile/region early so intelligence pipeline can scan infra
 		var targetProfile, region string
-		if targetProvider != "cloudflare" {
+		if strings.EqualFold(strings.TrimSpace(targetProvider), "aws") {
 			targetProfile = resolveAWSProfile(profile)
 			region = resolveAWSRegion(ctx, targetProfile)
 		}
@@ -118,8 +122,10 @@ Examples:
 		}
 
 		// 4.5. Prompt user for required configuration (Node.js apps)
+		// Only prompt in apply mode because plan generation can run in non-interactive contexts
+		// (e.g. backend API calls) where stdin is not available.
 		var userConfig *deploy.UserConfig
-		if intel.DeepAnalysis != nil && rp.Language == "node" {
+		if applyMode && intel.DeepAnalysis != nil && rp.Language == "node" {
 			// Show detected app info
 			if intel.DeepAnalysis.ListeningPort > 0 {
 				fmt.Fprintf(os.Stderr, "[deploy] detected port from analysis: %d\n", intel.DeepAnalysis.ListeningPort)
@@ -185,6 +191,7 @@ Examples:
 			planJSON, _ := json.MarshalIndent(plan, "", "  ")
 			validation, fixPrompt, err := deploy.ValidatePlan(ctx,
 				string(planJSON), rp, intel.DeepAnalysis,
+				false,
 				aiClient.AskPrompt, aiClient.CleanJSONResponse, logf,
 			)
 			if err != nil {
@@ -213,8 +220,8 @@ Examples:
 			enrichedQuestion += fixPrompt
 		}
 
-		// 6. Enrich w/ existing infra context (skip for Cloudflare)
-		if targetProvider != "cloudflare" {
+		// 6. Enrich w/ existing infra context (AWS only)
+		if strings.EqualFold(strings.TrimSpace(targetProvider), "aws") {
 			_ = maker.EnrichPlan(ctx, plan, maker.ExecOptions{
 				Profile: targetProfile, Region: region, Writer: io.Discard,
 			})
@@ -222,12 +229,12 @@ Examples:
 
 		// 7. Resolve placeholders before output
 		// Always apply static bindings (AMI_ID, ACCOUNT_ID, REGION) - even with --new-vpc
-		if targetProvider != "cloudflare" && intel.InfraSnap != nil {
+		if strings.EqualFold(strings.TrimSpace(targetProvider), "aws") && intel.InfraSnap != nil {
 			plan = deploy.ApplyStaticInfraBindings(plan, intel.InfraSnap)
 		}
 
-		// Full placeholder resolution (skip for Cloudflare and --new-vpc since those use 'produces' chaining)
-		if targetProvider != "cloudflare" && !newVPC {
+		// Full placeholder resolution (AWS only, skip --new-vpc since those use 'produces' chaining)
+		if strings.EqualFold(strings.TrimSpace(targetProvider), "aws") && !newVPC {
 			const maxPlaceholderRounds = 5
 			for round := 1; round <= maxPlaceholderRounds; round++ {
 				if !deploy.HasUnresolvedPlaceholders(plan) {
@@ -266,6 +273,63 @@ Examples:
 		if !applyMode {
 			fmt.Println(string(planJSON))
 			return nil
+		}
+
+		planProvider := strings.ToLower(strings.TrimSpace(plan.Provider))
+		if planProvider == "" {
+			planProvider = strings.ToLower(strings.TrimSpace(targetProvider))
+		}
+		if planProvider == "" {
+			planProvider = "aws"
+		}
+
+		switch planProvider {
+		case "gcp":
+			if strings.TrimSpace(gcpProject) == "" {
+				gcpProject = strings.TrimSpace(os.Getenv("GCP_PROJECT_ID"))
+			}
+			if strings.TrimSpace(gcpProject) == "" {
+				gcpProject = strings.TrimSpace(os.Getenv("GOOGLE_CLOUD_PROJECT"))
+			}
+			if strings.TrimSpace(gcpProject) == "" {
+				return fmt.Errorf("gcp project is required for GCP deploy (use --gcp-project or set GCP_PROJECT_ID)")
+			}
+			fmt.Fprintf(os.Stderr, "[deploy] applying GCP plan (%d commands)...\n", len(plan.Commands))
+			return maker.ExecuteGCPPlan(ctx, plan, maker.ExecOptions{
+				GCPProject: strings.TrimSpace(gcpProject),
+				Writer:     os.Stdout,
+				Destroyer:  false,
+				Debug:      debug,
+			})
+		case "azure":
+			azureSub := strings.TrimSpace(azureSubscription)
+			if azureSub == "" {
+				azureSub = azure.ResolveSubscriptionID()
+			}
+			if azureSub == "" {
+				return fmt.Errorf("azure subscription is required (use --azure-subscription or set AZURE_SUBSCRIPTION_ID)")
+			}
+			fmt.Fprintf(os.Stderr, "[deploy] applying Azure plan (%d commands)...\n", len(plan.Commands))
+			return maker.ExecuteAzurePlan(ctx, plan, maker.ExecOptions{
+				AzureSubscriptionID: azureSub,
+				Writer:              os.Stdout,
+				Destroyer:           false,
+				Debug:               debug,
+			})
+		case "cloudflare":
+			cfToken := cloudflare.ResolveAPIToken()
+			cfAccountID := cloudflare.ResolveAccountID()
+			if cfToken == "" {
+				return fmt.Errorf("cloudflare api token is required (set CLOUDFLARE_API_TOKEN or cloudflare.api_token)")
+			}
+			fmt.Fprintf(os.Stderr, "[deploy] applying Cloudflare plan (%d commands)...\n", len(plan.Commands))
+			return maker.ExecuteCloudflarePlan(ctx, plan, maker.ExecOptions{
+				CloudflareAPIToken:  cfToken,
+				CloudflareAccountID: cfAccountID,
+				Writer:              os.Stdout,
+				Destroyer:           false,
+				Debug:               debug,
+			})
 		}
 
 		// apply mode: execute the plan in phases
@@ -315,7 +379,7 @@ Examples:
 			Debug:          debug,
 			OutputBindings: outputBindings,
 		}
-		if targetProvider == "cloudflare" {
+		if strings.EqualFold(strings.TrimSpace(targetProvider), "cloudflare") {
 			execOpts.Profile = ""
 			execOpts.Region = ""
 		}
@@ -330,7 +394,7 @@ Examples:
 
 		// Phase 2: Build and push Docker image (if applicable, skip for native deployment)
 		isNativeDeployment := userConfig != nil && userConfig.DeployMode == "native"
-		if !isNativeDeployment && rp.HasDocker && outputBindings["ECR_URI"] != "" && targetProvider != "cloudflare" {
+		if !isNativeDeployment && rp.HasDocker && outputBindings["ECR_URI"] != "" && strings.EqualFold(strings.TrimSpace(targetProvider), "aws") {
 			if !maker.HasDockerInstalled() {
 				return fmt.Errorf("Docker is required for deployment but not installed locally")
 			}
@@ -355,7 +419,7 @@ Examples:
 
 		// Phase 4: Verify deployment is working
 		albDNS := outputBindings["ALB_DNS"]
-		if albDNS != "" && targetProvider != "cloudflare" {
+		if albDNS != "" && strings.EqualFold(strings.TrimSpace(targetProvider), "aws") {
 			fmt.Fprintf(os.Stderr, "[deploy] phase 4: verifying deployment health...\n")
 
 			// Give the app time to start
@@ -455,10 +519,12 @@ func init() {
 	deployCmd.Flags().String("anthropic-key", "", "Anthropic API key")
 	deployCmd.Flags().String("gemini-key", "", "Gemini API key")
 	deployCmd.Flags().Bool("apply", false, "Apply the plan immediately after generation")
-	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws or cloudflare")
+	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws, gcp, azure, or cloudflare")
 	deployCmd.Flags().String("target", "fargate", "Deployment target: fargate (default), ec2, or eks")
 	deployCmd.Flags().String("instance-type", "t3.small", "EC2 instance type (only used with --target ec2)")
 	deployCmd.Flags().Bool("new-vpc", false, "Create a new VPC instead of using default")
+	deployCmd.Flags().String("gcp-project", "", "GCP project ID (required for --provider gcp apply)")
+	deployCmd.Flags().String("azure-subscription", "", "Azure subscription ID (required for --provider azure apply)")
 }
 
 // splitPlanAtDockerBuild separates infrastructure setup from app deployment.
