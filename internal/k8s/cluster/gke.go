@@ -579,14 +579,14 @@ func (p *GKEProvider) listNodePools(ctx context.Context, clusterName string) ([]
 
 func (p *GKEProvider) waitForClusterRunning(ctx context.Context, clusterName, project, region string, timeout time.Duration) error {
 	if timeout <= 0 {
-		timeout = 15 * time.Minute
+		timeout = DefaultClusterCreateTimeout
 	}
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		cluster, err := p.describeCluster(ctx, clusterName)
 		if err != nil {
-			time.Sleep(30 * time.Second)
+			time.Sleep(DefaultPollInterval)
 			continue
 		}
 
@@ -601,20 +601,19 @@ func (p *GKEProvider) waitForClusterRunning(ctx context.Context, clusterName, pr
 			return fmt.Errorf("cluster creation failed with status: %s", cluster.Status)
 		}
 
-		time.Sleep(30 * time.Second)
+		time.Sleep(DefaultPollInterval)
 	}
 
 	return fmt.Errorf("timeout waiting for cluster to become running")
 }
 
 func (p *GKEProvider) waitForNodePoolRunning(ctx context.Context, clusterName, nodePoolName string) error {
-	timeout := 10 * time.Minute
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(DefaultNodeGroupCreateTimeout)
 
 	for time.Now().Before(deadline) {
 		nodePools, err := p.listNodePools(ctx, clusterName)
 		if err != nil {
-			time.Sleep(30 * time.Second)
+			time.Sleep(DefaultPollInterval)
 			continue
 		}
 
@@ -634,7 +633,7 @@ func (p *GKEProvider) waitForNodePoolRunning(ctx context.Context, clusterName, n
 			}
 		}
 
-		time.Sleep(30 * time.Second)
+		time.Sleep(DefaultPollInterval)
 	}
 
 	return fmt.Errorf("timeout waiting for node pool to become running")
