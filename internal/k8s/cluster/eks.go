@@ -1065,8 +1065,48 @@ func (p *EKSProvider) runAWS(ctx context.Context, args ...string) (string, error
 
 	err := cmd.Run()
 	if err != nil {
-		return "", fmt.Errorf("aws command failed: %w, stderr: %s", err, stderr.String())
+		stderrStr := stderr.String()
+		return "", fmt.Errorf("aws command failed: %w, stderr: %s%s", err, stderrStr, p.errorHint(stderrStr))
 	}
 
 	return stdout.String(), nil
+}
+
+// errorHint returns helpful hints for common AWS CLI errors
+func (p *EKSProvider) errorHint(stderr string) string {
+	lower := strings.ToLower(stderr)
+	switch {
+	case strings.Contains(lower, "accessdenied") || strings.Contains(lower, "access denied"):
+		return " (hint: check IAM permissions for EKS operations)"
+	case strings.Contains(lower, "authorizationerror") || strings.Contains(lower, "not authorized"):
+		return " (hint: IAM user/role lacks required permissions)"
+	case strings.Contains(lower, "resourcenotfoundexception"):
+		return " (hint: cluster or resource does not exist)"
+	case strings.Contains(lower, "invalidparameterexception"):
+		return " (hint: check parameter values, e.g., region, cluster name)"
+	case strings.Contains(lower, "resourceinuseexception"):
+		return " (hint: resource is currently in use or being modified)"
+	case strings.Contains(lower, "clusteralreadyexists"):
+		return " (hint: cluster with this name already exists)"
+	case strings.Contains(lower, "limitexceeded") || strings.Contains(lower, "service quota"):
+		return " (hint: AWS service quota exceeded, request increase)"
+	case strings.Contains(lower, "unable to locate credentials") || strings.Contains(lower, "no credentials"):
+		return " (hint: run 'aws configure' or set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY)"
+	case strings.Contains(lower, "expired token") || strings.Contains(lower, "security token"):
+		return " (hint: AWS session token expired, refresh credentials)"
+	case strings.Contains(lower, "invalid region"):
+		return " (hint: check region name, e.g., us-west-2, eu-west-1)"
+	case strings.Contains(lower, "vpc") && strings.Contains(lower, "not found"):
+		return " (hint: VPC does not exist in this region)"
+	case strings.Contains(lower, "subnet") && strings.Contains(lower, "not found"):
+		return " (hint: subnet does not exist or is in a different VPC)"
+	case strings.Contains(lower, "security group") && strings.Contains(lower, "not found"):
+		return " (hint: security group does not exist or is in a different VPC)"
+	case strings.Contains(lower, "role") && (strings.Contains(lower, "not found") || strings.Contains(lower, "invalid")):
+		return " (hint: IAM role ARN is invalid or does not exist)"
+	case strings.Contains(lower, "throttling") || strings.Contains(lower, "rate exceeded"):
+		return " (hint: API rate limit exceeded, retry after a moment)"
+	default:
+		return ""
+	}
 }
