@@ -968,76 +968,174 @@ func (p *EKSProvider) hasEksctl() bool {
 }
 
 func (p *EKSProvider) runEksctl(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "eksctl", args...)
-	cmd.Env = os.Environ()
+	backoffs := []time.Duration{200 * time.Millisecond, 500 * time.Millisecond, 1200 * time.Millisecond}
+	var lastErr error
+	var lastStderr string
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	for attempt := 0; attempt <= len(backoffs); attempt++ {
+		cmd := exec.CommandContext(ctx, "eksctl", args...)
+		cmd.Env = os.Environ()
 
-	err := cmd.Run()
-	if err != nil {
-		return "", fmt.Errorf("eksctl command failed: %w, stderr: %s", err, stderr.String())
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		err := cmd.Run()
+		if err == nil {
+			return stdout.String(), nil
+		}
+
+		lastErr = err
+		lastStderr = strings.TrimSpace(stderr.String())
+
+		if ctx.Err() != nil {
+			break
+		}
+
+		if !p.isRetryableError(lastStderr) {
+			break
+		}
+
+		if attempt < len(backoffs) {
+			time.Sleep(backoffs[attempt])
+		}
 	}
 
-	return stdout.String(), nil
+	if lastErr == nil {
+		return "", fmt.Errorf("eksctl command failed")
+	}
+
+	return "", fmt.Errorf("eksctl command failed: %w, stderr: %s%s", lastErr, lastStderr, p.errorHint(lastStderr))
 }
 
 func (p *EKSProvider) runAWS(ctx context.Context, args ...string) (string, error) {
+	if _, err := exec.LookPath("aws"); err != nil {
+		return "", fmt.Errorf("aws CLI not found in PATH (hint: install AWS CLI v2)")
+	}
+
 	// Add no-cli-pager to prevent interactive output
 	args = append(args, "--no-cli-pager")
 
-	cmd := exec.CommandContext(ctx, "aws", args...)
-	cmd.Env = os.Environ()
+	backoffs := []time.Duration{200 * time.Millisecond, 500 * time.Millisecond, 1200 * time.Millisecond}
+	var lastErr error
+	var lastStderr string
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	for attempt := 0; attempt <= len(backoffs); attempt++ {
+		cmd := exec.CommandContext(ctx, "aws", args...)
+		cmd.Env = os.Environ()
 
-	err := cmd.Run()
-	if err != nil {
-		stderrStr := stderr.String()
-		return "", fmt.Errorf("aws command failed: %w, stderr: %s%s", err, stderrStr, p.errorHint(stderrStr))
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		err := cmd.Run()
+		if err == nil {
+			return stdout.String(), nil
+		}
+
+		lastErr = err
+		lastStderr = strings.TrimSpace(stderr.String())
+
+		if ctx.Err() != nil {
+			break
+		}
+
+		if !p.isRetryableError(lastStderr) {
+			break
+		}
+
+		if attempt < len(backoffs) {
+			time.Sleep(backoffs[attempt])
+		}
 	}
 
-	return stdout.String(), nil
+	if lastErr == nil {
+		return "", fmt.Errorf("aws command failed")
+	}
+
+	return "", fmt.Errorf("aws command failed: %w, stderr: %s%s", lastErr, lastStderr, p.errorHint(lastStderr))
 }
 
-// errorHint returns helpful hints for common AWS CLI errors
+// isRetryableError determines if an AWS CLI error should be retried
+func (p *EKSProvider) isRetryableError(stderr string) bool {
+	lower := strings.ToLower(stderr)
+
+	// Throttling errors
+	if strings.Contains(lower, "throttling") || strings.Contains(lower, "rate exceeded") {
+		return true
+	}
+	if strings.Contains(lower, "too many requests") || strings.Contains(lower, "request limit exceeded") {
+		return true
+	}
+
+	// Timeout errors
+	if strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out") {
+		return true
+	}
+	if strings.Contains(lower, "deadline exceeded") {
+		return true
+	}
+
+	// Transient service errors
+	if strings.Contains(lower, "service unavailable") || strings.Contains(lower, "internal error") {
+		return true
+	}
+	if strings.Contains(lower, "temporarily unavailable") {
+		return true
+	}
+	if strings.Contains(lower, "connection reset") || strings.Contains(lower, "connection refused") {
+		return true
+	}
+
+	// AWS-specific transient errors
+	if strings.Contains(lower, "requestlimitexceeded") {
+		return true
+	}
+	if strings.Contains(lower, "provisionedthroughputexceeded") {
+		return true
+	}
+
+	return false
+}
+
+// errorHint provides helpful guidance for common AWS CLI errors
 func (p *EKSProvider) errorHint(stderr string) string {
 	lower := strings.ToLower(stderr)
 	switch {
 	case strings.Contains(lower, "accessdenied") || strings.Contains(lower, "access denied"):
 		return " (hint: check IAM permissions for EKS operations)"
 	case strings.Contains(lower, "authorizationerror") || strings.Contains(lower, "not authorized"):
-		return " (hint: IAM user/role lacks required permissions)"
-	case strings.Contains(lower, "resourcenotfoundexception"):
-		return " (hint: cluster or resource does not exist)"
-	case strings.Contains(lower, "invalidparameterexception"):
-		return " (hint: check parameter values, e.g., region, cluster name)"
-	case strings.Contains(lower, "resourceinuseexception"):
+		return " (hint: IAM user/role lacks required permissions for this operation)"
+	case strings.Contains(lower, "invalidparameterexception") || strings.Contains(lower, "invalid parameter"):
+		return " (hint: check parameter values match AWS requirements)"
+	case strings.Contains(lower, "resourceinuseexception") || strings.Contains(lower, "resource in use"):
 		return " (hint: resource is currently in use or being modified)"
+	case strings.Contains(lower, "resourcelimitexceeded") || strings.Contains(lower, "limitexceeded") || strings.Contains(lower, "limit exceeded"):
+		return " (hint: AWS service quota exceeded, request limit increase)"
 	case strings.Contains(lower, "clusteralreadyexists"):
-		return " (hint: cluster with this name already exists)"
-	case strings.Contains(lower, "limitexceeded") || strings.Contains(lower, "service quota"):
-		return " (hint: AWS service quota exceeded, request increase)"
+		return " (hint: cluster with this name already exists in the region)"
 	case strings.Contains(lower, "unable to locate credentials") || strings.Contains(lower, "no credentials"):
 		return " (hint: run 'aws configure' or set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY)"
-	case strings.Contains(lower, "expired token") || strings.Contains(lower, "security token"):
+	case strings.Contains(lower, "expiredtoken") || strings.Contains(lower, "token has expired"):
 		return " (hint: AWS session token expired, refresh credentials)"
-	case strings.Contains(lower, "invalid region"):
-		return " (hint: check region name, e.g., us-west-2, eu-west-1)"
+	case strings.Contains(lower, "invalid region") || strings.Contains(lower, "could not connect"):
+		return " (hint: check region name is valid, e.g., us-east-1, eu-west-1)"
+	// Check specific resource types before general "not found"
 	case strings.Contains(lower, "vpc") && strings.Contains(lower, "not found"):
-		return " (hint: VPC does not exist in this region)"
+		return " (hint: VPC does not exist or is not accessible)"
 	case strings.Contains(lower, "subnet") && strings.Contains(lower, "not found"):
-		return " (hint: subnet does not exist or is in a different VPC)"
+		return " (hint: subnet does not exist or is not in the specified VPC)"
 	case strings.Contains(lower, "security group") && strings.Contains(lower, "not found"):
-		return " (hint: security group does not exist or is in a different VPC)"
-	case strings.Contains(lower, "role") && (strings.Contains(lower, "not found") || strings.Contains(lower, "invalid")):
-		return " (hint: IAM role ARN is invalid or does not exist)"
+		return " (hint: security group does not exist or is not accessible)"
+	case strings.Contains(lower, "role") && strings.Contains(lower, "not found"):
+		return " (hint: IAM role ARN is invalid or role does not exist)"
+	// General "not found" check should be after specific resource checks
+	case strings.Contains(lower, "resourcenotfoundexception") || strings.Contains(lower, "not found"):
+		return " (hint: the specified resource does not exist in this region)"
 	case strings.Contains(lower, "throttling") || strings.Contains(lower, "rate exceeded"):
-		return " (hint: API rate limit exceeded, retry after a moment)"
+		return " (hint: API rate limit exceeded, try again shortly)"
 	default:
 		return ""
 	}
 }
+

@@ -264,7 +264,124 @@ func TestProviderManagerIntegration(t *testing.T) {
 	}
 }
 
-func TestEKSProviderErrorHints(t *testing.T) {
+func TestEKSProviderIsRetryableError(t *testing.T) {
+	provider := NewEKSProvider(EKSProviderOptions{
+		Region: "us-east-1",
+	})
+
+	tests := []struct {
+		name      string
+		stderr    string
+		retryable bool
+	}{
+		{
+			name:      "throttling error",
+			stderr:    "Throttling: Rate exceeded",
+			retryable: true,
+		},
+		{
+			name:      "too many requests",
+			stderr:    "TooManyRequestsException: Too many requests",
+			retryable: true,
+		},
+		{
+			name:      "request limit exceeded",
+			stderr:    "Request limit exceeded for this account",
+			retryable: true,
+		},
+		{
+			name:      "timeout error",
+			stderr:    "Connection timeout while connecting to endpoint",
+			retryable: true,
+		},
+		{
+			name:      "timed out",
+			stderr:    "Operation timed out",
+			retryable: true,
+		},
+		{
+			name:      "deadline exceeded",
+			stderr:    "Deadline exceeded while waiting for response",
+			retryable: true,
+		},
+		{
+			name:      "service unavailable",
+			stderr:    "Service Unavailable: The service is currently unavailable",
+			retryable: true,
+		},
+		{
+			name:      "internal error",
+			stderr:    "InternalError: An internal error occurred",
+			retryable: true,
+		},
+		{
+			name:      "temporarily unavailable",
+			stderr:    "The service is temporarily unavailable",
+			retryable: true,
+		},
+		{
+			name:      "connection reset",
+			stderr:    "Connection reset by peer",
+			retryable: true,
+		},
+		{
+			name:      "connection refused",
+			stderr:    "Connection refused",
+			retryable: true,
+		},
+		{
+			name:      "request limit exceeded exception",
+			stderr:    "RequestLimitExceeded: Request limit exceeded",
+			retryable: true,
+		},
+		{
+			name:      "provisioned throughput exceeded",
+			stderr:    "ProvisionedThroughputExceededException: Rate exceeded",
+			retryable: true,
+		},
+		{
+			name:      "access denied not retryable",
+			stderr:    "AccessDenied: User is not authorized",
+			retryable: false,
+		},
+		{
+			name:      "resource not found not retryable",
+			stderr:    "ResourceNotFoundException: cluster not found",
+			retryable: false,
+		},
+		{
+			name:      "invalid parameter not retryable",
+			stderr:    "InvalidParameterException: invalid value",
+			retryable: false,
+		},
+		{
+			name:      "cluster already exists not retryable",
+			stderr:    "ClusterAlreadyExists: cluster test-cluster already exists",
+			retryable: false,
+		},
+		{
+			name:      "no credentials not retryable",
+			stderr:    "Unable to locate credentials",
+			retryable: false,
+		},
+		{
+			name:      "unknown error not retryable",
+			stderr:    "Some unknown error occurred",
+			retryable: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := provider.isRetryableError(tt.stderr)
+			if result != tt.retryable {
+				t.Errorf("isRetryableError(%q) = %v, want %v", tt.stderr, result, tt.retryable)
+			}
+		})
+	}
+}
+
+func TestEKSProviderErrorHint(t *testing.T) {
 	provider := NewEKSProvider(EKSProviderOptions{
 		Region: "us-east-1",
 	})
@@ -300,14 +417,14 @@ func TestEKSProviderErrorHints(t *testing.T) {
 			contains: "currently in use",
 		},
 		{
-			name:     "cluster already exists",
-			stderr:   "ClusterAlreadyExists: cluster test-cluster already exists",
-			contains: "already exists",
-		},
-		{
 			name:     "limit exceeded",
 			stderr:   "LimitExceeded: maximum number of clusters reached",
 			contains: "quota exceeded",
+		},
+		{
+			name:     "cluster already exists",
+			stderr:   "ClusterAlreadyExists: cluster test-cluster already exists",
+			contains: "already exists",
 		},
 		{
 			name:     "no credentials",
