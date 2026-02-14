@@ -1986,6 +1986,81 @@ func (a *Agent) CheckGKEHealth(ctx context.Context, clusterName string) (*Health
 	return provider.Health(ctx, clusterName)
 }
 
+// AKS Provider methods
+
+// RegisterAKSProvider registers the AKS provider with the agent
+func (a *Agent) RegisterAKSProvider(subscriptionID, resourceGroup, region string) {
+	a.clusterMgr.RegisterProvider(cluster.NewAKSProvider(cluster.AKSProviderOptions{
+		SubscriptionID: subscriptionID,
+		ResourceGroup:  resourceGroup,
+		Region:         region,
+		Debug:          a.debug,
+	}))
+}
+
+// ListAKSClusters lists all AKS clusters in the subscription/resource group
+func (a *Agent) ListAKSClusters(ctx context.Context) ([]ClusterInfo, error) {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeAKS)
+	if !ok {
+		return nil, fmt.Errorf("AKS provider not registered; call RegisterAKSProvider first")
+	}
+	return provider.ListClusters(ctx)
+}
+
+// GetAKSCluster gets information about a specific AKS cluster
+func (a *Agent) GetAKSCluster(ctx context.Context, clusterName string) (*ClusterInfo, error) {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeAKS)
+	if !ok {
+		return nil, fmt.Errorf("AKS provider not registered; call RegisterAKSProvider first")
+	}
+	return provider.GetCluster(ctx, clusterName)
+}
+
+// CreateAKSCluster creates a new AKS cluster
+func (a *Agent) CreateAKSCluster(ctx context.Context, opts cluster.CreateOptions) (*ClusterInfo, error) {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeAKS)
+	if !ok {
+		return nil, fmt.Errorf("AKS provider not registered; call RegisterAKSProvider first")
+	}
+	return provider.Create(ctx, opts)
+}
+
+// DeleteAKSCluster deletes an AKS cluster
+func (a *Agent) DeleteAKSCluster(ctx context.Context, clusterName string) error {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeAKS)
+	if !ok {
+		return fmt.Errorf("AKS provider not registered; call RegisterAKSProvider first")
+	}
+	return provider.Delete(ctx, clusterName)
+}
+
+// ScaleAKSCluster scales an AKS cluster node pool
+func (a *Agent) ScaleAKSCluster(ctx context.Context, clusterName string, opts cluster.ScaleOptions) error {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeAKS)
+	if !ok {
+		return fmt.Errorf("AKS provider not registered; call RegisterAKSProvider first")
+	}
+	return provider.Scale(ctx, clusterName, opts)
+}
+
+// GetAKSKubeconfig updates kubeconfig for an AKS cluster
+func (a *Agent) GetAKSKubeconfig(ctx context.Context, clusterName string) (string, error) {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeAKS)
+	if !ok {
+		return "", fmt.Errorf("AKS provider not registered; call RegisterAKSProvider first")
+	}
+	return provider.GetKubeconfig(ctx, clusterName)
+}
+
+// CheckAKSHealth checks the health of an AKS cluster
+func (a *Agent) CheckAKSHealth(ctx context.Context, clusterName string) (*HealthStatus, error) {
+	provider, ok := a.clusterMgr.GetProvider(ClusterTypeAKS)
+	if !ok {
+		return nil, fmt.Errorf("AKS provider not registered; call RegisterAKSProvider first")
+	}
+	return provider.Health(ctx, clusterName)
+}
+
 // GetClusterResources fetches all K8s resources from the current cluster for visualization
 func (a *Agent) GetClusterResources(ctx context.Context, clusterName string, opts QueryOptions) (*ClusterResources, error) {
 	if a.debug {
