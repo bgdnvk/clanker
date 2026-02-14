@@ -693,13 +693,12 @@ func (p *EKSProvider) createNodeGroupWithAWSCLI(ctx context.Context, clusterName
 }
 
 func (p *EKSProvider) waitForNodeGroupActive(ctx context.Context, clusterName, nodeGroupName string) error {
-	timeout := 15 * time.Minute
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(DefaultNodeGroupCreateTimeout)
 
 	for time.Now().Before(deadline) {
 		ng, err := p.describeNodeGroup(ctx, clusterName, nodeGroupName)
 		if err != nil {
-			time.Sleep(30 * time.Second)
+			time.Sleep(DefaultPollInterval)
 			continue
 		}
 
@@ -714,7 +713,7 @@ func (p *EKSProvider) waitForNodeGroupActive(ctx context.Context, clusterName, n
 			return fmt.Errorf("node group creation failed")
 		}
 
-		time.Sleep(30 * time.Second)
+		time.Sleep(DefaultPollInterval)
 	}
 
 	return fmt.Errorf("timeout waiting for node group to become active")
@@ -911,14 +910,14 @@ func (p *EKSProvider) deleteNodeGroup(ctx context.Context, clusterName, nodeGrou
 
 func (p *EKSProvider) waitForClusterActive(ctx context.Context, clusterName, profile, region string, timeout time.Duration) error {
 	if timeout <= 0 {
-		timeout = 20 * time.Minute
+		timeout = DefaultClusterCreateTimeout
 	}
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		cluster, err := p.describeCluster(ctx, clusterName)
 		if err != nil {
-			time.Sleep(30 * time.Second)
+			time.Sleep(DefaultPollInterval)
 			continue
 		}
 
@@ -933,15 +932,14 @@ func (p *EKSProvider) waitForClusterActive(ctx context.Context, clusterName, pro
 			return fmt.Errorf("cluster creation failed")
 		}
 
-		time.Sleep(30 * time.Second)
+		time.Sleep(DefaultPollInterval)
 	}
 
 	return fmt.Errorf("timeout waiting for cluster to become active")
 }
 
 func (p *EKSProvider) waitForNodeGroupDeleted(ctx context.Context, clusterName, nodeGroupName string) error {
-	timeout := 10 * time.Minute
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(DefaultNodeGroupDeleteTimeout)
 
 	for time.Now().Before(deadline) {
 		_, err := p.describeNodeGroup(ctx, clusterName, nodeGroupName)
@@ -954,81 +952,14 @@ func (p *EKSProvider) waitForNodeGroupDeleted(ctx context.Context, clusterName, 
 			fmt.Printf("[aws] waiting for node group %s deletion\n", nodeGroupName)
 		}
 
-		time.Sleep(30 * time.Second)
+		time.Sleep(DefaultPollInterval)
 	}
 
 	return fmt.Errorf("timeout waiting for node group deletion")
 }
 
 func (p *EKSProvider) getNodesViaKubectl(ctx context.Context) ([]NodeInfo, error) {
-	cmd := exec.CommandContext(ctx, "kubectl", "get", "nodes", "-o", "json")
-	cmd.Env = os.Environ()
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("kubectl failed: %w, stderr: %s", err, stderr.String())
-	}
-
-	var nodeList struct {
-		Items []struct {
-			Metadata struct {
-				Name   string            `json:"name"`
-				Labels map[string]string `json:"labels"`
-			} `json:"metadata"`
-			Status struct {
-				Addresses []struct {
-					Type    string `json:"type"`
-					Address string `json:"address"`
-				} `json:"addresses"`
-				Conditions []struct {
-					Type   string `json:"type"`
-					Status string `json:"status"`
-				} `json:"conditions"`
-			} `json:"status"`
-		} `json:"items"`
-	}
-
-	if err := json.Unmarshal(stdout.Bytes(), &nodeList); err != nil {
-		return nil, err
-	}
-
-	nodes := make([]NodeInfo, 0, len(nodeList.Items))
-	for _, item := range nodeList.Items {
-		node := NodeInfo{
-			Name:   item.Metadata.Name,
-			Labels: item.Metadata.Labels,
-			Role:   "worker",
-		}
-
-		// Get addresses
-		for _, addr := range item.Status.Addresses {
-			switch addr.Type {
-			case "InternalIP":
-				node.InternalIP = addr.Address
-			case "ExternalIP":
-				node.ExternalIP = addr.Address
-			}
-		}
-
-		// Get status
-		for _, cond := range item.Status.Conditions {
-			if cond.Type == "Ready" {
-				if cond.Status == "True" {
-					node.Status = "Ready"
-				} else {
-					node.Status = "NotReady"
-				}
-				break
-			}
-		}
-
-		nodes = append(nodes, node)
-	}
-
-	return nodes, nil
+	return GetNodesViaKubectl(ctx)
 }
 
 func (p *EKSProvider) hasEksctl() bool {
@@ -1037,36 +968,174 @@ func (p *EKSProvider) hasEksctl() bool {
 }
 
 func (p *EKSProvider) runEksctl(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "eksctl", args...)
-	cmd.Env = os.Environ()
+	backoffs := []time.Duration{200 * time.Millisecond, 500 * time.Millisecond, 1200 * time.Millisecond}
+	var lastErr error
+	var lastStderr string
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	for attempt := 0; attempt <= len(backoffs); attempt++ {
+		cmd := exec.CommandContext(ctx, "eksctl", args...)
+		cmd.Env = os.Environ()
 
-	err := cmd.Run()
-	if err != nil {
-		return "", fmt.Errorf("eksctl command failed: %w, stderr: %s", err, stderr.String())
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		err := cmd.Run()
+		if err == nil {
+			return stdout.String(), nil
+		}
+
+		lastErr = err
+		lastStderr = strings.TrimSpace(stderr.String())
+
+		if ctx.Err() != nil {
+			break
+		}
+
+		if !p.isRetryableError(lastStderr) {
+			break
+		}
+
+		if attempt < len(backoffs) {
+			time.Sleep(backoffs[attempt])
+		}
 	}
 
-	return stdout.String(), nil
+	if lastErr == nil {
+		return "", fmt.Errorf("eksctl command failed")
+	}
+
+	return "", fmt.Errorf("eksctl command failed: %w, stderr: %s%s", lastErr, lastStderr, p.errorHint(lastStderr))
 }
 
 func (p *EKSProvider) runAWS(ctx context.Context, args ...string) (string, error) {
+	if _, err := exec.LookPath("aws"); err != nil {
+		return "", fmt.Errorf("aws CLI not found in PATH (hint: install AWS CLI v2)")
+	}
+
 	// Add no-cli-pager to prevent interactive output
 	args = append(args, "--no-cli-pager")
 
-	cmd := exec.CommandContext(ctx, "aws", args...)
-	cmd.Env = os.Environ()
+	backoffs := []time.Duration{200 * time.Millisecond, 500 * time.Millisecond, 1200 * time.Millisecond}
+	var lastErr error
+	var lastStderr string
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	for attempt := 0; attempt <= len(backoffs); attempt++ {
+		cmd := exec.CommandContext(ctx, "aws", args...)
+		cmd.Env = os.Environ()
 
-	err := cmd.Run()
-	if err != nil {
-		return "", fmt.Errorf("aws command failed: %w, stderr: %s", err, stderr.String())
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		err := cmd.Run()
+		if err == nil {
+			return stdout.String(), nil
+		}
+
+		lastErr = err
+		lastStderr = strings.TrimSpace(stderr.String())
+
+		if ctx.Err() != nil {
+			break
+		}
+
+		if !p.isRetryableError(lastStderr) {
+			break
+		}
+
+		if attempt < len(backoffs) {
+			time.Sleep(backoffs[attempt])
+		}
 	}
 
-	return stdout.String(), nil
+	if lastErr == nil {
+		return "", fmt.Errorf("aws command failed")
+	}
+
+	return "", fmt.Errorf("aws command failed: %w, stderr: %s%s", lastErr, lastStderr, p.errorHint(lastStderr))
 }
+
+// isRetryableError determines if an AWS CLI error should be retried
+func (p *EKSProvider) isRetryableError(stderr string) bool {
+	lower := strings.ToLower(stderr)
+
+	// Throttling errors
+	if strings.Contains(lower, "throttling") || strings.Contains(lower, "rate exceeded") {
+		return true
+	}
+	if strings.Contains(lower, "too many requests") || strings.Contains(lower, "request limit exceeded") {
+		return true
+	}
+
+	// Timeout errors
+	if strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out") {
+		return true
+	}
+	if strings.Contains(lower, "deadline exceeded") {
+		return true
+	}
+
+	// Transient service errors
+	if strings.Contains(lower, "service unavailable") || strings.Contains(lower, "internal error") {
+		return true
+	}
+	if strings.Contains(lower, "temporarily unavailable") {
+		return true
+	}
+	if strings.Contains(lower, "connection reset") || strings.Contains(lower, "connection refused") {
+		return true
+	}
+
+	// AWS-specific transient errors
+	if strings.Contains(lower, "requestlimitexceeded") {
+		return true
+	}
+	if strings.Contains(lower, "provisionedthroughputexceeded") {
+		return true
+	}
+
+	return false
+}
+
+// errorHint provides helpful guidance for common AWS CLI errors
+func (p *EKSProvider) errorHint(stderr string) string {
+	lower := strings.ToLower(stderr)
+	switch {
+	case strings.Contains(lower, "accessdenied") || strings.Contains(lower, "access denied"):
+		return " (hint: check IAM permissions for EKS operations)"
+	case strings.Contains(lower, "authorizationerror") || strings.Contains(lower, "not authorized"):
+		return " (hint: IAM user/role lacks required permissions for this operation)"
+	case strings.Contains(lower, "invalidparameterexception") || strings.Contains(lower, "invalid parameter"):
+		return " (hint: check parameter values match AWS requirements)"
+	case strings.Contains(lower, "resourceinuseexception") || strings.Contains(lower, "resource in use"):
+		return " (hint: resource is currently in use or being modified)"
+	case strings.Contains(lower, "resourcelimitexceeded") || strings.Contains(lower, "limitexceeded") || strings.Contains(lower, "limit exceeded"):
+		return " (hint: AWS service quota exceeded, request limit increase)"
+	case strings.Contains(lower, "clusteralreadyexists"):
+		return " (hint: cluster with this name already exists in the region)"
+	case strings.Contains(lower, "unable to locate credentials") || strings.Contains(lower, "no credentials"):
+		return " (hint: run 'aws configure' or set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY)"
+	case strings.Contains(lower, "expiredtoken") || strings.Contains(lower, "token has expired"):
+		return " (hint: AWS session token expired, refresh credentials)"
+	case strings.Contains(lower, "invalid region") || strings.Contains(lower, "could not connect"):
+		return " (hint: check region name is valid, e.g., us-east-1, eu-west-1)"
+	// Check specific resource types before general "not found"
+	case strings.Contains(lower, "vpc") && strings.Contains(lower, "not found"):
+		return " (hint: VPC does not exist or is not accessible)"
+	case strings.Contains(lower, "subnet") && strings.Contains(lower, "not found"):
+		return " (hint: subnet does not exist or is not in the specified VPC)"
+	case strings.Contains(lower, "security group") && strings.Contains(lower, "not found"):
+		return " (hint: security group does not exist or is not accessible)"
+	case strings.Contains(lower, "role") && strings.Contains(lower, "not found"):
+		return " (hint: IAM role ARN is invalid or role does not exist)"
+	// General "not found" check should be after specific resource checks
+	case strings.Contains(lower, "resourcenotfoundexception") || strings.Contains(lower, "not found"):
+		return " (hint: the specified resource does not exist in this region)"
+	case strings.Contains(lower, "throttling") || strings.Contains(lower, "rate exceeded"):
+		return " (hint: API rate limit exceeded, try again shortly)"
+	default:
+		return ""
+	}
+}
+

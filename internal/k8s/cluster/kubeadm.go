@@ -113,7 +113,7 @@ func (p *KubeadmProvider) Create(ctx context.Context, opts CreateOptions) (*Clus
 	}
 
 	// Wait for SSH to be available
-	if err := WaitForSSH(ctx, cpInstance.PublicIP, 22, 5*time.Minute); err != nil {
+	if err := WaitForSSH(ctx, cpInstance.PublicIP, 22, DefaultSSHConnectTimeout); err != nil {
 		_ = p.terminateInstance(ctx, cpInstance.InstanceID)
 		_ = p.deleteSecurityGroup(ctx, sgID)
 		return nil, fmt.Errorf("control plane SSH not available: %w", err)
@@ -209,7 +209,7 @@ func (p *KubeadmProvider) Create(ctx context.Context, opts CreateOptions) (*Clus
 		}
 
 		// Wait for SSH
-		if err := WaitForSSH(ctx, workerInstance.PublicIP, 22, 5*time.Minute); err != nil {
+		if err := WaitForSSH(ctx, workerInstance.PublicIP, 22, DefaultSSHConnectTimeout); err != nil {
 			// Continue anyway, will fail on bootstrap
 			if p.debug {
 				fmt.Printf("[kubeadm] warning: worker %d SSH not available: %v\n", i, err)
@@ -279,7 +279,7 @@ func (p *KubeadmProvider) Create(ctx context.Context, opts CreateOptions) (*Clus
 		fmt.Println("[kubeadm] waiting for nodes to be ready...")
 	}
 
-	if err := WaitForNodeReady(ctx, ssh, 5*time.Minute); err != nil {
+	if err := WaitForNodeReady(ctx, ssh, DefaultSSHConnectTimeout); err != nil {
 		if p.debug {
 			fmt.Printf("[kubeadm] warning: not all nodes ready: %v\n", err)
 		}
@@ -342,7 +342,7 @@ func (p *KubeadmProvider) Delete(ctx context.Context, clusterName string) error 
 	}
 
 	// Wait for instances to terminate
-	time.Sleep(30 * time.Second)
+	time.Sleep(DefaultPollInterval)
 
 	// Delete security group
 	sgID, err := p.findSecurityGroup(ctx, clusterName)
@@ -944,7 +944,7 @@ func (p *KubeadmProvider) scaleUp(ctx context.Context, cluster *ClusterInfo, cou
 		}
 
 		// Wait for SSH
-		if err := WaitForSSH(ctx, instance.PublicIP, 22, 5*time.Minute); err != nil {
+		if err := WaitForSSH(ctx, instance.PublicIP, 22, DefaultSSHConnectTimeout); err != nil {
 			continue
 		}
 

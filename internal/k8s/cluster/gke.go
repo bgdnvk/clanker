@@ -579,14 +579,14 @@ func (p *GKEProvider) listNodePools(ctx context.Context, clusterName string) ([]
 
 func (p *GKEProvider) waitForClusterRunning(ctx context.Context, clusterName, project, region string, timeout time.Duration) error {
 	if timeout <= 0 {
-		timeout = 15 * time.Minute
+		timeout = DefaultClusterCreateTimeout
 	}
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		cluster, err := p.describeCluster(ctx, clusterName)
 		if err != nil {
-			time.Sleep(30 * time.Second)
+			time.Sleep(DefaultPollInterval)
 			continue
 		}
 
@@ -601,20 +601,19 @@ func (p *GKEProvider) waitForClusterRunning(ctx context.Context, clusterName, pr
 			return fmt.Errorf("cluster creation failed with status: %s", cluster.Status)
 		}
 
-		time.Sleep(30 * time.Second)
+		time.Sleep(DefaultPollInterval)
 	}
 
 	return fmt.Errorf("timeout waiting for cluster to become running")
 }
 
 func (p *GKEProvider) waitForNodePoolRunning(ctx context.Context, clusterName, nodePoolName string) error {
-	timeout := 10 * time.Minute
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(DefaultNodeGroupCreateTimeout)
 
 	for time.Now().Before(deadline) {
 		nodePools, err := p.listNodePools(ctx, clusterName)
 		if err != nil {
-			time.Sleep(30 * time.Second)
+			time.Sleep(DefaultPollInterval)
 			continue
 		}
 
@@ -634,81 +633,14 @@ func (p *GKEProvider) waitForNodePoolRunning(ctx context.Context, clusterName, n
 			}
 		}
 
-		time.Sleep(30 * time.Second)
+		time.Sleep(DefaultPollInterval)
 	}
 
 	return fmt.Errorf("timeout waiting for node pool to become running")
 }
 
 func (p *GKEProvider) getNodesViaKubectl(ctx context.Context) ([]NodeInfo, error) {
-	cmd := exec.CommandContext(ctx, "kubectl", "get", "nodes", "-o", "json")
-	cmd.Env = os.Environ()
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("kubectl failed: %w, stderr: %s", err, stderr.String())
-	}
-
-	var nodeList struct {
-		Items []struct {
-			Metadata struct {
-				Name   string            `json:"name"`
-				Labels map[string]string `json:"labels"`
-			} `json:"metadata"`
-			Status struct {
-				Addresses []struct {
-					Type    string `json:"type"`
-					Address string `json:"address"`
-				} `json:"addresses"`
-				Conditions []struct {
-					Type   string `json:"type"`
-					Status string `json:"status"`
-				} `json:"conditions"`
-			} `json:"status"`
-		} `json:"items"`
-	}
-
-	if err := json.Unmarshal(stdout.Bytes(), &nodeList); err != nil {
-		return nil, err
-	}
-
-	nodes := make([]NodeInfo, 0, len(nodeList.Items))
-	for _, item := range nodeList.Items {
-		node := NodeInfo{
-			Name:   item.Metadata.Name,
-			Labels: item.Metadata.Labels,
-			Role:   "worker",
-		}
-
-		// Get addresses
-		for _, addr := range item.Status.Addresses {
-			switch addr.Type {
-			case "InternalIP":
-				node.InternalIP = addr.Address
-			case "ExternalIP":
-				node.ExternalIP = addr.Address
-			}
-		}
-
-		// Get status
-		for _, cond := range item.Status.Conditions {
-			if cond.Type == "Ready" {
-				if cond.Status == "True" {
-					node.Status = "Ready"
-				} else {
-					node.Status = "NotReady"
-				}
-				break
-			}
-		}
-
-		nodes = append(nodes, node)
-	}
-
-	return nodes, nil
+	return GetNodesViaKubectl(ctx)
 }
 
 func (p *GKEProvider) runGcloud(ctx context.Context, project string, args ...string) (string, error) {
