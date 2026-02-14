@@ -2,8 +2,34 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
+
+// Debug logging format convention:
+// All debug output should follow the pattern: [provider] action: details
+//
+// Examples:
+//   [eks] creating cluster: aws eks create-cluster --name test
+//   [gke] cluster test-cluster status: RUNNING
+//   [kubeadm] bootstrapping worker 1...
+//   [ssh] connecting to user@host
+//
+// The provider tag should be lowercase and match the tool being used:
+//   - [eks], [eksctl], [aws] - for EKS operations
+//   - [gke], [gcloud] - for GKE operations
+//   - [kubeadm] - for kubeadm operations
+//   - [kubectl] - for kubectl operations
+//   - [ssh] - for SSH operations
+
+// DebugLog prints a debug message with consistent formatting
+func DebugLog(debug bool, provider, format string, args ...interface{}) {
+	if !debug {
+		return
+	}
+	message := fmt.Sprintf(format, args...)
+	fmt.Printf("[%s] %s\n", provider, message)
+}
 
 // ClusterType identifies the Kubernetes cluster provisioning method
 type ClusterType string
