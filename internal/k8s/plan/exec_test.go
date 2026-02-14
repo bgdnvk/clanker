@@ -138,9 +138,9 @@ func TestApplyBindingsToString(t *testing.T) {
 
 func TestLearnBindingsFromOutput(t *testing.T) {
 	tests := []struct {
-		name            string
-		produces        map[string]string
-		output          string
+		name             string
+		produces         map[string]string
+		output           string
 		expectedBindings map[string]string
 	}{
 		{
@@ -183,7 +183,7 @@ func TestLearnBindingsFromOutput(t *testing.T) {
 		},
 		{
 			name:             "empty produces",
-			produces:        map[string]string{},
+			produces:         map[string]string{},
 			output:           "Some output",
 			expectedBindings: map[string]string{},
 		},
