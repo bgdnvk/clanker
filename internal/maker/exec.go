@@ -21,6 +21,7 @@ import (
 
 var awsErrorCodeRe = regexp.MustCompile(`(?i)an error occurred \(([^)]+)\)`)
 var planPlaceholderTokenRe = regexp.MustCompile(`<([A-Z0-9_]+)>`)
+var shellStylePlaceholderTokenRe = regexp.MustCompile(`^\$[A-Z][A-Z0-9_]*$`)
 
 type AWSFailureCategory string
 
@@ -206,6 +207,11 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 
 		// Handle EC2 user-data generation for run-instances
 		args = maybeGenerateEC2UserData(args, bindings, opts)
+		args = sanitizeCommandArgsForExecution(args, bindings)
+
+		if unresolved := findUnresolvedExecutionTokens(args); len(unresolved) > 0 {
+			return fmt.Errorf("command %d has unresolved placeholders: %s", idx+1, strings.Join(unresolved, ", "))
+		}
 
 		if handled, localErr := maybeRunLocalPlanStep(ctx, idx+1, len(plan.Commands), args, opts.Writer); handled {
 			if localErr != nil {
@@ -1379,6 +1385,168 @@ echo 'Deployment complete!'
 	return newArgs
 }
 
+func sanitizeCommandArgsForExecution(args []string, bindings map[string]string) []string {
+	if len(args) < 2 || args[0] != "ec2" || args[1] != "run-instances" {
+		return args
+	}
+
+	valueIdx := -1
+	inlineIdx := -1
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--user-data" && i+1 < len(args) {
+			valueIdx = i + 1
+			break
+		}
+		if strings.HasPrefix(args[i], "--user-data=") {
+			inlineIdx = i
+			break
+		}
+	}
+
+	if valueIdx < 0 && inlineIdx < 0 {
+		return args
+	}
+
+	newArgs := make([]string, len(args))
+	copy(newArgs, args)
+
+	value := ""
+	if valueIdx >= 0 {
+		value = newArgs[valueIdx]
+	} else {
+		value = strings.TrimPrefix(newArgs[inlineIdx], "--user-data=")
+	}
+
+	trimmed := strings.TrimSpace(value)
+	if isUserDataPlaceholderValue(trimmed) {
+		if v := strings.TrimSpace(bindings["USER_DATA"]); v != "" {
+			trimmed = v
+		} else if v := strings.TrimSpace(bindings["NODEJS_USER_DATA"]); v != "" {
+			trimmed = v
+		}
+	}
+
+	if decoded, ok := decodeLikelyBase64UserData(trimmed); ok {
+		trimmed = decoded
+	}
+
+	trimmed = strings.ReplaceAll(trimmed, "\r\n", "\n")
+
+	if valueIdx >= 0 {
+		newArgs[valueIdx] = trimmed
+	} else {
+		newArgs[inlineIdx] = "--user-data=" + trimmed
+	}
+
+	return newArgs
+}
+
+func isUserDataPlaceholderValue(v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return false
+	}
+	if v == "<USER_DATA>" || v == "<user_data>" || v == "$USER_DATA" {
+		return true
+	}
+	return strings.Contains(v, "<USER_DATA>") || strings.Contains(v, "<user_data>") || strings.Contains(v, "$USER_DATA")
+}
+
+func decodeLikelyBase64UserData(v string) (string, bool) {
+	v = strings.TrimSpace(v)
+	if v == "" || strings.HasPrefix(v, "file://") {
+		return "", false
+	}
+	if strings.ContainsAny(v, " \t\r\n") {
+		return "", false
+	}
+	if len(v) < 24 {
+		return "", false
+	}
+
+	decodeAttempts := []func(string) ([]byte, error){
+		base64.StdEncoding.DecodeString,
+		base64.RawStdEncoding.DecodeString,
+		base64.URLEncoding.DecodeString,
+		base64.RawURLEncoding.DecodeString,
+	}
+	for _, decodeFn := range decodeAttempts {
+		decoded, err := decodeFn(v)
+		if err != nil || len(decoded) == 0 {
+			continue
+		}
+		s := strings.TrimSpace(string(decoded))
+		if looksLikeUserDataScript(s) {
+			return s, true
+		}
+	}
+
+	return "", false
+}
+
+func looksLikeUserDataScript(script string) bool {
+	if script == "" {
+		return false
+	}
+	lower := strings.ToLower(script)
+	if strings.HasPrefix(script, "#!") {
+		return true
+	}
+	if strings.Contains(lower, "docker") && (strings.Contains(lower, "systemctl") || strings.Contains(lower, "dnf") || strings.Contains(lower, "apt") || strings.Contains(lower, "yum")) {
+		return true
+	}
+	if strings.Contains(script, "\n") && (strings.Contains(lower, "aws ") || strings.Contains(lower, "bash") || strings.Contains(lower, "curl ")) {
+		return true
+	}
+	return false
+}
+
+func findUnresolvedExecutionTokens(args []string) []string {
+	if len(args) == 0 {
+		return nil
+	}
+
+	userDataValueIdx := -1
+	userDataInlineIdx := -1
+	if len(args) >= 2 && strings.EqualFold(strings.TrimSpace(args[0]), "ec2") && strings.EqualFold(strings.TrimSpace(args[1]), "run-instances") {
+		for i := 0; i < len(args); i++ {
+			if args[i] == "--user-data" && i+1 < len(args) {
+				userDataValueIdx = i + 1
+				break
+			}
+			if strings.HasPrefix(args[i], "--user-data=") {
+				userDataInlineIdx = i
+				break
+			}
+		}
+	}
+
+	seen := map[string]bool{}
+	result := make([]string, 0, 4)
+
+	for i, arg := range args {
+		for _, m := range planPlaceholderTokenRe.FindAllString(arg, -1) {
+			if !seen[m] {
+				seen[m] = true
+				result = append(result, m)
+			}
+		}
+
+		if i == userDataValueIdx || i == userDataInlineIdx {
+			continue
+		}
+		if shellStylePlaceholderTokenRe.MatchString(strings.TrimSpace(arg)) {
+			token := strings.TrimSpace(arg)
+			if !seen[token] {
+				seen[token] = true
+				result = append(result, token)
+			}
+		}
+	}
+
+	return result
+}
+
 func maybeInjectLambdaZipBytes(args []string, w io.Writer) ([]byte, []string, error) {
 	if len(args) < 2 {
 		return nil, args, nil
@@ -2418,7 +2586,21 @@ func validateCommand(args []string, allowDestructive bool) error {
 		return fmt.Errorf("non-aws command is not allowed: %q", args[0])
 	}
 
-	for _, a := range args {
+	isEC2RunInstances := len(args) >= 2 && strings.EqualFold(strings.TrimSpace(args[0]), "ec2") && strings.EqualFold(strings.TrimSpace(args[1]), "run-instances")
+
+	for i, a := range args {
+		if isEC2RunInstances {
+			if strings.EqualFold(strings.TrimSpace(a), "--user-data") {
+				continue
+			}
+			if i > 0 && strings.EqualFold(strings.TrimSpace(args[i-1]), "--user-data") {
+				continue
+			}
+			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(a)), "--user-data=") {
+				continue
+			}
+		}
+
 		lower := strings.ToLower(a)
 		if strings.Contains(lower, ";") || strings.Contains(lower, "|") || strings.Contains(lower, "&&") || strings.Contains(lower, "||") {
 			return fmt.Errorf("shell operators are not allowed")

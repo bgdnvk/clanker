@@ -18,6 +18,10 @@ func maybeGenericGlueAndRetry(
 	failure AWSFailure,
 	output string,
 ) (bool, error) {
+	if ok, err := maybeRemediateSingletonAssociation(ctx, opts, args, awsArgs, stdinBytes, failure, output); ok {
+		return true, err
+	}
+
 	// Generic cross-service glue ("support all services")
 	//
 	// 1) Idempotency for delete-like operations: treat not-found as success.
@@ -109,6 +113,111 @@ func maybeGenericGlueAndRetry(
 	}
 
 	return false, nil
+}
+
+func maybeRemediateSingletonAssociation(
+	ctx context.Context,
+	opts ExecOptions,
+	args []string,
+	awsArgs []string,
+	stdinBytes []byte,
+	failure AWSFailure,
+	output string,
+) (bool, error) {
+	if args0(args) != "iam" || args1(args) != "add-role-to-instance-profile" {
+		return false, nil
+	}
+
+	lower := strings.ToLower(output)
+	if failure.Code != "LimitExceeded" && !strings.Contains(lower, "instancesessionsperinstanceprofile") {
+		return false, nil
+	}
+
+	profileName := strings.TrimSpace(flagValue(args, "--instance-profile-name"))
+	desiredRole := strings.TrimSpace(flagValue(args, "--role-name"))
+	if profileName == "" || desiredRole == "" {
+		return false, nil
+	}
+
+	attachedRoles, err := getInstanceProfileRoleNames(ctx, opts, profileName)
+	if err != nil {
+		return true, err
+	}
+
+	for _, roleName := range attachedRoles {
+		if roleName == desiredRole {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: instance profile already has desired role attached; treating as success (instanceProfile=%s role=%s)\n", profileName, desiredRole)
+			return true, nil
+		}
+	}
+
+	if len(attachedRoles) == 0 {
+		_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: instance profile role appears stale; retrying add-role with backoff (instanceProfile=%s role=%s)\n", profileName, desiredRole)
+		err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+			return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+		})
+		return true, err
+	}
+
+	if !opts.Destroyer {
+		return true, fmt.Errorf("instance profile %s already has role %s attached; safe-first mode will not replace it without destroyer approval (wanted role=%s)", profileName, attachedRoles[0], desiredRole)
+	}
+
+	for _, roleName := range attachedRoles {
+		if strings.TrimSpace(roleName) == "" {
+			continue
+		}
+		remove := []string{"iam", "remove-role-from-instance-profile", "--instance-profile-name", profileName, "--role-name", roleName, "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+		_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: replacing attached role on instance profile (instanceProfile=%s oldRole=%s newRole=%s)\n", profileName, roleName, desiredRole)
+		if _, removeErr := runAWSCommandStreaming(ctx, remove, nil, opts.Writer); removeErr != nil {
+			return true, removeErr
+		}
+	}
+
+	if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+		return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+	}); err != nil {
+		return true, err
+	}
+
+	return true, nil
+}
+
+func getInstanceProfileRoleNames(ctx context.Context, opts ExecOptions, profileName string) ([]string, error) {
+	query := []string{
+		"iam", "get-instance-profile",
+		"--instance-profile-name", profileName,
+		"--output", "json",
+		"--profile", opts.Profile,
+		"--region", opts.Region,
+		"--no-cli-pager",
+	}
+	out, err := runAWSCommandStreaming(ctx, query, nil, io.Discard)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp struct {
+		InstanceProfile struct {
+			Roles []struct {
+				RoleName string `json:"RoleName"`
+			} `json:"Roles"`
+		} `json:"InstanceProfile"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return nil, err
+	}
+
+	roles := make([]string, 0, len(resp.InstanceProfile.Roles))
+	for _, role := range resp.InstanceProfile.Roles {
+		name := strings.TrimSpace(role.RoleName)
+		if name == "" {
+			continue
+		}
+		roles = append(roles, name)
+	}
+
+	return roles, nil
 }
 
 func maybeLLMAfterGenericExhausted(
