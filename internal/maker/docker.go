@@ -4,9 +4,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+var repoURLInQuestionRe = regexp.MustCompile(`https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+`)
 
 // BuildAndPushDockerImage builds a Docker image locally and pushes to ECR.
 // It handles ECR authentication, building the image, tagging, and pushing.
@@ -77,4 +82,83 @@ func extractAccountFromECR(uri string) string {
 		return parts[0]
 	}
 	return ""
+}
+
+func extractRepositoryFromECR(uri string) string {
+	uri = strings.TrimSpace(uri)
+	if uri == "" {
+		return ""
+	}
+	parts := strings.SplitN(uri, "/", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(parts[1])
+}
+
+func ecrImageTagExists(ctx context.Context, ecrURI, profile, region, imageTag string) (bool, error) {
+	repo := extractRepositoryFromECR(ecrURI)
+	if repo == "" {
+		return false, fmt.Errorf("failed to extract repository from ECR URI: %s", ecrURI)
+	}
+	if strings.TrimSpace(imageTag) == "" {
+		imageTag = "latest"
+	}
+
+	args := []string{
+		"ecr", "describe-images",
+		"--repository-name", repo,
+		"--image-ids", "imageTag=" + imageTag,
+		"--profile", profile,
+		"--region", region,
+		"--no-cli-pager",
+	}
+	cmd := exec.CommandContext(ctx, "aws", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		lower := strings.ToLower(string(out))
+		if strings.Contains(lower, "imagetagdoesnotmatchdigest") || strings.Contains(lower, "imagenotfoundexception") || strings.Contains(lower, "requested image not found") {
+			return false, nil
+		}
+		return false, fmt.Errorf("describe-images failed: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+
+	if strings.Contains(string(out), "imageDigest") {
+		return true, nil
+	}
+	return false, nil
+}
+
+func extractRepoURLFromQuestion(question string) string {
+	question = strings.TrimSpace(question)
+	if question == "" {
+		return ""
+	}
+	return strings.TrimSpace(repoURLInQuestionRe.FindString(question))
+}
+
+func cloneRepoForImageBuild(ctx context.Context, repoURL string) (clonePath string, cleanup func(), err error) {
+	repoURL = strings.TrimSpace(repoURL)
+	if repoURL == "" {
+		return "", nil, fmt.Errorf("missing repo URL for image build")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "clanker-image-build-")
+	if err != nil {
+		return "", nil, err
+	}
+
+	cleanup = func() {
+		_ = os.RemoveAll(tmpDir)
+	}
+
+	targetDir := filepath.Join(tmpDir, "repo")
+	cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", repoURL, targetDir)
+	out, cloneErr := cmd.CombinedOutput()
+	if cloneErr != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("git clone failed: %w (%s)", cloneErr, strings.TrimSpace(string(out)))
+	}
+
+	return targetDir, cleanup, nil
 }

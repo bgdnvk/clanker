@@ -133,6 +133,7 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	bindings := make(map[string]string)
 	healPolicy := defaultHealingPolicy()
 	healRuntime := &healingRuntime{StartedAt: time.Now()}
+	autoImagePrepared := false
 
 	// Initialize bindings from OutputBindings if provided (for multi-phase execution)
 	if opts.OutputBindings != nil {
@@ -207,6 +208,13 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 
 		// Handle EC2 user-data generation for run-instances
 		args = maybeGenerateEC2UserData(args, bindings, opts)
+
+		if !autoImagePrepared && shouldAutoPrepareImage(args, bindings, opts) {
+			if err := autoPrepareImageForOneClickDeploy(ctx, plan.Question, bindings, opts); err != nil {
+				return fmt.Errorf("command %d image preparation failed: %w", idx+1, err)
+			}
+			autoImagePrepared = true
+		}
 		args = sanitizeCommandArgsForExecution(args, bindings)
 
 		if unresolved := findUnresolvedExecutionTokens(args); len(unresolved) > 0 {
@@ -315,6 +323,64 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		}
 	}
 
+	return nil
+}
+
+func shouldAutoPrepareImage(args []string, bindings map[string]string, opts ExecOptions) bool {
+	if len(args) < 2 || args[0] != "ec2" || args[1] != "run-instances" {
+		return false
+	}
+	if strings.TrimSpace(opts.Profile) == "" || strings.TrimSpace(opts.Region) == "" {
+		return false
+	}
+	ecrURI := strings.TrimSpace(bindings["ECR_URI"])
+	if ecrURI == "" {
+		return false
+	}
+	if strings.TrimSpace(bindings["IMAGE_URI"]) != "" {
+		return false
+	}
+	return true
+}
+
+func autoPrepareImageForOneClickDeploy(ctx context.Context, question string, bindings map[string]string, opts ExecOptions) error {
+	ecrURI := strings.TrimSpace(bindings["ECR_URI"])
+	if ecrURI == "" {
+		return fmt.Errorf("missing ECR_URI binding")
+	}
+
+	if !HasDockerInstalled() {
+		return fmt.Errorf("docker is required for one-click image build but is not installed")
+	}
+
+	exists, err := ecrImageTagExists(ctx, ecrURI, opts.Profile, opts.Region, "latest")
+	if err != nil {
+		return err
+	}
+	if exists {
+		bindings["IMAGE_URI"] = ecrURI + ":latest"
+		_, _ = fmt.Fprintf(opts.Writer, "[docker] found existing image in ECR, skipping build: %s\n", bindings["IMAGE_URI"])
+		return nil
+	}
+
+	repoURL := extractRepoURLFromQuestion(question)
+	if repoURL == "" {
+		return fmt.Errorf("ECR image missing and repo URL could not be inferred from plan question")
+	}
+
+	_, _ = fmt.Fprintf(opts.Writer, "[docker] one-click: image missing in ECR, building and pushing from repo %s\n", repoURL)
+	clonePath, cleanup, err := cloneRepoForImageBuild(ctx, repoURL)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	imageURI, err := BuildAndPushDockerImage(ctx, clonePath, ecrURI, opts.Profile, opts.Region, opts.Writer)
+	if err != nil {
+		return err
+	}
+	bindings["IMAGE_URI"] = imageURI
+	_, _ = fmt.Fprintf(opts.Writer, "[docker] one-click: image ready %s\n", imageURI)
 	return nil
 }
 
