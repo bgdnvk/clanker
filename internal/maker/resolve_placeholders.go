@@ -266,10 +266,15 @@ func maybeResolvePlaceholdersWithAI(ctx context.Context, opts ExecOptions, args 
 		if resolution != nil && len(resolution.Bindings) > 0 {
 			// Apply new bindings
 			for k, v := range resolution.Bindings {
-				if strings.TrimSpace(v) != "" {
-					bindings[k] = v
-					_, _ = fmt.Fprintf(opts.Writer, "[maker] AI resolved: %s = %s\n", k, v)
+				if strings.TrimSpace(v) == "" {
+					continue
 				}
+				if !bindingLooksCompatible(k, v) {
+					_, _ = fmt.Fprintf(opts.Writer, "[maker] AI resolved incompatible binding ignored: %s = %s\n", k, v)
+					continue
+				}
+				bindings[k] = v
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] AI resolved: %s = %s\n", k, v)
 			}
 
 			// Re-apply bindings to args
@@ -294,10 +299,15 @@ func maybeResolvePlaceholdersWithAI(ctx context.Context, opts ExecOptions, args 
 
 		if discovery != nil && len(discovery.Bindings) > 0 {
 			for k, v := range discovery.Bindings {
-				if strings.TrimSpace(v) != "" {
-					bindings[k] = v
-					_, _ = fmt.Fprintf(opts.Writer, "[maker] AI discovered: %s = %s\n", k, v)
+				if strings.TrimSpace(v) == "" {
+					continue
 				}
+				if !bindingLooksCompatible(k, v) {
+					_, _ = fmt.Fprintf(opts.Writer, "[maker] AI discovered incompatible binding ignored: %s = %s\n", k, v)
+					continue
+				}
+				bindings[k] = v
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] AI discovered: %s = %s\n", k, v)
 			}
 
 			resolved := applyPlanBindings(args, bindings)

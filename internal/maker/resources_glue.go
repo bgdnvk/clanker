@@ -707,6 +707,15 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 		}
 		if op == "create-target-group" {
 			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "duplicatetargetgroupname") || strings.Contains(lower, "already exists") {
+				tgName := strings.TrimSpace(flagValue(args, "--name"))
+				if tgName != "" {
+					if tgArn, err := describeTargetGroupArnByName(ctx, opts, tgName); err == nil && strings.TrimSpace(tgArn) != "" {
+						bindings["TG_ARN"] = strings.TrimSpace(tgArn)
+						_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: using existing target group ARN (name=%s)\n", tgName)
+					} else if err != nil {
+						_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to resolve existing target group ARN for %s: %v\n", tgName, err)
+					}
+				}
 				return true, nil
 			}
 		}
@@ -1510,6 +1519,39 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 
 	// Nothing to rewrite.
 	return false, nil
+}
+
+func describeTargetGroupArnByName(ctx context.Context, opts ExecOptions, tgName string) (string, error) {
+	tgName = strings.TrimSpace(tgName)
+	if tgName == "" {
+		return "", nil
+	}
+
+	args := []string{
+		"elbv2", "describe-target-groups",
+		"--names", tgName,
+		"--output", "json",
+		"--profile", opts.Profile,
+		"--region", opts.Region,
+		"--no-cli-pager",
+	}
+	out, err := runAWSCommandStreaming(ctx, args, nil, io.Discard)
+	if err != nil {
+		return "", err
+	}
+
+	var resp struct {
+		TargetGroups []struct {
+			TargetGroupArn string `json:"TargetGroupArn"`
+		} `json:"TargetGroups"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return "", err
+	}
+	if len(resp.TargetGroups) == 0 {
+		return "", nil
+	}
+	return strings.TrimSpace(resp.TargetGroups[0].TargetGroupArn), nil
 }
 
 func rewriteFlagName(args []string, from string, to string) ([]string, bool) {

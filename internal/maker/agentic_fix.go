@@ -133,10 +133,15 @@ func maybeAgenticFix(
 		// Apply new bindings
 		if len(fix.Bindings) > 0 {
 			for k, v := range fix.Bindings {
-				if strings.TrimSpace(v) != "" {
-					bindings[k] = v
-					_, _ = fmt.Fprintf(opts.Writer, "[maker] AI binding: %s = %s\n", k, v)
+				if strings.TrimSpace(v) == "" {
+					continue
 				}
+				if !bindingLooksCompatible(k, v) {
+					_, _ = fmt.Fprintf(opts.Writer, "[maker] AI binding incompatible, ignored: %s = %s\n", k, v)
+					continue
+				}
+				bindings[k] = v
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] AI binding: %s = %s\n", k, v)
 			}
 		}
 

@@ -132,6 +132,13 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		// Handle EC2 user-data generation for run-instances
 		args = maybeGenerateEC2UserData(args, bindings, opts)
 
+		if handled, localErr := maybeRunLocalPlanStep(ctx, idx+1, len(plan.Commands), args, opts.Writer); handled {
+			if localErr != nil {
+				return fmt.Errorf("command %d failed: %w", idx+1, localErr)
+			}
+			continue
+		}
+
 		awsArgs := make([]string, 0, len(args)+6)
 		awsArgs = append(awsArgs, args...)
 		awsArgs = append(awsArgs, "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
@@ -1028,6 +1035,43 @@ func resolveAWSAccountID(ctx context.Context, opts ExecOptions) (string, error) 
 	}
 
 	return accountID, nil
+}
+
+func maybeRunLocalPlanStep(ctx context.Context, index, total int, args []string, w io.Writer) (bool, error) {
+	if len(args) == 0 {
+		return false, nil
+	}
+
+	verb := strings.ToLower(strings.TrimSpace(args[0]))
+	if verb != "sleep" {
+		return false, nil
+	}
+
+	if len(args) != 2 {
+		return true, fmt.Errorf("sleep expects exactly one argument")
+	}
+
+	seconds, err := strconv.Atoi(strings.TrimSpace(args[1]))
+	if err != nil {
+		return true, fmt.Errorf("invalid sleep duration %q", args[1])
+	}
+	if seconds < 0 || seconds > 600 {
+		return true, fmt.Errorf("sleep duration out of range: %d", seconds)
+	}
+
+	_, _ = fmt.Fprintf(w, "[maker] running %d/%d: sleep %d\n", index, total, seconds)
+	if seconds == 0 {
+		return true, nil
+	}
+
+	timer := time.NewTimer(time.Duration(seconds) * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return true, ctx.Err()
+	case <-timer.C:
+		return true, nil
+	}
 }
 
 // maybeGenerateEC2UserData handles user-data generation for EC2 run-instances commands.
