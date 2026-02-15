@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 )
 
 // AskFunc is the LLM call interface — matches ai.Client.AskPrompt signature
@@ -17,6 +18,7 @@ type CleanFunc func(response string) string
 type IntelligenceResult struct {
 	Exploration  *ExplorationResult `json:"exploration,omitempty"`
 	DeepAnalysis *DeepAnalysis      `json:"deepAnalysis"`
+	Docker       *DockerAnalysis    `json:"docker,omitempty"`
 	InfraSnap    *InfraSnapshot     `json:"infraSnapshot,omitempty"`
 	CFInfraSnap  *CFInfraSnapshot   `json:"cfInfraSnapshot,omitempty"`
 	Architecture *ArchitectDecision `json:"architecture"`
@@ -173,25 +175,65 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 		profile.KeyFiles[name] = content
 	}
 
-	// Phase 1: Deep Understanding — LLM reads all gathered files
-	logf("[intelligence] phase 1: deep understanding (%d files)...", len(profile.KeyFiles))
-	deepPrompt := buildDeepAnalysisPrompt(profile)
-	deepResp, err := ask(ctx, deepPrompt)
-	if err != nil {
-		return nil, fmt.Errorf("phase 1 (deep analysis) failed: %w", err)
-	}
+	var deep *DeepAnalysis
+	var infraSnap *InfraSnapshot
+	var cfInfraSnap *CFInfraSnapshot
+	var deepErr error
 
-	deep, err := parseDeepAnalysis(clean(deepResp))
-	if err != nil {
-		logf("[intelligence] warning: deep analysis parse failed (%v), continuing with static analysis", err)
-		deep = &DeepAnalysis{
-			AppDescription: profile.Summary,
-			Complexity:     "unknown",
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	go func() {
+		defer wg.Done()
+		logf("[intelligence] phase 1: deep understanding (%d files)...", len(profile.KeyFiles))
+		deepPrompt := buildDeepAnalysisPrompt(profile)
+		deepResp, callErr := ask(ctx, deepPrompt)
+		if callErr != nil {
+			deepErr = fmt.Errorf("phase 1 (deep analysis) failed: %w", callErr)
+			return
 		}
-		// use exploration analysis as fallback
-		if exploration.Analysis != "" {
-			deep.AppDescription = exploration.Analysis
+
+		parsed, parseErr := parseDeepAnalysis(clean(deepResp))
+		if parseErr != nil {
+			logf("[intelligence] warning: deep analysis parse failed (%v), continuing with static analysis", parseErr)
+			parsed = &DeepAnalysis{
+				AppDescription: profile.Summary,
+				Complexity:     "unknown",
+			}
+			if exploration.Analysis != "" {
+				parsed.AppDescription = exploration.Analysis
+			}
 		}
+		deep = parsed
+	}()
+
+	go func() {
+		defer wg.Done()
+		logf("[intelligence] phase 1.25: docker-agent analysis (parallel)...")
+		docker := AnalyzeDockerAgent(profile)
+		result.Docker = docker
+		if docker != nil {
+			logf("[docker-agent] dockerfile=%t compose=%t services=%d primaryPort=%d", docker.HasDockerfile, docker.HasCompose, len(docker.ComposeServices), docker.PrimaryPort)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		switch strings.ToLower(strings.TrimSpace(targetProvider)) {
+		case "cloudflare":
+			logf("[intelligence] phase 1.5: scanning Cloudflare infrastructure...")
+			cfInfraSnap = ScanCFInfra(ctx, logf)
+		case "aws", "":
+			logf("[intelligence] phase 1.5: scanning AWS infrastructure...")
+			infraSnap = ScanInfra(ctx, awsProfile, awsRegion, logf)
+		default:
+			logf("[intelligence] phase 1.5: skipping infrastructure scan for provider=%s", targetProvider)
+		}
+	}()
+
+	wg.Wait()
+	if deepErr != nil {
+		return nil, deepErr
 	}
 	result.DeepAnalysis = deep
 
@@ -206,21 +248,8 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 		logf("[intelligence] deep analysis: %s (complexity: %s)", deep.AppDescription, deep.Complexity)
 	}
 
-	// Phase 1.5: Infra scan — query cloud provider for existing resources
-	var infraSnap *InfraSnapshot
-	var cfInfraSnap *CFInfraSnapshot
-	switch strings.ToLower(strings.TrimSpace(targetProvider)) {
-	case "cloudflare":
-		logf("[intelligence] phase 1.5: scanning Cloudflare infrastructure...")
-		cfInfraSnap = ScanCFInfra(ctx, logf)
-		result.CFInfraSnap = cfInfraSnap
-	case "aws", "":
-		logf("[intelligence] phase 1.5: scanning AWS infrastructure...")
-		infraSnap = ScanInfra(ctx, awsProfile, awsRegion, logf)
-		result.InfraSnap = infraSnap
-	default:
-		logf("[intelligence] phase 1.5: skipping infrastructure scan for provider=%s", targetProvider)
-	}
+	result.InfraSnap = infraSnap
+	result.CFInfraSnap = cfInfraSnap
 
 	// Phase 2: Architecture Decision + Cost Estimation
 	logf("[intelligence] phase 2: architecture + cost estimation (target: %s)...", opts.Target)
@@ -263,7 +292,7 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 
 	// build the final enriched prompt with all intelligence + infra context
 	strat := StrategyFromArchitect(arch)
-	result.EnrichedPrompt = buildIntelligentPrompt(profile, deep, arch, strat, infraSnap, cfInfraSnap, opts)
+	result.EnrichedPrompt = buildIntelligentPrompt(profile, deep, result.Docker, arch, strat, infraSnap, cfInfraSnap, opts)
 
 	return result, nil
 }
@@ -271,10 +300,10 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 // ValidatePlan runs the LLM validation phase on a generated plan.
 // Call this AFTER the maker plan is generated.
 // Returns validation result and an optional revised prompt if issues were found.
-func ValidatePlan(ctx context.Context, planJSON string, profile *RepoProfile, deep *DeepAnalysis, requireDockerCommandsInPlan bool, ask AskFunc, clean CleanFunc, logf func(string, ...any)) (*PlanValidation, string, error) {
+func ValidatePlan(ctx context.Context, planJSON string, profile *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis, requireDockerCommandsInPlan bool, ask AskFunc, clean CleanFunc, logf func(string, ...any)) (*PlanValidation, string, error) {
 	logf("[intelligence] phase 4: plan validation...")
 
-	prompt := buildValidationPrompt(planJSON, profile, deep, requireDockerCommandsInPlan)
+	prompt := buildValidationPrompt(planJSON, profile, deep, docker, requireDockerCommandsInPlan)
 	resp, err := ask(ctx, prompt)
 	if err != nil {
 		return nil, "", fmt.Errorf("validation failed: %w", err)
@@ -700,7 +729,7 @@ Break it down by service (compute, storage, networking, database).
 
 // --- Phase 4: Validation ---
 
-func buildValidationPrompt(planJSON string, p *RepoProfile, deep *DeepAnalysis, requireDockerCommandsInPlan bool) string {
+func buildValidationPrompt(planJSON string, p *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis, requireDockerCommandsInPlan bool) string {
 	var b strings.Builder
 
 	b.WriteString("You are a deployment QA engineer. Review this cloud deployment plan and check for correctness.\n\n")
@@ -725,6 +754,17 @@ func buildValidationPrompt(planJSON string, p *RepoProfile, deep *DeepAnalysis, 
 	}
 	if len(p.EnvVars) > 0 {
 		b.WriteString(fmt.Sprintf("- Required env vars: %s\n", strings.Join(p.EnvVars, ", ")))
+	}
+	if docker != nil {
+		if docker.PrimaryPort > 0 {
+			b.WriteString(fmt.Sprintf("- Docker primary port: %d\n", docker.PrimaryPort))
+		}
+		if docker.RunCommand != "" {
+			b.WriteString(fmt.Sprintf("- Docker recommended run: %s\n", docker.RunCommand))
+		}
+		if len(docker.Warnings) > 0 {
+			b.WriteString(fmt.Sprintf("- Docker warnings: %s\n", strings.Join(docker.Warnings, "; ")))
+		}
 	}
 
 	b.WriteString("\n## Generated Plan\n```json\n")
@@ -793,7 +833,7 @@ func buildFixPrompt(v *PlanValidation) string {
 // --- Intelligent Prompt Builder ---
 
 // buildIntelligentPrompt creates the final enriched prompt using all intelligence phases
-func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, arch *ArchitectDecision, strat DeployStrategy, infraSnap *InfraSnapshot, cfInfraSnap *CFInfraSnapshot, opts *DeployOptions) string {
+func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis, arch *ArchitectDecision, strat DeployStrategy, infraSnap *InfraSnapshot, cfInfraSnap *CFInfraSnapshot, opts *DeployOptions) string {
 	var b strings.Builder
 
 	providerLabel := "AWS"
@@ -905,6 +945,19 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, arch *ArchitectD
 	}
 	if p.HasDB {
 		b.WriteString(fmt.Sprintf("- Database: %s\n", p.DBType))
+	}
+	if docker != nil {
+		b.WriteString("\n")
+		b.WriteString(docker.FormatForPrompt())
+		if docker.PrimaryPort > 0 {
+			b.WriteString(fmt.Sprintf("- Use Docker agent primary port (%d) for load balancer target groups and health checks.\n", docker.PrimaryPort))
+		}
+		if docker.BuildCommand != "" {
+			b.WriteString(fmt.Sprintf("- Prefer Docker build command: %s\n", docker.BuildCommand))
+		}
+		if docker.RunCommand != "" {
+			b.WriteString(fmt.Sprintf("- Prefer Docker runtime command: %s\n", docker.RunCommand))
+		}
 	}
 	if isOpenClawRepo(p) {
 		b.WriteString("\n## OpenClaw Deployment Requirements\n")
@@ -1213,7 +1266,7 @@ func cfPagesPrompt(p *RepoProfile, deep *DeepAnalysis) string {
 
 	b.WriteString(fmt.Sprintf("1. Install dependencies: %s install\n", p.PackageManager))
 	b.WriteString(fmt.Sprintf("2. Build the project: %s\n", buildCmd))
-	b.WriteString(fmt.Sprintf("3. Create Pages project: npx wrangler pages project create <project-name> --production-branch main\n"))
+	b.WriteString("3. Create Pages project: npx wrangler pages project create <project-name> --production-branch main\n")
 	b.WriteString(fmt.Sprintf("4. Deploy built assets: npx wrangler pages deploy %s --project-name <project-name>\n", outputDir))
 	b.WriteString("5. Pages provides an automatic *.pages.dev URL + HTTPS\n")
 
@@ -1441,7 +1494,7 @@ func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts
 		appPort = p.Ports[0]
 	}
 	b.WriteString("2. Create target group:\n")
-	b.WriteString(fmt.Sprintf("   aws elbv2 create-target-group \\\n"))
+	b.WriteString("   aws elbv2 create-target-group \\\n")
 	b.WriteString("     --name clanker-tg \\\n")
 	b.WriteString(fmt.Sprintf("     --protocol HTTP --port %d \\\n", appPort))
 	b.WriteString("     --vpc-id <VPC_ID> \\\n")

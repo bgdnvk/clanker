@@ -702,6 +702,21 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 		// Idempotency: name already exists.
 		if op == "create-load-balancer" {
 			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "duplicateloadbalancername") || strings.Contains(lower, "already exists") {
+				lbName := strings.TrimSpace(flagValue(args, "--name"))
+				if lbName != "" {
+					if lbArn, lbDNS, err := describeLoadBalancerByName(ctx, opts, lbName); err == nil {
+						if strings.TrimSpace(lbArn) != "" {
+							bindings["ALB_ARN"] = strings.TrimSpace(lbArn)
+							_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: using existing load balancer ARN (name=%s)\n", lbName)
+						}
+						if strings.TrimSpace(lbDNS) != "" {
+							bindings["ALB_DNS"] = strings.TrimSpace(lbDNS)
+							bindings["ALB_DNS_NAME"] = strings.TrimSpace(lbDNS)
+						}
+					} else {
+						_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to resolve existing load balancer for %s: %v\n", lbName, err)
+					}
+				}
 				return true, nil
 			}
 		}
@@ -1500,6 +1515,16 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 	// Secrets Manager: create-secret already exists -> put-secret-value (if secret-string provided).
 	if failure.Category == FailureAlreadyExists && args0(args) == "secretsmanager" && args1(args) == "create-secret" {
 		name := flagValue(args, "--name")
+		if strings.TrimSpace(name) != "" {
+			if arn, err := describeSecretARNByName(ctx, opts, name); err == nil {
+				if strings.TrimSpace(arn) != "" {
+					inferSecretsBindings(name, arn, bindings)
+					_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: using existing secret ARN (name=%s)\n", name)
+				}
+			} else {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to resolve existing secret ARN for %s: %v\n", name, err)
+			}
+		}
 		secretString := flagValue(args, "--secret-string")
 		if strings.TrimSpace(name) != "" && strings.TrimSpace(secretString) != "" {
 			put := []string{"secretsmanager", "put-secret-value", "--secret-id", name, "--secret-string", secretString}
@@ -1552,6 +1577,68 @@ func describeTargetGroupArnByName(ctx context.Context, opts ExecOptions, tgName 
 		return "", nil
 	}
 	return strings.TrimSpace(resp.TargetGroups[0].TargetGroupArn), nil
+}
+
+func describeLoadBalancerByName(ctx context.Context, opts ExecOptions, lbName string) (string, string, error) {
+	lbName = strings.TrimSpace(lbName)
+	if lbName == "" {
+		return "", "", nil
+	}
+
+	args := []string{
+		"elbv2", "describe-load-balancers",
+		"--names", lbName,
+		"--output", "json",
+		"--profile", opts.Profile,
+		"--region", opts.Region,
+		"--no-cli-pager",
+	}
+	out, err := runAWSCommandStreaming(ctx, args, nil, io.Discard)
+	if err != nil {
+		return "", "", err
+	}
+
+	var resp struct {
+		LoadBalancers []struct {
+			LoadBalancerArn string `json:"LoadBalancerArn"`
+			DNSName         string `json:"DNSName"`
+		} `json:"LoadBalancers"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return "", "", err
+	}
+	if len(resp.LoadBalancers) == 0 {
+		return "", "", nil
+	}
+	return strings.TrimSpace(resp.LoadBalancers[0].LoadBalancerArn), strings.TrimSpace(resp.LoadBalancers[0].DNSName), nil
+}
+
+func describeSecretARNByName(ctx context.Context, opts ExecOptions, secretName string) (string, error) {
+	secretName = strings.TrimSpace(secretName)
+	if secretName == "" {
+		return "", nil
+	}
+
+	args := []string{
+		"secretsmanager", "describe-secret",
+		"--secret-id", secretName,
+		"--output", "json",
+		"--profile", opts.Profile,
+		"--region", opts.Region,
+		"--no-cli-pager",
+	}
+	out, err := runAWSCommandStreaming(ctx, args, nil, io.Discard)
+	if err != nil {
+		return "", err
+	}
+
+	var resp struct {
+		ARN string `json:"ARN"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(resp.ARN), nil
 }
 
 func rewriteFlagName(args []string, from string, to string) ([]string, bool) {

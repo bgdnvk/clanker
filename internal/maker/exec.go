@@ -42,6 +42,48 @@ type AWSFailure struct {
 	Message  string
 }
 
+type healingPolicy struct {
+	Enabled             bool
+	MaxAutoHealAttempts int
+	TransientRetries    int
+	MaxWindow           time.Duration
+}
+
+type healingRuntime struct {
+	StartedAt        time.Time
+	AutoHealAttempts int
+}
+
+func defaultHealingPolicy() healingPolicy {
+	return healingPolicy{
+		Enabled:             true,
+		MaxAutoHealAttempts: 4,
+		TransientRetries:    2,
+		MaxWindow:           8 * time.Minute,
+	}
+}
+
+func (p healingPolicy) canAttempt(runtime *healingRuntime) bool {
+	if !p.Enabled || runtime == nil {
+		return false
+	}
+	if p.MaxAutoHealAttempts > 0 && runtime.AutoHealAttempts >= p.MaxAutoHealAttempts {
+		return false
+	}
+	if p.MaxWindow > 0 && !runtime.StartedAt.IsZero() && time.Since(runtime.StartedAt) > p.MaxWindow {
+		return false
+	}
+	return true
+}
+
+func (p healingPolicy) consumeAttempt(runtime *healingRuntime) bool {
+	if !p.canAttempt(runtime) {
+		return false
+	}
+	runtime.AutoHealAttempts++
+	return true
+}
+
 type ExecOptions struct {
 	Profile             string
 	Region              string
@@ -58,6 +100,9 @@ type ExecOptions struct {
 	// Cloudflare options
 	CloudflareAPIToken  string
 	CloudflareAccountID string
+
+	CheckpointKey            string
+	DisableDurableCheckpoint bool
 
 	// OutputBindings is populated by ExecutePlan with the final resource bindings
 	// (e.g., ALB_DNS, INSTANCE_ID, etc.) for the caller to use
@@ -85,11 +130,35 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 
 	remediationAttempted := make(map[int]bool)
 	bindings := make(map[string]string)
+	healPolicy := defaultHealingPolicy()
+	healRuntime := &healingRuntime{StartedAt: time.Now()}
 
 	// Initialize bindings from OutputBindings if provided (for multi-phase execution)
 	if opts.OutputBindings != nil {
 		for k, v := range opts.OutputBindings {
 			bindings[k] = v
+		}
+	}
+
+	if !opts.DisableDurableCheckpoint {
+		persisted, loadErr := loadDurableCheckpoint(plan, opts)
+		if loadErr != nil {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] warning: failed to load durable checkpoint: %v\n", loadErr)
+		} else if len(persisted) > 0 {
+			for k, v := range persisted {
+				if strings.TrimSpace(bindings[k]) == "" {
+					bindings[k] = v
+				}
+			}
+			_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] loaded durable checkpoint state\n")
+		}
+	}
+
+	resumeFromIndex := 0
+	if raw := strings.TrimSpace(bindings["CHECKPOINT_LAST_SUCCESS_INDEX"]); raw != "" {
+		if parsed, parseErr := strconv.Atoi(raw); parseErr == nil && parsed > 0 {
+			resumeFromIndex = parsed
+			_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] resuming from command %d/%d\n", resumeFromIndex+1, len(plan.Commands))
 		}
 	}
 	// Pre-populate bindings with account and region info for user-data generation
@@ -103,6 +172,12 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	}
 
 	for idx, cmdSpec := range plan.Commands {
+		if resumeFromIndex > 0 && idx < resumeFromIndex {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] skipping already-completed command %d/%d\n", idx+1, len(plan.Commands))
+			continue
+		}
+		_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] start command %d/%d\n", idx+1, len(plan.Commands))
+
 		if err := validateCommand(cmdSpec.Args, opts.Destroyer); err != nil {
 			return fmt.Errorf("command %d rejected: %w", idx+1, err)
 		}
@@ -147,11 +222,23 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 
 		out, runErr := runAWSCommandStreaming(ctx, awsArgs, zipBytes, opts.Writer)
 		if runErr != nil {
-			if handled, handleErr := handleAWSFailure(ctx, plan, opts, idx, args, awsArgs, zipBytes, out, runErr, remediationAttempted, bindings); handled {
+			if handled, handleErr := handleAWSFailure(ctx, plan, opts, idx, args, awsArgs, zipBytes, out, runErr, remediationAttempted, bindings, healPolicy, healRuntime); handled {
 				if handleErr != nil {
 					return handleErr
 				}
+				bindings["CHECKPOINT_LAST_FAILURE_INDEX"] = strconv.Itoa(idx)
+				if !opts.DisableDurableCheckpoint {
+					if persistErr := persistDurableCheckpoint(plan, opts, bindings); persistErr != nil {
+						_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] warning: failed to persist durable checkpoint: %v\n", persistErr)
+					}
+				}
 				continue
+			}
+			bindings["CHECKPOINT_LAST_FAILURE_INDEX"] = strconv.Itoa(idx)
+			if !opts.DisableDurableCheckpoint {
+				if persistErr := persistDurableCheckpoint(plan, opts, bindings); persistErr != nil {
+					_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] warning: failed to persist durable checkpoint: %v\n", persistErr)
+				}
 			}
 			return fmt.Errorf("aws command %d failed: %w", idx+1, runErr)
 		}
@@ -159,6 +246,8 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		// Learn placeholder bindings from successful command outputs.
 		learnPlanBindingsFromProduces(cmdSpec.Produces, out, bindings)
 		learnPlanBindings(args, out, bindings)
+		bindings["CHECKPOINT_LAST_SUCCESS_INDEX"] = strconv.Itoa(idx + 1)
+		bindings["CHECKPOINT_LAST_FAILURE_INDEX"] = ""
 
 		// CloudFormation is async. If we just created/updated a stack, wait for it to complete.
 		if len(args) >= 2 && args[0] == "cloudformation" && (args[1] == "create-stack" || args[1] == "update-stack") {
@@ -176,14 +265,33 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 					combined += fmt.Sprintf("cloudformation stack %s ended in %s%s", stackName, status, details)
 
 					synthErr := fmt.Errorf("cloudformation stack %s failed (status=%s)", stackName, status)
-					if handled, handleErr := handleAWSFailure(ctx, plan, opts, idx, args, awsArgs, zipBytes, combined, synthErr, remediationAttempted, bindings); handled {
+					if handled, handleErr := handleAWSFailure(ctx, plan, opts, idx, args, awsArgs, zipBytes, combined, synthErr, remediationAttempted, bindings, healPolicy, healRuntime); handled {
 						if handleErr != nil {
 							return handleErr
 						}
+						bindings["CHECKPOINT_LAST_FAILURE_INDEX"] = strconv.Itoa(idx)
+						if !opts.DisableDurableCheckpoint {
+							if persistErr := persistDurableCheckpoint(plan, opts, bindings); persistErr != nil {
+								_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] warning: failed to persist durable checkpoint: %v\n", persistErr)
+							}
+						}
 						continue
+					}
+					bindings["CHECKPOINT_LAST_FAILURE_INDEX"] = strconv.Itoa(idx)
+					if !opts.DisableDurableCheckpoint {
+						if persistErr := persistDurableCheckpoint(plan, opts, bindings); persistErr != nil {
+							_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] warning: failed to persist durable checkpoint: %v\n", persistErr)
+						}
 					}
 					return fmt.Errorf("aws command %d failed: %w", idx+1, synthErr)
 				}
+			}
+		}
+
+		_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] success command %d/%d\n", idx+1, len(plan.Commands))
+		if !opts.DisableDurableCheckpoint {
+			if persistErr := persistDurableCheckpoint(plan, opts, bindings); persistErr != nil {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] warning: failed to persist durable checkpoint: %v\n", persistErr)
 			}
 		}
 	}
@@ -192,6 +300,12 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	if opts.OutputBindings != nil {
 		for k, v := range bindings {
 			opts.OutputBindings[k] = v
+		}
+	}
+
+	if !opts.DisableDurableCheckpoint {
+		if clearErr := clearDurableCheckpoint(plan, opts); clearErr != nil {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] warning: failed to clear durable checkpoint: %v\n", clearErr)
 		}
 	}
 
@@ -252,9 +366,7 @@ func jsonPathString(obj any, path string) (string, bool) {
 		// Not useful as a string.
 		return "", false
 	}
-	if strings.HasPrefix(path, "$") {
-		path = strings.TrimPrefix(path, "$")
-	}
+	path = strings.TrimPrefix(path, "$")
 	path = strings.TrimPrefix(path, ".")
 
 	cur := obj
@@ -953,6 +1065,8 @@ func handleAWSFailure(
 	runErr error,
 	remediationAttempted map[int]bool,
 	bindings map[string]string,
+	policy healingPolicy,
+	runtime *healingRuntime,
 ) (handled bool, err error) {
 	failure := classifyAWSFailure(args, out)
 	if failure.Code != "" {
@@ -966,6 +1080,12 @@ func handleAWSFailure(
 		return true, nil
 	}
 
+	if policy.canAttempt(runtime) {
+		if retried, retryErr := maybeRetryTransientFailure(ctx, opts, idx, awsArgs, stdinBytes, failure, policy, runtime); retried {
+			return true, retryErr
+		}
+	}
+
 	if handled, handleErr := maybeRewriteAndRetry(ctx, opts, args, awsArgs, stdinBytes, failure, out, bindings); handled {
 		return true, handleErr
 	}
@@ -973,19 +1093,75 @@ func handleAWSFailure(
 	if remediationAttempted[idx] {
 		return false, nil
 	}
-
-	if remediated, remErr := maybeAutoRemediateAndRetry(ctx, plan, opts, idx, args, awsArgs, stdinBytes, out, failure); remErr == nil && remediated {
-		remediationAttempted[idx] = true
-		return true, nil
+	if !policy.canAttempt(runtime) {
+		_, _ = fmt.Fprintf(opts.Writer, "[maker] self-heal budget exhausted; escalating failure\n")
+		return false, nil
 	}
 
-	// Agentic AI fallback: send error to AI, get fix, retry with exponential backoff
-	if handled, agentErr := maybeAgenticFix(ctx, opts, args, awsArgs, stdinBytes, out, bindings); handled {
-		remediationAttempted[idx] = true
-		return true, agentErr
+	if policy.consumeAttempt(runtime) {
+		if remediated, remErr := maybeAutoRemediateAndRetry(ctx, plan, opts, idx, args, awsArgs, stdinBytes, out, failure); remErr == nil && remediated {
+			remediationAttempted[idx] = true
+			return true, nil
+		}
+	}
+
+	if !policy.canAttempt(runtime) {
+		return false, nil
+	}
+
+	if policy.consumeAttempt(runtime) {
+		// Agentic AI fallback: send error to AI, get fix, retry with exponential backoff
+		if handled, agentErr := maybeAgenticFix(ctx, opts, args, awsArgs, stdinBytes, out, bindings); handled {
+			remediationAttempted[idx] = true
+			return true, agentErr
+		}
 	}
 
 	return false, runErr
+}
+
+func maybeRetryTransientFailure(
+	ctx context.Context,
+	opts ExecOptions,
+	idx int,
+	awsArgs []string,
+	stdinBytes []byte,
+	failure AWSFailure,
+	policy healingPolicy,
+	runtime *healingRuntime,
+) (bool, error) {
+	if failure.Category != FailureThrottled && failure.Category != FailureConflict {
+		return false, nil
+	}
+	attempts := policy.TransientRetries
+	if attempts <= 0 {
+		return false, nil
+	}
+
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if !policy.consumeAttempt(runtime) {
+			return false, nil
+		}
+		delay := time.Duration(300*(1<<uint(attempt-1))) * time.Millisecond
+		_, _ = fmt.Fprintf(opts.Writer, "[maker] transient failure retry %d/%d for command %d after %s (category=%s)\n", attempt, attempts, idx+1, delay, failure.Category)
+		select {
+		case <-ctx.Done():
+			return true, ctx.Err()
+		case <-time.After(delay):
+		}
+
+		out, err := runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+		if err == nil {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] transient retry succeeded for command %d\n", idx+1)
+			return true, nil
+		}
+		failure = classifyAWSFailure(awsArgs, out)
+		if failure.Category != FailureThrottled && failure.Category != FailureConflict {
+			break
+		}
+	}
+
+	return false, nil
 }
 
 var accountIDToken = regexp.MustCompile(`(?i)(<\s*(your_)?account[_-]?id\s*>|replace_with_account_id)`)
@@ -2247,12 +2423,20 @@ func validateCommand(args []string, allowDestructive bool) error {
 		if strings.Contains(lower, ";") || strings.Contains(lower, "|") || strings.Contains(lower, "&&") || strings.Contains(lower, "||") {
 			return fmt.Errorf("shell operators are not allowed")
 		}
-		if allowDestructive {
-			continue
-		}
-		if strings.Contains(lower, "delete") || strings.Contains(lower, "terminate") || strings.Contains(lower, "remove") || strings.Contains(lower, "destroy") {
-			return fmt.Errorf("destructive verbs are blocked")
-		}
+	}
+
+	if allowDestructive {
+		return nil
+	}
+
+	service := strings.ToLower(strings.TrimSpace(args[0]))
+	op := ""
+	if len(args) > 1 {
+		op = strings.ToLower(strings.TrimSpace(args[1]))
+	}
+
+	if strings.HasPrefix(op, "delete") || strings.HasPrefix(op, "terminate") || strings.HasPrefix(op, "remove") || strings.HasPrefix(op, "destroy") {
+		return fmt.Errorf("destructive operation is blocked: %s %s", service, op)
 	}
 
 	return nil

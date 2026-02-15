@@ -48,6 +48,10 @@ func ResolvePlanPlaceholders(
 		logf("[deploy] all placeholders resolved from infrastructure")
 		return plan, nil, nil
 	}
+	if AllPlaceholdersAreProduced(plan, remaining) {
+		logf("[deploy] %d placeholders are produced by earlier commands; skipping LLM resolution", len(remaining))
+		return plan, remaining, nil
+	}
 
 	logf("[deploy] %d placeholders remain after infra mapping, calling LLM...", len(remaining))
 
@@ -382,6 +386,41 @@ func buildPlaceholderResolutionPrompt(plan *maker.Plan, placeholders []string, i
 // HasUnresolvedPlaceholders checks if a plan still has unresolved placeholder tokens.
 func HasUnresolvedPlaceholders(plan *maker.Plan) bool {
 	return len(extractPlaceholdersFromPlan(plan)) > 0
+}
+
+// AllPlaceholdersAreProduced returns true when every placeholder token is expected
+// to be provided by an earlier command via `produces` bindings.
+func AllPlaceholdersAreProduced(plan *maker.Plan, placeholders []string) bool {
+	if plan == nil || len(placeholders) == 0 {
+		return false
+	}
+
+	produced := make(map[string]struct{})
+	for _, cmd := range plan.Commands {
+		for key := range cmd.Produces {
+			k := strings.TrimSpace(key)
+			if k == "" {
+				continue
+			}
+			produced[k] = struct{}{}
+		}
+	}
+
+	if len(produced) == 0 {
+		return false
+	}
+
+	for _, placeholder := range placeholders {
+		token := strings.TrimSpace(placeholder)
+		if token == "" {
+			continue
+		}
+		if _, ok := produced[token]; !ok {
+			return false
+		}
+	}
+
+	return true
 }
 
 // ApplyStaticInfraBindings applies only the "static" infrastructure bindings that

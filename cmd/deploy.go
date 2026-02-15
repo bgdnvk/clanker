@@ -191,6 +191,7 @@ Examples:
 			planJSON, _ := json.MarshalIndent(plan, "", "  ")
 			validation, fixPrompt, err := deploy.ValidatePlan(ctx,
 				string(planJSON), rp, intel.DeepAnalysis,
+				intel.Docker,
 				false,
 				aiClient.AskPrompt, aiClient.CleanJSONResponse, logf,
 			)
@@ -237,7 +238,12 @@ Examples:
 		if strings.EqualFold(strings.TrimSpace(targetProvider), "aws") && !newVPC {
 			const maxPlaceholderRounds = 5
 			for round := 1; round <= maxPlaceholderRounds; round++ {
-				if !deploy.HasUnresolvedPlaceholders(plan) {
+				unresolvedNow := deploy.GetUnresolvedPlaceholders(plan)
+				if len(unresolvedNow) == 0 {
+					break
+				}
+				if deploy.AllPlaceholdersAreProduced(plan, unresolvedNow) {
+					logf("[deploy] placeholder resolution complete: %d placeholders are runtime-produced via command chaining: %v", len(unresolvedNow), unresolvedNow)
 					break
 				}
 
