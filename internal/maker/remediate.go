@@ -36,7 +36,7 @@ func maybeAutoRemediateAndRetry(
 					if err := validateCommand(c.Args, opts.Destroyer); err != nil {
 						return false, fmt.Errorf("remediation command %d rejected: %w", i+1, err)
 					}
-					cmdArgs := append(append([]string{}, c.Args...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+					cmdArgs := buildAWSExecArgs(c.Args, opts, opts.Writer)
 					if _, err := runAWSCommandStreaming(ctx, cmdArgs, nil, opts.Writer); err != nil {
 						// Best-effort: some prereqs might already be gone.
 						continue
@@ -82,7 +82,7 @@ func maybeAutoRemediateAndRetry(
 			return false, fmt.Errorf("remediation command %d rejected: %w", i+1, err)
 		}
 
-		cmdArgs := append(append([]string{}, c.Args...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+		cmdArgs := buildAWSExecArgs(c.Args, opts, opts.Writer)
 		if _, err := runAWSCommandStreaming(ctx, cmdArgs, nil, opts.Writer); err != nil {
 			return false, err
 		}

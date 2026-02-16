@@ -153,7 +153,7 @@ func maybeAgenticFix(
 					_, _ = fmt.Fprintf(opts.Writer, "[maker] pre-command %d rejected: %v\n", i+1, err)
 					continue
 				}
-				cmdArgs := append(append([]string{}, cmd.Args...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+				cmdArgs := buildAWSExecArgs(cmd.Args, opts, opts.Writer)
 				out, runErr := runAWSCommandStreaming(ctx, cmdArgs, nil, opts.Writer)
 				if runErr != nil {
 					_, _ = fmt.Fprintf(opts.Writer, "[maker] pre-command %d failed: %v\n", i+1, runErr)
@@ -175,7 +175,7 @@ func maybeAgenticFix(
 		retryArgs = applyPlanBindings(retryArgs, bindings)
 
 		// Build final AWS args
-		finalArgs := append(append([]string{}, retryArgs...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+		finalArgs := buildAWSExecArgs(retryArgs, opts, opts.Writer)
 
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] retrying: %s\n", formatAWSArgsForLog(finalArgs))
 

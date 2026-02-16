@@ -44,6 +44,11 @@ Rules for commands:
 - Do NOT include shell operators, pipes, redirects, or subshells.
 - Do NOT include --profile, --region, or --no-cli-pager (the runner injects them).
 - Prefer idempotent operations where possible.
+- Region-awareness (CRITICAL):
+  - If a command targets a resource by ARN, keep that ARN and do NOT transform it.
+  - When mixing regions (for example us-east-1 + us-east-2), keep commands grouped by region in contiguous blocks.
+  - For destructive/teardown plans, strongly prefer region-grouped delete order: complete one region block, then move to the next region.
+  - Avoid interleaving unrelated cross-region deletes in alternating steps.
 
 Placeholders and bindings (CRITICAL):
 - You MAY use placeholder tokens inside args like "<SG_RDS_ID>" or "<SUBNET_1>".

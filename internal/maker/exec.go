@@ -22,6 +22,7 @@ import (
 var awsErrorCodeRe = regexp.MustCompile(`(?i)an error occurred \(([^)]+)\)`)
 var planPlaceholderTokenRe = regexp.MustCompile(`<([A-Z0-9_]+)>`)
 var shellStylePlaceholderTokenRe = regexp.MustCompile(`^\$[A-Z][A-Z0-9_]*$`)
+var awsARNRegionHintRe = regexp.MustCompile(`arn:aws[a-zA-Z-]*:[a-z0-9-]+:([a-z0-9-]+):\d{12}:[^,\s"']+`)
 
 type AWSFailureCategory string
 
@@ -173,6 +174,10 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		bindings["AWS_REGION"] = opts.Region
 	}
 
+	if warning := detectDestructiveRegionZigZag(plan, opts.Region); warning != "" {
+		_, _ = fmt.Fprintf(opts.Writer, "[maker] preflight warning: %s\n", warning)
+	}
+
 	for idx, cmdSpec := range plan.Commands {
 		if resumeFromIndex > 0 && idx < resumeFromIndex {
 			_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] skipping already-completed command %d/%d\n", idx+1, len(plan.Commands))
@@ -228,9 +233,7 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 			continue
 		}
 
-		awsArgs := make([]string, 0, len(args)+6)
-		awsArgs = append(awsArgs, args...)
-		awsArgs = append(awsArgs, "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+		awsArgs := buildAWSExecArgs(args, opts, opts.Writer)
 
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: %s\n", idx+1, len(plan.Commands), formatAWSArgsForLog(awsArgs))
 
@@ -2255,6 +2258,186 @@ func flagValue(args []string, flag string) string {
 	return ""
 }
 
+func stripAWSRuntimeFlags(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		token := strings.TrimSpace(args[i])
+		switch {
+		case token == "--profile" || token == "--region":
+			if i+1 < len(args) {
+				i++
+			}
+			continue
+		case strings.HasPrefix(token, "--profile=") || strings.HasPrefix(token, "--region=") || token == "--no-cli-pager":
+			continue
+		default:
+			out = append(out, args[i])
+		}
+	}
+	return out
+}
+
+func detectRegionFromARNArgs(args []string) string {
+	for _, arg := range args {
+		trimmed := strings.TrimSpace(arg)
+		if trimmed == "" || !strings.Contains(trimmed, "arn:aws") {
+			continue
+		}
+		matches := awsARNRegionHintRe.FindAllStringSubmatch(trimmed, -1)
+		for _, m := range matches {
+			if len(m) < 2 {
+				continue
+			}
+			region := strings.TrimSpace(m[1])
+			if region != "" {
+				return region
+			}
+		}
+	}
+	return ""
+}
+
+func resolveCommandRegion(args []string, fallbackRegion string) (region string, source string) {
+	if explicit := strings.TrimSpace(flagValue(args, "--region")); explicit != "" {
+		return explicit, "explicit"
+	}
+	if fromARN := strings.TrimSpace(detectRegionFromARNArgs(args)); fromARN != "" {
+		return fromARN, "arn"
+	}
+	return strings.TrimSpace(fallbackRegion), "default"
+}
+
+func buildAWSExecArgs(args []string, opts ExecOptions, w io.Writer) []string {
+	cleaned := stripAWSRuntimeFlags(args)
+	region, source := resolveCommandRegion(cleaned, opts.Region)
+	if strings.TrimSpace(region) == "" {
+		region = strings.TrimSpace(opts.Region)
+	}
+	if source == "arn" && strings.TrimSpace(opts.Region) != "" && region != strings.TrimSpace(opts.Region) {
+		if w != nil {
+			service := ""
+			op := ""
+			if len(cleaned) > 0 {
+				service = strings.TrimSpace(cleaned[0])
+			}
+			if len(cleaned) > 1 {
+				op = strings.TrimSpace(cleaned[1])
+			}
+			_, _ = fmt.Fprintf(w, "[maker] region override detected: %s/%s uses %s from ARN (default=%s)\n", service, op, region, opts.Region)
+		}
+	}
+
+	out := make([]string, 0, len(cleaned)+6)
+	out = append(out, cleaned...)
+	out = append(out, "--profile", opts.Profile, "--region", region, "--no-cli-pager")
+	return out
+}
+
+func detectDestructiveRegionZigZag(plan *Plan, defaultRegion string) string {
+	if plan == nil || len(plan.Commands) == 0 {
+		return ""
+	}
+
+	type regionStep struct {
+		index   int
+		service string
+		op      string
+		region  string
+	}
+
+	steps := make([]regionStep, 0, len(plan.Commands))
+	for idx, cmd := range plan.Commands {
+		args := normalizeArgs(cmd.Args)
+		if len(args) < 2 {
+			continue
+		}
+
+		service := strings.ToLower(strings.TrimSpace(args[0]))
+		op := strings.ToLower(strings.TrimSpace(args[1]))
+		if !isDestructiveOperationForRegionOrdering(op) {
+			continue
+		}
+		if isGlobalAWSServiceForRegionOrdering(service) {
+			continue
+		}
+
+		region, _ := resolveCommandRegion(args, defaultRegion)
+		region = strings.TrimSpace(region)
+		if region == "" {
+			continue
+		}
+
+		steps = append(steps, regionStep{index: idx + 1, service: service, op: op, region: region})
+	}
+
+	if len(steps) < 3 {
+		return ""
+	}
+
+	closed := make(map[string]struct{})
+	lastRegion := steps[0].region
+	unique := map[string]struct{}{lastRegion: {}}
+	zigzagAt := -1
+
+	for i := 1; i < len(steps); i++ {
+		current := steps[i].region
+		if current == lastRegion {
+			continue
+		}
+		closed[lastRegion] = struct{}{}
+		if _, revisited := closed[current]; revisited {
+			zigzagAt = i
+			break
+		}
+		lastRegion = current
+		unique[current] = struct{}{}
+	}
+
+	if zigzagAt == -1 || len(unique) < 2 {
+		return ""
+	}
+
+	start := zigzagAt - 1
+	if start < 0 {
+		start = 0
+	}
+	end := zigzagAt + 1
+	if end >= len(steps) {
+		end = len(steps) - 1
+	}
+
+	segments := make([]string, 0, end-start+1)
+	for i := start; i <= end; i++ {
+		s := steps[i]
+		segments = append(segments, fmt.Sprintf("#%d %s/%s (%s)", s.index, s.service, s.op, s.region))
+	}
+
+	return "destructive commands switch back to a previous region (zig-zag ordering). Group teardown commands by region to reduce cross-region failures; around " + strings.Join(segments, " -> ")
+}
+
+func isDestructiveOperationForRegionOrdering(op string) bool {
+	op = strings.ToLower(strings.TrimSpace(op))
+	if op == "" {
+		return false
+	}
+	return strings.HasPrefix(op, "delete") ||
+		strings.HasPrefix(op, "remove") ||
+		strings.HasPrefix(op, "terminate") ||
+		strings.HasPrefix(op, "destroy") ||
+		strings.HasPrefix(op, "detach") ||
+		strings.HasPrefix(op, "disassociate")
+}
+
+func isGlobalAWSServiceForRegionOrdering(service string) bool {
+	service = strings.ToLower(strings.TrimSpace(service))
+	switch service {
+	case "iam", "route53", "cloudfront", "organizations", "support":
+		return true
+	default:
+		return false
+	}
+}
+
 func isIAMDeleteRole(args []string) bool {
 	return len(args) >= 2 && args[0] == "iam" && args[1] == "delete-role"
 }
@@ -2282,7 +2465,7 @@ func resolveAndDeleteIAMRole(ctx context.Context, opts ExecOptions, roleName str
 	}
 
 	deleteArgs := []string{"iam", "delete-role", "--role-name", roleName}
-	awsDeleteArgs := append(append([]string{}, deleteArgs...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+	awsDeleteArgs := buildAWSExecArgs(deleteArgs, opts, w)
 
 	for attempt := 1; attempt <= 6; attempt++ {
 		out, err := runAWSCommandStreaming(ctx, awsDeleteArgs, nil, w)
@@ -2306,7 +2489,7 @@ func detachAllRolePolicies(ctx context.Context, opts ExecOptions, roleName strin
 		if marker != "" {
 			listArgs = append(listArgs, "--marker", marker)
 		}
-		awsListArgs := append(append([]string{}, listArgs...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+		awsListArgs := buildAWSExecArgs(listArgs, opts, w)
 		out, err := runAWSCommandStreaming(ctx, awsListArgs, nil, io.Discard)
 		if err != nil {
 			return err
@@ -2330,7 +2513,7 @@ func detachAllRolePolicies(ctx context.Context, opts ExecOptions, roleName strin
 			}
 			_, _ = fmt.Fprintf(w, "[maker] detaching policy from role (role=%s policy=%s)\n", roleName, arn)
 			detachArgs := []string{"iam", "detach-role-policy", "--role-name", roleName, "--policy-arn", arn}
-			awsDetachArgs := append(append([]string{}, detachArgs...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+			awsDetachArgs := buildAWSExecArgs(detachArgs, opts, w)
 			if _, err := runAWSCommandStreaming(ctx, awsDetachArgs, nil, w); err != nil {
 				return err
 			}
@@ -2355,7 +2538,7 @@ func deleteAllRoleInlinePolicies(ctx context.Context, opts ExecOptions, roleName
 		if marker != "" {
 			listArgs = append(listArgs, "--marker", marker)
 		}
-		awsListArgs := append(append([]string{}, listArgs...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+		awsListArgs := buildAWSExecArgs(listArgs, opts, w)
 		out, err := runAWSCommandStreaming(ctx, awsListArgs, nil, io.Discard)
 		if err != nil {
 			return err
@@ -2377,7 +2560,7 @@ func deleteAllRoleInlinePolicies(ctx context.Context, opts ExecOptions, roleName
 			}
 			_, _ = fmt.Fprintf(w, "[maker] deleting inline role policy (role=%s policy=%s)\n", roleName, policyName)
 			deleteArgs := []string{"iam", "delete-role-policy", "--role-name", roleName, "--policy-name", policyName}
-			awsDeleteArgs := append(append([]string{}, deleteArgs...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+			awsDeleteArgs := buildAWSExecArgs(deleteArgs, opts, w)
 			if _, err := runAWSCommandStreaming(ctx, awsDeleteArgs, nil, w); err != nil {
 				return err
 			}
@@ -2402,7 +2585,7 @@ func removeRoleFromAllInstanceProfiles(ctx context.Context, opts ExecOptions, ro
 		if marker != "" {
 			listArgs = append(listArgs, "--marker", marker)
 		}
-		awsListArgs := append(append([]string{}, listArgs...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+		awsListArgs := buildAWSExecArgs(listArgs, opts, w)
 		out, err := runAWSCommandStreaming(ctx, awsListArgs, nil, io.Discard)
 		if err != nil {
 			return err
@@ -2426,7 +2609,7 @@ func removeRoleFromAllInstanceProfiles(ctx context.Context, opts ExecOptions, ro
 			}
 			_, _ = fmt.Fprintf(w, "[maker] removing role from instance profile (role=%s profile=%s)\n", roleName, name)
 			removeArgs := []string{"iam", "remove-role-from-instance-profile", "--instance-profile-name", name, "--role-name", roleName}
-			awsRemoveArgs := append(append([]string{}, removeArgs...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+			awsRemoveArgs := buildAWSExecArgs(removeArgs, opts, w)
 			if _, err := runAWSCommandStreaming(ctx, awsRemoveArgs, nil, w); err != nil {
 				return err
 			}
@@ -2481,7 +2664,7 @@ func countRoleAttachedPolicies(ctx context.Context, opts ExecOptions, roleName s
 		if marker != "" {
 			args = append(args, "--marker", marker)
 		}
-		awsArgs := append(append([]string{}, args...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+		awsArgs := buildAWSExecArgs(args, opts, io.Discard)
 		out, err := runAWSCommandStreaming(ctx, awsArgs, nil, io.Discard)
 		if err != nil {
 			return 0, err
@@ -2511,7 +2694,7 @@ func countRoleInlinePolicies(ctx context.Context, opts ExecOptions, roleName str
 		if marker != "" {
 			args = append(args, "--marker", marker)
 		}
-		awsArgs := append(append([]string{}, args...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+		awsArgs := buildAWSExecArgs(args, opts, io.Discard)
 		out, err := runAWSCommandStreaming(ctx, awsArgs, nil, io.Discard)
 		if err != nil {
 			return 0, err
@@ -2541,7 +2724,7 @@ func countRoleInstanceProfiles(ctx context.Context, opts ExecOptions, roleName s
 		if marker != "" {
 			args = append(args, "--marker", marker)
 		}
-		awsArgs := append(append([]string{}, args...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+		awsArgs := buildAWSExecArgs(args, opts, io.Discard)
 		out, err := runAWSCommandStreaming(ctx, awsArgs, nil, io.Discard)
 		if err != nil {
 			return 0, err
@@ -2565,7 +2748,7 @@ func countRoleInstanceProfiles(ctx context.Context, opts ExecOptions, roleName s
 
 func deleteRolePermissionsBoundary(ctx context.Context, opts ExecOptions, roleName string, w io.Writer) error {
 	args := []string{"iam", "delete-role-permissions-boundary", "--role-name", roleName}
-	awsArgs := append(append([]string{}, args...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+	awsArgs := buildAWSExecArgs(args, opts, io.Discard)
 	_, err := runAWSCommandStreaming(ctx, awsArgs, nil, io.Discard)
 	if err == nil {
 		_, _ = fmt.Fprintf(w, "[maker] deleted role permissions boundary (role=%s)\n", roleName)
@@ -2603,7 +2786,7 @@ func updateExistingLambda(ctx context.Context, opts ExecOptions, createArgs []st
 	if len(zipBytes2) > 0 {
 		zipBytes = zipBytes2
 	}
-	awsCodeArgs := append(append([]string{}, codeArgs2...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+	awsCodeArgs := buildAWSExecArgs(codeArgs2, opts, w)
 	if _, err := runAWSCommandStreaming(ctx, awsCodeArgs, zipBytes, w); err != nil {
 		return err
 	}
@@ -2620,7 +2803,7 @@ func updateExistingLambda(ctx context.Context, opts ExecOptions, createArgs []st
 	}
 
 	if len(configArgs) > 3 {
-		awsCfgArgs := append(append([]string{}, configArgs...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+		awsCfgArgs := buildAWSExecArgs(configArgs, opts, w)
 		if _, err := runAWSCommandStreaming(ctx, awsCfgArgs, nil, w); err != nil {
 			return err
 		}
