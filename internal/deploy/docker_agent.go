@@ -116,10 +116,10 @@ func (d *DockerAnalysis) FormatForPrompt() string {
 		b.WriteString("- Dockerfile EXPOSE ports: " + intsToCSV(d.ExposedPorts) + "\n")
 	}
 	if len(d.PublishedPorts) > 0 {
-		b.WriteString("- Compose container ports: " + intsToCSV(d.PublishedPorts) + "\n")
+		b.WriteString("- Compose published host ports: " + intsToCSV(d.PublishedPorts) + "\n")
 	}
 	if d.PrimaryPort > 0 {
-		b.WriteString(fmt.Sprintf("- Primary container port: %d\n", d.PrimaryPort))
+		b.WriteString(fmt.Sprintf("- Primary published port: %d\n", d.PrimaryPort))
 	}
 	if d.BuildCommand != "" {
 		b.WriteString("- Recommended build command: " + d.BuildCommand + "\n")
@@ -179,7 +179,9 @@ func parseCompose(content string, analysis *DockerAnalysis) {
 	if strings.TrimSpace(content) == "" || analysis == nil {
 		return
 	}
-	portMapRe := regexp.MustCompile(`['"]?([0-9]{2,5}):([0-9]{2,5})['"]?`)
+	portMapRe := regexp.MustCompile(`^\s*-?\s*['"]?([0-9]{2,5}):([0-9]{2,5})(?:/(?:tcp|udp))?['"]?\s*$`)
+	// Handles compose ports with variable/templated host ports like "${FOO:-18789}:18789" (leading '-' allowed).
+	varHostPortRe := regexp.MustCompile(`^\s*-?\s*['\"]?\$\{[^}]*?:-([0-9]{2,5})\}:([0-9]{2,5})(?:/(?:tcp|udp))?['\"]?\s*$`)
 	serviceLineRe := regexp.MustCompile(`^\s{2}([a-zA-Z0-9_-]+):\s*$`)
 	volumeLineRe := regexp.MustCompile(`^\s*-\s*([^\s#]+:[^\s#]+)\s*$`)
 	envFileRe := regexp.MustCompile(`^\s*env_file\s*:\s*(.+)$`)
@@ -192,12 +194,21 @@ func parseCompose(content string, analysis *DockerAnalysis) {
 		if m := serviceLineRe.FindStringSubmatch(line); len(m) == 2 {
 			analysis.ComposeServices = append(analysis.ComposeServices, strings.TrimSpace(m[1]))
 		}
-		if m := portMapRe.FindStringSubmatch(trimmed); len(m) == 3 {
-			if containerPort := parsePort(m[2]); containerPort > 0 {
-				analysis.PublishedPorts = append(analysis.PublishedPorts, containerPort)
+		// Prefer published HOST ports for deployment/health checks.
+		if m := varHostPortRe.FindStringSubmatch(line); len(m) == 3 {
+			if hostPort := parsePort(m[1]); hostPort > 0 {
+				analysis.PublishedPorts = append(analysis.PublishedPorts, hostPort)
+			}
+		} else if m := portMapRe.FindStringSubmatch(line); len(m) == 3 {
+			if hostPort := parsePort(m[1]); hostPort > 0 {
+				analysis.PublishedPorts = append(analysis.PublishedPorts, hostPort)
 			}
 		}
 		if m := volumeLineRe.FindStringSubmatch(line); len(m) == 2 {
+			// Avoid treating port mappings as volume mounts.
+			if portMapRe.MatchString(line) || varHostPortRe.MatchString(line) {
+				continue
+			}
 			analysis.VolumeMounts = append(analysis.VolumeMounts, strings.TrimSpace(m[1]))
 		}
 		if m := envFileRe.FindStringSubmatch(line); len(m) == 2 {

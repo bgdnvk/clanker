@@ -307,7 +307,8 @@ func detectPorts(dir string, p *RepoProfile) {
 	// check docker-compose for port mappings like "18789:18789" or "8080:3000"
 	if p.HasCompose {
 		composeFiles := []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
-		composePortRe := regexp.MustCompile(`["']?(\d{4,5}):(\d{4,5})["']?`)
+		composePortRe := regexp.MustCompile(`["']?(\d{4,5}):(\d{4,5})(?:/(?:tcp|udp))?["']?`)
+		composeVarHostPortRe := regexp.MustCompile(`['"][^'"]*?:(\d{4,5})(?:/(?:tcp|udp))?['"]`)
 		for _, cf := range composeFiles {
 			fp := filepath.Join(dir, cf)
 			if _, err := os.Stat(fp); err != nil {
@@ -317,6 +318,11 @@ func detectPorts(dir string, p *RepoProfile) {
 				if m := composePortRe.FindStringSubmatch(line); m != nil {
 					// container port is the right side
 					if port := parsePort(m[2]); port > 0 {
+						p.Ports = appendUnique(p.Ports, port)
+					}
+				}
+				if m := composeVarHostPortRe.FindStringSubmatch(line); m != nil {
+					if port := parsePort(m[1]); port > 0 {
 						p.Ports = appendUnique(p.Ports, port)
 					}
 				}

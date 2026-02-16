@@ -9,13 +9,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 var repoURLInQuestionRe = regexp.MustCompile(`https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+`)
 
 // BuildAndPushDockerImage builds a Docker image locally and pushes to ECR.
 // It handles ECR authentication, building the image, tagging, and pushing.
-func BuildAndPushDockerImage(ctx context.Context, clonePath, ecrURI, profile, region string, w io.Writer) (string, error) {
+func BuildAndPushDockerImage(ctx context.Context, clonePath, ecrURI, profile, region, imageTag string, w io.Writer) (string, error) {
 	accountID := extractAccountFromECR(ecrURI)
 	if accountID == "" {
 		return "", fmt.Errorf("failed to extract account ID from ECR URI: %s", ecrURI)
@@ -41,17 +42,21 @@ func BuildAndPushDockerImage(ctx context.Context, clonePath, ecrURI, profile, re
 	}
 	fmt.Fprintf(w, "[docker] build complete\n")
 
+	if strings.TrimSpace(imageTag) == "" {
+		imageTag = "latest"
+	}
+
 	// 3. Tag with ECR URI
-	imageTag := ecrURI + ":latest"
-	fmt.Fprintf(w, "[docker] tagging as %s...\n", imageTag)
-	tagCmd := exec.CommandContext(ctx, "docker", "tag", "clanker-app:latest", imageTag)
+	imageRef := ecrURI + ":" + imageTag
+	fmt.Fprintf(w, "[docker] tagging as %s...\n", imageRef)
+	tagCmd := exec.CommandContext(ctx, "docker", "tag", "clanker-app:latest", imageRef)
 	if out, err := tagCmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("docker tag failed: %w\nOutput: %s", err, string(out))
 	}
 
 	// 4. Push to ECR
 	fmt.Fprintf(w, "[docker] pushing to ECR...\n")
-	pushCmd := exec.CommandContext(ctx, "docker", "push", imageTag)
+	pushCmd := exec.CommandContext(ctx, "docker", "push", imageRef)
 	pushCmd.Stdout = w
 	pushCmd.Stderr = w
 	if err := pushCmd.Run(); err != nil {
@@ -59,13 +64,35 @@ func BuildAndPushDockerImage(ctx context.Context, clonePath, ecrURI, profile, re
 	}
 	fmt.Fprintf(w, "[docker] push complete\n")
 
-	return imageTag, nil
+	return imageRef, nil
 }
 
 // HasDockerInstalled checks if Docker is available on the system.
 func HasDockerInstalled() bool {
-	cmd := exec.Command("docker", "version")
-	return cmd.Run() == nil
+	_, err := exec.LookPath("docker")
+	return err == nil
+}
+
+func dockerDaemonAvailable(ctx context.Context) bool {
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "info")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return true
+	}
+	lower := strings.ToLower(string(out))
+	if strings.Contains(lower, "cannot connect to the docker daemon") || strings.Contains(lower, "is the docker daemon running") {
+		return false
+	}
+	// Unknown failure: assume unavailable so callers can give a deterministic message.
+	return false
+}
+
+// DockerDaemonAvailableForCLI reports whether a local Docker daemon is reachable.
+// This is used by CLI flows to surface a clearer message than "docker not installed".
+func DockerDaemonAvailableForCLI(ctx context.Context) bool {
+	return dockerDaemonAvailable(ctx)
 }
 
 // extractAccountFromECR extracts the AWS account ID from an ECR URI.

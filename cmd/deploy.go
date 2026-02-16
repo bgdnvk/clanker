@@ -402,10 +402,13 @@ Examples:
 		isNativeDeployment := userConfig != nil && userConfig.DeployMode == "native"
 		if !isNativeDeployment && rp.HasDocker && outputBindings["ECR_URI"] != "" && strings.EqualFold(strings.TrimSpace(targetProvider), "aws") {
 			if !maker.HasDockerInstalled() {
-				return fmt.Errorf("Docker is required for deployment but not installed locally")
+				return fmt.Errorf("Docker is required for deployment but was not found in PATH")
+			}
+			if !maker.DockerDaemonAvailableForCLI(ctx) {
+				return fmt.Errorf("Docker is installed but the daemon is not running (start Docker Desktop / ensure docker engine is running, then retry)")
 			}
 			fmt.Fprintf(os.Stderr, "[deploy] phase 2: building and pushing Docker image...\n")
-			imageURI, err := maker.BuildAndPushDockerImage(ctx, rp.ClonePath, outputBindings["ECR_URI"], targetProfile, region, os.Stdout)
+			imageURI, err := maker.BuildAndPushDockerImage(ctx, rp.ClonePath, outputBindings["ECR_URI"], targetProfile, region, "latest", os.Stdout)
 			if err != nil {
 				return fmt.Errorf("docker build/push failed: %w", err)
 			}

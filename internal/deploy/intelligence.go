@@ -2,11 +2,117 @@ package deploy
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 )
+
+func repoResourcePrefix(repoURL string) string {
+	clean := strings.TrimSpace(repoURL)
+	if clean == "" {
+		return "app-000000"
+	}
+	clean = strings.TrimSuffix(clean, "/")
+	clean = strings.TrimSuffix(clean, ".git")
+
+	path := clean
+	if strings.Contains(clean, "://") {
+		if u, err := url.Parse(clean); err == nil {
+			path = strings.Trim(u.Path, "/")
+		}
+	} else if strings.HasPrefix(clean, "git@") {
+		// git@github.com:owner/repo
+		if parts := strings.SplitN(clean, ":", 2); len(parts) == 2 {
+			path = strings.Trim(parts[1], "/")
+		}
+	}
+
+	segments := strings.Split(path, "/")
+	slug := strings.TrimSpace(segments[len(segments)-1])
+	if slug == "" {
+		slug = "app"
+	}
+
+	slug = strings.ToLower(slug)
+	var out strings.Builder
+	lastDash := false
+	for _, r := range slug {
+		isAZ := r >= 'a' && r <= 'z'
+		is09 := r >= '0' && r <= '9'
+		if isAZ || is09 {
+			out.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			out.WriteByte('-')
+			lastDash = true
+		}
+	}
+	slug = strings.Trim(out.String(), "-")
+	if slug == "" {
+		slug = "app"
+	}
+
+	sum := sha1.Sum([]byte(strings.ToLower(clean)))
+	suffix := hex.EncodeToString(sum[:])
+	if len(suffix) > 6 {
+		suffix = suffix[:6]
+	}
+	return slug + "-" + suffix
+}
+
+func awsName(prefix string, suffix string, maxLen int) string {
+	prefix = strings.TrimSpace(prefix)
+	suffix = strings.TrimSpace(suffix)
+	if prefix == "" {
+		prefix = "app-000000"
+	}
+	if maxLen <= 0 {
+		return strings.Trim(prefix+suffix, "-")
+	}
+
+	name := prefix + suffix
+	if len(name) <= maxLen {
+		return strings.Trim(name, "-")
+	}
+
+	keep := maxLen - len(suffix)
+	if keep <= 0 {
+		trimmed := suffix
+		if len(trimmed) > maxLen {
+			trimmed = trimmed[:maxLen]
+		}
+		return strings.Trim(trimmed, "-")
+	}
+	if keep > len(prefix) {
+		keep = len(prefix)
+	}
+	trimmedPrefix := strings.Trim(prefix[:keep], "-")
+	if trimmedPrefix == "" {
+		trimmedPrefix = "app"
+	}
+	return strings.Trim(trimmedPrefix+suffix, "-")
+}
+
+func kubeName(prefix string, maxLen int) string {
+	name := strings.ToLower(strings.TrimSpace(prefix))
+	name = strings.Trim(name, "-")
+	if name == "" {
+		name = "app"
+	}
+	if maxLen > 0 && len(name) > maxLen {
+		name = strings.Trim(name[:maxLen], "-")
+		if name == "" {
+			name = "app"
+		}
+	}
+	return name
+}
 
 // AskFunc is the LLM call interface — matches ai.Client.AskPrompt signature
 type AskFunc func(ctx context.Context, prompt string) (string, error)
@@ -835,6 +941,7 @@ func buildFixPrompt(v *PlanValidation) string {
 // buildIntelligentPrompt creates the final enriched prompt using all intelligence phases
 func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis, arch *ArchitectDecision, strat DeployStrategy, infraSnap *InfraSnapshot, cfInfraSnap *CFInfraSnapshot, opts *DeployOptions) string {
 	var b strings.Builder
+	resourcePrefix := repoResourcePrefix(p.RepoURL)
 
 	providerLabel := "AWS"
 	switch strings.ToLower(strings.TrimSpace(strat.Provider)) {
@@ -969,6 +1076,9 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAn
 		b.WriteString("- Use environment variables for channel/provider secrets; avoid committing tokens\n")
 	}
 
+	b.WriteString("\n## Naming\n")
+	b.WriteString(fmt.Sprintf("- Use resource prefix: %s (repo name + short hash)\n", resourcePrefix))
+
 	// deployment instructions based on chosen method
 	b.WriteString("\n## Deployment Instructions\n")
 	switch strat.Method {
@@ -1039,7 +1149,7 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAn
 	case "cloudflare":
 		b.WriteString("- All commands use npx wrangler CLI\n")
 		b.WriteString("- Auth via CLOUDFLARE_API_TOKEN env var (already set)\n")
-		b.WriteString("- Tag/name resources with clanker-deploy prefix\n")
+		b.WriteString(fmt.Sprintf("- Name projects/resources with prefix %s\n", resourcePrefix))
 		b.WriteString("- Prefer free tier where possible\n")
 		b.WriteString("- The plan must be fully executable with npx wrangler commands only\n")
 		b.WriteString("- Commands must be in the correct dependency order\n")
@@ -1049,14 +1159,17 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAn
 		b.WriteString("- Prefer minimal, cost-effective machine sizes\n")
 		b.WriteString("- Persist state/workspace on disk\n")
 		b.WriteString("- Commands must be in dependency order\n")
+		b.WriteString(fmt.Sprintf("- Name resources with prefix %s\n", resourcePrefix))
 	case "azure":
 		b.WriteString("- The plan must be fully executable with az CLI only\n")
 		b.WriteString("- Prefer minimal, cost-effective VM sizes\n")
 		b.WriteString("- Persist state/workspace on managed disk\n")
 		b.WriteString("- Commands must be in dependency order\n")
+		b.WriteString(fmt.Sprintf("- Name resources with prefix %s\n", resourcePrefix))
 	default:
 		b.WriteString("- Use the default VPC and its existing subnets when possible\n")
-		b.WriteString("- Tag all resources with Project=clanker-deploy\n")
+		b.WriteString(fmt.Sprintf("- Name resources with prefix %s\n", resourcePrefix))
+		b.WriteString(fmt.Sprintf("- Tag all resources with Project=%s\n", resourcePrefix))
 		b.WriteString("- Prefer minimal, cost-effective resource sizes\n")
 		b.WriteString("- The plan must be fully executable with AWS CLI only\n")
 		b.WriteString("- Commands must be in the correct dependency order\n")
@@ -1070,7 +1183,9 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAn
 
 func smartECSPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis) string {
 	var b strings.Builder
+	resourcePrefix := repoResourcePrefix(p.RepoURL)
 	b.WriteString("Deploy using ECS Fargate (serverless containers):\n")
+	b.WriteString(fmt.Sprintf("Naming: use prefix %s for ECR repo, cluster, service, security group, and ALB (if used)\n", resourcePrefix))
 	b.WriteString("1. Create an ECR repository\n")
 
 	if p.HasDocker {
@@ -1121,7 +1236,9 @@ func smartECSPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis)
 
 func gcpComputeEnginePrompt(p *RepoProfile, deep *DeepAnalysis) string {
 	var b strings.Builder
+	resourcePrefix := repoResourcePrefix(p.RepoURL)
 	b.WriteString("Deploy using GCP Compute Engine (VM + Docker Compose):\n")
+	b.WriteString(fmt.Sprintf("Naming: use prefix %s for VM/network/firewall resources\n", resourcePrefix))
 	b.WriteString("1. Create a VPC firewall rule for required inbound ports\n")
 	b.WriteString("2. Create a Compute Engine VM (Ubuntu LTS)\n")
 	b.WriteString("3. Install Docker and Docker Compose on the VM\n")
@@ -1135,7 +1252,9 @@ func gcpComputeEnginePrompt(p *RepoProfile, deep *DeepAnalysis) string {
 
 func azureVMPrompt(p *RepoProfile, deep *DeepAnalysis) string {
 	var b strings.Builder
+	resourcePrefix := repoResourcePrefix(p.RepoURL)
 	b.WriteString("Deploy using Azure VM (Docker Compose):\n")
+	b.WriteString(fmt.Sprintf("Naming: use prefix %s for resource group/NSG/VM resources\n", resourcePrefix))
 	b.WriteString("1. Create resource group and network security group with least-privilege inbound rules\n")
 	b.WriteString("2. Create Ubuntu VM with managed disk\n")
 	b.WriteString("3. Install Docker and Docker Compose\n")
@@ -1165,7 +1284,9 @@ func isOpenClawRepo(p *RepoProfile) bool {
 
 func appRunnerPrompt(p *RepoProfile, arch *ArchitectDecision) string {
 	var b strings.Builder
+	resourcePrefix := repoResourcePrefix(p.RepoURL)
 	b.WriteString("Deploy using AWS App Runner (simplest container hosting):\n")
+	b.WriteString(fmt.Sprintf("Naming: use prefix %s for ECR repo + App Runner service\n", resourcePrefix))
 
 	if p.HasDocker {
 		b.WriteString("1. Create ECR repository, build and push Docker image\n")
@@ -1195,7 +1316,9 @@ func appRunnerPrompt(p *RepoProfile, arch *ArchitectDecision) string {
 
 func lightsailPrompt(p *RepoProfile, arch *ArchitectDecision) string {
 	var b strings.Builder
+	resourcePrefix := repoResourcePrefix(p.RepoURL)
 	b.WriteString("Deploy using AWS Lightsail (cheapest option, $3.50/mo):\n")
+	b.WriteString(fmt.Sprintf("Naming: use prefix %s for the Lightsail service/container\n", resourcePrefix))
 	b.WriteString("1. Create a Lightsail container service (nano plan)\n")
 
 	if p.HasDocker {
@@ -1244,6 +1367,7 @@ func dbPrompt(dbType string) string {
 
 func cfPagesPrompt(p *RepoProfile, deep *DeepAnalysis) string {
 	var b strings.Builder
+	resourcePrefix := repoResourcePrefix(p.RepoURL)
 	b.WriteString("Deploy as a Cloudflare Pages project (static site + optional Workers Functions):\n")
 
 	buildCmd := p.BuildCmd
@@ -1266,12 +1390,12 @@ func cfPagesPrompt(p *RepoProfile, deep *DeepAnalysis) string {
 
 	b.WriteString(fmt.Sprintf("1. Install dependencies: %s install\n", p.PackageManager))
 	b.WriteString(fmt.Sprintf("2. Build the project: %s\n", buildCmd))
-	b.WriteString("3. Create Pages project: npx wrangler pages project create <project-name> --production-branch main\n")
-	b.WriteString(fmt.Sprintf("4. Deploy built assets: npx wrangler pages deploy %s --project-name <project-name>\n", outputDir))
+	b.WriteString(fmt.Sprintf("3. Create Pages project: npx wrangler pages project create %s --production-branch main\n", resourcePrefix))
+	b.WriteString(fmt.Sprintf("4. Deploy built assets: npx wrangler pages deploy %s --project-name %s\n", outputDir, resourcePrefix))
 	b.WriteString("5. Pages provides an automatic *.pages.dev URL + HTTPS\n")
 
 	if len(p.EnvVars) > 0 {
-		b.WriteString("6. Set environment variables: npx wrangler pages secret put <KEY> --project-name <project-name>\n")
+		b.WriteString(fmt.Sprintf("6. Set environment variables: npx wrangler pages secret put <KEY> --project-name %s\n", resourcePrefix))
 	}
 
 	return b.String()
@@ -1279,6 +1403,7 @@ func cfPagesPrompt(p *RepoProfile, deep *DeepAnalysis) string {
 
 func cfWorkersPrompt(p *RepoProfile, deep *DeepAnalysis) string {
 	var b strings.Builder
+	resourcePrefix := repoResourcePrefix(p.RepoURL)
 	b.WriteString("Deploy as a Cloudflare Worker (edge serverless):\n")
 
 	// check if wrangler.toml exists
@@ -1296,7 +1421,7 @@ func cfWorkersPrompt(p *RepoProfile, deep *DeepAnalysis) string {
 		b.WriteString("3. Deploy with: npx wrangler deploy\n")
 	} else {
 		b.WriteString("1. Generate a wrangler.toml configuration file:\n")
-		b.WriteString("   - name = \"<project-name>\"\n")
+		b.WriteString(fmt.Sprintf("   - name = \"%s\"\n", resourcePrefix))
 		b.WriteString("   - main = \"src/index.ts\" (or appropriate entry point)\n")
 		b.WriteString("   - compatibility_date = current date\n")
 		b.WriteString("2. Install dependencies\n")
@@ -1326,19 +1451,20 @@ func cfWorkersPrompt(p *RepoProfile, deep *DeepAnalysis) string {
 
 func cfContainersPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis) string {
 	var b strings.Builder
+	resourcePrefix := repoResourcePrefix(p.RepoURL)
 	b.WriteString("Deploy as a Cloudflare Container (Docker on Cloudflare edge):\n")
 
 	if p.HasDocker {
 		b.WriteString("1. Build Docker image using existing Dockerfile:\n")
-		b.WriteString("   npx wrangler containers build . -t <project-name>:latest\n")
+		b.WriteString(fmt.Sprintf("   npx wrangler containers build . -t %s:latest\n", resourcePrefix))
 	} else {
 		b.WriteString("1. Generate a Dockerfile for the application, then build:\n")
 		b.WriteString(fmt.Sprintf("   - Base image: %s\n", dockerBaseImage(p)))
-		b.WriteString("   npx wrangler containers build . -t <project-name>:latest\n")
+		b.WriteString(fmt.Sprintf("   npx wrangler containers build . -t %s:latest\n", resourcePrefix))
 	}
 
 	b.WriteString("2. Push image to Cloudflare registry:\n")
-	b.WriteString("   npx wrangler containers push <project-name>:latest\n")
+	b.WriteString(fmt.Sprintf("   npx wrangler containers push %s:latest\n", resourcePrefix))
 	b.WriteString("3. Create a Worker that references the container\n")
 	b.WriteString("4. Deploy with: npx wrangler deploy\n")
 
@@ -1356,6 +1482,27 @@ func cfContainersPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnaly
 // ec2Prompt generates deployment instructions for EC2
 func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts *DeployOptions) string {
 	var b strings.Builder
+	resourcePrefix := repoResourcePrefix(p.RepoURL)
+	projectTag := resourcePrefix
+
+	// Tag values have generous limits; some AWS resource names do not.
+	vpcTagName := awsName(resourcePrefix, "-vpc", 128)
+	subnet1aTagName := awsName(resourcePrefix, "-public-1a", 128)
+	subnet1bTagName := awsName(resourcePrefix, "-public-1b", 128)
+	igwTagName := awsName(resourcePrefix, "-igw", 128)
+	rtTagName := awsName(resourcePrefix, "-public-rt", 128)
+
+	albSGName := awsName(resourcePrefix, "-alb-sg", 255)
+	ec2SGName := awsName(resourcePrefix, "-ec2-sg", 255)
+
+	roleName := awsName(resourcePrefix, "-ec2-role", 64)
+	profileName := awsName(resourcePrefix, "-ec2-profile", 128)
+
+	ecrRepoName := awsName(resourcePrefix, "", 256)
+	localImageName := awsName(resourcePrefix, "", 128)
+	instanceName := awsName(resourcePrefix, "", 128)
+	albName := awsName(resourcePrefix, "-alb", 32)
+	tgName := awsName(resourcePrefix, "-tg", 32)
 
 	instanceType := "t3.small"
 	if opts != nil && opts.InstanceType != "" {
@@ -1370,23 +1517,23 @@ func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts
 		b.WriteString("## MANDATORY: Create a NEW VPC (do NOT use default VPC)\n")
 		b.WriteString("You MUST create all these resources in order:\n\n")
 		b.WriteString("1. Create VPC:\n")
-		b.WriteString("   aws ec2 create-vpc --cidr-block 10.0.0.0/16 --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=clanker-deploy-vpc},{Key=Project,Value=clanker-deploy}]'\n")
+		b.WriteString(fmt.Sprintf("   aws ec2 create-vpc --cidr-block 10.0.0.0/16 --tag-specifications 'ResourceType=vpc,Tags=[{Key=Name,Value=%s},{Key=Project,Value=%s}]'\n", vpcTagName, projectTag))
 		b.WriteString("   Save the VpcId from output.\n\n")
 		b.WriteString("2. Enable DNS hostnames on VPC:\n")
 		b.WriteString("   aws ec2 modify-vpc-attribute --vpc-id <VPC_ID> --enable-dns-hostnames '{\"Value\":true}'\n\n")
 		b.WriteString("3. Create public subnet in us-east-1a:\n")
-		b.WriteString("   aws ec2 create-subnet --vpc-id <VPC_ID> --cidr-block 10.0.1.0/24 --availability-zone us-east-1a --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=clanker-public-1a}]'\n")
+		b.WriteString(fmt.Sprintf("   aws ec2 create-subnet --vpc-id <VPC_ID> --cidr-block 10.0.1.0/24 --availability-zone us-east-1a --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=%s},{Key=Project,Value=%s}]'\n", subnet1aTagName, projectTag))
 		b.WriteString("   Save the SubnetId.\n\n")
 		b.WriteString("4. Create public subnet in us-east-1b (for ALB):\n")
-		b.WriteString("   aws ec2 create-subnet --vpc-id <VPC_ID> --cidr-block 10.0.2.0/24 --availability-zone us-east-1b --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=clanker-public-1b}]'\n")
+		b.WriteString(fmt.Sprintf("   aws ec2 create-subnet --vpc-id <VPC_ID> --cidr-block 10.0.2.0/24 --availability-zone us-east-1b --tag-specifications 'ResourceType=subnet,Tags=[{Key=Name,Value=%s},{Key=Project,Value=%s}]'\n", subnet1bTagName, projectTag))
 		b.WriteString("   Save the SubnetId.\n\n")
 		b.WriteString("5. Create Internet Gateway:\n")
-		b.WriteString("   aws ec2 create-internet-gateway --tag-specifications 'ResourceType=internet-gateway,Tags=[{Key=Name,Value=clanker-igw}]'\n")
+		b.WriteString(fmt.Sprintf("   aws ec2 create-internet-gateway --tag-specifications 'ResourceType=internet-gateway,Tags=[{Key=Name,Value=%s},{Key=Project,Value=%s}]'\n", igwTagName, projectTag))
 		b.WriteString("   Save the InternetGatewayId.\n\n")
 		b.WriteString("6. Attach IGW to VPC:\n")
 		b.WriteString("   aws ec2 attach-internet-gateway --internet-gateway-id <IGW_ID> --vpc-id <VPC_ID>\n\n")
 		b.WriteString("7. Create route table:\n")
-		b.WriteString("   aws ec2 create-route-table --vpc-id <VPC_ID> --tag-specifications 'ResourceType=route-table,Tags=[{Key=Name,Value=clanker-public-rt}]'\n")
+		b.WriteString(fmt.Sprintf("   aws ec2 create-route-table --vpc-id <VPC_ID> --tag-specifications 'ResourceType=route-table,Tags=[{Key=Name,Value=%s},{Key=Project,Value=%s}]'\n", rtTagName, projectTag))
 		b.WriteString("   Save the RouteTableId.\n\n")
 		b.WriteString("8. Add route to Internet Gateway:\n")
 		b.WriteString("   aws ec2 create-route --route-table-id <RT_ID> --destination-cidr-block 0.0.0.0/0 --gateway-id <IGW_ID>\n\n")
@@ -1401,11 +1548,11 @@ func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts
 	b.WriteString("## Security Groups (CRITICAL: Follow least-privilege)\n")
 	b.WriteString("Create TWO security groups:\n\n")
 	b.WriteString("1. ALB Security Group (allows public HTTP/HTTPS):\n")
-	b.WriteString("   aws ec2 create-security-group --group-name clanker-alb-sg --description 'ALB security group' --vpc-id <VPC_ID>\n")
+	b.WriteString(fmt.Sprintf("   aws ec2 create-security-group --group-name %s --description 'ALB security group' --vpc-id <VPC_ID>\n", albSGName))
 	b.WriteString("   aws ec2 authorize-security-group-ingress --group-id <ALB_SG_ID> --protocol tcp --port 80 --cidr 0.0.0.0/0\n")
 	b.WriteString("   aws ec2 authorize-security-group-ingress --group-id <ALB_SG_ID> --protocol tcp --port 443 --cidr 0.0.0.0/0\n\n")
 	b.WriteString("2. EC2 Security Group (ONLY allows traffic from ALB, NOT from internet):\n")
-	b.WriteString("   aws ec2 create-security-group --group-name clanker-ec2-sg --description 'EC2 security group' --vpc-id <VPC_ID>\n")
+	b.WriteString(fmt.Sprintf("   aws ec2 create-security-group --group-name %s --description 'EC2 security group' --vpc-id <VPC_ID>\n", ec2SGName))
 	if len(p.Ports) > 0 {
 		for _, port := range p.Ports {
 			b.WriteString(fmt.Sprintf("   aws ec2 authorize-security-group-ingress --group-id <EC2_SG_ID> --protocol tcp --port %d --source-group <ALB_SG_ID>\n", port))
@@ -1416,29 +1563,29 @@ func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts
 	b.WriteString("## IAM Role and Instance Profile\n")
 	b.WriteString("Create IAM role AND instance profile (both required for EC2):\n\n")
 	b.WriteString("1. Create role:\n")
-	b.WriteString("   aws iam create-role --role-name clanker-ec2-role --assume-role-policy-document '{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}'\n\n")
+	b.WriteString(fmt.Sprintf("   aws iam create-role --role-name %s --assume-role-policy-document '{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}'\n\n", roleName))
 	b.WriteString("2. Attach policies (include ECR read for pulling images):\n")
-	b.WriteString("   aws iam attach-role-policy --role-name clanker-ec2-role --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore\n")
-	b.WriteString("   aws iam attach-role-policy --role-name clanker-ec2-role --policy-arn arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy\n")
-	b.WriteString("   aws iam attach-role-policy --role-name clanker-ec2-role --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly\n\n")
+	b.WriteString(fmt.Sprintf("   aws iam attach-role-policy --role-name %s --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore\n", roleName))
+	b.WriteString(fmt.Sprintf("   aws iam attach-role-policy --role-name %s --policy-arn arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy\n", roleName))
+	b.WriteString(fmt.Sprintf("   aws iam attach-role-policy --role-name %s --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly\n\n", roleName))
 	b.WriteString("3. Create instance profile:\n")
-	b.WriteString("   aws iam create-instance-profile --instance-profile-name clanker-ec2-profile\n\n")
+	b.WriteString(fmt.Sprintf("   aws iam create-instance-profile --instance-profile-name %s\n\n", profileName))
 	b.WriteString("4. Add role to instance profile:\n")
-	b.WriteString("   aws iam add-role-to-instance-profile --instance-profile-name clanker-ec2-profile --role-name clanker-ec2-role\n\n")
+	b.WriteString(fmt.Sprintf("   aws iam add-role-to-instance-profile --instance-profile-name %s --role-name %s\n\n", profileName, roleName))
 
 	// ECR image build approach - build locally/CI and push to ECR
 	b.WriteString("## Container Image (Build locally and push to ECR)\n")
 	b.WriteString("IMPORTANT: Do NOT build Docker images on the EC2 instance. Small instances run out of memory.\n")
 	b.WriteString("Instead, build locally or use CI, then push to ECR and pull on EC2.\n\n")
 	b.WriteString("1. Create ECR repository:\n")
-	b.WriteString("   aws ecr create-repository --repository-name clanker-app --image-scanning-configuration scanOnPush=true\n")
+	b.WriteString(fmt.Sprintf("   aws ecr create-repository --repository-name %s --image-scanning-configuration scanOnPush=true\n", ecrRepoName))
 	b.WriteString("   Save the repositoryUri as <ECR_URI>.\n\n")
 	b.WriteString("2. Get ECR login token (for local build machine):\n")
 	b.WriteString("   aws ecr get-login-password --region <REGION> | docker login --username AWS --password-stdin <ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com\n\n")
 	b.WriteString("3. Build and push image (run these commands on local machine or CI):\n")
 	b.WriteString(fmt.Sprintf("   git clone %s /tmp/app && cd /tmp/app\n", p.RepoURL))
-	b.WriteString("   docker build -t clanker-app .\n")
-	b.WriteString("   docker tag clanker-app:latest <ECR_URI>:latest\n")
+	b.WriteString(fmt.Sprintf("   docker build -t %s .\n", localImageName))
+	b.WriteString(fmt.Sprintf("   docker tag %s:latest <ECR_URI>:latest\n", localImageName))
 	b.WriteString("   docker push <ECR_URI>:latest\n\n")
 
 	b.WriteString("## Launch EC2 Instance\n")
@@ -1453,8 +1600,8 @@ func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts
 	b.WriteString("     --image-id <AMI_ID> \\\n")
 	b.WriteString("     --subnet-id <SUBNET_1A_ID> \\\n")
 	b.WriteString("     --security-group-ids <EC2_SG_ID> \\\n")
-	b.WriteString("     --iam-instance-profile Name=clanker-ec2-profile \\\n")
-	b.WriteString("     --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=clanker-app},{Key=Project,Value=clanker-deploy}]' \\\n")
+	b.WriteString(fmt.Sprintf("     --iam-instance-profile Name=%s \\\n ", profileName))
+	b.WriteString(fmt.Sprintf("     --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=%s},{Key=Project,Value=%s}]' \\\n ", instanceName, projectTag))
 	b.WriteString("     --metadata-options 'HttpTokens=required,HttpPutResponseHopLimit=2,HttpEndpoint=enabled' \\\n")
 	b.WriteString("     --user-data <USER_DATA>\n\n")
 	b.WriteString("NOTE: The <USER_DATA> placeholder will be automatically replaced with a base64-encoded script that:\n")
@@ -1473,7 +1620,7 @@ func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts
 		b.WriteString("## Environment Variables (Secrets Manager)\n")
 		b.WriteString("Store application secrets:\n")
 		for _, v := range p.EnvVars {
-			b.WriteString(fmt.Sprintf("   aws secretsmanager create-secret --name clanker/%s --secret-string '<value>'\n", v))
+			b.WriteString(fmt.Sprintf("   aws secretsmanager create-secret --name %s/%s --secret-string '<value>'\n", resourcePrefix, v))
 		}
 		b.WriteString("\n")
 	}
@@ -1482,7 +1629,7 @@ func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts
 	b.WriteString("## Application Load Balancer (use elbv2 commands, NOT ec2)\n")
 	b.WriteString("1. Create ALB:\n")
 	b.WriteString("   aws elbv2 create-load-balancer \\\n")
-	b.WriteString("     --name clanker-alb \\\n")
+	b.WriteString(fmt.Sprintf("     --name %s \\\n ", albName))
 	b.WriteString("     --subnets <SUBNET_1A_ID> <SUBNET_1B_ID> \\\n")
 	b.WriteString("     --security-groups <ALB_SG_ID> \\\n")
 	b.WriteString("     --scheme internet-facing \\\n")
@@ -1495,7 +1642,7 @@ func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts
 	}
 	b.WriteString("2. Create target group:\n")
 	b.WriteString("   aws elbv2 create-target-group \\\n")
-	b.WriteString("     --name clanker-tg \\\n")
+	b.WriteString(fmt.Sprintf("     --name %s \\\n ", tgName))
 	b.WriteString(fmt.Sprintf("     --protocol HTTP --port %d \\\n", appPort))
 	b.WriteString("     --vpc-id <VPC_ID> \\\n")
 	b.WriteString("     --target-type instance \\\n")
@@ -1527,6 +1674,8 @@ func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts
 // eksPrompt generates deployment instructions for EKS
 func eksPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis) string {
 	var b strings.Builder
+	resourcePrefix := repoResourcePrefix(p.RepoURL)
+	namespace := kubeName(resourcePrefix, 63)
 	b.WriteString("Deploy to existing EKS cluster:\n\n")
 
 	b.WriteString("## Prerequisites\n")
@@ -1551,7 +1700,7 @@ func eksPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis) stri
 	b.WriteString("apiVersion: v1\n")
 	b.WriteString("kind: Namespace\n")
 	b.WriteString("metadata:\n")
-	b.WriteString("  name: clanker-deploy\n")
+	b.WriteString(fmt.Sprintf("  name: %s\n", namespace))
 	b.WriteString("```\n\n")
 
 	b.WriteString("### Deployment\n")
@@ -1560,7 +1709,7 @@ func eksPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis) stri
 	b.WriteString("kind: Deployment\n")
 	b.WriteString("metadata:\n")
 	b.WriteString("  name: app\n")
-	b.WriteString("  namespace: clanker-deploy\n")
+	b.WriteString(fmt.Sprintf("  namespace: %s\n", namespace))
 	b.WriteString("spec:\n")
 	b.WriteString("  replicas: 2\n")
 	b.WriteString("  selector:\n")
@@ -1593,7 +1742,7 @@ func eksPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis) stri
 	b.WriteString("kind: Service\n")
 	b.WriteString("metadata:\n")
 	b.WriteString("  name: app\n")
-	b.WriteString("  namespace: clanker-deploy\n")
+	b.WriteString(fmt.Sprintf("  namespace: %s\n", namespace))
 	b.WriteString("spec:\n")
 	b.WriteString("  type: LoadBalancer\n")
 	b.WriteString("  selector:\n")
@@ -1611,7 +1760,7 @@ func eksPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis) stri
 	b.WriteString("kubectl apply -f namespace.yaml\n")
 	b.WriteString("kubectl apply -f deployment.yaml\n")
 	b.WriteString("kubectl apply -f service.yaml\n")
-	b.WriteString("kubectl get svc -n clanker-deploy  # Get LoadBalancer URL\n")
+	b.WriteString(fmt.Sprintf("kubectl get svc -n %s  # Get LoadBalancer URL\n", namespace))
 	b.WriteString("```\n")
 
 	return b.String()

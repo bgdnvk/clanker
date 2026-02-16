@@ -214,6 +214,10 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		// Handle EC2 user-data generation for run-instances
 		args = maybeGenerateEC2UserData(args, bindings, opts)
 
+		if err := maybeSyncSecretsForRunInstances(ctx, args, opts); err != nil {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to sync secrets for user-data: %v\n", err)
+		}
+
 		if !autoImagePrepared && shouldAutoPrepareImage(args, bindings, opts) {
 			if err := autoPrepareImageForOneClickDeploy(ctx, plan.Question, bindings, opts); err != nil {
 				return fmt.Errorf("command %d image preparation failed: %w", idx+1, err)
@@ -234,6 +238,10 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		}
 
 		awsArgs := buildAWSExecArgs(args, opts, opts.Writer)
+
+		if err := guardDefaultVPCDeletion(ctx, args, opts); err != nil {
+			return fmt.Errorf("command %d rejected: %w", idx+1, err)
+		}
 
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: %s\n", idx+1, len(plan.Commands), formatAWSArgsForLog(awsArgs))
 
@@ -336,8 +344,15 @@ func shouldAutoPrepareImage(args []string, bindings map[string]string, opts Exec
 	if strings.TrimSpace(opts.Profile) == "" || strings.TrimSpace(opts.Region) == "" {
 		return false
 	}
-	ecrURI := strings.TrimSpace(bindings["ECR_URI"])
-	if ecrURI == "" {
+	if strings.TrimSpace(bindings["ECR_URI"]) == "" {
+		if ref, ok := extractECRImageRefFromRunInstances(args); ok {
+			bindings["ECR_URI"] = ref.ECRURI
+			if strings.TrimSpace(bindings["IMAGE_TAG"]) == "" {
+				bindings["IMAGE_TAG"] = ref.Tag
+			}
+		}
+	}
+	if strings.TrimSpace(bindings["ECR_URI"]) == "" {
 		return false
 	}
 	if strings.TrimSpace(bindings["IMAGE_URI"]) != "" {
@@ -351,17 +366,24 @@ func autoPrepareImageForOneClickDeploy(ctx context.Context, question string, bin
 	if ecrURI == "" {
 		return fmt.Errorf("missing ECR_URI binding")
 	}
-
-	if !HasDockerInstalled() {
-		return fmt.Errorf("docker is required for one-click image build but is not installed")
+	imageTag := strings.TrimSpace(bindings["IMAGE_TAG"])
+	if imageTag == "" {
+		imageTag = "latest"
 	}
 
-	exists, err := ecrImageTagExists(ctx, ecrURI, opts.Profile, opts.Region, "latest")
+	if !HasDockerInstalled() {
+		return fmt.Errorf("docker is required for one-click image build but was not found in PATH")
+	}
+	if !dockerDaemonAvailable(ctx) {
+		return fmt.Errorf("docker is installed but the daemon is not running (start Docker Desktop / ensure docker engine is running, then retry)")
+	}
+
+	exists, err := ecrImageTagExists(ctx, ecrURI, opts.Profile, opts.Region, imageTag)
 	if err != nil {
 		return err
 	}
 	if exists {
-		bindings["IMAGE_URI"] = ecrURI + ":latest"
+		bindings["IMAGE_URI"] = ecrURI + ":" + imageTag
 		_, _ = fmt.Fprintf(opts.Writer, "[docker] found existing image in ECR, skipping build: %s\n", bindings["IMAGE_URI"])
 		return nil
 	}
@@ -378,12 +400,140 @@ func autoPrepareImageForOneClickDeploy(ctx context.Context, question string, bin
 	}
 	defer cleanup()
 
-	imageURI, err := BuildAndPushDockerImage(ctx, clonePath, ecrURI, opts.Profile, opts.Region, opts.Writer)
+	imageURI, err := BuildAndPushDockerImage(ctx, clonePath, ecrURI, opts.Profile, opts.Region, imageTag, opts.Writer)
 	if err != nil {
 		return err
 	}
 	bindings["IMAGE_URI"] = imageURI
 	_, _ = fmt.Fprintf(opts.Writer, "[docker] one-click: image ready %s\n", imageURI)
+	return nil
+}
+
+type ecrImageRef struct {
+	ECRURI string
+	Tag    string
+}
+
+func extractECRImageRefFromRunInstances(args []string) (ecrImageRef, bool) {
+	if len(args) < 2 || args[0] != "ec2" || args[1] != "run-instances" {
+		return ecrImageRef{}, false
+	}
+	userData := strings.TrimSpace(flagValue(args, "--user-data"))
+	if userData == "" {
+		return ecrImageRef{}, false
+	}
+	if decoded, ok := decodeLikelyBase64UserData(userData); ok {
+		userData = decoded
+	}
+	// Find an ECR image reference anywhere in user-data (docker pull/run).
+	// Example: 123456789012.dkr.ecr.us-east-2.amazonaws.com/app:latest
+	re := regexp.MustCompile(`([0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com\/[a-zA-Z0-9._/-]+)(?::([a-zA-Z0-9._-]+))?`)
+	match := re.FindStringSubmatch(userData)
+	if len(match) < 2 {
+		return ecrImageRef{}, false
+	}
+	ref := ecrImageRef{ECRURI: strings.TrimSpace(match[1]), Tag: "latest"}
+	if len(match) >= 3 {
+		if t := strings.TrimSpace(match[2]); t != "" {
+			ref.Tag = t
+		}
+	}
+	return ref, true
+}
+
+func maybeSyncSecretsForRunInstances(ctx context.Context, args []string, opts ExecOptions) error {
+	if len(args) < 2 || args[0] != "ec2" || args[1] != "run-instances" {
+		return nil
+	}
+	userData := strings.TrimSpace(flagValue(args, "--user-data"))
+	if userData == "" {
+		return nil
+	}
+	if decoded, ok := decodeLikelyBase64UserData(userData); ok {
+		userData = decoded
+	}
+	secretID := strings.TrimSpace(flagValueInScript(userData, "--secret-id"))
+	if secretID == "" {
+		return nil
+	}
+	envKey := secretEnvKey(secretID)
+	if envKey == "" {
+		return nil
+	}
+	secretValue := strings.TrimSpace(os.Getenv(envKey))
+	if secretValue == "" {
+		return nil
+	}
+
+	tmp, err := os.CreateTemp("", "clanker-secret-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Chmod(0o600)
+	_, _ = tmp.WriteString(secretValue)
+	_ = tmp.Close()
+	defer os.Remove(tmpPath)
+
+	putArgs := []string{"secretsmanager", "put-secret-value", "--secret-id", secretID, "--secret-string", "file://" + tmpPath}
+	awsArgs := buildAWSExecArgs(putArgs, opts, opts.Writer)
+	_, runErr := runAWSCommandStreaming(ctx, awsArgs, nil, opts.Writer)
+	if runErr != nil {
+		return runErr
+	}
+	_, _ = fmt.Fprintf(opts.Writer, "[maker] synced Secrets Manager secret %s from env %s\n", secretID, envKey)
+	return nil
+}
+
+func secretEnvKey(secretID string) string {
+	secretID = strings.TrimSpace(secretID)
+	if secretID == "" {
+		return ""
+	}
+	// Prefer last path segment for names like clanker/OPENCLAW_GATEWAY_TOKEN.
+	if strings.Contains(secretID, "/") {
+		parts := strings.Split(secretID, "/")
+		last := strings.TrimSpace(parts[len(parts)-1])
+		return strings.ToUpper(last)
+	}
+	return strings.ToUpper(secretID)
+}
+
+func flagValueInScript(script string, flag string) string {
+	parts := strings.Fields(script)
+	return flagValue(parts, flag)
+}
+
+func guardDefaultVPCDeletion(ctx context.Context, args []string, opts ExecOptions) error {
+	if len(args) < 2 || args[0] != "ec2" || args[1] != "delete-vpc" {
+		return nil
+	}
+	vpcID := strings.TrimSpace(flagValue(args, "--vpc-id"))
+	if vpcID == "" {
+		return nil
+	}
+	if strings.TrimSpace(opts.Profile) == "" || strings.TrimSpace(opts.Region) == "" {
+		return nil
+	}
+
+	desc := []string{"ec2", "describe-vpcs", "--vpc-ids", vpcID, "--output", "json"}
+	awsArgs := buildAWSExecArgs(desc, opts, opts.Writer)
+	out, err := runAWSCommandStreaming(ctx, awsArgs, nil, io.Discard)
+	if err != nil {
+		return nil
+	}
+
+	var resp struct {
+		Vpcs []struct {
+			IsDefault bool `json:"IsDefault"`
+		} `json:"Vpcs"`
+	}
+	if jsonErr := json.Unmarshal([]byte(out), &resp); jsonErr != nil {
+		return nil
+	}
+	if len(resp.Vpcs) > 0 && resp.Vpcs[0].IsDefault {
+		return fmt.Errorf("refusing to delete default VPC %s (delete only app resources inside the VPC instead)", vpcID)
+	}
 	return nil
 }
 
@@ -2225,6 +2375,12 @@ func shouldIgnoreFailure(args []string, failure AWSFailure, output string) bool 
 		return code == "InvalidPermission.Duplicate" || strings.Contains(lower, "invalidpermission.duplicate") || strings.Contains(lower, "already exists")
 	}
 
+	// Teardown idempotency: revokes can happen after the SG is deleted (plan ordering or retries).
+	// If the SG doesn't exist, revoking rules is a no-op.
+	if args[0] == "ec2" && (args[1] == "revoke-security-group-ingress" || args[1] == "revoke-security-group-egress") {
+		return failure.Category == FailureNotFound || isNotFoundish || code == "InvalidGroup.NotFound" || strings.Contains(lower, "invalidgroup.notfound")
+	}
+
 	// EC2 subnet conflict means subnet with that CIDR already exists - not fatal if we can find existing.
 	if args[0] == "ec2" && args[1] == "create-subnet" {
 		return code == "InvalidSubnet.Conflict" || strings.Contains(lower, "invalidsubnet.conflict") || strings.Contains(lower, "conflicts with another subnet")
@@ -2835,19 +2991,18 @@ func validateCommand(args []string, allowDestructive bool) error {
 		return fmt.Errorf("non-aws command is not allowed: %q", args[0])
 	}
 
-	isEC2RunInstances := len(args) >= 2 && strings.EqualFold(strings.TrimSpace(args[0]), "ec2") && strings.EqualFold(strings.TrimSpace(args[1]), "run-instances")
-
 	for i, a := range args {
-		if isEC2RunInstances {
-			if strings.EqualFold(strings.TrimSpace(a), "--user-data") {
-				continue
-			}
-			if i > 0 && strings.EqualFold(strings.TrimSpace(args[i-1]), "--user-data") {
-				continue
-			}
-			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(a)), "--user-data=") {
-				continue
-			}
+		trimmed := strings.TrimSpace(a)
+		lowerTrimmed := strings.ToLower(trimmed)
+		// Allow shell operators inside user-data scripts for any AWS command that supports --user-data.
+		if strings.EqualFold(trimmed, "--user-data") {
+			continue
+		}
+		if i > 0 && strings.EqualFold(strings.TrimSpace(args[i-1]), "--user-data") {
+			continue
+		}
+		if strings.HasPrefix(lowerTrimmed, "--user-data=") {
+			continue
 		}
 
 		lower := strings.ToLower(a)
