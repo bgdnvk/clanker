@@ -219,7 +219,7 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		}
 
 		if !autoImagePrepared && shouldAutoPrepareImage(args, bindings, opts) {
-			if err := autoPrepareImageForOneClickDeploy(ctx, plan.Question, bindings, opts); err != nil {
+			if err := autoPrepareImageForOneClickDeploy(ctx, plan.Question, args, bindings, opts); err != nil {
 				return fmt.Errorf("command %d image preparation failed: %w", idx+1, err)
 			}
 			autoImagePrepared = true
@@ -361,7 +361,7 @@ func shouldAutoPrepareImage(args []string, bindings map[string]string, opts Exec
 	return true
 }
 
-func autoPrepareImageForOneClickDeploy(ctx context.Context, question string, bindings map[string]string, opts ExecOptions) error {
+func autoPrepareImageForOneClickDeploy(ctx context.Context, question string, runInstancesArgs []string, bindings map[string]string, opts ExecOptions) error {
 	ecrURI := strings.TrimSpace(bindings["ECR_URI"])
 	if ecrURI == "" {
 		return fmt.Errorf("missing ECR_URI binding")
@@ -369,6 +369,11 @@ func autoPrepareImageForOneClickDeploy(ctx context.Context, question string, bin
 	imageTag := strings.TrimSpace(bindings["IMAGE_TAG"])
 	if imageTag == "" {
 		imageTag = "latest"
+	}
+
+	requiredPlatforms, err := inferRequiredDockerPlatformsForEC2RunInstances(ctx, runInstancesArgs, opts)
+	if err != nil {
+		return err
 	}
 
 	if !HasDockerInstalled() {
@@ -383,9 +388,31 @@ func autoPrepareImageForOneClickDeploy(ctx context.Context, question string, bin
 		return err
 	}
 	if exists {
-		bindings["IMAGE_URI"] = ecrURI + ":" + imageTag
-		_, _ = fmt.Fprintf(opts.Writer, "[docker] found existing image in ECR, skipping build: %s\n", bindings["IMAGE_URI"])
-		return nil
+		imageRef := ecrURI + ":" + imageTag
+		if len(requiredPlatforms) > 0 {
+			accountID := extractAccountFromECR(ecrURI)
+			if accountID == "" {
+				return fmt.Errorf("failed to extract account ID from ECR URI: %s", ecrURI)
+			}
+			if err := dockerLoginECR(ctx, accountID, opts.Profile, opts.Region, opts.Writer); err != nil {
+				return err
+			}
+			if err := ensureDockerBuildxReady(ctx, opts.Writer); err != nil {
+				return err
+			}
+			if err := verifyRemoteImagePlatforms(ctx, imageRef, requiredPlatforms); err != nil {
+				_, _ = fmt.Fprintf(opts.Writer, "[docker] existing image missing required platform (%s); rebuilding multi-arch...\n", strings.Join(requiredPlatforms, ", "))
+				exists = false
+			} else {
+				bindings["IMAGE_URI"] = imageRef
+				_, _ = fmt.Fprintf(opts.Writer, "[docker] found existing image in ECR, skipping build: %s\n", bindings["IMAGE_URI"])
+				return nil
+			}
+		} else {
+			bindings["IMAGE_URI"] = imageRef
+			_, _ = fmt.Fprintf(opts.Writer, "[docker] found existing image in ECR, skipping build: %s\n", bindings["IMAGE_URI"])
+			return nil
+		}
 	}
 
 	repoURL := extractRepoURLFromQuestion(question)
@@ -407,6 +434,103 @@ func autoPrepareImageForOneClickDeploy(ctx context.Context, question string, bin
 	bindings["IMAGE_URI"] = imageURI
 	_, _ = fmt.Fprintf(opts.Writer, "[docker] one-click: image ready %s\n", imageURI)
 	return nil
+}
+
+func inferRequiredDockerPlatformsForEC2RunInstances(ctx context.Context, args []string, opts ExecOptions) ([]string, error) {
+	if len(args) < 2 || args[0] != "ec2" || args[1] != "run-instances" {
+		return nil, nil
+	}
+	if strings.TrimSpace(opts.Profile) == "" || strings.TrimSpace(opts.Region) == "" {
+		return nil, nil
+	}
+
+	amiID := strings.TrimSpace(flagValue(args, "--image-id"))
+	instanceType := strings.TrimSpace(flagValue(args, "--instance-type"))
+	if amiID == "" {
+		return nil, nil
+	}
+
+	amiArch, err := awsDescribeAMIArchitecture(ctx, amiID, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	platform := ""
+	switch strings.ToLower(strings.TrimSpace(amiArch)) {
+	case "x86_64":
+		platform = "linux/amd64"
+	case "arm64":
+		platform = "linux/arm64"
+	}
+	if platform == "" {
+		return nil, nil
+	}
+
+	if instanceType != "" {
+		supported, suppErr := awsDescribeInstanceTypeArchitectures(ctx, instanceType, opts)
+		if suppErr == nil && len(supported) > 0 {
+			ok := false
+			for _, a := range supported {
+				if strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(amiArch)) {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				return nil, fmt.Errorf("EC2 instance-type architecture mismatch: instance-type %s supports %v but AMI %s is %s", instanceType, supported, amiID, amiArch)
+			}
+		}
+	}
+
+	return []string{platform}, nil
+}
+
+func awsDescribeAMIArchitecture(ctx context.Context, amiID string, opts ExecOptions) (string, error) {
+	amiID = strings.TrimSpace(amiID)
+	if amiID == "" {
+		return "", fmt.Errorf("missing AMI ID")
+	}
+	args := []string{
+		"ec2", "describe-images",
+		"--image-ids", amiID,
+		"--query", "Images[0].Architecture",
+		"--output", "text",
+		"--profile", opts.Profile,
+		"--region", opts.Region,
+		"--no-cli-pager",
+	}
+	cmd := exec.CommandContext(ctx, "aws", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("describe-images failed for %s: %w (%s)", amiID, err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func awsDescribeInstanceTypeArchitectures(ctx context.Context, instanceType string, opts ExecOptions) ([]string, error) {
+	instanceType = strings.TrimSpace(instanceType)
+	if instanceType == "" {
+		return nil, fmt.Errorf("missing instance type")
+	}
+	args := []string{
+		"ec2", "describe-instance-types",
+		"--instance-types", instanceType,
+		"--query", "InstanceTypes[0].ProcessorInfo.SupportedArchitectures",
+		"--output", "text",
+		"--profile", opts.Profile,
+		"--region", opts.Region,
+		"--no-cli-pager",
+	}
+	cmd := exec.CommandContext(ctx, "aws", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("describe-instance-types failed for %s: %w (%s)", instanceType, err, strings.TrimSpace(string(out)))
+	}
+	fields := strings.Fields(strings.TrimSpace(string(out)))
+	if len(fields) == 1 && (fields[0] == "None" || fields[0] == "null") {
+		return nil, nil
+	}
+	return fields, nil
 }
 
 type ecrImageRef struct {
