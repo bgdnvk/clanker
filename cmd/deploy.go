@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -140,6 +142,27 @@ Examples:
 				userConfig, err = deploy.PromptForConfig(intel.DeepAnalysis, rp)
 				if err != nil {
 					return fmt.Errorf("configuration failed: %w", err)
+				}
+			}
+		}
+
+		// Fallback prompting: if deep analysis didn't produce requiredEnvVars, infer from prompt text
+		// and docker-compose ${VAR} references.
+		if applyMode && rp.Language == "node" && (userConfig == nil || len(userConfig.EnvVars) == 0) {
+			inferred := inferEnvVarNamesFromText(intel.EnrichedPrompt)
+			if intel.Docker != nil {
+				inferred = append(inferred, intel.Docker.ReferencedEnvVars...)
+			}
+			values, pErr := deploy.PromptForEnvVarValues(inferred)
+			if pErr != nil {
+				return fmt.Errorf("configuration failed: %w", pErr)
+			}
+			if len(values) > 0 {
+				if userConfig == nil {
+					userConfig = deploy.DefaultUserConfig(intel.DeepAnalysis, rp)
+				}
+				for k, v := range values {
+					userConfig.EnvVars[k] = v
 				}
 			}
 		}
@@ -439,34 +462,43 @@ Examples:
 			case <-time.After(30 * time.Second):
 			}
 
-			// Build health check config based on app type
-			appPort := 3000
-			if userConfig != nil && userConfig.AppPort > 0 {
-				appPort = userConfig.AppPort
+			// Prefer HTTPS URL (CloudFront) when present; otherwise fall back to ALB HTTP.
+			httpsURL := strings.TrimSpace(outputBindings["HTTPS_URL"])
+			baseURL := "http://" + albDNS
+			if httpsURL != "" {
+				baseURL = httpsURL
 			}
-
-			healthConfig := maker.HealthCheckConfig{
-				Host:        albDNS,
-				Port:        appPort,
-				ExposesHTTP: true, // default to HTTP
+			path := "/health"
+			if intel.DeepAnalysis != nil && strings.TrimSpace(intel.DeepAnalysis.HealthEndpoint) != "" {
+				path = strings.TrimSpace(intel.DeepAnalysis.HealthEndpoint)
+				if !strings.HasPrefix(path, "/") {
+					path = "/" + path
+				}
 			}
-
-			// Use deep analysis to determine health check type
-			if intel.DeepAnalysis != nil {
-				healthConfig.ExposesHTTP = intel.DeepAnalysis.ExposesHTTP
-				healthConfig.HTTPEndpoint = intel.DeepAnalysis.HealthEndpoint
-			}
-
-			if err := maker.VerifyNodeJSDeployment(ctx, healthConfig, 5*time.Minute, os.Stdout); err != nil {
-				fmt.Fprintf(os.Stderr, "[deploy] health check failed: %v\n", err)
-				fmt.Fprintf(os.Stderr, "[deploy] tip: check EC2 instance logs via SSM Session Manager\n")
-				return fmt.Errorf("deployment verification failed: %w", err)
+			endpoint := strings.TrimRight(baseURL, "/") + path
+			if err := maker.VerifyDeployment(ctx, endpoint, 6*time.Minute, os.Stdout); err != nil {
+				// Common fallback: app has no /health.
+				fallback := strings.TrimRight(baseURL, "/") + "/"
+				if err2 := maker.VerifyDeployment(ctx, fallback, 3*time.Minute, os.Stdout); err2 != nil {
+					fmt.Fprintf(os.Stderr, "[deploy] health check failed: %v\n", err)
+					fmt.Fprintf(os.Stderr, "[deploy] tip: check EC2 instance logs via SSM Session Manager\n")
+					return fmt.Errorf("deployment verification failed: %w", err2)
+				}
 			}
 		}
 
 		// Print deployment summary with endpoint
 		fmt.Fprintf(os.Stderr, "\n[deploy] deployment complete!\n")
-		if albDNS != "" {
+		httpsURL := strings.TrimSpace(outputBindings["HTTPS_URL"])
+		cfDomain := strings.TrimSpace(outputBindings["CLOUDFRONT_DOMAIN"])
+		if httpsURL == "" && cfDomain != "" {
+			httpsURL = "https://" + cfDomain
+		}
+		if httpsURL != "" {
+			fmt.Fprintf(os.Stderr, "\n========================================\n")
+			fmt.Fprintf(os.Stderr, "Application URL: %s\n", httpsURL)
+			fmt.Fprintf(os.Stderr, "========================================\n\n")
+		} else if albDNS != "" {
 			fmt.Fprintf(os.Stderr, "\n========================================\n")
 			fmt.Fprintf(os.Stderr, "Application URL: http://%s\n", albDNS)
 			fmt.Fprintf(os.Stderr, "========================================\n\n")
@@ -517,6 +549,51 @@ func resolveAWSRegion(ctx context.Context, profile string) string {
 		return r
 	}
 	return "us-east-1"
+}
+
+func inferEnvVarNamesFromText(text string) []string {
+	text = strings.ReplaceAll(text, "\r", "")
+	lower := strings.ToLower(text)
+	if strings.TrimSpace(lower) == "" {
+		return nil
+	}
+
+	// Prefer lines that explicitly mention required env vars.
+	lines := strings.Split(text, "\n")
+	candidates := make([]string, 0, 16)
+	for _, line := range lines {
+		l := strings.ToLower(line)
+		if strings.Contains(l, "required env") || strings.Contains(l, "required env vars") || strings.Contains(l, "required env var") {
+			candidates = append(candidates, line)
+		}
+	}
+	if len(candidates) == 0 {
+		// Fallback: scan the whole text for common *_TOKEN / *_API_KEY / *_PASSWORD keys.
+		candidates = append(candidates, text)
+	}
+
+	re := regexp.MustCompile(`\b[A-Z][A-Z0-9_]{2,}\b`)
+	seen := make(map[string]struct{})
+	out := make([]string, 0, 24)
+	for _, chunk := range candidates {
+		for _, m := range re.FindAllString(chunk, -1) {
+			m = strings.TrimSpace(m)
+			if m == "" || !strings.Contains(m, "_") {
+				continue
+			}
+			// Only keep plausible secret/config keys.
+			if !(strings.Contains(m, "TOKEN") || strings.Contains(m, "KEY") || strings.Contains(m, "PASSWORD") || strings.Contains(m, "SECRET")) {
+				continue
+			}
+			if _, ok := seen[m]; ok {
+				continue
+			}
+			seen[m] = struct{}{}
+			out = append(out, m)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func init() {

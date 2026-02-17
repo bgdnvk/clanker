@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha1"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -23,6 +24,10 @@ var awsErrorCodeRe = regexp.MustCompile(`(?i)an error occurred \(([^)]+)\)`)
 var planPlaceholderTokenRe = regexp.MustCompile(`<([A-Z0-9_]+)>`)
 var shellStylePlaceholderTokenRe = regexp.MustCompile(`^\$[A-Z][A-Z0-9_]*$`)
 var awsARNRegionHintRe = regexp.MustCompile(`arn:aws[a-zA-Z-]*:[a-z0-9-]+:([a-z0-9-]+):\d{12}:[^,\s"']+`)
+
+var secretLikeEnvKeyRe = regexp.MustCompile(`^[A-Z][A-Z0-9_]{2,127}$`)
+
+var ecrRepoNameAllowedRe = regexp.MustCompile(`[^a-z0-9._-]`)
 
 type AWSFailureCategory string
 
@@ -63,6 +68,116 @@ func defaultHealingPolicy() healingPolicy {
 		TransientRetries:    2,
 		MaxWindow:           8 * time.Minute,
 	}
+}
+
+func shortStableHash(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	sum := sha1.Sum([]byte(s))
+	// 6 hex chars is enough for collision avoidance in practice here.
+	return fmt.Sprintf("%x", sum)[:6]
+}
+
+func sanitizeECRRepoName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return ""
+	}
+	name = ecrRepoNameAllowedRe.ReplaceAllString(name, "-")
+	name = strings.Trim(name, "-._")
+	for strings.Contains(name, "--") {
+		name = strings.ReplaceAll(name, "--", "-")
+	}
+	if name == "" {
+		return ""
+	}
+	if len(name) > 255 {
+		name = name[:255]
+		name = strings.Trim(name, "-._")
+	}
+	return name
+}
+
+func inferECRRepoNameFromQuestion(question string) string {
+	repoURL := extractRepoURLFromQuestion(question)
+	if repoURL == "" {
+		return ""
+	}
+	// https://github.com/openclaw/openclaw -> openclaw
+	parts := strings.Split(strings.Trim(repoURL, "/"), "/")
+	if len(parts) == 0 {
+		return ""
+	}
+	repo := parts[len(parts)-1]
+	repo = sanitizeECRRepoName(repo)
+	if repo == "" {
+		return ""
+	}
+	// Make it stable and avoid collisions.
+	suffix := shortStableHash(repoURL)
+	if suffix == "" {
+		return repo
+	}
+	return sanitizeECRRepoName(repo + "-" + suffix)
+}
+
+func ensureECRRepositoryURI(ctx context.Context, repoName, profile, region, accountID string, w io.Writer) (string, error) {
+	repoName = sanitizeECRRepoName(repoName)
+	profile = strings.TrimSpace(profile)
+	region = strings.TrimSpace(region)
+	accountID = strings.TrimSpace(accountID)
+	if repoName == "" {
+		return "", fmt.Errorf("missing ECR repository name")
+	}
+	if profile == "" || region == "" {
+		return "", fmt.Errorf("missing AWS profile/region for ECR repo")
+	}
+	if accountID == "" {
+		return "", fmt.Errorf("missing AWS account id for ECR repo")
+	}
+
+	// Fast path: describe.
+	descArgs := []string{
+		"ecr", "describe-repositories",
+		"--repository-names", repoName,
+		"--query", "repositories[0].repositoryUri",
+		"--output", "text",
+		"--profile", profile,
+		"--region", region,
+		"--no-cli-pager",
+	}
+	desc := exec.CommandContext(ctx, "aws", descArgs...)
+	out, err := desc.CombinedOutput()
+	if err == nil {
+		uri := strings.TrimSpace(string(out))
+		if uri != "" && uri != "None" {
+			return uri, nil
+		}
+	}
+
+	_, _ = fmt.Fprintf(w, "[docker] ECR repo %s not found; creating...\n", repoName)
+	createArgs := []string{
+		"ecr", "create-repository",
+		"--repository-name", repoName,
+		"--image-scanning-configuration", "scanOnPush=true",
+		"--query", "repository.repositoryUri",
+		"--output", "text",
+		"--profile", profile,
+		"--region", region,
+		"--no-cli-pager",
+	}
+	create := exec.CommandContext(ctx, "aws", createArgs...)
+	out2, err2 := create.CombinedOutput()
+	if err2 != nil {
+		return "", fmt.Errorf("create-repository failed: %w (%s)", err2, strings.TrimSpace(string(out2)))
+	}
+	uri := strings.TrimSpace(string(out2))
+	if uri == "" || uri == "None" {
+		return "", fmt.Errorf("create-repository returned empty repositoryUri")
+	}
+	return uri, nil
 }
 
 func (p healingPolicy) canAttempt(runtime *healingRuntime) bool {
@@ -136,12 +251,27 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	healRuntime := &healingRuntime{StartedAt: time.Now()}
 	autoImagePrepared := false
 
+	if strings.TrimSpace(bindings["DEPLOY_ID"]) == "" {
+		bindings["DEPLOY_ID"] = shortStableHash(fmt.Sprintf("%s|%s", strings.TrimSpace(plan.Question), time.Now().UTC().Format(time.RFC3339Nano)))
+	}
+
+	if strings.TrimSpace(plan.Question) != "" {
+		// Used by one-click deploy heuristics (repo inference, app-specific runtime tweaks).
+		if strings.TrimSpace(bindings["PLAN_QUESTION"]) == "" {
+			bindings["PLAN_QUESTION"] = plan.Question
+		}
+	}
+
 	// Initialize bindings from OutputBindings if provided (for multi-phase execution)
 	if opts.OutputBindings != nil {
 		for k, v := range opts.OutputBindings {
 			bindings[k] = v
 		}
 	}
+
+	// Import secret-like env vars into bindings so EC2 user-data injection can pass them
+	// into `docker run` via ENV_*. (clanker-cloud passes user-provided env vars to the CLI process.)
+	importSecretLikeEnvVarsIntoBindings(bindings)
 
 	if !opts.DisableDurableCheckpoint {
 		persisted, loadErr := loadDurableCheckpoint(plan, opts)
@@ -194,6 +324,15 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		args = substituteAccountID(args, accountID)
 		args = applyPlanBindings(args, bindings)
 
+		// One-click deploy: infer the app port from the target group (when present) so user-data publishes the right port.
+		if len(args) >= 2 && args[0] == "elbv2" && args[1] == "create-target-group" {
+			if strings.TrimSpace(bindings["APP_PORT"]) == "" {
+				if p := strings.TrimSpace(flagValue(args, "--port")); p != "" {
+					bindings["APP_PORT"] = p
+				}
+			}
+		}
+
 		// AI-powered placeholder resolution with exponential backoff
 		if hasUnresolvedPlaceholders(args) {
 			resolved, resolveErr := maybeResolvePlaceholdersWithAI(ctx, opts, args, bindings, "")
@@ -211,6 +350,15 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		}
 		args = updatedArgs
 
+		// One-click deploy: ensure ECR repo/image bindings exist before generating EC2 user-data,
+		// since user-data injection needs ECR_URI/ACCOUNT_ID/REGION.
+		if !autoImagePrepared && shouldAutoPrepareImage(args, plan.Question, bindings, opts) {
+			if err := autoPrepareImageForOneClickDeploy(ctx, plan.Question, args, bindings, opts); err != nil {
+				return fmt.Errorf("command %d image preparation failed: %w", idx+1, err)
+			}
+			autoImagePrepared = true
+		}
+
 		// Handle EC2 user-data generation for run-instances
 		args = maybeGenerateEC2UserData(args, bindings, opts)
 
@@ -218,12 +366,6 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 			_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to sync secrets for user-data: %v\n", err)
 		}
 
-		if !autoImagePrepared && shouldAutoPrepareImage(args, bindings, opts) {
-			if err := autoPrepareImageForOneClickDeploy(ctx, plan.Question, args, bindings, opts); err != nil {
-				return fmt.Errorf("command %d image preparation failed: %w", idx+1, err)
-			}
-			autoImagePrepared = true
-		}
 		args = sanitizeCommandArgsForExecution(args, bindings)
 
 		if unresolved := findUnresolvedExecutionTokens(args); len(unresolved) > 0 {
@@ -321,6 +463,16 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		}
 	}
 
+	// Post-deploy feedback loop (one-click EC2+ALB): if targets stay unhealthy, run SSM diagnostics
+	// and apply a safe bind-to-0.0.0.0 remediation automatically.
+	if err := maybeAutoFixUnhealthyALBTargets(ctx, bindings, opts, postDeployFixConfig{Aggressive: true}); err != nil {
+		return err
+	}
+	// HTTPS secure context (one-click EC2+ALB): create CloudFront in front of the ALB and export HTTPS URL.
+	if err := maybeEnsureHTTPSViaCloudFront(ctx, bindings, opts); err != nil {
+		return err
+	}
+
 	// Populate output bindings for the caller
 	if opts.OutputBindings != nil {
 		for k, v := range bindings {
@@ -337,7 +489,47 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	return nil
 }
 
-func shouldAutoPrepareImage(args []string, bindings map[string]string, opts ExecOptions) bool {
+func importSecretLikeEnvVarsIntoBindings(bindings map[string]string) {
+	if bindings == nil {
+		return
+	}
+
+	for _, kv := range os.Environ() {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		key := strings.TrimSpace(strings.ToUpper(k))
+		val := strings.TrimSpace(v)
+		if key == "" || val == "" {
+			continue
+		}
+		if !secretLikeEnvKeyRe.MatchString(key) {
+			continue
+		}
+		if !strings.Contains(key, "_") {
+			continue
+		}
+
+		// Never forward cloud-provider credentials/config into app containers.
+		if strings.HasPrefix(key, "AWS_") || strings.HasPrefix(key, "GOOGLE_") || strings.HasPrefix(key, "GCP_") || strings.HasPrefix(key, "AZURE_") || strings.HasPrefix(key, "CLOUDFLARE_") {
+			continue
+		}
+
+		// Only forward keys that look like secrets/config.
+		if !(strings.Contains(key, "TOKEN") || strings.Contains(key, "KEY") || strings.Contains(key, "PASSWORD") || strings.Contains(key, "SECRET")) {
+			continue
+		}
+
+		bindingKey := "ENV_" + key
+		if strings.TrimSpace(bindings[bindingKey]) != "" {
+			continue
+		}
+		bindings[bindingKey] = val
+	}
+}
+
+func shouldAutoPrepareImage(args []string, question string, bindings map[string]string, opts ExecOptions) bool {
 	if len(args) < 2 || args[0] != "ec2" || args[1] != "run-instances" {
 		return false
 	}
@@ -352,8 +544,12 @@ func shouldAutoPrepareImage(args []string, bindings map[string]string, opts Exec
 			}
 		}
 	}
+	// If the plan didn't mention ECR at all, one-click deploy can still work by inferring a repo name
+	// from the repo URL in the question and creating it on demand.
 	if strings.TrimSpace(bindings["ECR_URI"]) == "" {
-		return false
+		if inferECRRepoNameFromQuestion(question) == "" {
+			return false
+		}
 	}
 	if strings.TrimSpace(bindings["IMAGE_URI"]) != "" {
 		return false
@@ -363,12 +559,34 @@ func shouldAutoPrepareImage(args []string, bindings map[string]string, opts Exec
 
 func autoPrepareImageForOneClickDeploy(ctx context.Context, question string, runInstancesArgs []string, bindings map[string]string, opts ExecOptions) error {
 	ecrURI := strings.TrimSpace(bindings["ECR_URI"])
-	if ecrURI == "" {
-		return fmt.Errorf("missing ECR_URI binding")
-	}
 	imageTag := strings.TrimSpace(bindings["IMAGE_TAG"])
-	if imageTag == "" {
-		imageTag = "latest"
+	if imageTag == "" || strings.EqualFold(imageTag, "latest") {
+		deployID := strings.TrimSpace(bindings["DEPLOY_ID"])
+		if deployID == "" {
+			deployID = shortStableHash(time.Now().UTC().Format(time.RFC3339Nano))
+			bindings["DEPLOY_ID"] = deployID
+		}
+		imageTag = "deploy-" + deployID
+		bindings["IMAGE_TAG"] = imageTag
+	}
+
+	if ecrURI == "" {
+		repoName := inferECRRepoNameFromQuestion(question)
+		if repoName == "" {
+			return fmt.Errorf("ECR repo could not be inferred from plan question; include an ECR image ref in user-data or an ECR repo binding")
+		}
+		accountID := strings.TrimSpace(bindings["ACCOUNT_ID"])
+		if accountID == "" {
+			accountID = strings.TrimSpace(bindings["AWS_ACCOUNT_ID"])
+		}
+		uri, err := ensureECRRepositoryURI(ctx, repoName, opts.Profile, opts.Region, accountID, opts.Writer)
+		if err != nil {
+			return err
+		}
+		ecrURI = uri
+		bindings["ECR_URI"] = uri
+		bindings["ECR_REPO"] = repoName
+		_, _ = fmt.Fprintf(opts.Writer, "[docker] inferred ECR repo: %s (%s)\n", repoName, uri)
 	}
 
 	requiredPlatforms, err := inferRequiredDockerPlatformsForEC2RunInstances(ctx, runInstancesArgs, opts)
@@ -1389,7 +1607,23 @@ func formatAWSArgsForLog(awsArgs []string) string {
 
 	parts := make([]string, 0, len(awsArgs)+1)
 	parts = append(parts, "aws")
-	for _, a := range awsArgs {
+	for i := 0; i < len(awsArgs); i++ {
+		a := awsArgs[i]
+		trimmed := strings.TrimSpace(a)
+		lower := strings.ToLower(trimmed)
+		// Never log EC2 user-data (it can contain secrets).
+		if lower == "--user-data" {
+			parts = append(parts, a)
+			if i+1 < len(awsArgs) {
+				parts = append(parts, "<redacted>")
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(lower, "--user-data=") {
+			parts = append(parts, "--user-data=<redacted>")
+			continue
+		}
 		if len(a) > maxArgLen {
 			a = a[:maxArgLen] + "…"
 		}
@@ -1400,6 +1634,21 @@ func formatAWSArgsForLog(awsArgs []string) string {
 		s = s[:maxTotalLen] + "…"
 	}
 	return s
+}
+
+func extractRegionFromECRRef(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	// Examples:
+	// - 123456789012.dkr.ecr.us-east-2.amazonaws.com/repo:tag
+	// - 123456789012.dkr.ecr.us-east-2.amazonaws.com/repo
+	re := regexp.MustCompile(`\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com`)
+	if m := re.FindStringSubmatch(ref); len(m) >= 2 {
+		return strings.TrimSpace(m[1])
+	}
+	return ""
 }
 
 func handleAWSFailure(
@@ -1621,13 +1870,59 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 	}
 
 	currentUserData := args[userDataIdx]
-	// Check if it needs to be generated (contains placeholder-like values)
-	if !strings.Contains(currentUserData, "<USER_DATA>") &&
-		!strings.Contains(currentUserData, "$USER_DATA") &&
-		!strings.Contains(currentUserData, "<user_data>") &&
-		currentUserData != "<USER_DATA>" &&
-		currentUserData != "$USER_DATA" {
-		// User-data looks real, leave it alone
+
+	checkUserData := currentUserData
+	userDataWasBase64 := false
+	if decoded, ok := decodeLikelyBase64UserData(checkUserData); ok {
+		checkUserData = decoded
+		userDataWasBase64 = true
+	}
+
+	isPlaceholder := strings.Contains(checkUserData, "<USER_DATA>") ||
+		strings.Contains(checkUserData, "$USER_DATA") ||
+		strings.Contains(checkUserData, "<user_data>") ||
+		strings.TrimSpace(checkUserData) == "<USER_DATA>" ||
+		strings.TrimSpace(checkUserData) == "$USER_DATA"
+
+	trimmedUserData := strings.TrimSpace(checkUserData)
+	looksLikeScript := strings.HasPrefix(trimmedUserData, "#!") || strings.Contains(strings.ToLower(trimmedUserData), "#!/bin/bash")
+	// One-click deploy: some plans include a user-data script that only installs Docker
+	// but never pulls/runs the app. In that case, auto-generate the full startup script.
+	lower := strings.ToLower(checkUserData)
+	hasDocker := strings.Contains(lower, "docker")
+	startsContainer := strings.Contains(lower, "docker run") || strings.Contains(lower, "docker compose") || strings.Contains(lower, "docker-compose")
+	brokenAL2023DockerInstall := strings.Contains(lower, "amazon-linux-extras") && strings.Contains(lower, "docker")
+	mentionsECR := strings.Contains(lower, ".dkr.ecr.")
+	mentionsDockerHubOpenClaw := strings.Contains(lower, "openclaw/openclaw")
+	providedEnv := false
+	for k := range bindings {
+		if strings.HasPrefix(k, "ENV_") {
+			providedEnv = true
+			break
+		}
+	}
+	missingEnvInScript := providedEnv && !strings.Contains(lower, " -e ") && !strings.Contains(lower, "--env") && !strings.Contains(lower, "--env-file")
+	// If we have a concrete image produced by one-click build, and the provided script
+	// does not reference it, treat the script as untrusted and regenerate user-data.
+	// This avoids cases where the LLM produced a script with a bad/corrupted image ref.
+	desiredImageURI := strings.TrimSpace(bindings["IMAGE_URI"])
+	usesWrongImage := desiredImageURI != "" && startsContainer && !strings.Contains(checkUserData, desiredImageURI)
+
+	needsInjection := (hasDocker && !startsContainer) || brokenAL2023DockerInstall || usesWrongImage ||
+		(startsContainer && (mentionsDockerHubOpenClaw || (!mentionsECR && strings.TrimSpace(bindings["ECR_URI"]) != "") || missingEnvInScript))
+
+	// If the plan provided a literal user-data script (not base64), base64-encode it so the AWS CLI
+	// receives it reliably (and EC2 will execute it).
+	if !userDataWasBase64 && looksLikeScript && !needsInjection {
+		encoded := base64.StdEncoding.EncodeToString([]byte(checkUserData))
+		newArgs := make([]string, len(args))
+		copy(newArgs, args)
+		newArgs[userDataIdx] = encoded
+		return newArgs
+	}
+
+	if !isPlaceholder && !needsInjection {
+		// User-data looks real and starts the app; leave it alone.
 		return args
 	}
 
@@ -1645,28 +1940,60 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 	}
 
 	// Docker deployment mode
-	region := opts.Region
-	accountID := bindings["ACCOUNT_ID"]
+	region := strings.TrimSpace(opts.Region)
+	accountID := strings.TrimSpace(bindings["ACCOUNT_ID"])
 	if accountID == "" {
-		accountID = bindings["AWS_ACCOUNT_ID"]
+		accountID = strings.TrimSpace(bindings["AWS_ACCOUNT_ID"])
 	}
 
-	// Find ECR URI from bindings
-	ecrURI := bindings["ECR_URI"]
-	if ecrURI == "" {
-		// Try to construct from ECR_REPO
-		ecrRepo := bindings["ECR_REPO"]
-		if ecrRepo == "" {
-			ecrRepo = "clanker-app"
+	// Prefer the fully-qualified image ref produced by one-click build.
+	imageRef := strings.TrimSpace(bindings["IMAGE_URI"])
+	if imageRef == "" {
+		ecrURI := strings.TrimSpace(bindings["ECR_URI"])
+		if ecrURI == "" {
+			// Try to construct from ECR_REPO.
+			ecrRepo := strings.TrimSpace(bindings["ECR_REPO"])
+			if ecrRepo == "" {
+				ecrRepo = "clanker-app"
+			}
+			if accountID != "" {
+				if region == "" {
+					region = strings.TrimSpace(bindings["REGION"])
+					if region == "" {
+						region = strings.TrimSpace(bindings["AWS_REGION"])
+					}
+				}
+				if region != "" {
+					ecrURI = fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s", accountID, region, ecrRepo)
+				}
+			}
 		}
-		if accountID != "" && region != "" {
-			ecrURI = fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s", accountID, region, ecrRepo)
+		if ecrURI != "" {
+			tag := strings.TrimSpace(bindings["IMAGE_TAG"])
+			if tag == "" {
+				tag = "latest"
+			}
+			imageRef = ecrURI + ":" + tag
 		}
 	}
 
-	if ecrURI == "" || region == "" || accountID == "" {
-		// Missing required bindings, cannot generate user-data
+	// If we still don't have an imageRef, we can't generate a runnable startup script.
+	if imageRef == "" {
 		return args
+	}
+
+	// Fill region/account from the image ref when possible.
+	if accountID == "" {
+		accountID = strings.TrimSpace(extractAccountFromECR(imageRef))
+	}
+	if region == "" {
+		region = strings.TrimSpace(extractRegionFromECRRef(imageRef))
+		if region == "" {
+			region = strings.TrimSpace(bindings["REGION"])
+			if region == "" {
+				region = strings.TrimSpace(bindings["AWS_REGION"])
+			}
+		}
 	}
 
 	// Get app port from bindings or default to 3000
@@ -1674,6 +2001,12 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 	if appPort == "" {
 		appPort = "3000"
 	}
+
+	question := strings.TrimSpace(bindings["PLAN_QUESTION"])
+	repoURL := extractRepoURLFromQuestion(question)
+	lq := strings.ToLower(question)
+	lr := strings.ToLower(repoURL)
+	isOpenClaw := strings.Contains(lq, "openclaw") || strings.Contains(lr, "openclaw")
 
 	// Build docker run command with environment variables
 	var envFlags strings.Builder
@@ -1691,31 +2024,80 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 	// Check if we have a specific start command that includes the port
 	// This handles apps that need --port flag instead of PORT env var
 	startCmd := bindings["START_COMMAND"]
+	if startCmd == "" && isOpenClaw {
+		// OpenClaw defaults to loopback binding; force LAN binding for ALB health checks.
+		startCmd = fmt.Sprintf("node openclaw.mjs gateway --allow-unconfigured --bind lan --port %s", appPort)
+	}
 
 	var dockerRunCmd string
 	if startCmd != "" {
 		// Use the detected start command (handles apps needing --port flag)
-		dockerRunCmd = fmt.Sprintf("docker run -d --restart unless-stopped -p %s:%s %s%s:latest %s",
-			appPort, appPort, envFlags.String(), ecrURI, startCmd)
+		dockerRunCmd = fmt.Sprintf("docker run -d --restart unless-stopped -p %s:%s %s%s %s",
+			appPort, appPort, envFlags.String(), imageRef, startCmd)
 	} else {
 		// Default: just pass env vars and use container's default CMD
-		dockerRunCmd = fmt.Sprintf("docker run -d --restart unless-stopped -p %s:%s %s%s:latest",
-			appPort, appPort, envFlags.String(), ecrURI)
+		dockerRunCmd = fmt.Sprintf("docker run -d --restart unless-stopped -p %s:%s %s%s",
+			appPort, appPort, envFlags.String(), imageRef)
 	}
 
-	// Generate the startup script
+	preRun := ""
+	if isOpenClaw {
+		preRun = "docker volume create openclaw_data || true\n" +
+			"docker run --rm -v openclaw_data:/home/node/.openclaw alpine:3.20 sh -lc 'chown -R 1000:1000 /home/node/.openclaw' || true\n" +
+			"docker rm -f openclaw || true\n"
+		// Ensure the persistent volume is mounted.
+		if !strings.Contains(dockerRunCmd, "/home/node/.openclaw") {
+			dockerRunCmd = strings.Replace(dockerRunCmd, "docker run -d", "docker run -d --name openclaw -v openclaw_data:/home/node/.openclaw", 1)
+		}
+	}
+
+	needsECRLogin := strings.Contains(strings.ToLower(imageRef), ".dkr.ecr.")
+	registryHost := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com", accountID, region)
+	if needsECRLogin {
+		// Extract host part safely (works even if imageRef has a repo path).
+		if parts := strings.SplitN(imageRef, "/", 2); len(parts) >= 1 {
+			if strings.Contains(parts[0], ".dkr.ecr.") {
+				registryHost = parts[0]
+			}
+		}
+	}
+
+	loginLine := "echo '[bootstrap] skipping ECR login'"
+	if needsECRLogin && region != "" {
+		loginLine = fmt.Sprintf("aws ecr get-login-password --region %s | docker login --username AWS --password-stdin %s", region, registryHost)
+	}
+
+	// Generate the startup script (NO -x; user-data can contain secrets)
 	script := fmt.Sprintf(`#!/bin/bash
-set -ex
+set -e
 exec > /var/log/user-data.log 2>&1
-yum update -y
-yum install -y docker
-systemctl start docker
-systemctl enable docker
-aws ecr get-login-password --region %s | docker login --username AWS --password-stdin %s.dkr.ecr.%s.amazonaws.com
-docker pull %s:latest
+
+echo '[bootstrap] installing docker'
+. /etc/os-release || true
+if command -v docker >/dev/null 2>&1; then
+	echo '[bootstrap] docker already present'
+else
+	if [ "${ID:-}" = "amzn" ]; then
+		if command -v dnf >/dev/null 2>&1; then dnf install -y docker; else yum install -y docker; fi
+	elif command -v apt-get >/dev/null 2>&1; then
+		apt-get update -y && apt-get install -y docker.io
+	else
+		echo 'unsupported OS for docker install' && exit 1
+	fi
+fi
+
+systemctl enable docker || true
+systemctl start docker || true
+
+echo '[bootstrap] login/pull'
 %s
+docker pull %s
+
+%s
+%s
+
 echo 'Deployment complete!'
-`, region, accountID, region, ecrURI, dockerRunCmd)
+`, loginLine, imageRef, preRun, dockerRunCmd)
 
 	// Base64 encode the script
 	encoded := base64.StdEncoding.EncodeToString([]byte(script))
@@ -1769,11 +2151,22 @@ func sanitizeCommandArgsForExecution(args []string, bindings map[string]string) 
 		}
 	}
 
-	if decoded, ok := decodeLikelyBase64UserData(trimmed); ok {
-		trimmed = decoded
+	// Keep user-data base64-encoded for AWS CLI reliability, and avoid decoding it
+	// (decoding can accidentally leak secrets into logs).
+	if _, ok := decodeLikelyBase64UserData(trimmed); ok {
+		// Already looks like base64 user-data.
+		if valueIdx >= 0 {
+			newArgs[valueIdx] = strings.TrimSpace(value)
+		} else {
+			newArgs[inlineIdx] = "--user-data=" + strings.TrimSpace(value)
+		}
+		return newArgs
 	}
 
 	trimmed = strings.ReplaceAll(trimmed, "\r\n", "\n")
+	if looksLikeUserDataScript(trimmed) {
+		trimmed = base64.StdEncoding.EncodeToString([]byte(trimmed))
+	}
 
 	if valueIdx >= 0 {
 		newArgs[valueIdx] = trimmed

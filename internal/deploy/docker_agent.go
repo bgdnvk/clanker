@@ -19,6 +19,7 @@ type DockerAnalysis struct {
 	HealthcheckHint     string   `json:"healthcheckHint,omitempty"`
 	VolumeMounts        []string `json:"volumeMounts,omitempty"`
 	EnvFiles            []string `json:"envFiles,omitempty"`
+	ReferencedEnvVars   []string `json:"referencedEnvVars,omitempty"`
 	BuildCommand        string   `json:"buildCommand,omitempty"`
 	RunCommand          string   `json:"runCommand,omitempty"`
 	Warnings            []string `json:"warnings,omitempty"`
@@ -93,6 +94,7 @@ func AnalyzeDockerAgent(profile *RepoProfile) *DockerAnalysis {
 	analysis.ComposeServices = uniqueStrings(analysis.ComposeServices)
 	analysis.VolumeMounts = uniqueStrings(analysis.VolumeMounts)
 	analysis.EnvFiles = uniqueStrings(analysis.EnvFiles)
+	analysis.ReferencedEnvVars = uniqueStrings(analysis.ReferencedEnvVars)
 	analysis.Warnings = uniqueStrings(analysis.Warnings)
 
 	return analysis
@@ -185,6 +187,7 @@ func parseCompose(content string, analysis *DockerAnalysis) {
 	serviceLineRe := regexp.MustCompile(`^\s{2}([a-zA-Z0-9_-]+):\s*$`)
 	volumeLineRe := regexp.MustCompile(`^\s*-\s*([^\s#]+:[^\s#]+)\s*$`)
 	envFileRe := regexp.MustCompile(`^\s*env_file\s*:\s*(.+)$`)
+	envRefRe := regexp.MustCompile(`\$\{\s*([A-Za-z_][A-Za-z0-9_]*)`) // ${VAR} or ${VAR:-...}
 
 	for _, line := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -213,6 +216,11 @@ func parseCompose(content string, analysis *DockerAnalysis) {
 		}
 		if m := envFileRe.FindStringSubmatch(line); len(m) == 2 {
 			analysis.EnvFiles = append(analysis.EnvFiles, strings.Trim(strings.TrimSpace(m[1]), `"'`))
+		}
+		for _, m := range envRefRe.FindAllStringSubmatch(line, -1) {
+			if len(m) == 2 {
+				analysis.ReferencedEnvVars = append(analysis.ReferencedEnvVars, strings.TrimSpace(m[1]))
+			}
 		}
 		if strings.HasPrefix(strings.ToLower(trimmed), "healthcheck:") {
 			analysis.HasHealthcheck = true
