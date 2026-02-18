@@ -11,7 +11,7 @@ import (
 	"sync"
 )
 
-func repoResourcePrefix(repoURL string) string {
+func repoResourcePrefix(repoURL string, deployID string) string {
 	clean := strings.TrimSpace(repoURL)
 	if clean == "" {
 		return "app-000000"
@@ -58,7 +58,11 @@ func repoResourcePrefix(repoURL string) string {
 		slug = "app"
 	}
 
-	sum := sha1.Sum([]byte(strings.ToLower(clean)))
+	seed := strings.ToLower(clean)
+	if strings.TrimSpace(deployID) != "" {
+		seed += "|" + strings.ToLower(strings.TrimSpace(deployID))
+	}
+	sum := sha1.Sum([]byte(seed))
 	suffix := hex.EncodeToString(sum[:])
 	if len(suffix) > 6 {
 		suffix = suffix[:6]
@@ -138,6 +142,7 @@ type DeployOptions struct {
 	Target       string // fargate, ec2, eks
 	InstanceType string // for ec2: t3.small, t3.medium, etc.
 	NewVPC       bool   // create new VPC instead of using default
+	DeployID     string // run-specific id for unique resource naming
 }
 
 // shouldUseAPIGateway determines whether to use API Gateway or ALB based on app characteristics.
@@ -941,7 +946,7 @@ func buildFixPrompt(v *PlanValidation) string {
 // buildIntelligentPrompt creates the final enriched prompt using all intelligence phases
 func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis, arch *ArchitectDecision, strat DeployStrategy, infraSnap *InfraSnapshot, cfInfraSnap *CFInfraSnapshot, opts *DeployOptions) string {
 	var b strings.Builder
-	resourcePrefix := repoResourcePrefix(p.RepoURL)
+	resourcePrefix := repoResourcePrefix(p.RepoURL, opts.DeployID)
 
 	providerLabel := "AWS"
 	switch strings.ToLower(strings.TrimSpace(strat.Provider)) {
@@ -1085,35 +1090,35 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAn
 	case "ec2":
 		b.WriteString(ec2Prompt(p, arch, deep, opts))
 	case "eks":
-		b.WriteString(eksPrompt(p, arch, deep))
+		b.WriteString(eksPrompt(p, arch, deep, opts))
 	case "ecs-fargate":
-		b.WriteString(smartECSPrompt(p, arch, deep))
+		b.WriteString(smartECSPrompt(p, arch, deep, opts))
 	case "app-runner":
-		b.WriteString(appRunnerPrompt(p, arch))
+		b.WriteString(appRunnerPrompt(p, arch, opts))
 	case "s3-cloudfront":
 		b.WriteString(s3CloudfrontIntelligentPrompt(p))
 	case "lightsail":
-		b.WriteString(lightsailPrompt(p, arch))
+		b.WriteString(lightsailPrompt(p, arch, opts))
 	case "cf-pages":
-		b.WriteString(cfPagesPrompt(p, deep))
+		b.WriteString(cfPagesPrompt(p, deep, opts))
 	case "cf-workers":
-		b.WriteString(cfWorkersPrompt(p, deep))
+		b.WriteString(cfWorkersPrompt(p, deep, opts))
 	case "cf-containers":
-		b.WriteString(cfContainersPrompt(p, arch, deep))
+		b.WriteString(cfContainersPrompt(p, arch, deep, opts))
 	case "gcp-compute-engine":
-		b.WriteString(gcpComputeEnginePrompt(p, deep))
+		b.WriteString(gcpComputeEnginePrompt(p, deep, opts))
 	case "azure-vm":
-		b.WriteString(azureVMPrompt(p, deep))
+		b.WriteString(azureVMPrompt(p, deep, opts))
 	default:
 		switch strings.ToLower(strings.TrimSpace(strat.Provider)) {
 		case "cloudflare":
-			b.WriteString(cfWorkersPrompt(p, deep))
+			b.WriteString(cfWorkersPrompt(p, deep, opts))
 		case "gcp":
-			b.WriteString(gcpComputeEnginePrompt(p, deep))
+			b.WriteString(gcpComputeEnginePrompt(p, deep, opts))
 		case "azure":
-			b.WriteString(azureVMPrompt(p, deep))
+			b.WriteString(azureVMPrompt(p, deep, opts))
 		default:
-			b.WriteString(smartECSPrompt(p, arch, deep))
+			b.WriteString(smartECSPrompt(p, arch, deep, opts))
 		}
 	}
 
@@ -1181,9 +1186,13 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAn
 
 // --- Method-specific prompts ---
 
-func smartECSPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis) string {
+func smartECSPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts *DeployOptions) string {
 	var b strings.Builder
-	resourcePrefix := repoResourcePrefix(p.RepoURL)
+	deployID := ""
+	if opts != nil {
+		deployID = opts.DeployID
+	}
+	resourcePrefix := repoResourcePrefix(p.RepoURL, deployID)
 	b.WriteString("Deploy using ECS Fargate (serverless containers):\n")
 	b.WriteString(fmt.Sprintf("Naming: use prefix %s for ECR repo, cluster, service, security group, and ALB (if used)\n", resourcePrefix))
 	b.WriteString("1. Create an ECR repository\n")
@@ -1234,9 +1243,13 @@ func smartECSPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis)
 	return b.String()
 }
 
-func gcpComputeEnginePrompt(p *RepoProfile, deep *DeepAnalysis) string {
+func gcpComputeEnginePrompt(p *RepoProfile, deep *DeepAnalysis, opts *DeployOptions) string {
 	var b strings.Builder
-	resourcePrefix := repoResourcePrefix(p.RepoURL)
+	deployID := ""
+	if opts != nil {
+		deployID = opts.DeployID
+	}
+	resourcePrefix := repoResourcePrefix(p.RepoURL, deployID)
 	b.WriteString("Deploy using GCP Compute Engine (VM + Docker Compose):\n")
 	b.WriteString(fmt.Sprintf("Naming: use prefix %s for VM/network/firewall resources\n", resourcePrefix))
 	b.WriteString("1. Create a VPC firewall rule for required inbound ports\n")
@@ -1250,9 +1263,13 @@ func gcpComputeEnginePrompt(p *RepoProfile, deep *DeepAnalysis) string {
 	return b.String()
 }
 
-func azureVMPrompt(p *RepoProfile, deep *DeepAnalysis) string {
+func azureVMPrompt(p *RepoProfile, deep *DeepAnalysis, opts *DeployOptions) string {
 	var b strings.Builder
-	resourcePrefix := repoResourcePrefix(p.RepoURL)
+	deployID := ""
+	if opts != nil {
+		deployID = opts.DeployID
+	}
+	resourcePrefix := repoResourcePrefix(p.RepoURL, deployID)
 	b.WriteString("Deploy using Azure VM (Docker Compose):\n")
 	b.WriteString(fmt.Sprintf("Naming: use prefix %s for resource group/NSG/VM resources\n", resourcePrefix))
 	b.WriteString("1. Create resource group and network security group with least-privilege inbound rules\n")
@@ -1282,9 +1299,13 @@ func isOpenClawRepo(p *RepoProfile) bool {
 	return false
 }
 
-func appRunnerPrompt(p *RepoProfile, arch *ArchitectDecision) string {
+func appRunnerPrompt(p *RepoProfile, arch *ArchitectDecision, opts *DeployOptions) string {
 	var b strings.Builder
-	resourcePrefix := repoResourcePrefix(p.RepoURL)
+	deployID := ""
+	if opts != nil {
+		deployID = opts.DeployID
+	}
+	resourcePrefix := repoResourcePrefix(p.RepoURL, deployID)
 	b.WriteString("Deploy using AWS App Runner (simplest container hosting):\n")
 	b.WriteString(fmt.Sprintf("Naming: use prefix %s for ECR repo + App Runner service\n", resourcePrefix))
 
@@ -1314,9 +1335,13 @@ func appRunnerPrompt(p *RepoProfile, arch *ArchitectDecision) string {
 	return b.String()
 }
 
-func lightsailPrompt(p *RepoProfile, arch *ArchitectDecision) string {
+func lightsailPrompt(p *RepoProfile, arch *ArchitectDecision, opts *DeployOptions) string {
 	var b strings.Builder
-	resourcePrefix := repoResourcePrefix(p.RepoURL)
+	deployID := ""
+	if opts != nil {
+		deployID = opts.DeployID
+	}
+	resourcePrefix := repoResourcePrefix(p.RepoURL, deployID)
 	b.WriteString("Deploy using AWS Lightsail (cheapest option, $3.50/mo):\n")
 	b.WriteString(fmt.Sprintf("Naming: use prefix %s for the Lightsail service/container\n", resourcePrefix))
 	b.WriteString("1. Create a Lightsail container service (nano plan)\n")
@@ -1365,9 +1390,13 @@ func dbPrompt(dbType string) string {
 
 // --- Cloudflare method-specific prompts ---
 
-func cfPagesPrompt(p *RepoProfile, deep *DeepAnalysis) string {
+func cfPagesPrompt(p *RepoProfile, deep *DeepAnalysis, opts *DeployOptions) string {
 	var b strings.Builder
-	resourcePrefix := repoResourcePrefix(p.RepoURL)
+	deployID := ""
+	if opts != nil {
+		deployID = opts.DeployID
+	}
+	resourcePrefix := repoResourcePrefix(p.RepoURL, deployID)
 	b.WriteString("Deploy as a Cloudflare Pages project (static site + optional Workers Functions):\n")
 
 	buildCmd := p.BuildCmd
@@ -1401,9 +1430,13 @@ func cfPagesPrompt(p *RepoProfile, deep *DeepAnalysis) string {
 	return b.String()
 }
 
-func cfWorkersPrompt(p *RepoProfile, deep *DeepAnalysis) string {
+func cfWorkersPrompt(p *RepoProfile, deep *DeepAnalysis, opts *DeployOptions) string {
 	var b strings.Builder
-	resourcePrefix := repoResourcePrefix(p.RepoURL)
+	deployID := ""
+	if opts != nil {
+		deployID = opts.DeployID
+	}
+	resourcePrefix := repoResourcePrefix(p.RepoURL, deployID)
 	b.WriteString("Deploy as a Cloudflare Worker (edge serverless):\n")
 
 	// check if wrangler.toml exists
@@ -1449,9 +1482,13 @@ func cfWorkersPrompt(p *RepoProfile, deep *DeepAnalysis) string {
 	return b.String()
 }
 
-func cfContainersPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis) string {
+func cfContainersPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts *DeployOptions) string {
 	var b strings.Builder
-	resourcePrefix := repoResourcePrefix(p.RepoURL)
+	deployID := ""
+	if opts != nil {
+		deployID = opts.DeployID
+	}
+	resourcePrefix := repoResourcePrefix(p.RepoURL, deployID)
 	b.WriteString("Deploy as a Cloudflare Container (Docker on Cloudflare edge):\n")
 
 	if p.HasDocker {
@@ -1482,7 +1519,7 @@ func cfContainersPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnaly
 // ec2Prompt generates deployment instructions for EC2
 func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts *DeployOptions) string {
 	var b strings.Builder
-	resourcePrefix := repoResourcePrefix(p.RepoURL)
+	resourcePrefix := repoResourcePrefix(p.RepoURL, opts.DeployID)
 	projectTag := resourcePrefix
 
 	// Tag values have generous limits; some AWS resource names do not.
@@ -1672,9 +1709,13 @@ func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts
 }
 
 // eksPrompt generates deployment instructions for EKS
-func eksPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis) string {
+func eksPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts *DeployOptions) string {
 	var b strings.Builder
-	resourcePrefix := repoResourcePrefix(p.RepoURL)
+	deployID := ""
+	if opts != nil {
+		deployID = opts.DeployID
+	}
+	resourcePrefix := repoResourcePrefix(p.RepoURL, deployID)
 	namespace := kubeName(resourcePrefix, 63)
 	b.WriteString("Deploy to existing EKS cluster:\n\n")
 

@@ -16,6 +16,8 @@ var repoURLInQuestionRe = regexp.MustCompile(`https://github\.com/[A-Za-z0-9_.-]
 
 var dockerPlatformLineRe = regexp.MustCompile(`(?m)^\s*Platform:\s*(linux/(?:amd64|arm64))\s*$`)
 
+var dockerBuildxDriverLineRe = regexp.MustCompile(`(?m)^\s*Driver:\s*([a-zA-Z0-9_-]+)\s*$`)
+
 // BuildAndPushDockerImage builds a Docker image locally and pushes to ECR.
 // It handles ECR authentication, building the image, tagging, and pushing.
 func BuildAndPushDockerImage(ctx context.Context, clonePath, ecrURI, profile, region, imageTag string, w io.Writer) (string, error) {
@@ -40,9 +42,16 @@ func BuildAndPushDockerImage(ctx context.Context, clonePath, ecrURI, profile, re
 
 	// 2. Build+push a multi-arch image. This avoids shipping an arm64-only image when the target is amd64 (or vice versa).
 	fmt.Fprintf(w, "[docker] building multi-arch image (linux/amd64, linux/arm64) from %s...\n", clonePath)
-	buildCmd := exec.CommandContext(ctx,
+	buildCtx, cancel := context.WithTimeout(ctx, 25*time.Minute)
+	defer cancel()
+	buildCmd := exec.CommandContext(buildCtx,
 		"docker", "buildx", "build",
+		"--builder", "clanker-builder",
 		"--platform", "linux/amd64,linux/arm64",
+		"--progress", "plain",
+		"--provenance=false",
+		"--sbom=false",
+		"--no-cache",
 		"-t", imageRef,
 		"--push",
 		clonePath,
@@ -50,6 +59,9 @@ func BuildAndPushDockerImage(ctx context.Context, clonePath, ecrURI, profile, re
 	buildCmd.Stdout = w
 	buildCmd.Stderr = w
 	if err := buildCmd.Run(); err != nil {
+		if buildCtx.Err() != nil {
+			return "", fmt.Errorf("docker buildx build --push timed out after 25m")
+		}
 		return "", fmt.Errorf("docker buildx build --push failed: %w", err)
 	}
 	fmt.Fprintf(w, "[docker] push complete\n")
@@ -87,23 +99,43 @@ func dockerLoginECR(ctx context.Context, accountID, profile, region string, w io
 }
 
 func ensureDockerBuildxReady(ctx context.Context, w io.Writer) error {
-	// Quick check: buildx exists and a builder is usable.
-	check := exec.CommandContext(ctx, "docker", "buildx", "inspect")
-	if out, err := check.CombinedOutput(); err == nil {
-		_ = out
-		return nil
+	// Ensure a docker-container builder exists/selected.
+	// The Docker Desktop 'docker' driver can hang during export/unpack; docker-container avoids that.
+	name := "clanker-builder"
+
+	// Inspect existing builder (if any) and check driver.
+	inspect := exec.CommandContext(ctx, "docker", "buildx", "inspect", name)
+	out, err := inspect.CombinedOutput()
+	if err == nil {
+		driver := parseBuildxDriver(string(out))
+		if driver == "docker-container" {
+			use := exec.CommandContext(ctx, "docker", "buildx", "use", name)
+			_ = use.Run()
+			return nil
+		}
+
+		// If it's the wrong driver, recreate.
+		_ = exec.CommandContext(ctx, "docker", "buildx", "rm", "-f", name).Run()
 	}
 
-	// Attempt to create+use a dedicated builder.
-	// We keep this simple: if creation fails, surface the error with output.
-	name := "clanker-builder"
-	create := exec.CommandContext(ctx, "docker", "buildx", "create", "--use", "--name", name)
-	out, err := create.CombinedOutput()
+	create := exec.CommandContext(ctx, "docker", "buildx", "create", "--use", "--name", name, "--driver", "docker-container")
+	out, err = create.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("docker buildx is not ready (failed to create builder): %w\nOutput: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("docker buildx is not ready (failed to create docker-container builder): %w\nOutput: %s", err, strings.TrimSpace(string(out)))
 	}
-	fmt.Fprintf(w, "[docker] buildx builder ready: %s\n", name)
+	fmt.Fprintf(w, "[docker] buildx builder ready: %s (driver=docker-container)\n", name)
 	return nil
+}
+
+func parseBuildxDriver(inspectOutput string) string {
+	inspectOutput = strings.TrimSpace(inspectOutput)
+	if inspectOutput == "" {
+		return ""
+	}
+	if m := dockerBuildxDriverLineRe.FindStringSubmatch(inspectOutput); len(m) >= 2 {
+		return strings.TrimSpace(m[1])
+	}
+	return ""
 }
 
 func verifyRemoteImagePlatforms(ctx context.Context, imageRef string, requiredPlatforms []string) error {

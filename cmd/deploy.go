@@ -112,6 +112,8 @@ Examples:
 			InstanceType: instanceType,
 			NewVPC:       newVPC,
 		}
+		// Run-specific id so resource names get a fresh short-hash suffix each deploy.
+		deployOpts.DeployID = time.Now().UTC().Format(time.RFC3339Nano)
 
 		// 4. Run multi-phase intelligence pipeline (explore → deep analysis → infra scan → architecture)
 		intel, err := deploy.RunIntelligence(ctx, rp,

@@ -49,6 +49,9 @@ func maybeEnsureHTTPSViaCloudFront(ctx context.Context, bindings map[string]stri
 	if q := strings.TrimSpace(bindings["PLAN_QUESTION"]); q != "" {
 		key += "|" + q
 	}
+	if did := strings.TrimSpace(bindings["DEPLOY_ID"]); did != "" {
+		key += "|deploy:" + did
+	}
 	comment := fmt.Sprintf("clanker:https:%s", shortStableHash(key))
 
 	id, domain, status, err := findCloudFrontDistributionByComment(ctx, comment, opts.Profile, opts.Writer)

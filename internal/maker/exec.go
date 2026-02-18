@@ -251,10 +251,6 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	healRuntime := &healingRuntime{StartedAt: time.Now()}
 	autoImagePrepared := false
 
-	if strings.TrimSpace(bindings["DEPLOY_ID"]) == "" {
-		bindings["DEPLOY_ID"] = shortStableHash(fmt.Sprintf("%s|%s", strings.TrimSpace(plan.Question), time.Now().UTC().Format(time.RFC3339Nano)))
-	}
-
 	if strings.TrimSpace(plan.Question) != "" {
 		// Used by one-click deploy heuristics (repo inference, app-specific runtime tweaks).
 		if strings.TrimSpace(bindings["PLAN_QUESTION"]) == "" {
@@ -285,6 +281,12 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 			}
 			_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] loaded durable checkpoint state\n")
 		}
+	}
+
+	// Deploy id is used for per-run uniqueness (image tags, and any run-scoped naming).
+	// Generate it after loading durable checkpoint/output bindings so resumes keep the same value.
+	if strings.TrimSpace(bindings["DEPLOY_ID"]) == "" {
+		bindings["DEPLOY_ID"] = shortStableHash(fmt.Sprintf("%s|%s", strings.TrimSpace(plan.Question), time.Now().UTC().Format(time.RFC3339Nano)))
 	}
 
 	resumeFromIndex := 0
@@ -472,6 +474,7 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	if err := maybeEnsureHTTPSViaCloudFront(ctx, bindings, opts); err != nil {
 		return err
 	}
+	maybePrintOpenClawPostDeployInstructions(bindings, opts)
 
 	// Populate output bindings for the caller
 	if opts.OutputBindings != nil {
@@ -571,10 +574,16 @@ func autoPrepareImageForOneClickDeploy(ctx context.Context, question string, run
 	}
 
 	if ecrURI == "" {
+		deployID := strings.TrimSpace(bindings["DEPLOY_ID"])
+		if deployID == "" {
+			deployID = shortStableHash(time.Now().UTC().Format(time.RFC3339Nano))
+			bindings["DEPLOY_ID"] = deployID
+		}
 		repoName := inferECRRepoNameFromQuestion(question)
 		if repoName == "" {
 			return fmt.Errorf("ECR repo could not be inferred from plan question; include an ECR image ref in user-data or an ECR repo binding")
 		}
+		repoName = sanitizeECRRepoName(repoName + "-" + deployID)
 		accountID := strings.TrimSpace(bindings["ACCOUNT_ID"])
 		if accountID == "" {
 			accountID = strings.TrimSpace(bindings["AWS_ACCOUNT_ID"])
@@ -2007,6 +2016,10 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 	lq := strings.ToLower(question)
 	lr := strings.ToLower(repoURL)
 	isOpenClaw := strings.Contains(lq, "openclaw") || strings.Contains(lr, "openclaw")
+	containerName := ""
+	if isOpenClaw {
+		containerName = openClawContainerName(bindings)
+	}
 
 	// Build docker run command with environment variables
 	var envFlags strings.Builder
@@ -2041,14 +2054,80 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 	}
 
 	preRun := ""
+	postRun := ""
 	if isOpenClaw {
+		if strings.TrimSpace(containerName) == "" {
+			containerName = "openclaw"
+		}
 		preRun = "docker volume create openclaw_data || true\n" +
 			"docker run --rm -v openclaw_data:/home/node/.openclaw alpine:3.20 sh -lc 'chown -R 1000:1000 /home/node/.openclaw' || true\n" +
-			"docker rm -f openclaw || true\n"
+			"docker rm -f openclaw || true\n" +
+			fmt.Sprintf("docker rm -f %s || true\n", containerName)
 		// Ensure the persistent volume is mounted.
 		if !strings.Contains(dockerRunCmd, "/home/node/.openclaw") {
-			dockerRunCmd = strings.Replace(dockerRunCmd, "docker run -d", "docker run -d --name openclaw -v openclaw_data:/home/node/.openclaw", 1)
+			dockerRunCmd = strings.Replace(dockerRunCmd, "docker run -d", fmt.Sprintf("docker run -d --name %s -v openclaw_data:/home/node/.openclaw", containerName), 1)
 		}
+
+		// OpenClaw requires device pairing approvals. Start a short background loop to auto-approve
+		// pending pairing requests after deploy (useful for CloudFront/remote UI).
+		postRun = fmt.Sprintf(`
+echo '[openclaw] starting auto-pair approval loop (5m)'
+OC_CONTAINER=%q
+(
+	set +e
+	END=$(( $(date +%s) + 300 ))
+	while [ $(date +%s) -lt $END ]; do
+		if ! docker ps --format '{{.Names}}' | grep -qx "$OC_CONTAINER"; then
+			echo '[openclaw] container not running; skipping auto-pair'
+			break
+		fi
+		JS=$(cat <<'JS'
+const fs = require("fs");
+const path = require("path");
+const pendingPath = "/home/node/.openclaw/devices/pending.json";
+const pairedPath = "/home/node/.openclaw/devices/paired.json";
+
+function readJSON(p) {
+	try {
+		return JSON.parse(fs.readFileSync(p, "utf8") || "{}");
+	} catch (e) {
+		return {};
+	}
+}
+
+const pending = readJSON(pendingPath);
+const paired = readJSON(pairedPath);
+const requestIds = Object.keys(pending || {});
+
+if (requestIds.length === 0) {
+	console.log("CLANKER_PAIR_NONE");
+	process.exit(0);
+}
+
+let approved = 0;
+for (const rid of requestIds) {
+	const req = pending[rid];
+	if (!req || !req.deviceId) continue;
+	paired[req.deviceId] = req;
+	delete pending[rid];
+	approved++;
+}
+
+fs.mkdirSync(path.dirname(pendingPath), { recursive: true });
+fs.writeFileSync(pairedPath, JSON.stringify(paired, null, 2));
+fs.writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
+console.log("CLANKER_PAIR_APPROVED=" + approved);
+JS
+)
+		OUT=$(docker exec "$OC_CONTAINER" node -e "$JS" 2>/dev/null)
+		if echo "$OUT" | grep -q '^CLANKER_PAIR_APPROVED='; then
+			echo "[openclaw] $OUT"
+		fi
+		sleep 3
+	done
+	echo '[openclaw] auto-pair loop finished'
+) &
+`, containerName)
 	}
 
 	needsECRLogin := strings.Contains(strings.ToLower(imageRef), ".dkr.ecr.")
@@ -2095,9 +2174,10 @@ docker pull %s
 
 %s
 %s
+	%s
 
 echo 'Deployment complete!'
-`, loginLine, imageRef, preRun, dockerRunCmd)
+`, loginLine, imageRef, preRun, dockerRunCmd, postRun)
 
 	// Base64 encode the script
 	encoded := base64.StdEncoding.EncodeToString([]byte(script))

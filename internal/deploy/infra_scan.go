@@ -10,16 +10,20 @@ import (
 
 // InfraSnapshot is a snapshot of existing AWS infrastructure
 type InfraSnapshot struct {
-	AccountID      string   `json:"accountId,omitempty"`
-	Region         string   `json:"region"`
-	VPC            *VPCInfo `json:"vpc,omitempty"`
-	ECRRepos       []string `json:"ecrRepos,omitempty"`       // existing ECR repos
-	ECSClusters    []string `json:"ecsClusters,omitempty"`    // existing ECS clusters
-	ALBs           []string `json:"albs,omitempty"`           // existing ALBs
-	RDSInstances   []string `json:"rdsInstances,omitempty"`   // existing RDS instances
-	SecurityGroups []SGInfo `json:"securityGroups,omitempty"` // existing SGs in default VPC
-	LatestAMI      string   `json:"latestAmi,omitempty"`      // latest Amazon Linux 2023 AMI ID
-	Summary        string   `json:"summary"`
+	AccountID                  string   `json:"accountId,omitempty"`
+	Region                     string   `json:"region"`
+	VPC                        *VPCInfo `json:"vpc,omitempty"`
+	ECRRepos                   []string `json:"ecrRepos,omitempty"`                   // existing ECR repos
+	CloudFrontDists            []string `json:"cloudFrontDists,omitempty"`            // existing CloudFront distribution domains
+	LightsailInstances         []string `json:"lightsailInstances,omitempty"`         // existing Lightsail instances
+	LightsailContainerServices []string `json:"lightsailContainerServices,omitempty"` // existing Lightsail container services
+	LightsailDistributions     []string `json:"lightsailDistributions,omitempty"`     // existing Lightsail CDN distributions
+	ECSClusters                []string `json:"ecsClusters,omitempty"`                // existing ECS clusters
+	ALBs                       []string `json:"albs,omitempty"`                       // existing ALBs
+	RDSInstances               []string `json:"rdsInstances,omitempty"`               // existing RDS instances
+	SecurityGroups             []SGInfo `json:"securityGroups,omitempty"`             // existing SGs in default VPC
+	LatestAMI                  string   `json:"latestAmi,omitempty"`                  // latest Amazon Linux 2023 AMI ID
+	Summary                    string   `json:"summary"`
 }
 
 // VPCInfo is the default VPC + subnets info
@@ -78,6 +82,34 @@ func ScanInfra(ctx context.Context, profile, region string, logf func(string, ..
 		var repos []string
 		if err := json.Unmarshal([]byte(out), &repos); err == nil {
 			snap.ECRRepos = repos
+		}
+	}
+
+	// CloudFront distributions (global service; region flag is ignored by AWS CLI)
+	if out := awsCLI(ctx, profile, region, "cloudfront", "list-distributions", "--query", "DistributionList.Items[].DomainName", "--output", "json"); out != "" {
+		var domains []string
+		if err := json.Unmarshal([]byte(out), &domains); err == nil {
+			snap.CloudFrontDists = capStrings(domains, 25)
+		}
+	}
+
+	// Lightsail resources (regional)
+	if out := awsCLI(ctx, profile, region, "lightsail", "get-instances", "--query", "instances[].name", "--output", "json"); out != "" {
+		var names []string
+		if err := json.Unmarshal([]byte(out), &names); err == nil {
+			snap.LightsailInstances = capStrings(names, 50)
+		}
+	}
+	if out := awsCLI(ctx, profile, region, "lightsail", "get-container-services", "--query", "containerServices[].containerServiceName", "--output", "json"); out != "" {
+		var names []string
+		if err := json.Unmarshal([]byte(out), &names); err == nil {
+			snap.LightsailContainerServices = capStrings(names, 50)
+		}
+	}
+	if out := awsCLI(ctx, profile, region, "lightsail", "get-distributions", "--query", "distributions[].name", "--output", "json"); out != "" {
+		var names []string
+		if err := json.Unmarshal([]byte(out), &names); err == nil {
+			snap.LightsailDistributions = capStrings(names, 50)
 		}
 	}
 
@@ -146,6 +178,18 @@ func buildInfraSummary(s *InfraSnapshot) string {
 	if len(s.ECRRepos) > 0 {
 		parts = append(parts, fmt.Sprintf("%d ECR repos", len(s.ECRRepos)))
 	}
+	if len(s.CloudFrontDists) > 0 {
+		parts = append(parts, fmt.Sprintf("%d CloudFront dists", len(s.CloudFrontDists)))
+	}
+	if len(s.LightsailInstances) > 0 {
+		parts = append(parts, fmt.Sprintf("%d Lightsail instances", len(s.LightsailInstances)))
+	}
+	if len(s.LightsailContainerServices) > 0 {
+		parts = append(parts, fmt.Sprintf("%d Lightsail container svcs", len(s.LightsailContainerServices)))
+	}
+	if len(s.LightsailDistributions) > 0 {
+		parts = append(parts, fmt.Sprintf("%d Lightsail dists", len(s.LightsailDistributions)))
+	}
 	if len(s.ECSClusters) > 0 {
 		parts = append(parts, fmt.Sprintf("%d ECS clusters", len(s.ECSClusters)))
 	}
@@ -169,7 +213,6 @@ func (s *InfraSnapshot) FormatForPrompt() string {
 	}
 
 	var b strings.Builder
-	b.WriteString("## Existing AWS Infrastructure\n")
 	b.WriteString(fmt.Sprintf("- Region: %s\n", s.Region))
 
 	if s.AccountID != "" {
@@ -187,6 +230,23 @@ func (s *InfraSnapshot) FormatForPrompt() string {
 	if len(s.ECRRepos) > 0 {
 		b.WriteString(fmt.Sprintf("- Existing ECR repos: %s\n", strings.Join(s.ECRRepos, ", ")))
 		b.WriteString("  → REUSE existing repo if name matches, don't create duplicates\n")
+	}
+
+	if len(s.CloudFrontDists) > 0 {
+		b.WriteString(fmt.Sprintf("- Existing CloudFront distributions: %s\n", strings.Join(s.CloudFrontDists, ", ")))
+		b.WriteString("  → If you create CloudFront, ensure it is uniquely identifiable (e.g., comment includes DEPLOY_ID); avoid accidental reuse\n")
+	}
+
+	if len(s.LightsailInstances) > 0 {
+		b.WriteString(fmt.Sprintf("- Existing Lightsail instances: %s\n", strings.Join(s.LightsailInstances, ", ")))
+		b.WriteString("  → Avoid creating duplicates; reuse where it makes sense\n")
+	}
+	if len(s.LightsailContainerServices) > 0 {
+		b.WriteString(fmt.Sprintf("- Existing Lightsail container services: %s\n", strings.Join(s.LightsailContainerServices, ", ")))
+		b.WriteString("  → Avoid creating duplicates; reuse where it makes sense\n")
+	}
+	if len(s.LightsailDistributions) > 0 {
+		b.WriteString(fmt.Sprintf("- Existing Lightsail distributions: %s\n", strings.Join(s.LightsailDistributions, ", ")))
 	}
 
 	if len(s.ECSClusters) > 0 {
@@ -213,4 +273,11 @@ func (s *InfraSnapshot) FormatForPrompt() string {
 	}
 
 	return b.String()
+}
+
+func capStrings(in []string, max int) []string {
+	if max <= 0 || len(in) <= max {
+		return in
+	}
+	return in[:max]
 }
