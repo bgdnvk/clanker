@@ -17,6 +17,31 @@ type durableCheckpointState struct {
 	Bindings  map[string]string `json:"bindings"`
 }
 
+func redactBindingsForCheckpoint(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			continue
+		}
+		upper := strings.ToUpper(key)
+		if strings.HasPrefix(upper, "ENV_") {
+			continue
+		}
+		if upper == "USER_DATA" || upper == "NODEJS_USER_DATA" || strings.HasSuffix(upper, "_USER_DATA") {
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func loadDurableCheckpoint(plan *Plan, opts ExecOptions) (map[string]string, error) {
 	checkpointPath, err := durableCheckpointPath(plan, opts)
 	if err != nil {
@@ -51,7 +76,7 @@ func persistDurableCheckpoint(plan *Plan, opts ExecOptions, bindings map[string]
 
 	state := durableCheckpointState{
 		UpdatedAt: time.Now().UTC(),
-		Bindings:  cloneStringMap(bindings),
+		Bindings:  cloneStringMap(redactBindingsForCheckpoint(bindings)),
 	}
 	payload, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {

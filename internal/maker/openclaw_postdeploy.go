@@ -64,7 +64,7 @@ func maybePrintOpenClawPostDeployInstructions(bindings map[string]string, opts E
 	_, _ = fmt.Fprintf(w, "[openclaw]  2) When prompted, enter your gateway token (env var OPENCLAW_GATEWAY_TOKEN)\n")
 	_, _ = fmt.Fprintf(w, "[openclaw]  3) Click Connect\n")
 	_, _ = fmt.Fprintf(w, "[openclaw] Pairing:\n")
-	_, _ = fmt.Fprintf(w, "[openclaw]  - One-click deploy starts an auto-approve loop for pending pair requests for ~5 minutes after instance boot\n")
+	_, _ = fmt.Fprintf(w, "[openclaw]  - One-click deploy starts an auto-approve loop for pending pair requests for ~30 minutes (or until 2 new devices are paired) after instance boot\n")
 	_, _ = fmt.Fprintf(w, "[openclaw]  - If you still see 'pairing required', use the localhost + approve loop below (this also fixes stale browser device tokens)\n")
 
 	if instanceID != "" && strings.TrimSpace(opts.Profile) != "" && strings.TrimSpace(opts.Region) != "" {
@@ -75,7 +75,7 @@ func maybePrintOpenClawPostDeployInstructions(bindings map[string]string, opts E
 		_, _ = fmt.Fprintf(w, "[openclaw]     (Incognito avoids stale device tokens that can cause: disconnected (1008): pairing required)\n")
 		_, _ = fmt.Fprintf(w, "[openclaw]  3) Enter token and click Connect\n")
 		_, _ = fmt.Fprintf(w, "[openclaw]  4) If it still says pairing required, run approve+restart (repeat until connected):\n")
-		_, _ = fmt.Fprintf(w, "[openclaw]     aws ssm send-command --document-name AWS-RunShellScript --instance-ids %s --parameters 'commands=[\"sudo docker exec %s node -e \\\"const fs=require(\\\\\\\"fs\\\\\\\"); const p=\\\\\\\"/home/node/.openclaw/devices/pending.json\\\\\\\"; const q=\\\\\\\"/home/node/.openclaw/devices/paired.json\\\\\\\"; const read=(f,def)=>{try{const s=fs.readFileSync(f,\\\\\\\"utf8\\\\\\\").trim(); return s?JSON.parse(s):def}catch{return def}}; const pending=read(p,{}); const paired=read(q,{}); let n=0; for(const [k,v] of Object.entries(pending||{})){ const dk=(v&&v.deviceId)?String(v.deviceId):String(k); paired[dk]=v; n++; } fs.writeFileSync(q, JSON.stringify(paired,null,2)); fs.writeFileSync(p, JSON.stringify({},null,2)); console.log(\\\\\\\"approved\\\\\\\", n);\\\"\",\"sudo docker restart %s\"]' --profile %s --region %s\n", instanceID, containerName, containerName, opts.Profile, opts.Region)
+		_, _ = fmt.Fprintf(w, "[openclaw]     clanker openclaw approve --instance-id %s --container %s --profile %s --region %s\n", instanceID, containerName, opts.Profile, opts.Region)
 		_, _ = fmt.Fprintf(w, "[openclaw]     then refresh the page and click Connect again\n")
 	}
 

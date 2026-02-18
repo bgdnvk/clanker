@@ -46,6 +46,9 @@ Examples:
 		openaiKey, _ := cmd.Flags().GetString("openai-key")
 		anthropicKey, _ := cmd.Flags().GetString("anthropic-key")
 		geminiKey, _ := cmd.Flags().GetString("gemini-key")
+		openaiModel, _ := cmd.Flags().GetString("openai-model")
+		anthropicModel, _ := cmd.Flags().GetString("anthropic-model")
+		geminiModel, _ := cmd.Flags().GetString("gemini-model")
 		targetProvider, _ := cmd.Flags().GetString("provider")
 		deployTarget, _ := cmd.Flags().GetString("target")
 		instanceType, _ := cmd.Flags().GetString("instance-type")
@@ -91,6 +94,8 @@ Examples:
 		default:
 			apiKey = viper.GetString("ai.api_key")
 		}
+
+		maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel)
 
 		aiClient := ai.NewClient(provider, apiKey, debug, aiProfile)
 
@@ -305,6 +310,10 @@ Examples:
 			fmt.Println(string(planJSON))
 			return nil
 		}
+
+		// Apply mode: normalize any inline EC2 user-data scripts to base64 so heredocs like <<EOF
+		// can't be misinterpreted as placeholders by downstream scanners.
+		plan = deploy.Base64EncodeEC2UserDataScripts(plan)
 
 		planProvider := strings.ToLower(strings.TrimSpace(plan.Provider))
 		if planProvider == "" {
@@ -606,6 +615,9 @@ func init() {
 	deployCmd.Flags().String("openai-key", "", "OpenAI API key")
 	deployCmd.Flags().String("anthropic-key", "", "Anthropic API key")
 	deployCmd.Flags().String("gemini-key", "", "Gemini API key")
+	deployCmd.Flags().String("openai-model", "", "OpenAI model to use (overrides config)")
+	deployCmd.Flags().String("anthropic-model", "", "Anthropic model to use (overrides config)")
+	deployCmd.Flags().String("gemini-model", "", "Gemini model to use (overrides config)")
 	deployCmd.Flags().Bool("apply", false, "Apply the plan immediately after generation")
 	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws, gcp, azure, or cloudflare")
 	deployCmd.Flags().String("target", "fargate", "Deployment target: fargate (default), ec2, or eks")

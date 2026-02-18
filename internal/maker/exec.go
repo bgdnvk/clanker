@@ -318,6 +318,7 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] start command %d/%d\n", idx+1, len(plan.Commands))
 
 		if err := validateCommand(cmdSpec.Args, opts.Destroyer); err != nil {
+			_ = maybeSwarmDiagnose(ctx, opts, "preflight: command rejected", cmdSpec.Args, err.Error(), bindings)
 			return fmt.Errorf("command %d rejected: %w", idx+1, err)
 		}
 
@@ -371,6 +372,7 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		args = sanitizeCommandArgsForExecution(args, bindings)
 
 		if unresolved := findUnresolvedExecutionTokens(args); len(unresolved) > 0 {
+			_ = maybeSwarmDiagnose(ctx, opts, "preflight: unresolved placeholders", args, strings.Join(unresolved, ", "), bindings)
 			return fmt.Errorf("command %d has unresolved placeholders: %s", idx+1, strings.Join(unresolved, ", "))
 		}
 
@@ -1614,6 +1616,25 @@ func formatAWSArgsForLog(awsArgs []string) string {
 	const maxArgLen = 160
 	const maxTotalLen = 700
 
+	// If this is `ssm put-parameter --type SecureString`, redact --value.
+	isSSMSecureStringPut := false
+	if len(awsArgs) >= 2 {
+		if strings.EqualFold(strings.TrimSpace(awsArgs[0]), "ssm") && strings.EqualFold(strings.TrimSpace(awsArgs[1]), "put-parameter") {
+			for i := 0; i < len(awsArgs)-1; i++ {
+				if strings.EqualFold(strings.TrimSpace(awsArgs[i]), "--type") && strings.EqualFold(strings.TrimSpace(awsArgs[i+1]), "SecureString") {
+					isSSMSecureStringPut = true
+					break
+				}
+				if strings.HasPrefix(strings.ToLower(strings.TrimSpace(awsArgs[i])), "--type=") {
+					if strings.EqualFold(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(awsArgs[i]), "--type=")), "SecureString") {
+						isSSMSecureStringPut = true
+						break
+					}
+				}
+			}
+		}
+	}
+
 	parts := make([]string, 0, len(awsArgs)+1)
 	parts = append(parts, "aws")
 	for i := 0; i < len(awsArgs); i++ {
@@ -1632,6 +1653,20 @@ func formatAWSArgsForLog(awsArgs []string) string {
 		if strings.HasPrefix(lower, "--user-data=") {
 			parts = append(parts, "--user-data=<redacted>")
 			continue
+		}
+		if isSSMSecureStringPut {
+			if lower == "--value" {
+				parts = append(parts, a)
+				if i+1 < len(awsArgs) {
+					parts = append(parts, "<redacted>")
+					i++
+				}
+				continue
+			}
+			if strings.HasPrefix(lower, "--value=") {
+				parts = append(parts, "--value=<redacted>")
+				continue
+			}
 		}
 		if len(a) > maxArgLen {
 			a = a[:maxArgLen] + "…"
@@ -1695,6 +1730,34 @@ func handleAWSFailure(
 
 	if handled, handleErr := maybeRewriteAndRetry(ctx, opts, args, awsArgs, stdinBytes, failure, out, bindings); handled {
 		return true, handleErr
+	}
+
+	// One-click EC2+ALB deployments frequently fail the AWS waiter when the instance hasn't
+	// finished bootstrapping yet (or user-data was incomplete). If we have enough bindings,
+	// run the safe SSM-based remediation immediately and then treat the waiter as satisfied
+	// once we observe a healthy target.
+	if len(args) >= 3 && args[0] == "elbv2" && args[1] == "wait" && args[2] == "target-in-service" {
+		lower := strings.ToLower(out)
+		if strings.Contains(lower, "max attempts exceeded") {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] waiter target-in-service timed out; attempting one-click runtime remediation (docker/bootstrap) before giving up\n")
+			if err := maybeAutoFixUnhealthyALBTargets(ctx, bindings, opts, postDeployFixConfig{Aggressive: true}); err != nil {
+				_ = maybeSwarmDiagnose(ctx, opts, "elbv2 waiter timed out", args, out, bindings)
+				return true, err
+			}
+			tgARN := strings.TrimSpace(flagValue(args, "--target-group-arn"))
+			if tgARN == "" {
+				tgARN = strings.TrimSpace(bindings["TG_ARN"])
+			}
+			if tgARN != "" {
+				if err := WaitForALBHealthy(ctx, tgARN, opts.Profile, opts.Region, opts.Writer, 6*time.Minute); err == nil {
+					_, _ = fmt.Fprintf(opts.Writer, "[maker] waiter satisfied: at least one healthy target detected\n")
+					return true, nil
+				} else {
+					_ = maybeSwarmDiagnose(ctx, opts, "targets still unhealthy after remediation", args, out, bindings)
+					return true, err
+				}
+			}
+		}
 	}
 
 	if remediationAttempted[idx] {
@@ -1866,25 +1929,106 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 		return args
 	}
 
-	// Find the --user-data argument
+	// Find the --user-data argument (supports both "--user-data <v>" and "--user-data=<v>")
 	userDataIdx := -1
-	for i, arg := range args {
-		if arg == "--user-data" && i+1 < len(args) {
+	userDataInlineIdx := -1
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--user-data" && i+1 < len(args) {
 			userDataIdx = i + 1
 			break
 		}
+		if strings.HasPrefix(strings.TrimSpace(args[i]), "--user-data=") {
+			userDataInlineIdx = i
+			break
+		}
 	}
-	if userDataIdx < 0 {
+	if userDataIdx < 0 && userDataInlineIdx < 0 {
 		return args
 	}
 
-	currentUserData := args[userDataIdx]
+	currentUserData := ""
+	if userDataIdx >= 0 {
+		currentUserData = args[userDataIdx]
+	} else {
+		currentUserData = strings.TrimPrefix(strings.TrimSpace(args[userDataInlineIdx]), "--user-data=")
+	}
+
+	decodeForInspection := func(s string) (string, bool) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return "", false
+		}
+		// Prefer the conservative decoder, but allow short decodes for inspection.
+		if decoded, ok := decodeLikelyBase64UserData(s); ok {
+			return decoded, true
+		}
+		// Short base64 user-data (e.g. IyEvYmluL2Jhc2g= -> #!/bin/bash) won't be decoded
+		// by decodeLikelyBase64UserData; attempt a safe decode for inspection only.
+		if len(s) < 16 || len(s) > 4096 {
+			return "", false
+		}
+		for _, ch := range s {
+			if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '+' || ch == '/' || ch == '=' {
+				continue
+			}
+			return "", false
+		}
+		if len(s)%4 != 0 {
+			return "", false
+		}
+		b, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			return "", false
+		}
+		if len(b) == 0 || len(b) > 32*1024 {
+			return "", false
+		}
+		decoded := strings.TrimSpace(string(b))
+		if decoded == "" {
+			return "", false
+		}
+		if strings.HasPrefix(decoded, "#!") || strings.HasPrefix(strings.ToLower(decoded), "#cloud-config") {
+			return decoded, true
+		}
+		return "", false
+	}
+
+	isTrivialUserDataScript := func(script string) bool {
+		script = strings.ReplaceAll(script, "\r\n", "\n")
+		script = strings.TrimSpace(script)
+		if script == "" {
+			return true
+		}
+		lines := strings.Split(script, "\n")
+		// Drop shebang.
+		if len(lines) > 0 && strings.HasPrefix(strings.TrimSpace(lines[0]), "#!") {
+			lines = lines[1:]
+		}
+		for _, ln := range lines {
+			t := strings.TrimSpace(ln)
+			if t == "" {
+				continue
+			}
+			if strings.HasPrefix(t, "#") {
+				continue
+			}
+			// Any non-comment command means it's not trivial.
+			return false
+		}
+		return true
+	}
 
 	checkUserData := currentUserData
 	userDataWasBase64 := false
 	if decoded, ok := decodeLikelyBase64UserData(checkUserData); ok {
 		checkUserData = decoded
 		userDataWasBase64 = true
+	}
+	if !userDataWasBase64 {
+		if decoded, ok := decodeForInspection(checkUserData); ok {
+			checkUserData = decoded
+			userDataWasBase64 = true
+		}
 	}
 
 	isPlaceholder := strings.Contains(checkUserData, "<USER_DATA>") ||
@@ -1895,6 +2039,7 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 
 	trimmedUserData := strings.TrimSpace(checkUserData)
 	looksLikeScript := strings.HasPrefix(trimmedUserData, "#!") || strings.Contains(strings.ToLower(trimmedUserData), "#!/bin/bash")
+	isTrivial := looksLikeScript && isTrivialUserDataScript(trimmedUserData)
 	// One-click deploy: some plans include a user-data script that only installs Docker
 	// but never pulls/runs the app. In that case, auto-generate the full startup script.
 	lower := strings.ToLower(checkUserData)
@@ -1917,7 +2062,7 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 	desiredImageURI := strings.TrimSpace(bindings["IMAGE_URI"])
 	usesWrongImage := desiredImageURI != "" && startsContainer && !strings.Contains(checkUserData, desiredImageURI)
 
-	needsInjection := (hasDocker && !startsContainer) || brokenAL2023DockerInstall || usesWrongImage ||
+	needsInjection := isTrivial || (hasDocker && !startsContainer) || brokenAL2023DockerInstall || usesWrongImage ||
 		(startsContainer && (mentionsDockerHubOpenClaw || (!mentionsECR && strings.TrimSpace(bindings["ECR_URI"]) != "") || missingEnvInScript))
 
 	// If the plan provided a literal user-data script (not base64), base64-encode it so the AWS CLI
@@ -1926,7 +2071,11 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 		encoded := base64.StdEncoding.EncodeToString([]byte(checkUserData))
 		newArgs := make([]string, len(args))
 		copy(newArgs, args)
-		newArgs[userDataIdx] = encoded
+		if userDataIdx >= 0 {
+			newArgs[userDataIdx] = encoded
+		} else {
+			newArgs[userDataInlineIdx] = "--user-data=" + encoded
+		}
 		return newArgs
 	}
 
@@ -2071,12 +2220,15 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 		// OpenClaw requires device pairing approvals. Start a short background loop to auto-approve
 		// pending pairing requests after deploy (useful for CloudFront/remote UI).
 		postRun = fmt.Sprintf(`
-echo '[openclaw] starting auto-pair approval loop (5m)'
+echo '[openclaw] starting auto-pair approval loop (30m or until 2 new devices are paired)'
 OC_CONTAINER=%q
 (
 	set +e
-	END=$(( $(date +%s) + 300 ))
-	while [ $(date +%s) -lt $END ]; do
+	END=$(( $(date +%%s) + 1800 ))
+	TARGET_NEW=2
+	BASE_PAIRED=$(docker exec "$OC_CONTAINER" node -e 'try{const fs=require("fs"); const p="/home/node/.openclaw/devices/paired.json"; const s=fs.readFileSync(p,"utf8").trim(); const o=s?JSON.parse(s):{}; console.log(Object.keys(o||{}).length)}catch(e){console.log(0)}' 2>/dev/null)
+	if [ -z "$BASE_PAIRED" ]; then BASE_PAIRED=0; fi
+	while [ $(date +%%s) -lt $END ]; do
 		if ! docker ps --format '{{.Names}}' | grep -qx "$OC_CONTAINER"; then
 			echo '[openclaw] container not running; skipping auto-pair'
 			break
@@ -2099,8 +2251,10 @@ const pending = readJSON(pendingPath);
 const paired = readJSON(pairedPath);
 const requestIds = Object.keys(pending || {});
 
+const pairedCount = Object.keys(paired || {}).length;
+
 if (requestIds.length === 0) {
-	console.log("CLANKER_PAIR_NONE");
+	console.log("CLANKER_PAIR_NONE PAIRED=" + pairedCount);
 	process.exit(0);
 }
 
@@ -2116,12 +2270,21 @@ for (const rid of requestIds) {
 fs.mkdirSync(path.dirname(pendingPath), { recursive: true });
 fs.writeFileSync(pairedPath, JSON.stringify(paired, null, 2));
 fs.writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
-console.log("CLANKER_PAIR_APPROVED=" + approved);
+console.log("CLANKER_PAIR_APPROVED=" + approved + " PAIRED=" + Object.keys(paired || {}).length);
 JS
 )
 		OUT=$(docker exec "$OC_CONTAINER" node -e "$JS" 2>/dev/null)
-		if echo "$OUT" | grep -q '^CLANKER_PAIR_APPROVED='; then
+		APPROVED=$(echo "$OUT" | sed -n 's/^.*CLANKER_PAIR_APPROVED=\([0-9][0-9]*\).*$/\1/p')
+		PAIRED=$(echo "$OUT" | sed -n 's/^.*PAIRED=\([0-9][0-9]*\).*$/\1/p')
+		if [ -n "$APPROVED" ] && [ "$APPROVED" -gt 0 ] 2>/dev/null; then
 			echo "[openclaw] $OUT"
+			echo "[openclaw] restarting container after approvals"
+			docker restart "$OC_CONTAINER" >/dev/null 2>&1 || true
+			sleep 2
+		fi
+		if [ -n "$PAIRED" ] && [ "$PAIRED" -ge $(( BASE_PAIRED + TARGET_NEW )) ] 2>/dev/null; then
+			echo "[openclaw] paired devices reached target ($PAIRED >= $(( BASE_PAIRED + TARGET_NEW )))"
+			break
 		fi
 		sleep 3
 	done
@@ -2185,7 +2348,11 @@ echo 'Deployment complete!'
 	// Replace the user-data argument
 	newArgs := make([]string, len(args))
 	copy(newArgs, args)
-	newArgs[userDataIdx] = encoded
+	if userDataIdx >= 0 {
+		newArgs[userDataIdx] = encoded
+	} else {
+		newArgs[userDataInlineIdx] = "--user-data=" + encoded
+	}
 
 	return newArgs
 }
