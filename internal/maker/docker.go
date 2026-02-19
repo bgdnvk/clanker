@@ -21,6 +21,10 @@ var dockerBuildxDriverLineRe = regexp.MustCompile(`(?m)^\s*Driver:\s*([a-zA-Z0-9
 // BuildAndPushDockerImage builds a Docker image locally and pushes to ECR.
 // It handles ECR authentication, building the image, tagging, and pushing.
 func BuildAndPushDockerImage(ctx context.Context, clonePath, ecrURI, profile, region, imageTag string, w io.Writer) (string, error) {
+	return BuildAndPushDockerImageWithTags(ctx, clonePath, ecrURI, profile, region, []string{imageTag}, w)
+}
+
+func BuildAndPushDockerImageWithTags(ctx context.Context, clonePath, ecrURI, profile, region string, imageTags []string, w io.Writer) (string, error) {
 	accountID := extractAccountFromECR(ecrURI)
 	if accountID == "" {
 		return "", fmt.Errorf("failed to extract account ID from ECR URI: %s", ecrURI)
@@ -31,10 +35,32 @@ func BuildAndPushDockerImage(ctx context.Context, clonePath, ecrURI, profile, re
 		return "", err
 	}
 
-	if strings.TrimSpace(imageTag) == "" {
-		imageTag = "latest"
+	if len(imageTags) == 0 {
+		imageTags = []string{"latest"}
 	}
-	imageRef := ecrURI + ":" + imageTag
+	// Trim + de-dupe while preserving order.
+	seen := map[string]bool{}
+	cleanTags := make([]string, 0, len(imageTags))
+	for _, t := range imageTags {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
+		cleanTags = append(cleanTags, t)
+	}
+	if len(cleanTags) == 0 {
+		cleanTags = []string{"latest"}
+	}
+
+	primaryRef := ecrURI + ":" + cleanTags[0]
+	tagArgs := make([]string, 0, len(cleanTags)*2)
+	for _, t := range cleanTags {
+		tagArgs = append(tagArgs, "-t", ecrURI+":"+t)
+	}
 
 	if err := ensureDockerBuildxReady(ctx, w); err != nil {
 		return "", err
@@ -44,18 +70,18 @@ func BuildAndPushDockerImage(ctx context.Context, clonePath, ecrURI, profile, re
 	fmt.Fprintf(w, "[docker] building multi-arch image (linux/amd64, linux/arm64) from %s...\n", clonePath)
 	buildCtx, cancel := context.WithTimeout(ctx, 25*time.Minute)
 	defer cancel()
-	buildCmd := exec.CommandContext(buildCtx,
-		"docker", "buildx", "build",
+	buildArgs := []string{
+		"buildx", "build",
 		"--builder", "clanker-builder",
 		"--platform", "linux/amd64,linux/arm64",
 		"--progress", "plain",
 		"--provenance=false",
 		"--sbom=false",
 		"--no-cache",
-		"-t", imageRef,
-		"--push",
-		clonePath,
-	)
+	}
+	buildArgs = append(buildArgs, tagArgs...)
+	buildArgs = append(buildArgs, "--push", clonePath)
+	buildCmd := exec.CommandContext(buildCtx, "docker", buildArgs...)
 	buildCmd.Stdout = w
 	buildCmd.Stderr = w
 	if err := buildCmd.Run(); err != nil {
@@ -67,11 +93,89 @@ func BuildAndPushDockerImage(ctx context.Context, clonePath, ecrURI, profile, re
 	fmt.Fprintf(w, "[docker] push complete\n")
 
 	// 3. Verify the registry has the expected platforms.
-	if err := verifyRemoteImagePlatforms(ctx, imageRef, []string{"linux/amd64", "linux/arm64"}); err != nil {
+	if err := verifyRemoteImagePlatforms(ctx, primaryRef, []string{"linux/amd64", "linux/arm64"}); err != nil {
 		return "", err
 	}
 
-	return imageRef, nil
+	return primaryRef, nil
+}
+
+func ensureECRTagExistsFromTag(ctx context.Context, ecrURI, profile, region, srcTag, dstTag string) error {
+	srcTag = strings.TrimSpace(srcTag)
+	dstTag = strings.TrimSpace(dstTag)
+	if srcTag == "" || dstTag == "" {
+		return fmt.Errorf("missing src/dst tag")
+	}
+	if strings.EqualFold(srcTag, dstTag) {
+		return nil
+	}
+	exists, err := ecrImageTagExists(ctx, ecrURI, profile, region, dstTag)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+
+	repo := extractRepositoryFromECR(ecrURI)
+	if repo == "" {
+		return fmt.Errorf("failed to extract repository from ECR URI: %s", ecrURI)
+	}
+
+	// Fetch the manifest for srcTag and write it to a temp file so we don't blow argv limits.
+	getArgs := []string{
+		"ecr", "batch-get-image",
+		"--repository-name", repo,
+		"--image-ids", "imageTag=" + srcTag,
+		"--query", "images[0].imageManifest",
+		"--output", "text",
+		"--profile", profile,
+		"--region", region,
+		"--no-cli-pager",
+	}
+	getCmd := exec.CommandContext(ctx, "aws", getArgs...)
+	out, err := getCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("batch-get-image failed: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	manifest := strings.TrimSpace(string(out))
+	if manifest == "" || strings.EqualFold(manifest, "none") {
+		return fmt.Errorf("batch-get-image returned empty manifest for %s:%s", repo, srcTag)
+	}
+
+	f, err := os.CreateTemp("", "clanker-ecr-manifest-*.json")
+	if err != nil {
+		return err
+	}
+	path := f.Name()
+	defer os.Remove(path)
+	if _, werr := f.WriteString(manifest); werr != nil {
+		_ = f.Close()
+		return werr
+	}
+	_ = f.Close()
+
+	putArgs := []string{
+		"ecr", "put-image",
+		"--repository-name", repo,
+		"--image-tag", dstTag,
+		"--image-manifest", "file://" + path,
+		"--profile", profile,
+		"--region", region,
+		"--no-cli-pager",
+	}
+	putCmd := exec.CommandContext(ctx, "aws", putArgs...)
+	putOut, putErr := putCmd.CombinedOutput()
+	if putErr != nil {
+		lower := strings.ToLower(string(putOut))
+		// If another concurrent deploy already created the tag, that's fine.
+		if strings.Contains(lower, "imagealreadyexistsexception") {
+			return nil
+		}
+		return fmt.Errorf("put-image failed: %w (%s)", putErr, strings.TrimSpace(string(putOut)))
+	}
+
+	return nil
 }
 
 func dockerLoginECR(ctx context.Context, accountID, profile, region string, w io.Writer) error {

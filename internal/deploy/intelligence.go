@@ -129,6 +129,7 @@ type IntelligenceResult struct {
 	Exploration  *ExplorationResult `json:"exploration,omitempty"`
 	DeepAnalysis *DeepAnalysis      `json:"deepAnalysis"`
 	Docker       *DockerAnalysis    `json:"docker,omitempty"`
+	Preflight    *PreflightReport   `json:"preflight,omitempty"`
 	InfraSnap    *InfraSnapshot     `json:"infraSnapshot,omitempty"`
 	CFInfraSnap  *CFInfraSnapshot   `json:"cfInfraSnapshot,omitempty"`
 	Architecture *ArchitectDecision `json:"architecture"`
@@ -347,6 +348,7 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 		return nil, deepErr
 	}
 	result.DeepAnalysis = deep
+	result.Preflight = BuildPreflightReport(profile, result.Docker, deep)
 
 	// CRITICAL: Update profile.Ports with detected listening port from deep analysis
 	// This ensures the port is used correctly in EC2/ECS prompts for target groups
@@ -380,7 +382,24 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 			Reasoning: "fallback heuristic",
 		}
 	}
+
+	// Deterministic override: OpenClaw is stateful + long-lived websocket gateway.
+	// When deploying to AWS and the target is default/unspecified, prefer EC2.
+	ApplyOpenClawArchitectureDefaults(targetProvider, opts, profile, deep, arch)
 	result.Architecture = arch
+
+	// Deterministic override: static sites should prefer static hosting unless user explicitly requested EC2/EKS.
+	if strings.EqualFold(strings.TrimSpace(targetProvider), "aws") || strings.TrimSpace(targetProvider) == "" {
+		if result.Preflight != nil && result.Preflight.IsStaticSite {
+			if opts == nil || strings.TrimSpace(opts.Target) == "" || strings.TrimSpace(opts.Target) == "fargate" {
+				if arch.Method != "s3-cloudfront" {
+					arch.Method = "s3-cloudfront"
+					arch.Provider = "aws"
+					arch.Reasoning = "Static site detected; S3+CloudFront is simpler and cheaper than running servers"
+				}
+			}
+		}
+	}
 
 	logf("[intelligence] architecture: %s — %s", arch.Method, arch.Reasoning)
 	if arch.EstMonthly != "" {
@@ -414,6 +433,14 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 func ValidatePlan(ctx context.Context, planJSON string, profile *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis, requireDockerCommandsInPlan bool, ask AskFunc, clean CleanFunc, logf func(string, ...any)) (*PlanValidation, string, error) {
 	logf("[intelligence] phase 4: plan validation...")
 
+	// Deterministic checks first: catch hard failures like missing compose-required env vars,
+	// missing onboarding scripts for known repos, and secret inlining.
+	det := runDeterministicPlanValidation(planJSON, profile, deep, docker)
+	if len(det.Issues) > 0 {
+		v := &PlanValidation{IsValid: false, Issues: det.Issues, Fixes: det.Fixes, Warnings: det.Warnings}
+		return v, buildFixPrompt(v), nil
+	}
+
 	prompt := buildValidationPrompt(planJSON, profile, deep, docker, requireDockerCommandsInPlan)
 	resp, err := ask(ctx, prompt)
 	if err != nil {
@@ -429,9 +456,18 @@ func ValidatePlan(ctx context.Context, planJSON string, profile *RepoProfile, de
 	if !v.IsValid && len(v.Fixes) > 0 {
 		// build a fix prompt that the caller can feed back into plan generation
 		fixPrompt := buildFixPrompt(v)
+		// keep deterministic warnings even when LLM finds issues
+		if len(det.Warnings) > 0 {
+			v.Warnings = append(v.Warnings, det.Warnings...)
+			v.Warnings = uniqueStrings(v.Warnings)
+		}
 		return v, fixPrompt, nil
 	}
 
+	if len(det.Warnings) > 0 {
+		v.Warnings = append(v.Warnings, det.Warnings...)
+		v.Warnings = uniqueStrings(v.Warnings)
+	}
 	return v, "", nil
 }
 
@@ -460,27 +496,41 @@ func buildDeepAnalysisPrompt(p *RepoProfile) string {
 
 	// static analysis results for context
 	profileJSON, _ := json.MarshalIndent(struct {
-		Language       string   `json:"language"`
-		Framework      string   `json:"framework"`
-		PackageManager string   `json:"packageManager"`
-		IsMonorepo     bool     `json:"isMonorepo"`
-		HasDocker      bool     `json:"hasDocker"`
-		HasCompose     bool     `json:"hasCompose"`
-		Ports          []int    `json:"ports"`
-		EnvVars        []string `json:"envVars"`
-		HasDB          bool     `json:"hasDb"`
-		DBType         string   `json:"dbType"`
+		Language         string   `json:"language"`
+		Framework        string   `json:"framework"`
+		PackageManager   string   `json:"packageManager"`
+		IsMonorepo       bool     `json:"isMonorepo"`
+		HasDocker        bool     `json:"hasDocker"`
+		HasCompose       bool     `json:"hasCompose"`
+		Ports            []int    `json:"ports"`
+		EnvVars          []string `json:"envVars"`
+		HasDB            bool     `json:"hasDb"`
+		DBType           string   `json:"dbType"`
+		BootstrapScripts []string `json:"bootstrapScripts,omitempty"`
+		EnvExampleFiles  []string `json:"envExampleFiles,omitempty"`
+		MigrationHints   []string `json:"migrationHints,omitempty"`
+		NativeDeps       []string `json:"nativeDeps,omitempty"`
+		BuildOutputDir   string   `json:"buildOutputDir,omitempty"`
+		IsStaticSite     bool     `json:"isStaticSite"`
+		LockFiles        []string `json:"lockFiles,omitempty"`
 	}{
-		Language:       p.Language,
-		Framework:      p.Framework,
-		PackageManager: p.PackageManager,
-		IsMonorepo:     p.IsMonorepo,
-		HasDocker:      p.HasDocker,
-		HasCompose:     p.HasCompose,
-		Ports:          p.Ports,
-		EnvVars:        p.EnvVars,
-		HasDB:          p.HasDB,
-		DBType:         p.DBType,
+		Language:         p.Language,
+		Framework:        p.Framework,
+		PackageManager:   p.PackageManager,
+		IsMonorepo:       p.IsMonorepo,
+		HasDocker:        p.HasDocker,
+		HasCompose:       p.HasCompose,
+		Ports:            p.Ports,
+		EnvVars:          p.EnvVars,
+		HasDB:            p.HasDB,
+		DBType:           p.DBType,
+		BootstrapScripts: p.BootstrapScripts,
+		EnvExampleFiles:  p.EnvExampleFiles,
+		MigrationHints:   p.MigrationHints,
+		NativeDeps:       p.NativeDeps,
+		BuildOutputDir:   p.BuildOutputDir,
+		IsStaticSite:     p.IsStaticSite,
+		LockFiles:        p.LockFiles,
 	}, "", "  ")
 	b.WriteString("## Static Analysis\n```json\n")
 	b.WriteString(string(profileJSON))
@@ -692,16 +742,20 @@ Estimate the MONTHLY cost in USD. Most small apps fit in free tier.
   "costBreakdown": ["Pages: free", "Bandwidth: free up to 100GB/mo"]
 }`)
 	case "gcp":
+		if IsOpenClawRepo(p, deep) {
+			b.WriteString(OpenClawArchitectPromptGCP())
+			break
+		}
 		b.WriteString(`
 ## GCP Options to Consider
-1. **gcp-compute-engine** — VM + Docker Compose (best for long-running gateway services) (~$8-30/mo)
-2. **cloud-run** — managed containers (good for stateless HTTP apps, less ideal for stateful local-first gateway workflows)
+1. **gcp-compute-engine** — VM + Docker Compose (best for stateful or always-on services) (~$8-30/mo)
+2. **cloud-run** — managed containers (best for stateless HTTP apps)
 3. **gke** — Kubernetes (overkill unless explicitly requested)
 
 ## GCP Services
-- Compute Engine for always-on gateway
-- Persistent disk for OpenClaw state/workspace
-- Secret Manager for API keys and channel tokens
+- Compute Engine VM for always-on runtime
+- Persistent disk for any stateful data
+- Secret Manager for API keys and app secrets
 - Cloud DNS + HTTPS LB only if public exposure is required
 
 ## Deployment CLI
@@ -714,9 +768,9 @@ Estimate the MONTHLY cost in USD.
 {
 	"provider": "gcp",
 	"method": "gcp-compute-engine",
-	"reasoning": "OpenClaw is a long-running gateway with persistent state and channel credentials. A Compute Engine VM with Docker Compose is the most reliable and simplest path.",
+	"reasoning": "A VM with Docker Compose is the most reliable and simplest path for this app.",
 	"alternatives": [
-		{"method": "cloud-run", "why_not": "Less suitable for persistent workspace/state and interactive gateway workflows"},
+		{"method": "cloud-run", "why_not": "Less suitable if this app requires local persistent state or long-lived connections"},
 		{"method": "gke", "why_not": "Operationally complex for this use case"}
 	],
 	"buildSteps": [
@@ -725,8 +779,8 @@ Estimate the MONTHLY cost in USD.
 		"Clone repo and configure .env",
 		"Run docker compose build && docker compose up -d"
 	],
-	"runCmd": "docker compose up -d openclaw-gateway",
-	"notes": ["Expose only required ports", "Persist OpenClaw config/workspace on disk"],
+	"runCmd": "docker compose up -d",
+	"notes": ["Expose only required ports", "Persist any required state on disk"],
 	"cpuMemory": "e2-standard-2",
 	"needsAlb": false,
 	"useApiGateway": false,
@@ -736,16 +790,20 @@ Estimate the MONTHLY cost in USD.
 	"costBreakdown": ["Compute Engine VM", "Persistent disk", "Network egress"]
 }`)
 	case "azure":
+		if IsOpenClawRepo(p, deep) {
+			b.WriteString(OpenClawArchitectPromptAzure())
+			break
+		}
 		b.WriteString(`
 ## Azure Options to Consider
-1. **azure-vm** — VM + Docker Compose (best for long-running gateway services) (~$10-35/mo)
+1. **azure-vm** — VM + Docker Compose (best for stateful or always-on services) (~$10-35/mo)
 2. **azure-container-apps** — managed containers (good for stateless services)
 3. **aks** — Kubernetes (overkill unless explicitly requested)
 
 ## Azure Services
-- VM for always-on gateway runtime
-- Managed disk for persistent OpenClaw state/workspace
-- Key Vault for API keys and channel tokens
+- VM for always-on runtime
+- Managed disk for any stateful data
+- Key Vault for API keys and app secrets
 
 ## Deployment CLI
 All commands must use az CLI only.
@@ -757,9 +815,9 @@ Estimate the MONTHLY cost in USD.
 {
 	"provider": "azure",
 	"method": "azure-vm",
-	"reasoning": "OpenClaw runs best as an always-on gateway with persistent local state. Azure VM with Docker Compose is the most direct and operationally simple option.",
+	"reasoning": "A VM with Docker Compose is the most direct and operationally simple option.",
 	"alternatives": [
-		{"method": "azure-container-apps", "why_not": "Less ideal for persistent local-first runtime patterns"},
+		{"method": "azure-container-apps", "why_not": "Less ideal if this app requires local persistent state or long-lived connections"},
 		{"method": "aks", "why_not": "Unnecessary complexity for this workload"}
 	],
 	"buildSteps": [
@@ -768,8 +826,8 @@ Estimate the MONTHLY cost in USD.
 		"Clone repo and configure .env",
 		"Run docker compose build && docker compose up -d"
 	],
-	"runCmd": "docker compose up -d openclaw-gateway",
-	"notes": ["Persist OpenClaw directories on disk", "Restrict inbound network rules"],
+	"runCmd": "docker compose up -d",
+	"notes": ["Persist any required state on disk", "Restrict inbound network rules"],
 	"cpuMemory": "Standard_B2s",
 	"needsAlb": false,
 	"useApiGateway": false,
@@ -1071,14 +1129,22 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAn
 			b.WriteString(fmt.Sprintf("- Prefer Docker runtime command: %s\n", docker.RunCommand))
 		}
 	}
-	if isOpenClawRepo(p) {
-		b.WriteString("\n## OpenClaw Deployment Requirements\n")
-		b.WriteString("- Runtime must be Node.js 22+\n")
-		b.WriteString("- Prefer Docker-based gateway deployment\n")
-		b.WriteString("- Persist OpenClaw state and workspace directories\n")
-		b.WriteString("- Configure gateway token via environment variable\n")
-		b.WriteString("- Expose gateway port (default 18789) intentionally and securely\n")
-		b.WriteString("- Use environment variables for channel/provider secrets; avoid committing tokens\n")
+	AppendOpenClawDeploymentRequirements(&b, p, deep)
+	if pf := BuildPreflightReport(p, docker, deep); pf != nil {
+		ctx := pf.FormatForPrompt()
+		if strings.TrimSpace(ctx) != "" {
+			b.WriteString("\n")
+			b.WriteString(ctx)
+		}
+		if pf.IsStaticSite {
+			b.WriteString("\n## Static Site Notes\n")
+			b.WriteString("- If this is an SPA, configure routing so deep links work (e.g. CloudFront custom error response 404->200 /index.html, or platform-specific redirect rules).\n")
+		}
+	}
+	if len(p.BootstrapScripts) > 0 {
+		b.WriteString("\n## Bootstrap Scripts (If deploying on a VM)\n")
+		b.WriteString("- This repo includes bootstrap/onboarding scripts. If the workload depends on them, run them BEFORE starting services.\n")
+		b.WriteString("- If a bootstrap script is interactive, include it as an explicit interactive step (do not silently skip it).\n")
 	}
 
 	b.WriteString("\n## Naming\n")
@@ -1244,6 +1310,9 @@ func smartECSPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis,
 }
 
 func gcpComputeEnginePrompt(p *RepoProfile, deep *DeepAnalysis, opts *DeployOptions) string {
+	if IsOpenClawRepo(p, deep) {
+		return OpenClawGCPComputeEnginePrompt(p, deep, opts)
+	}
 	var b strings.Builder
 	deployID := ""
 	if opts != nil {
@@ -1256,14 +1325,17 @@ func gcpComputeEnginePrompt(p *RepoProfile, deep *DeepAnalysis, opts *DeployOpti
 	b.WriteString("2. Create a Compute Engine VM (Ubuntu LTS)\n")
 	b.WriteString("3. Install Docker and Docker Compose on the VM\n")
 	b.WriteString(fmt.Sprintf("4. Clone repository: %s\n", p.RepoURL))
-	b.WriteString("5. Create .env with gateway token and required secrets\n")
-	b.WriteString("6. Create persistent directories for OpenClaw config/workspace\n")
-	b.WriteString("7. Build and start with: docker compose build && docker compose up -d openclaw-gateway\n")
-	b.WriteString("8. Verify gateway health and endpoint readiness\n")
+	b.WriteString("5. Create .env with required env vars and secrets\n")
+	b.WriteString("6. If the app is stateful, create persistent directories/volumes on disk\n")
+	b.WriteString("7. Build and start with: docker compose build && docker compose up -d\n")
+	b.WriteString("8. Verify service health and endpoint readiness\n")
 	return b.String()
 }
 
 func azureVMPrompt(p *RepoProfile, deep *DeepAnalysis, opts *DeployOptions) string {
+	if IsOpenClawRepo(p, deep) {
+		return OpenClawAzureVMPrompt(p, deep, opts)
+	}
 	var b strings.Builder
 	deployID := ""
 	if opts != nil {
@@ -1276,28 +1348,14 @@ func azureVMPrompt(p *RepoProfile, deep *DeepAnalysis, opts *DeployOptions) stri
 	b.WriteString("2. Create Ubuntu VM with managed disk\n")
 	b.WriteString("3. Install Docker and Docker Compose\n")
 	b.WriteString(fmt.Sprintf("4. Clone repository: %s\n", p.RepoURL))
-	b.WriteString("5. Create .env with gateway token and required secrets\n")
-	b.WriteString("6. Create persistent directories for OpenClaw config/workspace\n")
-	b.WriteString("7. Build and start with: docker compose build && docker compose up -d openclaw-gateway\n")
-	b.WriteString("8. Verify gateway health and endpoint readiness\n")
+	b.WriteString("5. Create .env with required env vars and secrets\n")
+	b.WriteString("6. If the app is stateful, create persistent directories/volumes on disk\n")
+	b.WriteString("7. Build and start with: docker compose build && docker compose up -d\n")
+	b.WriteString("8. Verify service health and endpoint readiness\n")
 	return b.String()
 }
 
-func isOpenClawRepo(p *RepoProfile) bool {
-	repo := strings.ToLower(strings.TrimSpace(p.RepoURL))
-	if strings.Contains(repo, "openclaw/openclaw") {
-		return true
-	}
-	if strings.Contains(strings.ToLower(p.Summary), "openclaw") {
-		return true
-	}
-	for name := range p.KeyFiles {
-		if strings.EqualFold(strings.TrimSpace(name), "openclaw.mjs") {
-			return true
-		}
-	}
-	return false
-}
+// (OpenClaw helpers are in openclaw.go)
 
 func appRunnerPrompt(p *RepoProfile, arch *ArchitectDecision, opts *DeployOptions) string {
 	var b strings.Builder
@@ -1683,7 +1741,13 @@ func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts
 	b.WriteString(fmt.Sprintf("     --protocol HTTP --port %d \\\n", appPort))
 	b.WriteString("     --vpc-id <VPC_ID> \\\n")
 	b.WriteString("     --target-type instance \\\n")
-	b.WriteString(fmt.Sprintf("     --health-check-path / --health-check-port %d\n", appPort))
+	healthPath := "/"
+	if deep != nil {
+		if hp := strings.TrimSpace(deep.HealthEndpoint); strings.HasPrefix(hp, "/") {
+			healthPath = hp
+		}
+	}
+	b.WriteString(fmt.Sprintf("     --health-check-path %s --health-check-port %d\n", healthPath, appPort))
 	b.WriteString("   Save the TargetGroupArn.\n\n")
 
 	b.WriteString("3. Register EC2 instance with target group:\n")

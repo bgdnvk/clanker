@@ -618,6 +618,10 @@ func autoPrepareImageForOneClickDeploy(ctx context.Context, question string, run
 	}
 	if exists {
 		imageRef := ecrURI + ":" + imageTag
+		// Ensure :latest exists even if the plan uses a unique deploy tag.
+		if !strings.EqualFold(imageTag, "latest") {
+			_ = ensureECRTagExistsFromTag(ctx, ecrURI, opts.Profile, opts.Region, imageTag, "latest")
+		}
 		if len(requiredPlatforms) > 0 {
 			accountID := extractAccountFromECR(ecrURI)
 			if accountID == "" {
@@ -656,7 +660,7 @@ func autoPrepareImageForOneClickDeploy(ctx context.Context, question string, run
 	}
 	defer cleanup()
 
-	imageURI, err := BuildAndPushDockerImage(ctx, clonePath, ecrURI, opts.Profile, opts.Region, imageTag, opts.Writer)
+	imageURI, err := BuildAndPushDockerImageWithTags(ctx, clonePath, ecrURI, opts.Profile, opts.Region, []string{imageTag, "latest"}, opts.Writer)
 	if err != nil {
 		return err
 	}
@@ -2209,7 +2213,7 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 			containerName = "openclaw"
 		}
 		preRun = "docker volume create openclaw_data || true\n" +
-			"docker run --rm -v openclaw_data:/home/node/.openclaw alpine:3.20 sh -lc 'chown -R 1000:1000 /home/node/.openclaw' || true\n" +
+			"docker run --rm -v openclaw_data:/home/node/.openclaw alpine:3.20 sh -lc 'mkdir -p /home/node/.openclaw/workspace; if [ ! -f /home/node/.openclaw/openclaw.json ]; then printf \"%s\\n\" \"{ gateway: { mode: \\\"local\\\" } }\" > /home/node/.openclaw/openclaw.json; fi; chown -R 1000:1000 /home/node/.openclaw' || true\n" +
 			"docker rm -f openclaw || true\n" +
 			fmt.Sprintf("docker rm -f %s || true\n", containerName)
 		// Ensure the persistent volume is mounted.
@@ -3769,8 +3773,11 @@ func validateCommand(args []string, allowDestructive bool) error {
 			continue
 		}
 
-		lower := strings.ToLower(a)
-		if strings.Contains(lower, ";") || strings.Contains(lower, "|") || strings.Contains(lower, "&&") || strings.Contains(lower, "||") {
+		// Args are executed via exec.Command(argv...), not a shell.
+		// Many AWS args can legitimately contain characters like ';' (descriptions) or '|' (JMESPath queries).
+		// Only block explicit shell-operator TOKENS.
+		switch strings.ToLower(trimmed) {
+		case ";", "|", "||", "&&", ">", ">>", "<", "<<":
 			return fmt.Errorf("shell operators are not allowed")
 		}
 	}

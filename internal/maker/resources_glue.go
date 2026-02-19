@@ -1538,6 +1538,25 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 		return true, nil
 	}
 
+	// ECR: describe-images with an explicit tag can fail if the tag doesn't exist (common footgun: assuming :latest).
+	// Remediation: pick the newest pushed image digest in the repo, bind IMAGE_DIGEST, and continue.
+	if args0(args) == "ecr" && args1(args) == "describe-images" && failure.Category == FailureNotFound {
+		lower := strings.ToLower(output)
+		if strings.Contains(lower, "imagenotfoundexception") || strings.Contains(lower, "requested image not found") || strings.Contains(lower, "does not exist") {
+			repoName := strings.TrimSpace(flagValue(args, "--repository-name"))
+			if repoName != "" {
+				digest, digErr := remediateECRBindLatestDigest(ctx, opts, repoName, bindings)
+				if digErr != nil {
+					return true, digErr
+				}
+				if strings.TrimSpace(digest) != "" {
+					_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: ecr describe-images tag missing; using newest image digest (repo=%s)\n", repoName)
+					return true, nil
+				}
+			}
+		}
+	}
+
 	if ok, err := maybeGenericGlueAndRetry(ctx, opts, args, awsArgs, stdinBytes, failure, output); ok {
 		return true, err
 	}
@@ -1611,6 +1630,64 @@ func describeLoadBalancerByName(ctx context.Context, opts ExecOptions, lbName st
 		return "", "", nil
 	}
 	return strings.TrimSpace(resp.LoadBalancers[0].LoadBalancerArn), strings.TrimSpace(resp.LoadBalancers[0].DNSName), nil
+}
+
+func remediateECRBindLatestDigest(ctx context.Context, opts ExecOptions, repoName string, bindings map[string]string) (string, error) {
+	repoName = strings.TrimSpace(repoName)
+	if repoName == "" {
+		return "", fmt.Errorf("empty ECR repo name")
+	}
+	if bindings == nil {
+		return "", fmt.Errorf("nil bindings")
+	}
+
+	// If ECR_URI isn't already known, fetch it (best-effort).
+	if strings.TrimSpace(bindings["ECR_URI"]) == "" {
+		descRepo := []string{"ecr", "describe-repositories", "--repository-names", repoName, "--output", "json"}
+		awsArgs := buildAWSExecArgs(descRepo, opts, opts.Writer)
+		out, err := runAWSCommandStreaming(ctx, awsArgs, nil, io.Discard)
+		if err == nil {
+			var resp struct {
+				Repositories []struct {
+					RepositoryURI string `json:"repositoryUri"`
+				} `json:"repositories"`
+			}
+			if json.Unmarshal([]byte(out), &resp) == nil {
+				if len(resp.Repositories) > 0 {
+					bindings["ECR_URI"] = strings.TrimSpace(resp.Repositories[0].RepositoryURI)
+				}
+			}
+		}
+	}
+
+	// Describe newest pushed image (do not assume tag exists).
+	q := []string{
+		"ecr", "describe-images",
+		"--repository-name", repoName,
+		"--query", "sort_by(imageDetails,&imagePushedAt)[-1]",
+		"--output", "json",
+	}
+	awsArgs := buildAWSExecArgs(q, opts, opts.Writer)
+	out, err := runAWSCommandStreaming(ctx, awsArgs, nil, io.Discard)
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		ImageDigest string   `json:"imageDigest"`
+		ImageTags   []string `json:"imageTags"`
+	}
+	if json.Unmarshal([]byte(out), &resp) != nil {
+		return "", fmt.Errorf("failed to parse ECR describe-images output")
+	}
+	digest := strings.TrimSpace(resp.ImageDigest)
+	if digest == "" || digest == "null" {
+		return "", fmt.Errorf("no images found in ECR repo %s (push an image first)", repoName)
+	}
+	bindings["IMAGE_DIGEST"] = digest
+	if len(resp.ImageTags) > 0 {
+		bindings["IMAGE_TAG"] = strings.TrimSpace(resp.ImageTags[0])
+	}
+	return digest, nil
 }
 
 func describeSecretARNByName(ctx context.Context, opts ExecOptions, secretName string) (string, error) {
@@ -3012,9 +3089,7 @@ func listRoute53HostedZones(ctx context.Context, opts ExecOptions) ([]route53Hos
 	for _, z := range resp.HostedZones {
 		id := strings.TrimSpace(z.ID)
 		name := strings.TrimSpace(z.Name)
-		if strings.HasPrefix(id, "/hostedzone/") {
-			id = strings.TrimPrefix(id, "/hostedzone/")
-		}
+		id = strings.TrimPrefix(id, "/hostedzone/")
 		if id == "" || name == "" {
 			continue
 		}

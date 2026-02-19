@@ -11,6 +11,8 @@ type DockerAnalysis struct {
 	HasDockerfile       bool     `json:"hasDockerfile"`
 	HasCompose          bool     `json:"hasCompose"`
 	BuildUsesMultiStage bool     `json:"buildUsesMultiStage"`
+	HasPlatformPin      bool     `json:"hasPlatformPin"`
+	PlatformPins        []string `json:"platformPins,omitempty"`
 	ComposeServices     []string `json:"composeServices,omitempty"`
 	ExposedPorts        []int    `json:"exposedPorts,omitempty"`
 	PublishedPorts      []int    `json:"publishedPorts,omitempty"`
@@ -20,6 +22,7 @@ type DockerAnalysis struct {
 	VolumeMounts        []string `json:"volumeMounts,omitempty"`
 	EnvFiles            []string `json:"envFiles,omitempty"`
 	ReferencedEnvVars   []string `json:"referencedEnvVars,omitempty"`
+	HardRequiredEnvVars []string `json:"hardRequiredEnvVars,omitempty"`
 	BuildCommand        string   `json:"buildCommand,omitempty"`
 	RunCommand          string   `json:"runCommand,omitempty"`
 	Warnings            []string `json:"warnings,omitempty"`
@@ -95,6 +98,7 @@ func AnalyzeDockerAgent(profile *RepoProfile) *DockerAnalysis {
 	analysis.VolumeMounts = uniqueStrings(analysis.VolumeMounts)
 	analysis.EnvFiles = uniqueStrings(analysis.EnvFiles)
 	analysis.ReferencedEnvVars = uniqueStrings(analysis.ReferencedEnvVars)
+	analysis.HardRequiredEnvVars = uniqueStrings(analysis.HardRequiredEnvVars)
 	analysis.Warnings = uniqueStrings(analysis.Warnings)
 
 	return analysis
@@ -110,6 +114,12 @@ func (d *DockerAnalysis) FormatForPrompt() string {
 	b.WriteString(fmt.Sprintf("- Compose: %t\n", d.HasCompose))
 	if d.BuildUsesMultiStage {
 		b.WriteString("- Build: multi-stage Dockerfile\n")
+	}
+	if d.HasPlatformPin {
+		b.WriteString("- Dockerfile: has --platform pin\n")
+		if len(d.PlatformPins) > 0 {
+			b.WriteString("- Platform pins: " + strings.Join(d.PlatformPins, ", ") + "\n")
+		}
 	}
 	if len(d.ComposeServices) > 0 {
 		b.WriteString("- Compose services: " + strings.Join(d.ComposeServices, ", ") + "\n")
@@ -142,6 +152,9 @@ func (d *DockerAnalysis) FormatForPrompt() string {
 	if len(d.EnvFiles) > 0 {
 		b.WriteString("- Env files: " + strings.Join(d.EnvFiles, ", ") + "\n")
 	}
+	if len(d.HardRequiredEnvVars) > 0 {
+		b.WriteString("- Hard-required env vars (compose fails if empty): " + strings.Join(d.HardRequiredEnvVars, ", ") + "\n")
+	}
 	if len(d.Warnings) > 0 {
 		b.WriteString("- Docker warnings:\n")
 		for _, warning := range d.Warnings {
@@ -157,10 +170,15 @@ func parseDockerfile(content string, analysis *DockerAnalysis) {
 	}
 	fromCount := 0
 	exposeRe := regexp.MustCompile(`(?i)^\s*EXPOSE\s+([0-9]{2,5})`)
+	platformRe := regexp.MustCompile(`(?i)^\s*FROM\s+--platform=([^\s]+)\s+`)
 	for _, line := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(strings.ToUpper(trimmed), "FROM ") {
 			fromCount++
+			if m := platformRe.FindStringSubmatch(trimmed); len(m) == 2 {
+				analysis.HasPlatformPin = true
+				analysis.PlatformPins = append(analysis.PlatformPins, strings.TrimSpace(m[1]))
+			}
 		}
 		if m := exposeRe.FindStringSubmatch(trimmed); len(m) == 2 {
 			if port := parsePort(m[1]); port > 0 {
@@ -175,6 +193,7 @@ func parseDockerfile(content string, analysis *DockerAnalysis) {
 	if fromCount > 1 {
 		analysis.BuildUsesMultiStage = true
 	}
+	analysis.PlatformPins = uniqueStrings(analysis.PlatformPins)
 }
 
 func parseCompose(content string, analysis *DockerAnalysis) {
@@ -183,11 +202,14 @@ func parseCompose(content string, analysis *DockerAnalysis) {
 	}
 	portMapRe := regexp.MustCompile(`^\s*-?\s*['"]?([0-9]{2,5}):([0-9]{2,5})(?:/(?:tcp|udp))?['"]?\s*$`)
 	// Handles compose ports with variable/templated host ports like "${FOO:-18789}:18789" (leading '-' allowed).
-	varHostPortRe := regexp.MustCompile(`^\s*-?\s*['\"]?\$\{[^}]*?:-([0-9]{2,5})\}:([0-9]{2,5})(?:/(?:tcp|udp))?['\"]?\s*$`)
+	varHostPortDefaultRe := regexp.MustCompile(`^\s*-?\s*['\"]?\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*:-([0-9]{2,5})\}:([0-9]{2,5})(?:/(?:tcp|udp))?['\"]?\s*$`)
+	// Handles compose ports with required host ports like "${FOO}:18789".
+	varHostPortRequiredRe := regexp.MustCompile(`^\s*-?\s*['\"]?\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}:([0-9]{2,5})(?:/(?:tcp|udp))?['\"]?\s*$`)
 	serviceLineRe := regexp.MustCompile(`^\s{2}([a-zA-Z0-9_-]+):\s*$`)
 	volumeLineRe := regexp.MustCompile(`^\s*-\s*([^\s#]+:[^\s#]+)\s*$`)
 	envFileRe := regexp.MustCompile(`^\s*env_file\s*:\s*(.+)$`)
 	envRefRe := regexp.MustCompile(`\$\{\s*([A-Za-z_][A-Za-z0-9_]*)`) // ${VAR} or ${VAR:-...}
+	volumeHostRequiredVarRe := regexp.MustCompile(`^\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}$`)
 
 	for _, line := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(line)
@@ -198,10 +220,14 @@ func parseCompose(content string, analysis *DockerAnalysis) {
 			analysis.ComposeServices = append(analysis.ComposeServices, strings.TrimSpace(m[1]))
 		}
 		// Prefer published HOST ports for deployment/health checks.
-		if m := varHostPortRe.FindStringSubmatch(line); len(m) == 3 {
-			if hostPort := parsePort(m[1]); hostPort > 0 {
+		if m := varHostPortDefaultRe.FindStringSubmatch(line); len(m) == 4 {
+			analysis.ReferencedEnvVars = append(analysis.ReferencedEnvVars, strings.TrimSpace(m[1]))
+			if hostPort := parsePort(m[2]); hostPort > 0 {
 				analysis.PublishedPorts = append(analysis.PublishedPorts, hostPort)
 			}
+		} else if m := varHostPortRequiredRe.FindStringSubmatch(line); len(m) == 3 {
+			analysis.ReferencedEnvVars = append(analysis.ReferencedEnvVars, strings.TrimSpace(m[1]))
+			analysis.HardRequiredEnvVars = append(analysis.HardRequiredEnvVars, strings.TrimSpace(m[1]))
 		} else if m := portMapRe.FindStringSubmatch(line); len(m) == 3 {
 			if hostPort := parsePort(m[1]); hostPort > 0 {
 				analysis.PublishedPorts = append(analysis.PublishedPorts, hostPort)
@@ -209,10 +235,19 @@ func parseCompose(content string, analysis *DockerAnalysis) {
 		}
 		if m := volumeLineRe.FindStringSubmatch(line); len(m) == 2 {
 			// Avoid treating port mappings as volume mounts.
-			if portMapRe.MatchString(line) || varHostPortRe.MatchString(line) {
+			if portMapRe.MatchString(line) || varHostPortDefaultRe.MatchString(line) || varHostPortRequiredRe.MatchString(line) {
 				continue
 			}
-			analysis.VolumeMounts = append(analysis.VolumeMounts, strings.TrimSpace(m[1]))
+			mount := strings.TrimSpace(m[1])
+			analysis.VolumeMounts = append(analysis.VolumeMounts, mount)
+			parts := strings.SplitN(mount, ":", 2)
+			if len(parts) == 2 {
+				host := strings.TrimSpace(parts[0])
+				if vm := volumeHostRequiredVarRe.FindStringSubmatch(host); len(vm) == 2 {
+					analysis.ReferencedEnvVars = append(analysis.ReferencedEnvVars, strings.TrimSpace(vm[1]))
+					analysis.HardRequiredEnvVars = append(analysis.HardRequiredEnvVars, strings.TrimSpace(vm[1]))
+				}
+			}
 		}
 		if m := envFileRe.FindStringSubmatch(line); len(m) == 2 {
 			analysis.EnvFiles = append(analysis.EnvFiles, strings.Trim(strings.TrimSpace(m[1]), `"'`))
@@ -234,6 +269,22 @@ func parseCompose(content string, analysis *DockerAnalysis) {
 func choosePrimaryService(services []string) string {
 	if len(services) == 0 {
 		return ""
+	}
+	// Strong preferences for common gateway naming.
+	strong := []string{"openclaw-gateway", "gateway", "api", "server", "web", "app"}
+	for _, want := range strong {
+		for _, s := range services {
+			if strings.EqualFold(strings.TrimSpace(s), want) {
+				return s
+			}
+		}
+	}
+	// Prefix/suffix matches.
+	for _, s := range services {
+		ls := strings.ToLower(strings.TrimSpace(s))
+		if strings.HasSuffix(ls, "-gateway") || strings.Contains(ls, "gateway") {
+			return s
+		}
 	}
 	preferred := []string{"gateway", "api", "app", "server", "web"}
 	for _, p := range preferred {

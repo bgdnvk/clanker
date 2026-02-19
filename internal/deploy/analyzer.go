@@ -13,25 +13,32 @@ import (
 
 // RepoProfile is the result of analyzing a git repo
 type RepoProfile struct {
-	RepoURL        string            `json:"repoUrl"`
-	ClonePath      string            `json:"clonePath"`
-	Language       string            `json:"language"`       // go, python, node, rust, java, etc
-	Framework      string            `json:"framework"`      // express, flask, fastapi, gin, fiber, nextjs, etc
-	PackageManager string            `json:"packageManager"` // npm, pnpm, yarn, bun, pip, cargo, go
-	IsMonorepo     bool              `json:"isMonorepo"`
-	HasDocker      bool              `json:"hasDocker"`
-	HasCompose     bool              `json:"hasCompose"`  // docker-compose.yml
-	DeployHints    []string          `json:"deployHints"` // fly.toml, render.yaml, etc
-	Ports          []int             `json:"ports"`
-	EnvVars        []string          `json:"envVars"`    // required env vars detected
-	EntryPoint     string            `json:"entryPoint"` // main.go, app.py, index.js, etc
-	BuildCmd       string            `json:"buildCmd"`
-	StartCmd       string            `json:"startCmd"`
-	HasDB          bool              `json:"hasDb"`
-	DBType         string            `json:"dbType"` // postgres, mysql, redis, mongo, etc
-	Summary        string            `json:"summary"`
-	KeyFiles       map[string]string `json:"keyFiles"` // filename → content (capped)
-	FileTree       string            `json:"fileTree"` // top-level directory listing
+	RepoURL          string            `json:"repoUrl"`
+	ClonePath        string            `json:"clonePath"`
+	Language         string            `json:"language"`       // go, python, node, rust, java, etc
+	Framework        string            `json:"framework"`      // express, flask, fastapi, gin, fiber, nextjs, etc
+	PackageManager   string            `json:"packageManager"` // npm, pnpm, yarn, bun, pip, cargo, go
+	IsMonorepo       bool              `json:"isMonorepo"`
+	HasDocker        bool              `json:"hasDocker"`
+	HasCompose       bool              `json:"hasCompose"`                 // docker-compose.yml
+	DeployHints      []string          `json:"deployHints"`                // fly.toml, render.yaml, etc
+	BootstrapScripts []string          `json:"bootstrapScripts,omitempty"` // docker-setup.sh, setup scripts, onboard scripts
+	EnvExampleFiles  []string          `json:"envExampleFiles,omitempty"`  // .env.example, etc
+	MigrationHints   []string          `json:"migrationHints,omitempty"`   // detected migration tooling/files
+	NativeDeps       []string          `json:"nativeDeps,omitempty"`       // node native deps that often need OS packages
+	BuildOutputDir   string            `json:"buildOutputDir,omitempty"`   // dist/build/out/.next
+	IsStaticSite     bool              `json:"isStaticSite"`               // likely static bundle deployable
+	LockFiles        []string          `json:"lockFiles,omitempty"`        // pnpm-lock.yaml, yarn.lock, etc
+	Ports            []int             `json:"ports"`
+	EnvVars          []string          `json:"envVars"`    // required env vars detected
+	EntryPoint       string            `json:"entryPoint"` // main.go, app.py, index.js, etc
+	BuildCmd         string            `json:"buildCmd"`
+	StartCmd         string            `json:"startCmd"`
+	HasDB            bool              `json:"hasDb"`
+	DBType           string            `json:"dbType"` // postgres, mysql, redis, mongo, etc
+	Summary          string            `json:"summary"`
+	KeyFiles         map[string]string `json:"keyFiles"` // filename → content (capped)
+	FileTree         string            `json:"fileTree"` // top-level directory listing
 }
 
 // CloneAndAnalyze clones a repo and returns a profile
@@ -73,12 +80,191 @@ func Analyze(dir string) (*RepoProfile, error) {
 	detectPackageManager(dir, p)
 	detectMonorepo(dir, p)
 	detectDeployHints(dir, p)
+	detectBootstrapScripts(dir, p)
+	detectLockFiles(dir, p)
+	detectEnvExampleFiles(dir, p)
+	detectMigrations(dir, p)
+	detectNativeDeps(dir, p)
+	detectStaticSiteAndBuildOutput(dir, p)
 	detectPorts(dir, p)
 	detectEnvVars(dir, p)
 	detectDatabase(dir, p)
 	detectCommands(dir, p)
 
 	return p, nil
+}
+
+func detectBootstrapScripts(dir string, p *RepoProfile) {
+	if p == nil {
+		return
+	}
+	// Common patterns: OpenClaw-style docker-setup.sh, general setup/onboard scripts.
+	candidates := []string{
+		"docker-setup.sh",
+		"setup.sh",
+		"onboard.sh",
+		"install.sh",
+		"bootstrap.sh",
+		"scripts/setup.sh",
+		"scripts/install.sh",
+		"scripts/bootstrap.sh",
+		"scripts/onboard.sh",
+		"setup-podman.sh",
+		"setup-docker.sh",
+		"scripts/docker-setup.sh",
+	}
+	for _, f := range candidates {
+		if fileExists(dir, f) {
+			p.BootstrapScripts = append(p.BootstrapScripts, f)
+		}
+	}
+}
+
+func detectLockFiles(dir string, p *RepoProfile) {
+	if p == nil {
+		return
+	}
+	lockfiles := []string{
+		"pnpm-lock.yaml",
+		"yarn.lock",
+		"package-lock.json",
+		"bun.lockb",
+		"bun.lock",
+		"poetry.lock",
+		"Pipfile.lock",
+		"uv.lock",
+		"Cargo.lock",
+		"go.sum",
+	}
+	for _, lf := range lockfiles {
+		if fileExists(dir, lf) {
+			p.LockFiles = append(p.LockFiles, lf)
+		}
+	}
+}
+
+func detectEnvExampleFiles(dir string, p *RepoProfile) {
+	if p == nil {
+		return
+	}
+	candidates := []string{
+		".env.example",
+		".env.sample",
+		".env.template",
+		".env.local.example",
+		".env.production.example",
+		"config/.env.example",
+		"config/.env.sample",
+	}
+	for _, f := range candidates {
+		if fileExists(dir, f) {
+			p.EnvExampleFiles = append(p.EnvExampleFiles, f)
+		}
+	}
+}
+
+func detectMigrations(dir string, p *RepoProfile) {
+	if p == nil {
+		return
+	}
+	// Files/dirs that strongly indicate migrations.
+	paths := []string{
+		"prisma/migrations",
+		"drizzle",
+		"drizzle.config.ts",
+		"drizzle.config.js",
+		"migrations",
+		"db/migrations",
+		"alembic.ini",
+		"alembic",
+		"flyway.conf",
+		"sql/migrations",
+	}
+	for _, path := range paths {
+		if fileExists(dir, path) || dirExists(dir, path) {
+			p.MigrationHints = append(p.MigrationHints, path)
+		}
+	}
+	// Script hints.
+	if fileExists(dir, "package.json") {
+		if contentContains(dir, "package.json", "prisma") || contentContains(dir, "package.json", "migrate") {
+			p.MigrationHints = append(p.MigrationHints, "package.json:scripts/deps(migrate)")
+		}
+	}
+}
+
+func detectNativeDeps(dir string, p *RepoProfile) {
+	if p == nil {
+		return
+	}
+	if !fileExists(dir, "package.json") {
+		return
+	}
+	// Very coarse scan; goal is to warn planner about OS deps.
+	nativeMarkers := []string{
+		"node-gyp",
+		"sharp",
+		"playwright",
+		"puppeteer",
+		"canvas",
+		"better-sqlite3",
+		"sqlite3",
+		"bcrypt",
+		"grpc",
+		"@grpc/grpc-js",
+		"ffi-napi",
+		"ref-napi",
+	}
+	for _, m := range nativeMarkers {
+		if contentContains(dir, "package.json", m) {
+			p.NativeDeps = append(p.NativeDeps, m)
+		}
+	}
+}
+
+func detectStaticSiteAndBuildOutput(dir string, p *RepoProfile) {
+	if p == nil {
+		return
+	}
+	if !fileExists(dir, "package.json") {
+		return
+	}
+	// Heuristic: Vite/React without a server framework usually implies static.
+	// Next/Nuxt are server-ish by default.
+	isVite := contentContains(dir, "package.json", "vite")
+	isReact := contentContains(dir, "package.json", "react")
+	isNext := contentContains(dir, "package.json", "next")
+	isNuxt := contentContains(dir, "package.json", "nuxt")
+	isExpress := contentContains(dir, "package.json", "express")
+	isFastify := contentContains(dir, "package.json", "fastify")
+	if isNext {
+		p.BuildOutputDir = ".next"
+		p.IsStaticSite = false
+		return
+	}
+	if isNuxt {
+		p.BuildOutputDir = ".output"
+		p.IsStaticSite = false
+		return
+	}
+	if isVite {
+		p.BuildOutputDir = "dist"
+	}
+	if !isExpress && !isFastify && isVite && isReact {
+		p.IsStaticSite = true
+	}
+	if p.BuildOutputDir == "" {
+		// CRA-style
+		if contentContains(dir, "package.json", "react-scripts") {
+			p.BuildOutputDir = "build"
+			p.IsStaticSite = true
+		}
+	}
+}
+
+func dirExists(baseDir, rel string) bool {
+	st, err := os.Stat(filepath.Join(baseDir, rel))
+	return err == nil && st.IsDir()
 }
 
 func detectLanguage(dir string, p *RepoProfile) {

@@ -275,12 +275,27 @@ func shouldGenericRetryAfterPropagation(f AWSFailure, output string) bool {
 
 	lower := strings.ToLower(output)
 	if f.Category == FailureNotFound {
+		// Do NOT generic-retry read-only operations when something truly doesn't exist.
+		// These are usually hard failures (wrong name/tag/id), not eventual consistency.
+		op := strings.ToLower(strings.TrimSpace(f.Op))
+		if strings.HasPrefix(op, "describe-") || strings.HasPrefix(op, "get-") || strings.HasPrefix(op, "list-") {
+			return false
+		}
+
 		// Only retry for follow-on operations that are likely to race with a create.
 		// (We avoid retrying delete-like ops here.)
 		if looksLikeFollowOnOp(strings.TrimSpace(f.Op)) {
 			return true
 		}
 		// If we don't have an op, fallback to output patterns.
+		if strings.TrimSpace(f.Op) == "" {
+			if strings.Contains(lower, "not found") || strings.Contains(lower, "does not exist") || strings.Contains(lower, "resourcenotfound") {
+				return true
+			}
+			return false
+		}
+
+		// Otherwise: known op, not a follow-on -> no generic retry.
 		if strings.Contains(lower, "not found") || strings.Contains(lower, "does not exist") || strings.Contains(lower, "resourcenotfound") {
 			return true
 		}

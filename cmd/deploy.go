@@ -242,6 +242,8 @@ Examples:
 				break
 			}
 
+			// Keep iterating; validation + deterministic preflight should converge within maxValidationRounds.
+
 			// plan has issues — feed fixes back into prompt and retry
 			logf("[deploy] validation found %d issues, regenerating (round %d/%d)...",
 				len(validation.Issues), round+1, maxValidationRounds)
