@@ -1,4 +1,4 @@
-package maker
+package aws
 
 import (
 	"context"
@@ -13,20 +13,29 @@ const (
 	awsManagedOriginRequestPolicyAllViewer = "216adef6-5c7f-47e4-b989-5492eafa07d3"
 )
 
-func maybeEnsureHTTPSViaCloudFront(ctx context.Context, bindings map[string]string, opts ExecOptions) error {
+func MaybeEnsureHTTPSViaCloudFront(ctx context.Context, bindings map[string]string, opts CLIExecOptions, run CLIRunner) error {
 	if opts.Destroyer {
+		return nil
+	}
+	if run == nil {
+		return fmt.Errorf("missing aws cli runner")
+	}
+	if opts.Writer == nil {
 		return nil
 	}
 	if strings.TrimSpace(opts.Profile) == "" {
 		return nil
 	}
+
 	albDNS := strings.TrimSpace(bindings["ALB_DNS"])
 	tgARN := strings.TrimSpace(bindings["TG_ARN"])
 	instanceID := strings.TrimSpace(bindings["INSTANCE_ID"])
 	if albDNS == "" {
 		return nil
 	}
-	// Scope: only when this looks like an app behind an ALB (target group and/or instance present).
+	if strings.HasPrefix(strings.ToLower(albDNS), "internal-") {
+		return fmt.Errorf("cannot create CloudFront distribution for internal ALB origin: %s", albDNS)
+	}
 	if tgARN == "" && instanceID == "" {
 		return nil
 	}
@@ -39,7 +48,6 @@ func maybeEnsureHTTPSViaCloudFront(ctx context.Context, bindings map[string]stri
 		return nil
 	}
 
-	// Stable key so repeated runs reuse the same distribution.
 	key := albDNS
 	if tgARN != "" {
 		key += "|" + tgARN
@@ -52,12 +60,12 @@ func maybeEnsureHTTPSViaCloudFront(ctx context.Context, bindings map[string]stri
 	if did := strings.TrimSpace(bindings["DEPLOY_ID"]); did != "" {
 		key += "|deploy:" + did
 	}
-	comment := fmt.Sprintf("clanker:https:%s", shortStableHash(key))
+	comment := fmt.Sprintf("clanker:https:%s", ShortStableHash(key))
 
-	id, domain, status, err := findCloudFrontDistributionByComment(ctx, comment, opts.Profile, opts.Writer)
+	id, domain, status, err := findCloudFrontDistributionByComment(ctx, comment, opts.Profile, opts.Writer, run)
 	if err == nil && id != "" && domain != "" {
 		_, _ = fmt.Fprintf(opts.Writer, "[https] found existing CloudFront distribution (id=%s status=%s)\n", id, status)
-		_ = waitForCloudFrontDistributionDeployed(ctx, opts, id, opts.Writer)
+		_ = WaitForCloudFrontDistributionDeployed(ctx, id, opts.Profile, run)
 		bindings["CLOUDFRONT_ID"] = id
 		bindings["CLOUDFRONT_DOMAIN"] = domain
 		bindings["HTTPS_URL"] = "https://" + domain
@@ -119,13 +127,12 @@ func maybeEnsureHTTPSViaCloudFront(ctx context.Context, bindings map[string]stri
 		"--no-cli-pager",
 	}
 
-	out, createErr := runAWSCommandStreaming(ctx, createArgs, nil, io.Discard)
+	out, createErr := run(ctx, createArgs, nil, io.Discard)
 	if createErr != nil {
-		// Retry by discovery: eventual consistency or duplicate caller reference.
-		id2, domain2, status2, findErr := findCloudFrontDistributionByComment(ctx, comment, opts.Profile, opts.Writer)
+		id2, domain2, status2, findErr := findCloudFrontDistributionByComment(ctx, comment, opts.Profile, opts.Writer, run)
 		if findErr == nil && id2 != "" && domain2 != "" {
 			_, _ = fmt.Fprintf(opts.Writer, "[https] create failed but distribution exists (id=%s status=%s); continuing\n", id2, status2)
-			_ = waitForCloudFrontDistributionDeployed(ctx, opts, id2, opts.Writer)
+			_ = WaitForCloudFrontDistributionDeployed(ctx, id2, opts.Profile, run)
 			bindings["CLOUDFRONT_ID"] = id2
 			bindings["CLOUDFRONT_DOMAIN"] = domain2
 			bindings["HTTPS_URL"] = "https://" + domain2
@@ -146,7 +153,7 @@ func maybeEnsureHTTPSViaCloudFront(ctx context.Context, bindings map[string]stri
 	}
 
 	_, _ = fmt.Fprintf(opts.Writer, "[https] CloudFront distribution created (id=%s status=%s)\n", id, status)
-	_ = waitForCloudFrontDistributionDeployed(ctx, opts, id, opts.Writer)
+	_ = WaitForCloudFrontDistributionDeployed(ctx, id, opts.Profile, run)
 
 	bindings["CLOUDFRONT_ID"] = id
 	bindings["CLOUDFRONT_DOMAIN"] = domain
@@ -154,22 +161,24 @@ func maybeEnsureHTTPSViaCloudFront(ctx context.Context, bindings map[string]stri
 	return nil
 }
 
-func findCloudFrontDistributionByComment(ctx context.Context, comment, profile string, w io.Writer) (id, domain, status string, err error) {
+func findCloudFrontDistributionByComment(ctx context.Context, comment, profile string, w io.Writer, run CLIRunner) (id, domain, status string, err error) {
 	comment = strings.TrimSpace(comment)
 	profile = strings.TrimSpace(profile)
 	if comment == "" || profile == "" {
 		return "", "", "", fmt.Errorf("missing comment/profile")
 	}
+	if run == nil {
+		return "", "", "", fmt.Errorf("missing runner")
+	}
 
-	// Note: CloudFront is global; region flag is ignored.
 	args := []string{
 		"cloudfront", "list-distributions",
-		"--query", fmt.Sprintf("DistributionList.Items[?Comment=='%s'] | [0].[Id,DomainName,Status]", escapeJMES(comment)),
+		"--query", fmt.Sprintf("DistributionList.Items[?Comment=='%s'] | [0].[Id,DomainName,Status]", EscapeJMES(comment)),
 		"--output", "text",
 		"--profile", profile,
 		"--no-cli-pager",
 	}
-	out, e := runAWSCommandStreaming(ctx, args, nil, io.Discard)
+	out, e := run(ctx, args, nil, io.Discard)
 	if e != nil {
 		return "", "", "", e
 	}
@@ -191,9 +200,22 @@ func findCloudFrontDistributionByComment(ctx context.Context, comment, profile s
 	return id, domain, status, nil
 }
 
-func escapeJMES(s string) string {
-	// We only embed this inside single quotes in JMESPath.
-	return strings.ReplaceAll(s, "'", "\\'")
+func WaitForCloudFrontDistributionDeployed(ctx context.Context, id, profile string, run CLIRunner) error {
+	id = strings.TrimSpace(id)
+	profile = strings.TrimSpace(profile)
+	if id == "" {
+		return fmt.Errorf("empty cloudfront distribution id")
+	}
+	if profile == "" {
+		return fmt.Errorf("empty aws profile")
+	}
+	if run == nil {
+		return fmt.Errorf("missing runner")
+	}
+
+	args := []string{"cloudfront", "wait", "distribution-deployed", "--id", id, "--profile", profile, "--no-cli-pager"}
+	_, err := run(ctx, args, nil, io.Discard)
+	return err
 }
 
 type cloudFrontDistributionConfig struct {

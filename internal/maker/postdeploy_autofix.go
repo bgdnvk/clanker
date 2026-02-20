@@ -4,10 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bgdnvk/clanker/internal/openclaw"
 )
 
 type postDeployFixConfig struct {
@@ -72,8 +73,7 @@ func maybeAutoFixUnhealthyALBTargets(ctx context.Context, bindings map[string]st
 		accountID = parsed
 	}
 
-	lq := strings.ToLower(question)
-	isOpenClaw := strings.Contains(lq, "openclaw") || strings.Contains(strings.ToLower(extractRepoURLFromQuestion(question)), "openclaw")
+	isOpenClaw := openclaw.Detect(question, extractRepoURLFromQuestion(question))
 
 	diagOut, diagErr := runSSMShellScript(ctx, instanceID, opts.Profile, opts.Region, ssmDiagnosticCommands(appPort, opts.Region, accountID, image), opts.Writer)
 	if diagErr != nil {
@@ -97,7 +97,11 @@ func maybeAutoFixUnhealthyALBTargets(ctx context.Context, bindings map[string]st
 		if startCmd == "" {
 			startCmd = fmt.Sprintf("node openclaw.mjs gateway --allow-unconfigured --bind lan --port %d", appPort)
 		}
-		restartCmds = ssmRestartCommandsOpenClaw(appPort, opts.Region, accountID, image, startCmd, bindings)
+		prelude := make([]string, 0, 16)
+		prelude = append(prelude, ssmEnsureDockerCommands()...)
+		prelude = append(prelude, ssmEnsureAWSCLICommands()...)
+		prelude = append(prelude, ssmEnsureECRLoginAndPullCommands(opts.Region, accountID, strings.TrimSpace(image))...)
+		restartCmds = openclaw.SSMRestartCommands(prelude, appPort, image, startCmd, bindings)
 	}
 
 	restartOut, restartErr := runSSMShellScript(ctx, instanceID, opts.Profile, opts.Region, restartCmds, opts.Writer)
@@ -127,6 +131,13 @@ func ssmEnsureDockerCommands() []string {
 	}
 }
 
+func ssmEnsureAWSCLICommands() []string {
+	return []string{
+		"echo '[bootstrap] ensure aws cli'",
+		"if command -v aws >/dev/null 2>&1; then echo '[bootstrap] aws cli present'; else echo '[bootstrap] aws cli missing; installing...'; . /etc/os-release || true; if [ \"${ID:-}\" = \"amzn\" ]; then (dnf -y install awscli || yum -y install awscli); elif command -v apt-get >/dev/null 2>&1; then apt-get update -y && apt-get install -y awscli; else echo 'unsupported OS for aws cli install' && exit 1; fi; fi",
+	}
+}
+
 func ssmEnsureECRLoginAndPullCommands(region, accountID, image string) []string {
 	region = strings.TrimSpace(region)
 	accountID = strings.TrimSpace(accountID)
@@ -138,6 +149,8 @@ func ssmEnsureECRLoginAndPullCommands(region, accountID, image string) []string 
 	registry := fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com", accountID, region)
 	return []string{
 		"echo '[bootstrap] ECR login + pull'",
+		"# Ensure AWS CLI exists for aws ecr login",
+		"if command -v aws >/dev/null 2>&1; then true; else . /etc/os-release || true; if [ \"${ID:-}\" = \"amzn\" ]; then (dnf -y install awscli || yum -y install awscli); elif command -v apt-get >/dev/null 2>&1; then apt-get update -y && apt-get install -y awscli; else echo 'unsupported OS for aws cli install' && exit 1; fi; fi",
 		fmt.Sprintf("aws ecr get-login-password --region %s | docker login --username AWS --password-stdin %s", region, registry),
 		fmt.Sprintf("docker pull %s || true", image),
 	}
@@ -147,6 +160,7 @@ func ssmDiagnosticCommands(port int, region, accountID, image string) []string {
 	p := strconv.Itoa(port)
 	cmds := make([]string, 0, 32)
 	cmds = append(cmds, ssmEnsureDockerCommands()...)
+	cmds = append(cmds, ssmEnsureAWSCLICommands()...)
 	cmds = append(cmds, ssmEnsureECRLoginAndPullCommands(region, accountID, image)...)
 	cmds = append(cmds,
 		"PORT="+p,
@@ -173,6 +187,7 @@ func ssmRestartCommands(port int, region, accountID, image string) []string {
 	// Keep it self-contained and non-interactive.
 	cmds := make([]string, 0, 32)
 	cmds = append(cmds, ssmEnsureDockerCommands()...)
+	cmds = append(cmds, ssmEnsureAWSCLICommands()...)
 	cmds = append(cmds, ssmEnsureECRLoginAndPullCommands(region, accountID, img)...)
 	cmds = append(cmds,
 		"PORT="+p,
@@ -187,73 +202,4 @@ func ssmRestartCommands(port int, region, accountID, image string) []string {
 		"docker ps --format '{{.ID}} {{.Image}} {{.Ports}} {{.Names}}' | sed 's/^/[ps] /' || true",
 	)
 	return cmds
-}
-
-func ssmRestartCommandsOpenClaw(port int, region, accountID, image string, startCmd string, bindings map[string]string) []string {
-	p := strconv.Itoa(port)
-	img := strings.TrimSpace(image)
-	if img == "" {
-		img = "<missing-image>"
-	}
-	startCmd = strings.TrimSpace(startCmd)
-	startCmd = strings.ReplaceAll(startCmd, "\"", "\\\"")
-	cmds := make([]string, 0, 32)
-	cmds = append(cmds, ssmEnsureDockerCommands()...)
-	cmds = append(cmds, ssmEnsureECRLoginAndPullCommands(region, accountID, img)...)
-
-	containerName := openClawContainerName(bindings)
-
-	cmds = append(cmds,
-		"PORT="+p,
-		"IMAGE=\""+strings.ReplaceAll(img, "\"", "\\\"")+"\"",
-		"START=\""+startCmd+"\"",
-		"CID=$(docker ps --format '{{.ID}} {{.Ports}}' | awk -v p=\":$PORT->\" '$0 ~ p {print $1; exit}'); if [ -z \"${CID}\" ]; then CID=$(docker ps -q | head -n 1 || true); fi",
-		"if [ -n \"${CID:-}\" ]; then docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \"$CID\" | grep -vE '^(HOST|BIND|PORT)=' > /tmp/clanker.env || true; fi",
-		"if [ -n \"${CID:-}\" ]; then docker rm -f \"$CID\" || true; fi",
-		"docker volume create openclaw_data || true",
-		"docker run --rm -v openclaw_data:/home/node/.openclaw alpine:3.20 sh -lc 'chown -R 1000:1000 /home/node/.openclaw' || true",
-		"docker rm -f openclaw || true",
-		"docker rm -f \""+containerName+"\" || true",
-		"touch /tmp/clanker.env || true",
-	)
-
-	// Extract any ENV_* bindings (passed by clanker-cloud via process env → maker bindings) so the
-	// restarted container keeps required secrets like OPENCLAW_GATEWAY_TOKEN.
-	extraEnvLines := envFileLinesFromBindings(bindings)
-	for _, line := range extraEnvLines {
-		cmds = append(cmds, fmt.Sprintf("printf '%%s\\n' %s >> /tmp/clanker.env", shellSingleQuote(line)))
-	}
-
-	cmds = append(cmds,
-		"docker run -d --restart unless-stopped --name \""+containerName+"\" -p \"$PORT:$PORT\" -v openclaw_data:/home/node/.openclaw --env-file /tmp/clanker.env --env PORT=\"$PORT\" --env HOST=0.0.0.0 --env BIND=0.0.0.0 \"$IMAGE\" sh -lc \"$START\"",
-		"sleep 2",
-		"docker ps --format '{{.ID}} {{.Image}} {{.Ports}} {{.Names}}' | sed 's/^/[ps] /' || true",
-	)
-	return cmds
-}
-
-func envFileLinesFromBindings(bindings map[string]string) []string {
-	if len(bindings) == 0 {
-		return nil
-	}
-	lines := make([]string, 0, 16)
-	for k, v := range bindings {
-		key := strings.TrimSpace(k)
-		if !strings.HasPrefix(key, "ENV_") {
-			continue
-		}
-		envName := strings.TrimSpace(strings.TrimPrefix(key, "ENV_"))
-		val := strings.TrimSpace(v)
-		if envName == "" || val == "" {
-			continue
-		}
-		lines = append(lines, envName+"="+val)
-	}
-	sort.Strings(lines)
-	return lines
-}
-
-func shellSingleQuote(s string) string {
-	// Produces a single-quoted shell literal, escaping embedded single quotes.
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }

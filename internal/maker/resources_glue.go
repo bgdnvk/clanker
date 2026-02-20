@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	clankeraws "github.com/bgdnvk/clanker/internal/aws"
 )
 
 var lambdaArnMissingRegionRe = regexp.MustCompile(`^arn:([^:]+):lambda:(\d{12}):function:(.+)$`)
@@ -365,7 +367,7 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 		if op == "attach-internet-gateway" && (strings.Contains(lower, "already has an internet gateway attached") || strings.Contains(lower, "has an internet gateway attached")) {
 			vpcID := strings.TrimSpace(flagValue(args, "--vpc-id"))
 			if vpcID != "" {
-				igwID, _ := findAttachedInternetGatewayForVPC(ctx, opts, vpcID)
+				igwID, _ := clankeraws.FindAttachedInternetGatewayForVPC(ctx, clankeraws.CLIExecOptions{Profile: opts.Profile, Region: opts.Region}, vpcID, runAWSCommandStreaming)
 				if igwID != "" && bindings != nil {
 					bindings["IGW_ID"] = igwID
 					bindings["IGW"] = igwID
@@ -701,6 +703,41 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 
 		// Idempotency: name already exists.
 		if op == "create-load-balancer" {
+			// One-click deploy: if VPC has no IGW, an internet-facing ALB cannot be created.
+			// Fix it deterministically (attach/create IGW + default route) and retry the same command.
+			scheme := strings.TrimSpace(flagValue(args, "--scheme"))
+			if scheme == "internet-facing" && (strings.Contains(lower, "has no internet gateway") || strings.Contains(lower, "no internet gateway")) {
+				subnets := clankeraws.ExtractELBv2SubnetsFromArgs(args)
+				vpcID := ""
+				if len(subnets) > 0 {
+					vpcID, _ = describeSubnetVpcID(ctx, opts, subnets[0])
+				}
+				if vpcID == "" {
+					vpcID = strings.TrimSpace(bindings["VPC_ID"])
+				}
+				if vpcID == "" {
+					return true, fmt.Errorf("could not infer VPC ID for IGW remediation; cannot create internet-facing ALB")
+				}
+
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: attach/create IGW + default route then retry internet-facing ALB (vpc=%s)\n", vpcID)
+				if _, err := clankeraws.EnsureVPCInternetGatewayAndDefaultRoute(
+					ctx,
+					clankeraws.CLIExecOptions{Profile: opts.Profile, Region: opts.Region, Writer: opts.Writer, Destroyer: opts.Destroyer},
+					vpcID,
+					opts.Writer,
+					runAWSCommandStreaming,
+				); err != nil {
+					return true, err
+				}
+
+				out2, err2 := runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+				if err2 != nil {
+					return true, err2
+				}
+				learnPlanBindings(args, out2, bindings)
+				return true, nil
+			}
+
 			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "duplicateloadbalancername") || strings.Contains(lower, "already exists") {
 				lbName := strings.TrimSpace(flagValue(args, "--name"))
 				if lbName != "" {
@@ -1430,7 +1467,7 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 			// Only trigger on errors that look like "not deployed yet".
 			if failure.Category == FailureConflict || failure.Category == FailureValidation || strings.Contains(lower, "not") && strings.Contains(lower, "deployed") {
 				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: waiting for cloudfront distribution deployed (id=%s)\n", strings.TrimSpace(id))
-				_ = waitForCloudFrontDistributionDeployed(ctx, opts, strings.TrimSpace(id), opts.Writer)
+				_ = clankeraws.WaitForCloudFrontDistributionDeployed(ctx, strings.TrimSpace(id), opts.Profile, runAWSCommandStreaming)
 				if _, err := runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer); err == nil {
 					return true, nil
 				}
@@ -1740,30 +1777,6 @@ func rewriteFlagName(args []string, from string, to string) ([]string, bool) {
 		return nil, false
 	}
 	return out, true
-}
-
-func findAttachedInternetGatewayForVPC(ctx context.Context, opts ExecOptions, vpcID string) (string, error) {
-	vpcID = strings.TrimSpace(vpcID)
-	if vpcID == "" {
-		return "", nil
-	}
-	q := []string{"ec2", "describe-internet-gateways", "--filters", fmt.Sprintf("Name=attachment.vpc-id,Values=%s", vpcID), "--output", "json", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
-	out, err := runAWSCommandStreaming(ctx, q, nil, io.Discard)
-	if err != nil {
-		return "", err
-	}
-	var resp struct {
-		InternetGateways []struct {
-			InternetGatewayId string `json:"InternetGatewayId"`
-		} `json:"InternetGateways"`
-	}
-	if json.Unmarshal([]byte(out), &resp) != nil {
-		return "", nil
-	}
-	if len(resp.InternetGateways) == 0 {
-		return "", nil
-	}
-	return strings.TrimSpace(resp.InternetGateways[0].InternetGatewayId), nil
 }
 
 func deleteAllEKSNodegroups(ctx context.Context, opts ExecOptions, clusterName string, w io.Writer) error {
@@ -2711,6 +2724,8 @@ func deleteAllS3ObjectVersions(ctx context.Context, opts ExecOptions, bucket str
 		}
 		startingToken = strings.TrimSpace(resp.NextToken)
 	}
+
+	return nil
 }
 
 func deleteAllS3Objects(ctx context.Context, opts ExecOptions, bucket string, w io.Writer) error {
@@ -3281,18 +3296,6 @@ func waitForEKSNodegroupActive(ctx context.Context, opts ExecOptions, clusterNam
 	}
 
 	args := []string{"eks", "wait", "nodegroup-active", "--cluster-name", clusterName, "--nodegroup-name", nodegroupName, "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
-	_, err := runAWSCommandStreaming(ctx, args, nil, io.Discard)
-	return err
-}
-
-func waitForCloudFrontDistributionDeployed(ctx context.Context, opts ExecOptions, id string, w io.Writer) error {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return fmt.Errorf("empty cloudfront distribution id")
-	}
-
-	// CloudFront is global; the CLI still accepts region flags but ignores them.
-	args := []string{"cloudfront", "wait", "distribution-deployed", "--id", id, "--profile", opts.Profile, "--no-cli-pager"}
 	_, err := runAWSCommandStreaming(ctx, args, nil, io.Discard)
 	return err
 }

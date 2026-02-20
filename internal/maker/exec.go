@@ -18,6 +18,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	clankeraws "github.com/bgdnvk/clanker/internal/aws"
+	"github.com/bgdnvk/clanker/internal/openclaw"
 )
 
 var awsErrorCodeRe = regexp.MustCompile(`(?i)an error occurred \(([^)]+)\)`)
@@ -306,6 +309,10 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		bindings["AWS_REGION"] = opts.Region
 	}
 
+	// One-click deploy: infer app port early so EC2 user-data generation publishes the right port
+	// even when the target group is created after the instance.
+	prebindAppPortFromPlan(plan, bindings)
+
 	if warning := detectDestructiveRegionZigZag(plan, opts.Region); warning != "" {
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] preflight warning: %s\n", warning)
 	}
@@ -332,6 +339,21 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 			if strings.TrimSpace(bindings["APP_PORT"]) == "" {
 				if p := strings.TrimSpace(flagValue(args, "--port")); p != "" {
 					bindings["APP_PORT"] = p
+				}
+			}
+		}
+
+		// OpenClaw: make ALB health checks more reliable.
+		if len(args) >= 2 && args[0] == "elbv2" && args[1] == "create-target-group" {
+			question := strings.TrimSpace(bindings["PLAN_QUESTION"])
+			repoURL := extractRepoURLFromQuestion(question)
+			isOpenClaw := openclaw.Detect(question, repoURL)
+			if isOpenClaw {
+				if p := strings.TrimSpace(flagValue(args, "--health-check-path")); p == "" || p == "/" {
+					args = setFlagValue(args, "--health-check-path", "/health")
+				}
+				if m := strings.TrimSpace(flagValue(args, "--matcher")); m == "" || strings.Contains(m, "HttpCode=200-399") {
+					args = setFlagValue(args, "--matcher", "HttpCode=200-499")
 				}
 			}
 		}
@@ -473,10 +495,20 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		return err
 	}
 	// HTTPS secure context (one-click EC2+ALB): create CloudFront in front of the ALB and export HTTPS URL.
-	if err := maybeEnsureHTTPSViaCloudFront(ctx, bindings, opts); err != nil {
+	if err := clankeraws.MaybeEnsureHTTPSViaCloudFront(
+		ctx,
+		bindings,
+		clankeraws.CLIExecOptions{Profile: opts.Profile, Region: opts.Region, Writer: opts.Writer, Destroyer: opts.Destroyer},
+		runAWSCommandStreaming,
+	); err != nil {
 		return err
 	}
-	maybePrintOpenClawPostDeployInstructions(bindings, opts)
+
+	question := strings.TrimSpace(bindings["PLAN_QUESTION"])
+	if question == "" {
+		question = strings.TrimSpace(bindings["QUESTION"])
+	}
+	openclaw.MaybePrintPostDeployInstructions(bindings, opts.Profile, opts.Region, opts.Writer, question, extractRepoURLFromQuestion(question))
 
 	// Populate output bindings for the caller
 	if opts.OutputBindings != nil {
@@ -492,6 +524,34 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	}
 
 	return nil
+}
+
+func prebindAppPortFromPlan(plan *Plan, bindings map[string]string) {
+	if plan == nil || len(plan.Commands) == 0 {
+		return
+	}
+	if strings.TrimSpace(bindings["APP_PORT"]) != "" {
+		return
+	}
+	for _, cmd := range plan.Commands {
+		args := cmd.Args
+		if len(args) < 2 {
+			continue
+		}
+		if args[0] == "elbv2" && args[1] == "create-target-group" {
+			if p := strings.TrimSpace(flagValue(args, "--port")); p != "" {
+				bindings["APP_PORT"] = p
+				return
+			}
+		}
+	}
+
+	// Fallback: app-specific default ports.
+	q := strings.TrimSpace(bindings["PLAN_QUESTION"])
+	repoURL := extractRepoURLFromQuestion(q)
+	if openclaw.Detect(q, repoURL) {
+		bindings["APP_PORT"] = strconv.Itoa(openclaw.DefaultPort)
+	}
 }
 
 func importSecretLikeEnvVarsIntoBindings(bindings map[string]string) {
@@ -2166,12 +2226,10 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 
 	question := strings.TrimSpace(bindings["PLAN_QUESTION"])
 	repoURL := extractRepoURLFromQuestion(question)
-	lq := strings.ToLower(question)
-	lr := strings.ToLower(repoURL)
-	isOpenClaw := strings.Contains(lq, "openclaw") || strings.Contains(lr, "openclaw")
+	isOpenClaw := openclaw.Detect(question, repoURL)
 	containerName := ""
 	if isOpenClaw {
-		containerName = openClawContainerName(bindings)
+		containerName = openclaw.ContainerName(bindings)
 	}
 
 	// Build docker run command with environment variables
@@ -2318,6 +2376,20 @@ JS
 set -e
 exec > /var/log/user-data.log 2>&1
 
+echo '[bootstrap] ensuring aws cli'
+if command -v aws >/dev/null 2>&1; then
+	echo '[bootstrap] aws cli present'
+else
+	. /etc/os-release || true
+	if [ "${ID:-}" = "amzn" ]; then
+		if command -v dnf >/dev/null 2>&1; then dnf install -y awscli; else yum install -y awscli; fi
+	elif command -v apt-get >/dev/null 2>&1; then
+		apt-get update -y && apt-get install -y awscli
+	else
+		echo 'unsupported OS for aws cli install' && exit 1
+	fi
+fi
+
 echo '[bootstrap] installing docker'
 . /etc/os-release || true
 if command -v docker >/dev/null 2>&1; then
@@ -2366,25 +2438,26 @@ func sanitizeCommandArgsForExecution(args []string, bindings map[string]string) 
 		return args
 	}
 
+	newArgs := make([]string, len(args))
+	copy(newArgs, args)
+	newArgs = sanitizeRunInstancesBlockDeviceMappings(newArgs)
+
 	valueIdx := -1
 	inlineIdx := -1
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--user-data" && i+1 < len(args) {
+	for i := 0; i < len(newArgs); i++ {
+		if newArgs[i] == "--user-data" && i+1 < len(newArgs) {
 			valueIdx = i + 1
 			break
 		}
-		if strings.HasPrefix(args[i], "--user-data=") {
+		if strings.HasPrefix(newArgs[i], "--user-data=") {
 			inlineIdx = i
 			break
 		}
 	}
 
 	if valueIdx < 0 && inlineIdx < 0 {
-		return args
+		return newArgs
 	}
-
-	newArgs := make([]string, len(args))
-	copy(newArgs, args)
 
 	value := ""
 	if valueIdx >= 0 {
@@ -2426,6 +2499,83 @@ func sanitizeCommandArgsForExecution(args []string, bindings map[string]string) 
 	}
 
 	return newArgs
+}
+
+func sanitizeRunInstancesBlockDeviceMappings(args []string) []string {
+	if len(args) < 2 || args[0] != "ec2" || args[1] != "run-instances" {
+		return args
+	}
+
+	setValue := func(idx int, v string) {
+		if idx >= 0 && idx < len(args) {
+			args[idx] = v
+		}
+	}
+
+	for i := 0; i < len(args); i++ {
+		valIdx := -1
+		inline := false
+		if args[i] == "--block-device-mappings" && i+1 < len(args) {
+			valIdx = i + 1
+		} else if strings.HasPrefix(strings.TrimSpace(args[i]), "--block-device-mappings=") {
+			valIdx = i
+			inline = true
+		} else {
+			continue
+		}
+
+		raw := ""
+		if inline {
+			raw = strings.TrimPrefix(strings.TrimSpace(args[valIdx]), "--block-device-mappings=")
+		} else {
+			raw = args[valIdx]
+		}
+		raw = strings.TrimSpace(raw)
+		if raw == "" || !strings.HasPrefix(raw, "[") {
+			continue
+		}
+
+		var mappings []map[string]any
+		if err := json.Unmarshal([]byte(raw), &mappings); err != nil {
+			continue
+		}
+
+		changed := false
+		for _, m := range mappings {
+			ebsAny, ok := m["Ebs"]
+			if !ok {
+				continue
+			}
+			ebs, ok := ebsAny.(map[string]any)
+			if !ok {
+				continue
+			}
+			if _, ok := ebs["TaggedSpecifications"]; ok {
+				delete(ebs, "TaggedSpecifications")
+				changed = true
+			}
+			if _, ok := ebs["TagSpecifications"]; ok {
+				delete(ebs, "TagSpecifications")
+				changed = true
+			}
+		}
+
+		if !changed {
+			continue
+		}
+		b, err := json.Marshal(mappings)
+		if err != nil {
+			continue
+		}
+		clean := string(b)
+		if inline {
+			setValue(valIdx, "--block-device-mappings="+clean)
+		} else {
+			setValue(valIdx, clean)
+		}
+	}
+
+	return args
 }
 
 func isUserDataPlaceholderValue(v string) bool {
