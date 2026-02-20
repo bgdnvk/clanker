@@ -2724,8 +2724,6 @@ func deleteAllS3ObjectVersions(ctx context.Context, opts ExecOptions, bucket str
 		}
 		startingToken = strings.TrimSpace(resp.NextToken)
 	}
-
-	return nil
 }
 
 func deleteAllS3Objects(ctx context.Context, opts ExecOptions, bucket string, w io.Writer) error {
