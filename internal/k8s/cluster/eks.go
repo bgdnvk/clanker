@@ -1138,4 +1138,3 @@ func (p *EKSProvider) errorHint(stderr string) string {
 		return ""
 	}
 }
-

@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	clankeraws "github.com/bgdnvk/clanker/internal/aws"
 )
 
 var lambdaArnMissingRegionRe = regexp.MustCompile(`^arn:([^:]+):lambda:(\d{12}):function:(.+)$`)
@@ -365,7 +367,7 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 		if op == "attach-internet-gateway" && (strings.Contains(lower, "already has an internet gateway attached") || strings.Contains(lower, "has an internet gateway attached")) {
 			vpcID := strings.TrimSpace(flagValue(args, "--vpc-id"))
 			if vpcID != "" {
-				igwID, _ := findAttachedInternetGatewayForVPC(ctx, opts, vpcID)
+				igwID, _ := clankeraws.FindAttachedInternetGatewayForVPC(ctx, clankeraws.CLIExecOptions{Profile: opts.Profile, Region: opts.Region}, vpcID, runAWSCommandStreaming)
 				if igwID != "" && bindings != nil {
 					bindings["IGW_ID"] = igwID
 					bindings["IGW"] = igwID
@@ -701,12 +703,71 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 
 		// Idempotency: name already exists.
 		if op == "create-load-balancer" {
+			// One-click deploy: if VPC has no IGW, an internet-facing ALB cannot be created.
+			// Fix it deterministically (attach/create IGW + default route) and retry the same command.
+			scheme := strings.TrimSpace(flagValue(args, "--scheme"))
+			if scheme == "internet-facing" && (strings.Contains(lower, "has no internet gateway") || strings.Contains(lower, "no internet gateway")) {
+				subnets := clankeraws.ExtractELBv2SubnetsFromArgs(args)
+				vpcID := ""
+				if len(subnets) > 0 {
+					vpcID, _ = describeSubnetVpcID(ctx, opts, subnets[0])
+				}
+				if vpcID == "" {
+					vpcID = strings.TrimSpace(bindings["VPC_ID"])
+				}
+				if vpcID == "" {
+					return true, fmt.Errorf("could not infer VPC ID for IGW remediation; cannot create internet-facing ALB")
+				}
+
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: attach/create IGW + default route then retry internet-facing ALB (vpc=%s)\n", vpcID)
+				if _, err := clankeraws.EnsureVPCInternetGatewayAndDefaultRoute(
+					ctx,
+					clankeraws.CLIExecOptions{Profile: opts.Profile, Region: opts.Region, Writer: opts.Writer, Destroyer: opts.Destroyer},
+					vpcID,
+					opts.Writer,
+					runAWSCommandStreaming,
+				); err != nil {
+					return true, err
+				}
+
+				out2, err2 := runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+				if err2 != nil {
+					return true, err2
+				}
+				learnPlanBindings(args, out2, bindings)
+				return true, nil
+			}
+
 			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "duplicateloadbalancername") || strings.Contains(lower, "already exists") {
+				lbName := strings.TrimSpace(flagValue(args, "--name"))
+				if lbName != "" {
+					if lbArn, lbDNS, err := describeLoadBalancerByName(ctx, opts, lbName); err == nil {
+						if strings.TrimSpace(lbArn) != "" {
+							bindings["ALB_ARN"] = strings.TrimSpace(lbArn)
+							_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: using existing load balancer ARN (name=%s)\n", lbName)
+						}
+						if strings.TrimSpace(lbDNS) != "" {
+							bindings["ALB_DNS"] = strings.TrimSpace(lbDNS)
+							bindings["ALB_DNS_NAME"] = strings.TrimSpace(lbDNS)
+						}
+					} else {
+						_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to resolve existing load balancer for %s: %v\n", lbName, err)
+					}
+				}
 				return true, nil
 			}
 		}
 		if op == "create-target-group" {
 			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "duplicatetargetgroupname") || strings.Contains(lower, "already exists") {
+				tgName := strings.TrimSpace(flagValue(args, "--name"))
+				if tgName != "" {
+					if tgArn, err := describeTargetGroupArnByName(ctx, opts, tgName); err == nil && strings.TrimSpace(tgArn) != "" {
+						bindings["TG_ARN"] = strings.TrimSpace(tgArn)
+						_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: using existing target group ARN (name=%s)\n", tgName)
+					} else if err != nil {
+						_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to resolve existing target group ARN for %s: %v\n", tgName, err)
+					}
+				}
 				return true, nil
 			}
 		}
@@ -1406,7 +1467,7 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 			// Only trigger on errors that look like "not deployed yet".
 			if failure.Category == FailureConflict || failure.Category == FailureValidation || strings.Contains(lower, "not") && strings.Contains(lower, "deployed") {
 				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: waiting for cloudfront distribution deployed (id=%s)\n", strings.TrimSpace(id))
-				_ = waitForCloudFrontDistributionDeployed(ctx, opts, strings.TrimSpace(id), opts.Writer)
+				_ = clankeraws.WaitForCloudFrontDistributionDeployed(ctx, strings.TrimSpace(id), opts.Profile, runAWSCommandStreaming)
 				if _, err := runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer); err == nil {
 					return true, nil
 				}
@@ -1450,7 +1511,7 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 	if args0(args) == "ec2" && args1(args) == "run-instances" && failure.Category == FailureValidation {
 		lower := strings.ToLower(output)
 		if strings.Contains(lower, "iaminstanceprofile") && strings.Contains(lower, "invalid") && strings.Contains(lower, "instance profile") {
-			if err := remediateEC2InvalidInstanceProfileAndRetry(ctx, opts, args, stdinBytes, opts.Writer); err != nil {
+			if err := remediateEC2InvalidInstanceProfileAndRetry(ctx, opts, args, stdinBytes, opts.Writer, bindings); err != nil {
 				return true, err
 			}
 			return true, nil
@@ -1491,6 +1552,16 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 	// Secrets Manager: create-secret already exists -> put-secret-value (if secret-string provided).
 	if failure.Category == FailureAlreadyExists && args0(args) == "secretsmanager" && args1(args) == "create-secret" {
 		name := flagValue(args, "--name")
+		if strings.TrimSpace(name) != "" {
+			if arn, err := describeSecretARNByName(ctx, opts, name); err == nil {
+				if strings.TrimSpace(arn) != "" {
+					inferSecretsBindings(name, arn, bindings)
+					_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: using existing secret ARN (name=%s)\n", name)
+				}
+			} else {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to resolve existing secret ARN for %s: %v\n", name, err)
+			}
+		}
 		secretString := flagValue(args, "--secret-string")
 		if strings.TrimSpace(name) != "" && strings.TrimSpace(secretString) != "" {
 			put := []string{"secretsmanager", "put-secret-value", "--secret-id", name, "--secret-string", secretString}
@@ -1504,12 +1575,184 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 		return true, nil
 	}
 
+	// ECR: describe-images with an explicit tag can fail if the tag doesn't exist (common footgun: assuming :latest).
+	// Remediation: pick the newest pushed image digest in the repo, bind IMAGE_DIGEST, and continue.
+	if args0(args) == "ecr" && args1(args) == "describe-images" && failure.Category == FailureNotFound {
+		lower := strings.ToLower(output)
+		if strings.Contains(lower, "imagenotfoundexception") || strings.Contains(lower, "requested image not found") || strings.Contains(lower, "does not exist") {
+			repoName := strings.TrimSpace(flagValue(args, "--repository-name"))
+			if repoName != "" {
+				digest, digErr := remediateECRBindLatestDigest(ctx, opts, repoName, bindings)
+				if digErr != nil {
+					return true, digErr
+				}
+				if strings.TrimSpace(digest) != "" {
+					_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: ecr describe-images tag missing; using newest image digest (repo=%s)\n", repoName)
+					return true, nil
+				}
+			}
+		}
+	}
+
 	if ok, err := maybeGenericGlueAndRetry(ctx, opts, args, awsArgs, stdinBytes, failure, output); ok {
 		return true, err
 	}
 
 	// Nothing to rewrite.
 	return false, nil
+}
+
+func describeTargetGroupArnByName(ctx context.Context, opts ExecOptions, tgName string) (string, error) {
+	tgName = strings.TrimSpace(tgName)
+	if tgName == "" {
+		return "", nil
+	}
+
+	args := []string{
+		"elbv2", "describe-target-groups",
+		"--names", tgName,
+		"--output", "json",
+		"--profile", opts.Profile,
+		"--region", opts.Region,
+		"--no-cli-pager",
+	}
+	out, err := runAWSCommandStreaming(ctx, args, nil, io.Discard)
+	if err != nil {
+		return "", err
+	}
+
+	var resp struct {
+		TargetGroups []struct {
+			TargetGroupArn string `json:"TargetGroupArn"`
+		} `json:"TargetGroups"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return "", err
+	}
+	if len(resp.TargetGroups) == 0 {
+		return "", nil
+	}
+	return strings.TrimSpace(resp.TargetGroups[0].TargetGroupArn), nil
+}
+
+func describeLoadBalancerByName(ctx context.Context, opts ExecOptions, lbName string) (string, string, error) {
+	lbName = strings.TrimSpace(lbName)
+	if lbName == "" {
+		return "", "", nil
+	}
+
+	args := []string{
+		"elbv2", "describe-load-balancers",
+		"--names", lbName,
+		"--output", "json",
+		"--profile", opts.Profile,
+		"--region", opts.Region,
+		"--no-cli-pager",
+	}
+	out, err := runAWSCommandStreaming(ctx, args, nil, io.Discard)
+	if err != nil {
+		return "", "", err
+	}
+
+	var resp struct {
+		LoadBalancers []struct {
+			LoadBalancerArn string `json:"LoadBalancerArn"`
+			DNSName         string `json:"DNSName"`
+		} `json:"LoadBalancers"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return "", "", err
+	}
+	if len(resp.LoadBalancers) == 0 {
+		return "", "", nil
+	}
+	return strings.TrimSpace(resp.LoadBalancers[0].LoadBalancerArn), strings.TrimSpace(resp.LoadBalancers[0].DNSName), nil
+}
+
+func remediateECRBindLatestDigest(ctx context.Context, opts ExecOptions, repoName string, bindings map[string]string) (string, error) {
+	repoName = strings.TrimSpace(repoName)
+	if repoName == "" {
+		return "", fmt.Errorf("empty ECR repo name")
+	}
+	if bindings == nil {
+		return "", fmt.Errorf("nil bindings")
+	}
+
+	// If ECR_URI isn't already known, fetch it (best-effort).
+	if strings.TrimSpace(bindings["ECR_URI"]) == "" {
+		descRepo := []string{"ecr", "describe-repositories", "--repository-names", repoName, "--output", "json"}
+		awsArgs := buildAWSExecArgs(descRepo, opts, opts.Writer)
+		out, err := runAWSCommandStreaming(ctx, awsArgs, nil, io.Discard)
+		if err == nil {
+			var resp struct {
+				Repositories []struct {
+					RepositoryURI string `json:"repositoryUri"`
+				} `json:"repositories"`
+			}
+			if json.Unmarshal([]byte(out), &resp) == nil {
+				if len(resp.Repositories) > 0 {
+					bindings["ECR_URI"] = strings.TrimSpace(resp.Repositories[0].RepositoryURI)
+				}
+			}
+		}
+	}
+
+	// Describe newest pushed image (do not assume tag exists).
+	q := []string{
+		"ecr", "describe-images",
+		"--repository-name", repoName,
+		"--query", "sort_by(imageDetails,&imagePushedAt)[-1]",
+		"--output", "json",
+	}
+	awsArgs := buildAWSExecArgs(q, opts, opts.Writer)
+	out, err := runAWSCommandStreaming(ctx, awsArgs, nil, io.Discard)
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		ImageDigest string   `json:"imageDigest"`
+		ImageTags   []string `json:"imageTags"`
+	}
+	if json.Unmarshal([]byte(out), &resp) != nil {
+		return "", fmt.Errorf("failed to parse ECR describe-images output")
+	}
+	digest := strings.TrimSpace(resp.ImageDigest)
+	if digest == "" || digest == "null" {
+		return "", fmt.Errorf("no images found in ECR repo %s (push an image first)", repoName)
+	}
+	bindings["IMAGE_DIGEST"] = digest
+	if len(resp.ImageTags) > 0 {
+		bindings["IMAGE_TAG"] = strings.TrimSpace(resp.ImageTags[0])
+	}
+	return digest, nil
+}
+
+func describeSecretARNByName(ctx context.Context, opts ExecOptions, secretName string) (string, error) {
+	secretName = strings.TrimSpace(secretName)
+	if secretName == "" {
+		return "", nil
+	}
+
+	args := []string{
+		"secretsmanager", "describe-secret",
+		"--secret-id", secretName,
+		"--output", "json",
+		"--profile", opts.Profile,
+		"--region", opts.Region,
+		"--no-cli-pager",
+	}
+	out, err := runAWSCommandStreaming(ctx, args, nil, io.Discard)
+	if err != nil {
+		return "", err
+	}
+
+	var resp struct {
+		ARN string `json:"ARN"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(resp.ARN), nil
 }
 
 func rewriteFlagName(args []string, from string, to string) ([]string, bool) {
@@ -1534,30 +1777,6 @@ func rewriteFlagName(args []string, from string, to string) ([]string, bool) {
 		return nil, false
 	}
 	return out, true
-}
-
-func findAttachedInternetGatewayForVPC(ctx context.Context, opts ExecOptions, vpcID string) (string, error) {
-	vpcID = strings.TrimSpace(vpcID)
-	if vpcID == "" {
-		return "", nil
-	}
-	q := []string{"ec2", "describe-internet-gateways", "--filters", fmt.Sprintf("Name=attachment.vpc-id,Values=%s", vpcID), "--output", "json", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
-	out, err := runAWSCommandStreaming(ctx, q, nil, io.Discard)
-	if err != nil {
-		return "", err
-	}
-	var resp struct {
-		InternetGateways []struct {
-			InternetGatewayId string `json:"InternetGatewayId"`
-		} `json:"InternetGateways"`
-	}
-	if json.Unmarshal([]byte(out), &resp) != nil {
-		return "", nil
-	}
-	if len(resp.InternetGateways) == 0 {
-		return "", nil
-	}
-	return strings.TrimSpace(resp.InternetGateways[0].InternetGatewayId), nil
 }
 
 func deleteAllEKSNodegroups(ctx context.Context, opts ExecOptions, clusterName string, w io.Writer) error {
@@ -2883,9 +3102,7 @@ func listRoute53HostedZones(ctx context.Context, opts ExecOptions) ([]route53Hos
 	for _, z := range resp.HostedZones {
 		id := strings.TrimSpace(z.ID)
 		name := strings.TrimSpace(z.Name)
-		if strings.HasPrefix(id, "/hostedzone/") {
-			id = strings.TrimPrefix(id, "/hostedzone/")
-		}
+		id = strings.TrimPrefix(id, "/hostedzone/")
 		if id == "" || name == "" {
 			continue
 		}
@@ -3077,18 +3294,6 @@ func waitForEKSNodegroupActive(ctx context.Context, opts ExecOptions, clusterNam
 	}
 
 	args := []string{"eks", "wait", "nodegroup-active", "--cluster-name", clusterName, "--nodegroup-name", nodegroupName, "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
-	_, err := runAWSCommandStreaming(ctx, args, nil, io.Discard)
-	return err
-}
-
-func waitForCloudFrontDistributionDeployed(ctx context.Context, opts ExecOptions, id string, w io.Writer) error {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return fmt.Errorf("empty cloudfront distribution id")
-	}
-
-	// CloudFront is global; the CLI still accepts region flags but ignores them.
-	args := []string{"cloudfront", "wait", "distribution-deployed", "--id", id, "--profile", opts.Profile, "--no-cli-pager"}
 	_, err := runAWSCommandStreaming(ctx, args, nil, io.Discard)
 	return err
 }
@@ -3286,7 +3491,7 @@ func retryWithBackoff(ctx context.Context, w io.Writer, attempts int, fn func() 
 	return err
 }
 
-func remediateEC2InvalidInstanceProfileAndRetry(ctx context.Context, opts ExecOptions, args []string, stdinBytes []byte, w io.Writer) error {
+func remediateEC2InvalidInstanceProfileAndRetry(ctx context.Context, opts ExecOptions, args []string, stdinBytes []byte, w io.Writer, bindings map[string]string) error {
 	name := extractEC2RunInstancesInstanceProfileName(args)
 	if name == "" {
 		return fmt.Errorf("cannot remediate: missing --iam-instance-profile name")
@@ -3313,10 +3518,15 @@ func remediateEC2InvalidInstanceProfileAndRetry(ctx context.Context, opts ExecOp
 			return fmt.Errorf("cannot remediate: failed to rewrite --iam-instance-profile")
 		}
 
+		// Also generate user-data if needed (it may have been skipped earlier due to missing bindings)
+		rewritten = maybeGenerateEC2UserData(rewritten, bindings, opts)
+
 		_, _ = fmt.Fprintf(w, "[maker] remediation attempted: rewriting ec2 run-instances --iam-instance-profile to use Arn=... and retrying\n")
 		rewrittenAWSArgs := append(append([]string{}, rewritten...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
 		out, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, w)
 		if err == nil {
+			// Learn bindings from successful run-instances output
+			learnPlanBindings(rewritten, out, bindings)
 			return nil
 		}
 

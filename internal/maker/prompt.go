@@ -38,12 +38,18 @@ Constraints:
 }
 
 Rules for commands:
+- The "commands" array MUST contain at least 1 command.
 - Provide args as an array; do NOT provide a single string.
 - Commands MUST be AWS CLI only. Every command args MUST start with "aws".
 - Do NOT include any non-AWS programs (no python/node/bash/curl/zip/terraform/etc).
 - Do NOT include shell operators, pipes, redirects, or subshells.
 - Do NOT include --profile, --region, or --no-cli-pager (the runner injects them).
 - Prefer idempotent operations where possible.
+- Region-awareness (CRITICAL):
+  - If a command targets a resource by ARN, keep that ARN and do NOT transform it.
+  - When mixing regions (for example us-east-1 + us-east-2), keep commands grouped by region in contiguous blocks.
+  - For destructive/teardown plans, strongly prefer region-grouped delete order: complete one region block, then move to the next region.
+  - Avoid interleaving unrelated cross-region deletes in alternating steps.
 
 Placeholders and bindings (CRITICAL):
 - You MAY use placeholder tokens inside args like "<SG_RDS_ID>" or "<SUBNET_1>".
@@ -228,6 +234,11 @@ IMPORTANT - Reuse existing resources:
 - If you must create subnets, use CIDR blocks that don't conflict with existing ones (check context).
 
 %s
+
+IMPORTANT - If the user asks for deletion/cleanup but destructive operations are NOT allowed:
+- You MUST still return a valid plan with a non-empty "commands" array.
+- In that case, output only READ-ONLY discovery commands (describe/list/get) to identify what would be deleted,
+  and include a note telling the user to re-run with destroyer enabled to actually delete.
 
 AWS Lambda code packaging:
 - Prefer Python runtime "python3.12".

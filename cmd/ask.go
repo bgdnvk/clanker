@@ -357,15 +357,34 @@ Examples:
 			default:
 				prompt = maker.PlanPromptWithMode(question, destroyer)
 			}
-			resp, err := aiClient.AskPrompt(ctx, prompt)
-			if err != nil {
-				return err
-			}
 
-			cleaned := aiClient.CleanJSONResponse(resp)
-			plan, err := maker.ParsePlan(cleaned)
-			if err != nil {
-				return fmt.Errorf("failed to parse maker plan: %w", err)
+			const maxMakerPlanAttempts = 3
+			var lastParseErr error
+			var plan *maker.Plan
+			for attempt := 1; attempt <= maxMakerPlanAttempts; attempt++ {
+				attemptPrompt := prompt
+				if attempt > 1 {
+					attemptPrompt = fmt.Sprintf(
+						"%s\n\nIMPORTANT: Your previous output was invalid (%v). Regenerate a VALID JSON plan that matches the schema exactly and includes a NON-EMPTY commands array.",
+						prompt,
+						lastParseErr,
+					)
+				}
+				resp, err := aiClient.AskPrompt(ctx, attemptPrompt)
+				if err != nil {
+					return err
+				}
+
+				cleaned := aiClient.CleanJSONResponse(resp)
+				parsed, err := maker.ParsePlan(cleaned)
+				if err == nil {
+					plan = parsed
+					break
+				}
+				lastParseErr = err
+			}
+			if plan == nil {
+				return fmt.Errorf("failed to parse maker plan: %w", lastParseErr)
 			}
 
 			plan.Provider = makerProvider

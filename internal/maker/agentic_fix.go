@@ -133,10 +133,15 @@ func maybeAgenticFix(
 		// Apply new bindings
 		if len(fix.Bindings) > 0 {
 			for k, v := range fix.Bindings {
-				if strings.TrimSpace(v) != "" {
-					bindings[k] = v
-					_, _ = fmt.Fprintf(opts.Writer, "[maker] AI binding: %s = %s\n", k, v)
+				if strings.TrimSpace(v) == "" {
+					continue
 				}
+				if !bindingLooksCompatible(k, v) {
+					_, _ = fmt.Fprintf(opts.Writer, "[maker] AI binding incompatible, ignored: %s = %s\n", k, v)
+					continue
+				}
+				bindings[k] = v
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] AI binding: %s = %s\n", k, v)
 			}
 		}
 
@@ -148,7 +153,7 @@ func maybeAgenticFix(
 					_, _ = fmt.Fprintf(opts.Writer, "[maker] pre-command %d rejected: %v\n", i+1, err)
 					continue
 				}
-				cmdArgs := append(append([]string{}, cmd.Args...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+				cmdArgs := buildAWSExecArgs(cmd.Args, opts, opts.Writer)
 				out, runErr := runAWSCommandStreaming(ctx, cmdArgs, nil, opts.Writer)
 				if runErr != nil {
 					_, _ = fmt.Fprintf(opts.Writer, "[maker] pre-command %d failed: %v\n", i+1, runErr)
@@ -170,7 +175,7 @@ func maybeAgenticFix(
 		retryArgs = applyPlanBindings(retryArgs, bindings)
 
 		// Build final AWS args
-		finalArgs := append(append([]string{}, retryArgs...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+		finalArgs := buildAWSExecArgs(retryArgs, opts, opts.Writer)
 
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] retrying: %s\n", formatAWSArgsForLog(finalArgs))
 
