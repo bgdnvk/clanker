@@ -362,7 +362,8 @@ func NeedsLLMClassification(ctx ServiceContext) bool {
 	// Use LLM classification if:
 	// 1. Multiple services inferred (ambiguous)
 	// 2. Cloudflare was inferred (verify it's actually Cloudflare-related)
-	return count > 1 || ctx.Cloudflare
+	// 3. IAM was inferred (verify it's actually IAM-related for disambiguation)
+	return count > 1 || ctx.Cloudflare || ctx.IAM
 }
 
 // ApplyLLMClassification updates the ServiceContext based on LLM classification result
