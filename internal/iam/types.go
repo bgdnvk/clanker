@@ -32,39 +32,39 @@ const (
 
 // Finding types
 const (
-	FindingOverpermissivePolicy  = "overpermissive_policy"
-	FindingAdminAccess           = "admin_access"
-	FindingWildcardResource      = "wildcard_resource"
-	FindingUnusedRole            = "unused_role"
-	FindingCrossAccountTrust     = "cross_account_trust"
-	FindingMissingMFA            = "missing_mfa"
-	FindingOldAccessKeys         = "old_access_keys"
-	FindingInactiveKeys          = "inactive_keys"
-	FindingRootAccountUsage      = "root_account_usage"
-	FindingPublicS3Access        = "public_s3_access"
-	FindingExcessivePermissions  = "excessive_permissions"
+	FindingOverpermissivePolicy   = "overpermissive_policy"
+	FindingAdminAccess            = "admin_access"
+	FindingWildcardResource       = "wildcard_resource"
+	FindingUnusedRole             = "unused_role"
+	FindingCrossAccountTrust      = "cross_account_trust"
+	FindingMissingMFA             = "missing_mfa"
+	FindingOldAccessKeys          = "old_access_keys"
+	FindingInactiveKeys           = "inactive_keys"
+	FindingRootAccountUsage       = "root_account_usage"
+	FindingPublicS3Access         = "public_s3_access"
+	FindingExcessivePermissions   = "excessive_permissions"
 	FindingMissingResourceScoping = "missing_resource_scoping"
 )
 
 // FixPlan represents a plan to remediate a security finding
 type FixPlan struct {
-	ID        string       `json:"id"`
-	Summary   string       `json:"summary"`
+	ID        string          `json:"id"`
+	Summary   string          `json:"summary"`
 	Finding   SecurityFinding `json:"finding"`
-	Commands  []FixCommand `json:"commands"`
-	Notes     []string     `json:"notes,omitempty"`
-	Warnings  []string     `json:"warnings,omitempty"`
-	CreatedAt time.Time    `json:"created_at"`
+	Commands  []FixCommand    `json:"commands"`
+	Notes     []string        `json:"notes,omitempty"`
+	Warnings  []string        `json:"warnings,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
 }
 
 // FixCommand represents a single remediation command
 type FixCommand struct {
-	ID         string                 `json:"id"`
-	Action     string                 `json:"action"`
-	ResourceARN string                `json:"resource_arn"`
-	Parameters map[string]interface{} `json:"parameters"`
-	Reason     string                 `json:"reason"`
-	Rollback   *FixCommand            `json:"rollback,omitempty"`
+	ID          string                 `json:"id"`
+	Action      string                 `json:"action"`
+	ResourceARN string                 `json:"resource_arn"`
+	Parameters  map[string]interface{} `json:"parameters"`
+	Reason      string                 `json:"reason"`
+	Rollback    *FixCommand            `json:"rollback,omitempty"`
 }
 
 // Action types for fix commands
@@ -190,13 +190,13 @@ type UserInfo struct {
 
 // AccessKeyInfo contains access key metadata
 type AccessKeyInfo struct {
-	UserName        string    `json:"user_name"`
-	AccessKeyId     string    `json:"access_key_id"`
-	Status          string    `json:"status"`
-	CreateDate      time.Time `json:"create_date"`
+	UserName        string     `json:"user_name"`
+	AccessKeyId     string     `json:"access_key_id"`
+	Status          string     `json:"status"`
+	CreateDate      time.Time  `json:"create_date"`
 	LastUsedDate    *time.Time `json:"last_used_date,omitempty"`
-	LastUsedService string    `json:"last_used_service,omitempty"`
-	LastUsedRegion  string    `json:"last_used_region,omitempty"`
+	LastUsedService string     `json:"last_used_service,omitempty"`
+	LastUsedRegion  string     `json:"last_used_region,omitempty"`
 }
 
 // CredentialReport represents an IAM credential report
@@ -237,13 +237,13 @@ type GroupInfo struct {
 
 // AccountSummary represents a summary of IAM resources in an account
 type AccountSummary struct {
-	RoleCount       int `json:"role_count"`
-	PolicyCount     int `json:"policy_count"`
-	UserCount       int `json:"user_count"`
-	GroupCount      int `json:"group_count"`
+	RoleCount        int `json:"role_count"`
+	PolicyCount      int `json:"policy_count"`
+	UserCount        int `json:"user_count"`
+	GroupCount       int `json:"group_count"`
 	InstanceProfiles int `json:"instance_profiles"`
-	MFADevices      int `json:"mfa_devices"`
-	AccessKeys      int `json:"access_keys"`
+	MFADevices       int `json:"mfa_devices"`
+	AccessKeys       int `json:"access_keys"`
 }
 
 // TrustPolicy represents a parsed trust policy

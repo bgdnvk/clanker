@@ -561,18 +561,18 @@ func (a *analyzerClientAdapter) GetCredentialReport(ctx interface{}) (*analyzer.
 	users := make([]analyzer.CredentialReportEntry, len(report.Users))
 	for i, u := range report.Users {
 		users[i] = analyzer.CredentialReportEntry{
-			User:                      u.User,
-			ARN:                       u.ARN,
-			UserCreationTime:          u.UserCreationTime,
-			PasswordEnabled:           u.PasswordEnabled,
-			PasswordLastUsed:          u.PasswordLastUsed,
-			MFAActive:                 u.MFAActive,
-			AccessKey1Active:          u.AccessKey1Active,
-			AccessKey1LastRotated:     u.AccessKey1LastRotated,
-			AccessKey1LastUsedDate:    u.AccessKey1LastUsedDate,
-			AccessKey2Active:          u.AccessKey2Active,
-			AccessKey2LastRotated:     u.AccessKey2LastRotated,
-			AccessKey2LastUsedDate:    u.AccessKey2LastUsedDate,
+			User:                   u.User,
+			ARN:                    u.ARN,
+			UserCreationTime:       u.UserCreationTime,
+			PasswordEnabled:        u.PasswordEnabled,
+			PasswordLastUsed:       u.PasswordLastUsed,
+			MFAActive:              u.MFAActive,
+			AccessKey1Active:       u.AccessKey1Active,
+			AccessKey1LastRotated:  u.AccessKey1LastRotated,
+			AccessKey1LastUsedDate: u.AccessKey1LastUsedDate,
+			AccessKey2Active:       u.AccessKey2Active,
+			AccessKey2LastRotated:  u.AccessKey2LastRotated,
+			AccessKey2LastUsedDate: u.AccessKey2LastUsedDate,
 		}
 	}
 

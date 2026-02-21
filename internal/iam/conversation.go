@@ -20,10 +20,10 @@ type ConversationEntry struct {
 
 // ConversationHistory maintains conversation state for IAM ask mode
 type ConversationHistory struct {
-	Entries       []ConversationEntry `json:"entries"`
-	AccountID     string              `json:"account_id"`
-	LastSummary   *AccountSummary     `json:"last_summary,omitempty"`
-	mu            sync.RWMutex
+	Entries     []ConversationEntry `json:"entries"`
+	AccountID   string              `json:"account_id"`
+	LastSummary *AccountSummary     `json:"last_summary,omitempty"`
+	mu          sync.RWMutex
 }
 
 // MaxHistoryEntries limits the conversation history size
