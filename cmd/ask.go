@@ -70,6 +70,9 @@ Examples:
 		includeAzure, _ := cmd.Flags().GetBool("azure")
 		includeCloudflare, _ := cmd.Flags().GetBool("cloudflare")
 		includeTerraform, _ := cmd.Flags().GetBool("terraform")
+		includeIAM, _ := cmd.Flags().GetBool("iam")
+		iamRoleARN, _ := cmd.Flags().GetString("role-arn")
+		iamPolicyARN, _ := cmd.Flags().GetString("policy-arn")
 		debug := viper.GetBool("debug")
 		discovery, _ := cmd.Flags().GetBool("discovery")
 		compliance, _ := cmd.Flags().GetBool("compliance")
@@ -569,8 +572,8 @@ Format as a professional compliance table suitable for government security docum
 			}
 
 			// Handle IAM queries by delegating to IAM agent
-			if svcCtx.IAM {
-				return handleIAMQuery(context.Background(), routingQuestion, debug)
+			if includeIAM || svcCtx.IAM {
+				return handleIAMQuery(context.Background(), routingQuestion, debug, iamRoleARN, iamPolicyARN)
 			}
 
 			// Handle K8s queries by delegating to K8s agent
@@ -1042,6 +1045,9 @@ func init() {
 	askCmd.Flags().Bool("cloudflare", false, "Include Cloudflare infrastructure context")
 	askCmd.Flags().Bool("github", false, "Include GitHub repository context")
 	askCmd.Flags().Bool("terraform", false, "Include Terraform workspace context")
+	askCmd.Flags().Bool("iam", false, "Route query to IAM agent for security analysis")
+	askCmd.Flags().String("role-arn", "", "Scope IAM query to a specific role ARN")
+	askCmd.Flags().String("policy-arn", "", "Scope IAM query to a specific policy ARN")
 	askCmd.Flags().Bool("discovery", false, "Run comprehensive infrastructure discovery (all services)")
 	askCmd.Flags().Bool("compliance", false, "Generate compliance report showing all services, ports, and protocols")
 	askCmd.Flags().String("profile", "", "AWS profile to use for infrastructure queries")
@@ -1484,9 +1490,15 @@ Provide a clear and helpful response.`, question, cfContext)
 }
 
 // handleIAMQuery delegates an IAM query to the IAM agent
-func handleIAMQuery(ctx context.Context, question string, debug bool) error {
+func handleIAMQuery(ctx context.Context, question string, debug bool, roleARN, policyARN string) error {
 	if debug {
 		fmt.Println("Delegating query to IAM agent...")
+		if roleARN != "" {
+			fmt.Printf("  Role ARN: %s\n", roleARN)
+		}
+		if policyARN != "" {
+			fmt.Printf("  Policy ARN: %s\n", policyARN)
+		}
 	}
 
 	// Resolve AWS profile
@@ -1522,9 +1534,11 @@ func handleIAMQuery(ctx context.Context, question string, debug bool) error {
 		return fmt.Errorf("failed to create IAM agent: %w", err)
 	}
 
-	// Configure query options
+	// Configure query options - scope to specific resource if ARN provided
 	opts := iamclient.QueryOptions{
-		AccountWide: true,
+		AccountWide: roleARN == "" && policyARN == "",
+		RoleARN:     roleARN,
+		PolicyARN:   policyARN,
 	}
 
 	// Handle the query
