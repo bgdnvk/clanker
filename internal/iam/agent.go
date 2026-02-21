@@ -192,8 +192,58 @@ func (a *Agent) handleGeneralQuery(ctx context.Context, query string, opts Query
 	iamContext := a.conversation.GetAccountSummaryContext()
 	conversationContext := a.conversation.GetRecentContext(5)
 
+	// Add scoped resource context if ARNs are provided
+	scopedContext := ""
+	if opts.RoleARN != "" {
+		roleName := extractRoleName(opts.RoleARN)
+		if a.debug {
+			fmt.Printf("[iam] Fetching details for scoped role: %s\n", roleName)
+		}
+		roleDetail, err := a.client.GetRoleDetails(ctx, roleName)
+		if err == nil {
+			scopedContext = fmt.Sprintf(`
+SCOPED CONTEXT - User is asking about this specific role:
+Role Name: %s
+Role ARN: %s
+Trust Policy: %s
+Attached Policies: %d
+Inline Policies: %d
+Last Used: %s
+
+The user's question should be answered specifically about this role.
+`, roleDetail.RoleName, roleDetail.RoleARN, roleDetail.AssumeRolePolicyDocument,
+				len(roleDetail.AttachedPolicies), len(roleDetail.InlinePolicies), roleDetail.LastUsed)
+		} else if a.debug {
+			fmt.Printf("[iam] Failed to get role details: %v\n", err)
+		}
+	} else if opts.PolicyARN != "" {
+		if a.debug {
+			fmt.Printf("[iam] Fetching details for scoped policy: %s\n", opts.PolicyARN)
+		}
+		policyDetail, err := a.client.GetPolicyDocument(ctx, opts.PolicyARN)
+		if err == nil {
+			scopedContext = fmt.Sprintf(`
+SCOPED CONTEXT - User is asking about this specific policy:
+Policy Name: %s
+Policy ARN: %s
+Policy Document:
+%s
+
+The user's question should be answered specifically about this policy.
+`, policyDetail.PolicyName, policyDetail.PolicyARN, policyDetail.PolicyDocument)
+		} else if a.debug {
+			fmt.Printf("[iam] Failed to get policy details: %v\n", err)
+		}
+	}
+
+	// Combine contexts
+	fullContext := iamContext
+	if scopedContext != "" {
+		fullContext = iamContext + "\n" + scopedContext
+	}
+
 	// Get LLM to analyze what operations are needed
-	analysisPrompt := GetLLMAnalysisPrompt(query, iamContext)
+	analysisPrompt := GetLLMAnalysisPrompt(query, fullContext)
 
 	aiClient := a.getAIClient()
 	analysisResp, err := aiClient.AskPrompt(ctx, analysisPrompt)
