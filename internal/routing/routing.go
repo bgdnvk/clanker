@@ -22,6 +22,7 @@ type ServiceContext struct {
 	GCP        bool
 	Azure      bool
 	Cloudflare bool
+	IAM        bool
 	Code       bool
 }
 
@@ -168,6 +169,18 @@ func InferContext(question string) ServiceContext {
 		"cloudflared",
 	}
 
+	iamKeywords := []string{
+		// IAM specific queries
+		"iam role", "iam roles", "iam policy", "iam policies",
+		"iam user", "iam users", "iam group", "iam groups",
+		"trust policy", "assume role", "attached policies",
+		"inline policies", "permission boundary", "service-linked role",
+		"access key", "access keys", "credential report",
+		"least privilege", "security audit", "iam analysis",
+		"overpermissive", "admin access", "cross-account trust",
+		"mfa status", "unused role", "wildcard permission",
+	}
+
 	questionLower := strings.ToLower(question)
 
 	for _, keyword := range awsKeywords {
@@ -216,8 +229,16 @@ func InferContext(question string) ServiceContext {
 		}
 	}
 
+	// Check for IAM-specific queries (takes precedence over general AWS)
+	for _, keyword := range iamKeywords {
+		if contains(questionLower, keyword) {
+			ctx.IAM = true
+			break
+		}
+	}
+
 	// Default to AWS and GitHub context if nothing is detected
-	if !ctx.AWS && !ctx.GitHub && !ctx.Terraform && !ctx.K8s && !ctx.GCP && !ctx.Azure && !ctx.Cloudflare {
+	if !ctx.AWS && !ctx.GitHub && !ctx.Terraform && !ctx.K8s && !ctx.GCP && !ctx.Azure && !ctx.Cloudflare && !ctx.IAM {
 		ctx.AWS = true
 		ctx.GitHub = true
 	}
@@ -233,7 +254,8 @@ User Query: "%s"
 
 Available services:
 - cloudflare: Cloudflare CDN, DNS, Workers, KV, D1, R2, Pages, WAF, Tunnels, Zero Trust, Analytics
-- aws: Amazon Web Services (EC2, Lambda, S3, RDS, VPC, Route53, CloudFront, IAM, ECS, etc.)
+- aws: Amazon Web Services (EC2, Lambda, S3, RDS, VPC, Route53, CloudFront, ECS, etc.) - NOT IAM-specific queries
+- iam: AWS IAM specific queries about roles, policies, permissions, access keys, trust policies, security analysis
 - k8s: Kubernetes clusters, pods, deployments, services, helm, kubectl
 - gcp: Google Cloud Platform (Cloud Run, GKE, Cloud SQL, BigQuery, etc.)
 - azure: Microsoft Azure (VMs, AKS, App Service, Storage, Key Vault, Cosmos DB, VNets, etc.)
@@ -244,12 +266,13 @@ Available services:
 IMPORTANT RULES:
 1. Only classify as "cloudflare" if the query EXPLICITLY mentions Cloudflare, wrangler, cloudflared, or Cloudflare-specific products
 2. Generic terms like "cdn", "cache", "dns", "worker", "waf", "rate limit", "tunnel" should default to AWS unless Cloudflare is explicitly mentioned
-3. If the query mentions AWS services (EC2, Lambda, S3, CloudFront, Route53, etc.), classify as "aws"
-4. If uncertain, classify as "aws" (the default cloud provider)
+3. If the query is specifically about IAM roles, policies, permissions, access keys, trust policies, or security analysis, classify as "iam"
+4. If the query mentions AWS services (EC2, Lambda, S3, CloudFront, Route53, etc.) but NOT IAM-specific topics, classify as "aws"
+5. If uncertain, classify as "aws" (the default cloud provider)
 
 Respond with ONLY a JSON object:
 {
-	"service": "cloudflare|aws|k8s|gcp|azure|github|terraform|general",
+	"service": "cloudflare|aws|iam|k8s|gcp|azure|github|terraform|general",
     "confidence": "high|medium|low",
     "reason": "brief explanation of why this classification"
 }`, question)
@@ -332,11 +355,15 @@ func NeedsLLMClassification(ctx ServiceContext) bool {
 	if ctx.Cloudflare {
 		count++
 	}
+	if ctx.IAM {
+		count++
+	}
 
 	// Use LLM classification if:
 	// 1. Multiple services inferred (ambiguous)
 	// 2. Cloudflare was inferred (verify it's actually Cloudflare-related)
-	return count > 1 || ctx.Cloudflare
+	// 3. IAM was inferred (verify it's actually IAM-related for disambiguation)
+	return count > 1 || ctx.Cloudflare || ctx.IAM
 }
 
 // ApplyLLMClassification updates the ServiceContext based on LLM classification result
@@ -348,24 +375,36 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.GCP = false
 		ctx.Azure = false
 		ctx.AWS = false
+		ctx.IAM = false
 	case "k8s":
 		ctx.K8s = true
 		ctx.Cloudflare = false
 		ctx.GCP = false
 		ctx.Azure = false
+		ctx.IAM = false
 	case "gcp":
 		ctx.GCP = true
 		ctx.Cloudflare = false
 		ctx.K8s = false
 		ctx.Azure = false
+		ctx.IAM = false
 	case "azure":
 		ctx.Azure = true
 		ctx.GCP = false
 		ctx.Cloudflare = false
 		ctx.K8s = false
 		ctx.AWS = false
+		ctx.IAM = false
 	case "aws":
 		ctx.AWS = true
+		ctx.Cloudflare = false
+		ctx.K8s = false
+		ctx.GCP = false
+		ctx.Azure = false
+		ctx.IAM = false
+	case "iam":
+		ctx.IAM = true
+		ctx.AWS = false
 		ctx.Cloudflare = false
 		ctx.K8s = false
 		ctx.GCP = false
@@ -382,6 +421,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Cloudflare = false
 		ctx.K8s = false
 		ctx.Azure = false
+		ctx.IAM = false
 	}
 }
 

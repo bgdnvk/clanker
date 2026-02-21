@@ -22,6 +22,7 @@ import (
 	cfzerotrust "github.com/bgdnvk/clanker/internal/cloudflare/zerotrust"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	ghclient "github.com/bgdnvk/clanker/internal/github"
+	iamclient "github.com/bgdnvk/clanker/internal/iam"
 	"github.com/bgdnvk/clanker/internal/k8s"
 	"github.com/bgdnvk/clanker/internal/k8s/plan"
 	"github.com/bgdnvk/clanker/internal/maker"
@@ -69,6 +70,9 @@ Examples:
 		includeAzure, _ := cmd.Flags().GetBool("azure")
 		includeCloudflare, _ := cmd.Flags().GetBool("cloudflare")
 		includeTerraform, _ := cmd.Flags().GetBool("terraform")
+		includeIAM, _ := cmd.Flags().GetBool("iam")
+		iamRoleARN, _ := cmd.Flags().GetString("role-arn")
+		iamPolicyARN, _ := cmd.Flags().GetString("policy-arn")
 		debug := viper.GetBool("debug")
 		discovery, _ := cmd.Flags().GetBool("discovery")
 		compliance, _ := cmd.Flags().GetBool("compliance")
@@ -567,6 +571,11 @@ Format as a professional compliance table suitable for government security docum
 				return handleCloudflareQuery(context.Background(), routingQuestion, debug)
 			}
 
+			// Handle IAM queries by delegating to IAM agent
+			if includeIAM || svcCtx.IAM {
+				return handleIAMQuery(context.Background(), routingQuestion, debug, iamRoleARN, iamPolicyARN)
+			}
+
 			// Handle K8s queries by delegating to K8s agent
 			if svcCtx.K8s {
 				return handleK8sQuery(context.Background(), routingQuestion, debug, viper.GetString("kubernetes.kubeconfig"))
@@ -1036,6 +1045,9 @@ func init() {
 	askCmd.Flags().Bool("cloudflare", false, "Include Cloudflare infrastructure context")
 	askCmd.Flags().Bool("github", false, "Include GitHub repository context")
 	askCmd.Flags().Bool("terraform", false, "Include Terraform workspace context")
+	askCmd.Flags().Bool("iam", false, "Route query to IAM agent for security analysis")
+	askCmd.Flags().String("role-arn", "", "Scope IAM query to a specific role ARN")
+	askCmd.Flags().String("policy-arn", "", "Scope IAM query to a specific policy ARN")
 	askCmd.Flags().Bool("discovery", false, "Run comprehensive infrastructure discovery (all services)")
 	askCmd.Flags().Bool("compliance", false, "Generate compliance report showing all services, ports, and protocols")
 	askCmd.Flags().String("profile", "", "AWS profile to use for infrastructure queries")
@@ -1474,6 +1486,84 @@ Provide a clear and helpful response.`, question, cfContext)
 	}
 
 	fmt.Println(response)
+	return nil
+}
+
+// handleIAMQuery delegates an IAM query to the IAM agent
+func handleIAMQuery(ctx context.Context, question string, debug bool, roleARN, policyARN string) error {
+	if debug {
+		fmt.Println("Delegating query to IAM agent...")
+		if roleARN != "" {
+			fmt.Printf("  Role ARN: %s\n", roleARN)
+		}
+		if policyARN != "" {
+			fmt.Printf("  Policy ARN: %s\n", policyARN)
+		}
+	}
+
+	// Resolve AWS profile
+	awsProfile := ""
+	defaultEnv := viper.GetString("infra.default_environment")
+	if defaultEnv == "" {
+		defaultEnv = "dev"
+	}
+	awsProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+	if awsProfile == "" {
+		awsProfile = viper.GetString("aws.default_profile")
+	}
+	if awsProfile == "" {
+		awsProfile = "default"
+	}
+
+	// Resolve region
+	awsRegion := viper.GetString(fmt.Sprintf("infra.aws.environments.%s.region", defaultEnv))
+	if awsRegion == "" {
+		awsRegion = viper.GetString("aws.default_region")
+	}
+	if awsRegion == "" {
+		awsRegion = "us-east-1"
+	}
+
+	// Create IAM agent
+	iamAgent, err := iamclient.NewAgentWithOptions(iamclient.AgentOptions{
+		Profile: awsProfile,
+		Region:  awsRegion,
+		Debug:   debug,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create IAM agent: %w", err)
+	}
+
+	// Configure query options - scope to specific resource if ARN provided
+	opts := iamclient.QueryOptions{
+		AccountWide: roleARN == "" && policyARN == "",
+		RoleARN:     roleARN,
+		PolicyARN:   policyARN,
+	}
+
+	// Handle the query
+	response, err := iamAgent.HandleQuery(ctx, question, opts)
+	if err != nil {
+		return fmt.Errorf("IAM agent error: %w", err)
+	}
+
+	// Output based on response type
+	switch response.Type {
+	case iamclient.ResponseTypePlan:
+		// Output plan
+		fmt.Println(response.Content)
+		fmt.Println("\n// To apply this plan, review the commands and run them manually")
+
+	case iamclient.ResponseTypeFindings:
+		fmt.Println(response.Content)
+
+	case iamclient.ResponseTypeResult:
+		fmt.Println(response.Content)
+
+	case iamclient.ResponseTypeError:
+		return response.Error
+	}
+
 	return nil
 }
 
@@ -2057,6 +2147,25 @@ func executeK8sPlan(ctx context.Context, rawPlan string, profile string, debug b
 // This is used by the --route-only flag to return routing decisions without executing.
 func determineRoutingDecision(question string) (agent string, reason string) {
 	questionLower := strings.ToLower(question)
+
+	// Check for IAM-specific queries first
+	iamKeywords := []string{
+		"iam role", "iam roles", "iam policy", "iam policies",
+		"iam user", "iam users", "iam permission", "iam permissions",
+		"trust policy", "assume role", "attached policies",
+		"inline policies", "permission boundary",
+		"access key", "access keys", "credential report",
+		"least privilege", "security audit", "iam analysis",
+		"overpermissive", "admin access", "cross-account trust",
+		"mfa status", "unused role", "wildcard permission",
+		"analyze iam", "fix iam", "iam security",
+	}
+	for _, kw := range iamKeywords {
+		if strings.Contains(questionLower, kw) {
+			return "iam", "IAM query or security analysis request"
+		}
+	}
+
 	terraformSignals := []string{
 		"terraform", "tf ", "tfstate", "tf plan", "tf apply", "tf destroy",
 		"hcl", "module", "provider", "workspace", "state", "plan", "apply", "destroy",
