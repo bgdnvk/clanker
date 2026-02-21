@@ -15,6 +15,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/azure"
 	"github.com/bgdnvk/clanker/internal/backend"
 	"github.com/bgdnvk/clanker/internal/cloudflare"
+	iamclient "github.com/bgdnvk/clanker/internal/iam"
 	cfanalytics "github.com/bgdnvk/clanker/internal/cloudflare/analytics"
 	cfdns "github.com/bgdnvk/clanker/internal/cloudflare/dns"
 	cfwaf "github.com/bgdnvk/clanker/internal/cloudflare/waf"
@@ -565,6 +566,11 @@ Format as a professional compliance table suitable for government security docum
 			// Handle Cloudflare queries by delegating to Cloudflare agent
 			if svcCtx.Cloudflare {
 				return handleCloudflareQuery(context.Background(), routingQuestion, debug)
+			}
+
+			// Handle IAM queries by delegating to IAM agent
+			if svcCtx.IAM {
+				return handleIAMQuery(context.Background(), routingQuestion, debug)
 			}
 
 			// Handle K8s queries by delegating to K8s agent
@@ -1477,6 +1483,76 @@ Provide a clear and helpful response.`, question, cfContext)
 	return nil
 }
 
+// handleIAMQuery delegates an IAM query to the IAM agent
+func handleIAMQuery(ctx context.Context, question string, debug bool) error {
+	if debug {
+		fmt.Println("Delegating query to IAM agent...")
+	}
+
+	// Resolve AWS profile
+	awsProfile := ""
+	defaultEnv := viper.GetString("infra.default_environment")
+	if defaultEnv == "" {
+		defaultEnv = "dev"
+	}
+	awsProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+	if awsProfile == "" {
+		awsProfile = viper.GetString("aws.default_profile")
+	}
+	if awsProfile == "" {
+		awsProfile = "default"
+	}
+
+	// Resolve region
+	awsRegion := viper.GetString(fmt.Sprintf("infra.aws.environments.%s.region", defaultEnv))
+	if awsRegion == "" {
+		awsRegion = viper.GetString("aws.default_region")
+	}
+	if awsRegion == "" {
+		awsRegion = "us-east-1"
+	}
+
+	// Create IAM agent
+	iamAgent, err := iamclient.NewAgentWithOptions(iamclient.AgentOptions{
+		Profile: awsProfile,
+		Region:  awsRegion,
+		Debug:   debug,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create IAM agent: %w", err)
+	}
+
+	// Configure query options
+	opts := iamclient.QueryOptions{
+		AccountWide: true,
+	}
+
+	// Handle the query
+	response, err := iamAgent.HandleQuery(ctx, question, opts)
+	if err != nil {
+		return fmt.Errorf("IAM agent error: %w", err)
+	}
+
+	// Output based on response type
+	switch response.Type {
+	case iamclient.ResponseTypePlan:
+		// Output plan
+		fmt.Println(response.Content)
+		fmt.Println("\n// To apply this plan, review the commands and run them manually")
+
+	case iamclient.ResponseTypeFindings:
+		fmt.Println(response.Content)
+
+	case iamclient.ResponseTypeResult:
+		fmt.Println(response.Content)
+
+	case iamclient.ResponseTypeError:
+		return response.Error
+	}
+
+	return nil
+}
+
 // handleK8sQuery delegates a Kubernetes query to the K8s agent
 func handleK8sQuery(ctx context.Context, question string, debug bool, kubeconfig string) error {
 	if debug {
@@ -2057,6 +2133,25 @@ func executeK8sPlan(ctx context.Context, rawPlan string, profile string, debug b
 // This is used by the --route-only flag to return routing decisions without executing.
 func determineRoutingDecision(question string) (agent string, reason string) {
 	questionLower := strings.ToLower(question)
+
+	// Check for IAM-specific queries first
+	iamKeywords := []string{
+		"iam role", "iam roles", "iam policy", "iam policies",
+		"iam user", "iam users", "iam permission", "iam permissions",
+		"trust policy", "assume role", "attached policies",
+		"inline policies", "permission boundary",
+		"access key", "access keys", "credential report",
+		"least privilege", "security audit", "iam analysis",
+		"overpermissive", "admin access", "cross-account trust",
+		"mfa status", "unused role", "wildcard permission",
+		"analyze iam", "fix iam", "iam security",
+	}
+	for _, kw := range iamKeywords {
+		if strings.Contains(questionLower, kw) {
+			return "iam", "IAM query or security analysis request"
+		}
+	}
+
 	terraformSignals := []string{
 		"terraform", "tf ", "tfstate", "tf plan", "tf apply", "tf destroy",
 		"hcl", "module", "provider", "workspace", "state", "plan", "apply", "destroy",
