@@ -23,6 +23,32 @@ import (
 	"google.golang.org/genai"
 )
 
+type anthropicMessage struct {
+	Role    string `json:"role"`
+	Content any    `json:"content"`
+}
+
+type anthropicRequest struct {
+	Model       string             `json:"model"`
+	MaxTokens   int                `json:"max_tokens"`
+	Temperature float64            `json:"temperature,omitempty"`
+	Messages    []anthropicMessage `json:"messages"`
+}
+
+type anthropicResponse struct {
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+}
+
+type anthropicModelsResponse struct {
+	Data []struct {
+		ID        string `json:"id"`
+		CreatedAt string `json:"created_at"`
+	} `json:"data"`
+}
+
 type Client struct {
 	provider     string
 	apiKey       string
@@ -778,8 +804,121 @@ func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
 }
 
 func (c *Client) askAnthropic(ctx context.Context, prompt string) (string, error) {
-	// Direct Anthropic API implementation would go here
-	return "Direct Anthropic API integration not implemented. Use Bedrock instead.", nil
+	profileLLMCall, err := c.getAIProfile(c.aiProfile)
+	if err != nil {
+		return "", fmt.Errorf("failed to get AI profile for LLM calls: %w", err)
+	}
+
+	if strings.TrimSpace(c.apiKey) == "" {
+		return "", fmt.Errorf("Anthropic API key not configured")
+	}
+
+	model := strings.TrimSpace(profileLLMCall.Model)
+	if model == "" {
+		latest, lErr := c.getLatestAnthropicModelID(ctx)
+		if lErr != nil {
+			return "", lErr
+		}
+		model = latest
+	}
+
+	// Anthropic API is strict about ASCII in some client setups; keep consistent with other providers.
+	prompt = sanitizeASCII(prompt)
+
+	reqBody := anthropicRequest{
+		Model:       model,
+		MaxTokens:   4000,
+		Temperature: 0.1,
+		Messages: []anthropicMessage{{
+			Role: "user",
+			// Use the content-block format which is compatible with modern Anthropic Messages API.
+			Content: []map[string]any{{"type": "text", "text": prompt}},
+		}},
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.baseURL, "/")+"/messages", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-api-key", strings.TrimSpace(c.apiKey))
+	httpReq.Header.Set("anthropic-version", "2023-06-01")
+
+	client := &http.Client{}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Anthropic API request failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var parsed anthropicResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	for _, c := range parsed.Content {
+		if strings.TrimSpace(c.Text) != "" {
+			return c.Text, nil
+		}
+	}
+
+	return "", fmt.Errorf("no response content from Anthropic")
+}
+
+func (c *Client) getLatestAnthropicModelID(ctx context.Context) (string, error) {
+	base := strings.TrimRight(c.baseURL, "/")
+	url := base + "/models"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create models request: %w", err)
+	}
+	req.Header.Set("x-api-key", strings.TrimSpace(c.apiKey))
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch Anthropic models: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read Anthropic models response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Anthropic models request failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var parsed anthropicModelsResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("failed to unmarshal Anthropic models response: %w", err)
+	}
+	for _, m := range parsed.Data {
+		id := strings.TrimSpace(m.ID)
+		if id != "" {
+			// Docs: newest models are listed first.
+			return id, nil
+		}
+	}
+
+	return "", fmt.Errorf("no Anthropic models returned")
 }
 
 func (c *Client) getSpecificAWSData(ctx context.Context, question string) (string, error) {
