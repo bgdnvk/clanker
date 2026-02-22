@@ -2126,32 +2126,11 @@ func createAIClient(debug bool) (*ai.Client, error) {
 		// Gemini ADC, no API key needed
 		apiKey = ""
 	case "gemini-api":
-		apiKey = viper.GetString("ai.providers.gemini-api.api_key")
-		if apiKey == "" {
-			if envName := viper.GetString("ai.providers.gemini-api.api_key_env"); envName != "" {
-				apiKey = os.Getenv(envName)
-			}
-		}
-		if apiKey == "" {
-			apiKey = os.Getenv("GEMINI_API_KEY")
-		}
+		apiKey = resolveGeminiAPIKey("")
 	case "openai":
-		apiKey = viper.GetString("ai.providers.openai.api_key")
-		if apiKey == "" {
-			if envName := viper.GetString("ai.providers.openai.api_key_env"); envName != "" {
-				apiKey = os.Getenv(envName)
-			}
-		}
-		if apiKey == "" {
-			apiKey = os.Getenv("OPENAI_API_KEY")
-		}
+		apiKey = resolveOpenAIKey("")
 	case "anthropic":
-		apiKey = viper.GetString("ai.providers.anthropic.api_key")
-		if apiKey == "" {
-			if envName := viper.GetString("ai.providers.anthropic.api_key_env"); envName != "" {
-				apiKey = os.Getenv(envName)
-			}
-		}
+		apiKey = resolveAnthropicKey("")
 	}
 
 	if debug {

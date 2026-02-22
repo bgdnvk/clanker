@@ -21,6 +21,7 @@ import (
 
 	clankeraws "github.com/bgdnvk/clanker/internal/aws"
 	"github.com/bgdnvk/clanker/internal/openclaw"
+	"github.com/bgdnvk/clanker/internal/wordpress"
 )
 
 var awsErrorCodeRe = regexp.MustCompile(`(?i)an error occurred \(([^)]+)\)`)
@@ -348,12 +349,21 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 			question := strings.TrimSpace(bindings["PLAN_QUESTION"])
 			repoURL := extractRepoURLFromQuestion(question)
 			isOpenClaw := openclaw.Detect(question, repoURL)
+			isWordPress := wordpress.Detect(question, repoURL)
 			if isOpenClaw {
 				if p := strings.TrimSpace(flagValue(args, "--health-check-path")); p == "" || p == "/" {
 					args = setFlagValue(args, "--health-check-path", "/health")
 				}
 				if m := strings.TrimSpace(flagValue(args, "--matcher")); m == "" || strings.Contains(m, "HttpCode=200-399") {
 					args = setFlagValue(args, "--matcher", "HttpCode=200-499")
+				}
+			}
+			if isWordPress {
+				if p := strings.TrimSpace(flagValue(args, "--health-check-path")); p == "" || p == "/" {
+					args = setFlagValue(args, "--health-check-path", "/wp-login.php")
+				}
+				if m := strings.TrimSpace(flagValue(args, "--matcher")); m == "" {
+					args = setFlagValue(args, "--matcher", "HttpCode=200-399")
 				}
 			}
 		}
@@ -509,6 +519,7 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		question = strings.TrimSpace(bindings["QUESTION"])
 	}
 	openclaw.MaybePrintPostDeployInstructions(bindings, opts.Profile, opts.Region, opts.Writer, question, extractRepoURLFromQuestion(question))
+	wordpress.MaybePrintPostDeployInstructions(bindings, opts.Writer, question, extractRepoURLFromQuestion(question))
 
 	// Populate output bindings for the caller
 	if opts.OutputBindings != nil {
@@ -551,6 +562,9 @@ func prebindAppPortFromPlan(plan *Plan, bindings map[string]string) {
 	repoURL := extractRepoURLFromQuestion(q)
 	if openclaw.Detect(q, repoURL) {
 		bindings["APP_PORT"] = strconv.Itoa(openclaw.DefaultPort)
+	}
+	if wordpress.Detect(q, repoURL) {
+		bindings["APP_PORT"] = strconv.Itoa(wordpress.DefaultPort)
 	}
 }
 
@@ -596,6 +610,11 @@ func importSecretLikeEnvVarsIntoBindings(bindings map[string]string) {
 
 func shouldAutoPrepareImage(args []string, question string, bindings map[string]string, opts ExecOptions) bool {
 	if len(args) < 2 || args[0] != "ec2" || args[1] != "run-instances" {
+		return false
+	}
+	// WordPress one-click uses Docker Hub images (no ECR build/push).
+	q := strings.TrimSpace(question)
+	if wordpress.Detect(q, extractRepoURLFromQuestion(q)) {
 		return false
 	}
 	if strings.TrimSpace(opts.Profile) == "" || strings.TrimSpace(opts.Region) == "" {
@@ -1984,6 +2003,110 @@ func maybeRunLocalPlanStep(ctx context.Context, index, total int, args []string,
 	}
 }
 
+func generateWordPressOneClickUserData(bindings map[string]string) string {
+	deployID := strings.TrimSpace(bindings["DEPLOY_ID"])
+	wpName := wordpress.WPContainerName(bindings)
+	dbName := wordpress.DBContainerName(bindings)
+
+	netName := "wordpress-net"
+	dbVol := "wordpress-db"
+	contentVol := "wordpress-content"
+	if deployID != "" {
+		netName = "wordpress-net-" + deployID
+		dbVol = "wordpress-db-" + deployID
+		contentVol = "wordpress-content-" + deployID
+	}
+
+	dbPass := strings.TrimSpace(bindings["ENV_WORDPRESS_DB_PASSWORD"])
+	if dbPass == "" {
+		dbPass = ""
+	}
+
+	script := fmt.Sprintf(`#!/bin/bash
+set -euo pipefail
+exec > /var/log/user-data.log 2>&1
+
+echo '[wordpress] one-click boot'
+
+DB_PASS=%q
+if [ -z "${DB_PASS}" ]; then
+	echo '[wordpress] missing WORDPRESS_DB_PASSWORD'
+	exit 1
+fi
+
+echo '[wordpress] installing docker'
+. /etc/os-release || true
+if command -v docker >/dev/null 2>&1; then
+	echo '[wordpress] docker already present'
+else
+	if [ "${ID:-}" = "amzn" ]; then
+		if command -v dnf >/dev/null 2>&1; then dnf install -y docker; else yum install -y docker; fi
+	elif command -v apt-get >/dev/null 2>&1; then
+		apt-get update -y && apt-get install -y docker.io
+	else
+		echo 'unsupported OS for docker install' && exit 1
+	fi
+fi
+
+systemctl enable docker || true
+systemctl start docker || true
+
+echo '[wordpress] creating network/volumes'
+docker network create %q >/dev/null 2>&1 || true
+docker volume create %q >/dev/null 2>&1 || true
+docker volume create %q >/dev/null 2>&1 || true
+
+DB_ROOT_PASS=$(head -c 24 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)
+
+echo '[wordpress] starting mariadb'
+docker rm -f %q >/dev/null 2>&1 || true
+docker run -d --restart unless-stopped --name %q --network %q \
+	-v %q:/var/lib/mysql \
+	-e MARIADB_DATABASE=wordpress \
+	-e MARIADB_USER=wordpress \
+	-e MARIADB_PASSWORD="$DB_PASS" \
+	-e MARIADB_ROOT_PASSWORD="$DB_ROOT_PASS" \
+	mariadb:11
+
+echo '[wordpress] waiting for db'
+for i in $(seq 1 60); do
+	if docker exec %q mariadb-admin ping -uroot -p"$DB_ROOT_PASS" --silent >/dev/null 2>&1; then
+		echo '[wordpress] db ready'
+		break
+	fi
+	sleep 2
+done
+
+echo '[wordpress] starting wordpress'
+docker rm -f %q >/dev/null 2>&1 || true
+docker run -d --restart unless-stopped --name %q --network %q \
+	-p 80:80 \
+	-v %q:/var/www/html/wp-content \
+	-e WORDPRESS_DB_HOST=%q:3306 \
+	-e WORDPRESS_DB_USER=wordpress \
+	-e WORDPRESS_DB_PASSWORD="$DB_PASS" \
+	-e WORDPRESS_DB_NAME=wordpress \
+	wordpress:latest
+
+echo '[wordpress] waiting for http'
+for i in $(seq 1 60); do
+	if curl -fsS --max-time 2 http://127.0.0.1/wp-login.php >/dev/null 2>&1; then
+		echo '[wordpress] http ready'
+		exit 0
+	fi
+	sleep 2
+done
+
+echo '[wordpress] http not ready (check docker logs)'
+docker ps --format '{{.Names}} {{.Image}} {{.Ports}}' || true
+docker logs --tail 200 %q || true
+docker logs --tail 200 %q || true
+exit 1
+`, dbPass, netName, dbVol, contentVol, dbName, dbName, netName, dbVol, dbName, wpName, wpName, netName, contentVol, dbName, wpName, dbName)
+
+	return script
+}
+
 // maybeGenerateEC2UserData handles user-data generation for EC2 run-instances commands.
 // If the user-data argument contains a placeholder (like <USER_DATA> or $USER_DATA),
 // it generates a proper startup script based on the available bindings.
@@ -2100,6 +2223,22 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 		strings.Contains(checkUserData, "<user_data>") ||
 		strings.TrimSpace(checkUserData) == "<USER_DATA>" ||
 		strings.TrimSpace(checkUserData) == "$USER_DATA"
+
+	// WordPress one-click deploy: always inject a deterministic user-data script.
+	questionForDetect := strings.TrimSpace(bindings["PLAN_QUESTION"])
+	repoURLForDetect := extractRepoURLFromQuestion(questionForDetect)
+	if wordpress.Detect(questionForDetect, repoURLForDetect) {
+		script := generateWordPressOneClickUserData(bindings)
+		encoded := base64.StdEncoding.EncodeToString([]byte(script))
+		newArgs := make([]string, len(args))
+		copy(newArgs, args)
+		if userDataIdx >= 0 {
+			newArgs[userDataIdx] = encoded
+		} else {
+			newArgs[userDataInlineIdx] = "--user-data=" + encoded
+		}
+		return newArgs
+	}
 
 	trimmedUserData := strings.TrimSpace(checkUserData)
 	looksLikeScript := strings.HasPrefix(trimmedUserData, "#!") || strings.Contains(strings.ToLower(trimmedUserData), "#!/bin/bash")
