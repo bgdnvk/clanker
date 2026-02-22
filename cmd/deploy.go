@@ -86,11 +86,7 @@ Examples:
 		case "openai":
 			apiKey = resolveOpenAIKey(openaiKey)
 		case "anthropic":
-			if anthropicKey != "" {
-				apiKey = anthropicKey
-			} else {
-				apiKey = viper.GetString("ai.providers.anthropic.api_key_env")
-			}
+			apiKey = resolveAnthropicKey(anthropicKey)
 		default:
 			apiKey = viper.GetString("ai.api_key")
 		}
@@ -189,6 +185,7 @@ Examples:
 
 		const maxValidationRounds = 5
 		var plan *maker.Plan
+		var lastPlanRaw string
 
 		for round := 0; round <= maxValidationRounds; round++ {
 			prompt := maker.PlanPromptWithMode(enrichedQuestion, false)
@@ -200,7 +197,25 @@ Examples:
 			cleaned := aiClient.CleanJSONResponse(resp)
 			plan, err = maker.ParsePlan(cleaned)
 			if err != nil {
-				return fmt.Errorf("failed to parse plan: %w", err)
+				lastPlanRaw = strings.TrimSpace(cleaned)
+				// Self-heal: the model sometimes returns markdown/code fences or omits commands.
+				// Retry by hardening instructions and asking again.
+				if round < maxValidationRounds {
+					logf("[deploy] warning: plan parse failed (%v), retrying (round %d/%d)...", err, round+1, maxValidationRounds)
+					enrichedQuestion += "\n\n" + strings.TrimSpace(`IMPORTANT: Your next response MUST be a single valid JSON object ONLY (no markdown, no backticks, no code fences, no prose).
+
+Schema requirements:
+- {\"version\": number, \"provider\": \"aws\", \"question\": string, \"summary\": string, \"commands\": [ { \"args\": [string,...], \"reason\": string } , ... ] }
+- commands MUST be a non-empty array.
+- args MUST be an array and MUST NOT include the leading program name (e.g. do NOT include \"aws\" as args[0]).
+`) + "\n"
+					continue
+				}
+				snippet := lastPlanRaw
+				if len(snippet) > 600 {
+					snippet = snippet[:600] + "…"
+				}
+				return fmt.Errorf("failed to parse plan after %d attempts: %w\nRaw (truncated): %s", maxValidationRounds+1, err, snippet)
 			}
 
 			plan.Provider = intel.Architecture.Provider

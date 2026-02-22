@@ -231,11 +231,7 @@ Examples:
 			case "openai":
 				apiKey = resolveOpenAIKey(openaiKey)
 			case "anthropic":
-				if anthropicKey != "" {
-					apiKey = anthropicKey
-				} else {
-					apiKey = viper.GetString("ai.providers.anthropic.api_key_env")
-				}
+				apiKey = resolveAnthropicKey(anthropicKey)
 			default:
 				apiKey = viper.GetString("ai.api_key")
 			}
@@ -279,11 +275,7 @@ Examples:
 			case "openai":
 				apiKey = resolveOpenAIKey(openaiKey)
 			case "anthropic":
-				if anthropicKey != "" {
-					apiKey = anthropicKey
-				} else {
-					apiKey = viper.GetString("ai.providers.anthropic.api_key_env")
-				}
+				apiKey = resolveAnthropicKey(anthropicKey)
 			default:
 				apiKey = viper.GetString("ai.api_key")
 			}
@@ -930,12 +922,7 @@ Format as a professional compliance table suitable for government security docum
 			case "openai":
 				apiKey = resolveOpenAIKey(openaiKey)
 			case "anthropic":
-				// Get Anthropic API key from flag or config
-				if anthropicKey != "" {
-					apiKey = anthropicKey
-				} else {
-					apiKey = viper.GetString("ai.providers.anthropic.api_key_env")
-				}
+				apiKey = resolveAnthropicKey(anthropicKey)
 			default:
 				// Default/other providers
 				apiKey = viper.GetString("ai.api_key")
@@ -972,12 +959,7 @@ Format as a professional compliance table suitable for government security docum
 			case "openai":
 				apiKey = resolveOpenAIKey(openaiKey)
 			case "anthropic":
-				// Get Anthropic API key from flag or config
-				if anthropicKey != "" {
-					apiKey = anthropicKey
-				} else {
-					apiKey = viper.GetString("ai.providers.anthropic.api_key_env")
-				}
+				apiKey = resolveAnthropicKey(anthropicKey)
 			default:
 				// Default/other providers
 				apiKey = viper.GetString("ai.api_key")
@@ -1100,6 +1082,24 @@ func resolveOpenAIKey(flagValue string) string {
 		}
 	}
 	if envVal := os.Getenv("OPENAI_API_KEY"); envVal != "" {
+		return envVal
+	}
+	return ""
+}
+
+func resolveAnthropicKey(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if key := viper.GetString("ai.providers.anthropic.api_key"); key != "" {
+		return key
+	}
+	if envName := viper.GetString("ai.providers.anthropic.api_key_env"); envName != "" {
+		if envVal := os.Getenv(envName); envVal != "" {
+			return envVal
+		}
+	}
+	if envVal := os.Getenv("ANTHROPIC_API_KEY"); envVal != "" {
 		return envVal
 	}
 	return ""

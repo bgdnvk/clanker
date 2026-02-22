@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bgdnvk/clanker/internal/openclaw"
+	"github.com/bgdnvk/clanker/internal/wordpress"
 )
 
 type postDeployFixConfig struct {
@@ -74,6 +75,38 @@ func maybeAutoFixUnhealthyALBTargets(ctx context.Context, bindings map[string]st
 	}
 
 	isOpenClaw := openclaw.Detect(question, extractRepoURLFromQuestion(question))
+	isWordPress := wordpress.Detect(question, extractRepoURLFromQuestion(question))
+	if isWordPress {
+		wpName := wordpress.WPContainerName(bindings)
+		dbName := wordpress.DBContainerName(bindings)
+
+		cmds := make([]string, 0, 24)
+		cmds = append(cmds, ssmEnsureDockerCommands()...)
+		cmds = append(cmds,
+			"echo '[wordpress] ssm remediation: restart containers'",
+			"docker ps --format '{{.ID}} {{.Image}} {{.Ports}} {{.Names}}' || true",
+			fmt.Sprintf("docker restart %s || true", dbName),
+			fmt.Sprintf("docker restart %s || true", wpName),
+			"sleep 3",
+			"echo '[wordpress] curl localhost'",
+			"curl -fsS --max-time 2 http://127.0.0.1/wp-login.php >/dev/null 2>&1 && echo CLANKER_WP_CURL_OK=1 || echo CLANKER_WP_CURL_OK=0",
+			fmt.Sprintf("docker logs --tail 120 %s || true", dbName),
+			fmt.Sprintf("docker logs --tail 120 %s || true", wpName),
+		)
+
+		restartOut, restartErr := runSSMShellScript(ctx, instanceID, opts.Profile, opts.Region, cmds, opts.Writer)
+		if restartOut != "" {
+			_, _ = io.WriteString(opts.Writer, "[health][ssm] wordpress restart output:\n"+restartOut+"\n")
+		}
+		if restartErr != nil {
+			return fmt.Errorf("auto-fix wordpress restart failed: %w", restartErr)
+		}
+
+		if err := WaitForALBHealthy(ctx, tgARN, opts.Profile, opts.Region, opts.Writer, 6*time.Minute); err != nil {
+			return fmt.Errorf("auto-fix attempted but wordpress targets still unhealthy (alb=%s): %w", albDNS, err)
+		}
+		return nil
+	}
 
 	diagOut, diagErr := runSSMShellScript(ctx, instanceID, opts.Profile, opts.Region, ssmDiagnosticCommands(appPort, opts.Region, accountID, image), opts.Writer)
 	if diagErr != nil {

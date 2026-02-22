@@ -3,6 +3,7 @@ package ai
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -117,10 +118,45 @@ type Choice struct {
 	Message Message `json:"message"`
 }
 
+func looksLikeEnvVarName(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) < 8 {
+		return false
+	}
+	// Must be all caps/underscores/digits and start with a letter.
+	for i, r := range s {
+		if i == 0 {
+			if r < 'A' || r > 'Z' {
+				return false
+			}
+			continue
+		}
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func resolveEnvVarKeyPointer(apiKey string) string {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return ""
+	}
+	if !looksLikeEnvVarName(apiKey) {
+		return apiKey
+	}
+	if v := strings.TrimSpace(os.Getenv(apiKey)); v != "" {
+		return v
+	}
+	return apiKey
+}
+
 func NewClient(provider, apiKey string, debug bool, aiProfile ...string) *Client {
 	client := &Client{
 		provider: provider,
-		apiKey:   apiKey,
+		apiKey:   resolveEnvVarKeyPointer(apiKey),
 		debug:    debug,
 	}
 
@@ -813,6 +849,13 @@ func (c *Client) askAnthropic(ctx context.Context, prompt string) (string, error
 		return "", fmt.Errorf("Anthropic API key not configured")
 	}
 
+	keyLen := len(strings.TrimSpace(c.apiKey))
+	keyHash := ""
+	{
+		sum := sha256.Sum256([]byte(strings.TrimSpace(c.apiKey)))
+		keyHash = fmt.Sprintf("%x", sum)[:8]
+	}
+
 	model := strings.TrimSpace(profileLLMCall.Model)
 	if model == "" {
 		latest, lErr := c.getLatestAnthropicModelID(ctx)
@@ -863,7 +906,7 @@ func (c *Client) askAnthropic(ctx context.Context, prompt string) (string, error
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("Anthropic API request failed with status %d: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("Anthropic API request failed with status %d (keyLen=%d keyHash=%s): %s", resp.StatusCode, keyLen, keyHash, string(body))
 	}
 
 	var parsed anthropicResponse
@@ -1032,44 +1075,49 @@ func (c *Client) getSpecificGitHubData(ctx context.Context, question string) (st
 	return result.String(), nil
 }
 
-// extractAndCleanJSON extracts and cleans JSON from Claude's response
+func stripMarkdownCodeFences(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	lines := strings.Split(s, "\n")
+	out := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		t := strings.TrimSpace(ln)
+		if strings.HasPrefix(t, "```") {
+			continue
+		}
+		out = append(out, ln)
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+// extractAndCleanJSON extracts the first valid JSON value from an LLM response.
+// It is robust against braces inside JSON strings and markdown code fences.
 func (c *Client) extractAndCleanJSON(response string) string {
-	// Find the JSON object in the response
-	start := strings.Index(response, "{")
-	if start == -1 {
-		return response // Return original if no JSON found
+	s := strings.TrimSpace(response)
+	if s == "" {
+		return s
 	}
 
-	// Find the matching closing brace
-	braceCount := 0
-	end := -1
+	// Remove markdown code fences, which often introduce leading backticks.
+	s = stripMarkdownCodeFences(s)
 
-findEnd:
-	for i := start; i < len(response); i++ {
-		switch response[i] {
-		case '{':
-			braceCount++
-		case '}':
-			braceCount--
-			if braceCount == 0 {
-				end = i + 1
-				break findEnd
+	// Scan for a JSON object/array start and attempt decoding from there.
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if ch != '{' && ch != '[' {
+			continue
+		}
+		dec := json.NewDecoder(strings.NewReader(s[i:]))
+		dec.UseNumber()
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err == nil {
+			trimmed := strings.TrimSpace(string(raw))
+			if trimmed != "" {
+				return trimmed
 			}
 		}
 	}
 
-	if end == -1 {
-		return response // Return original if no complete JSON found
-	}
-
-	// Extract the JSON portion
-	jsonStr := response[start:end]
-
-	// Clean common problematic characters that break JSON parsing
-	// Replace backticks with regular quotes in JSON strings
-	jsonStr = strings.ReplaceAll(jsonStr, "`", "'")
-
-	return jsonStr
+	return strings.TrimSpace(response)
 }
 
 // AskPrompt sends a raw prompt to the configured provider without adding additional wrapper context.

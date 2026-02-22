@@ -1,6 +1,9 @@
 package maker
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 func PlanPrompt(question string) string {
 	return PlanPromptWithMode(question, false)
@@ -10,6 +13,89 @@ func PlanPromptWithMode(question string, destroyer bool) string {
 	destructiveRule := "- Avoid any destructive operations (delete/remove/terminate/destroy)."
 	if destroyer {
 		destructiveRule = "- Destructive operations are allowed ONLY if the user explicitly asked for deletion/teardown."
+	}
+
+	lowerQ := strings.ToLower(strings.TrimSpace(question))
+	wpExample := ""
+	if strings.Contains(lowerQ, "docker-library/wordpress") || strings.Contains(lowerQ, "wordpress one-click") || strings.Contains(lowerQ, "one click deploy wordpress") {
+		wpExample = strings.TrimSpace(`
+
+WordPress one-click deploy (IMPORTANT):
+- Do NOT suggest Lightsail for this workflow.
+- Use AWS EC2 + ALB.
+- Run Docker Hub images (wordpress:latest + mariadb:11) on the EC2 instance.
+- ALB target group health check path must be /wp-login.php.
+- WordPress must be reachable on port 80.
+
+Example plan shape (JSON ONLY in your response; this is just an example):
+{
+  "version": 1,
+  "createdAt": "2026-01-01T00:00:00Z",
+  "provider": "aws",
+  "question": "...",
+  "summary": "EC2 + ALB WordPress (Docker Hub) with persistent volumes",
+  "commands": [
+    {
+      "args": ["aws", "ec2", "describe-vpcs", "--filters", "Name=isDefault,Values=true"],
+      "reason": "Find the default VPC (or use existing VPC from context)",
+      "produces": {"VPC_ID": "$.Vpcs[0].VpcId"}
+    },
+    {
+      "args": ["aws", "ec2", "describe-subnets", "--filters", "Name=vpc-id,Values=<VPC_ID>", "Name=default-for-az,Values=true"],
+      "reason": "Pick two default subnets in different AZs for the ALB",
+      "produces": {"SUBNET_1": "$.Subnets[0].SubnetId", "SUBNET_2": "$.Subnets[1].SubnetId"}
+    },
+    {
+      "args": ["aws", "ssm", "get-parameter", "--name", "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"],
+      "reason": "Resolve a stable Amazon Linux 2023 AMI id",
+      "produces": {"AMI_ID": "$.Parameter.Value"}
+    },
+    {
+      "args": ["aws", "ec2", "create-security-group", "--group-name", "wp-alb-sg", "--description", "ALB SG", "--vpc-id", "<VPC_ID>"],
+      "reason": "Security group for the public ALB",
+      "produces": {"ALB_SG_ID": "$.GroupId"}
+    },
+    {
+      "args": ["aws", "ec2", "authorize-security-group-ingress", "--group-id", "<ALB_SG_ID>", "--ip-permissions", "IpProtocol=tcp,FromPort=80,ToPort=80,IpRanges=[{CidrIp=0.0.0.0/0}]"],
+      "reason": "Allow HTTP to the ALB"
+    },
+    {
+      "args": ["aws", "ec2", "create-security-group", "--group-name", "wp-ec2-sg", "--description", "EC2 SG", "--vpc-id", "<VPC_ID>"],
+      "reason": "Security group for the EC2 instance running Docker",
+      "produces": {"EC2_SG_ID": "$.GroupId"}
+    },
+    {
+      "args": ["aws", "ec2", "authorize-security-group-ingress", "--group-id", "<EC2_SG_ID>", "--ip-permissions", "IpProtocol=tcp,FromPort=80,ToPort=80,UserIdGroupPairs=[{GroupId=<ALB_SG_ID>}]"],
+      "reason": "Allow ALB to reach WordPress on port 80"
+    },
+    {
+      "args": ["aws", "elbv2", "create-target-group", "--name", "wp-tg", "--protocol", "HTTP", "--port", "80", "--target-type", "instance", "--vpc-id", "<VPC_ID>", "--health-check-path", "/wp-login.php", "--matcher", "HttpCode=200-399"],
+      "reason": "Target group for WordPress",
+      "produces": {"TG_ARN": "$.TargetGroups[0].TargetGroupArn"}
+    },
+    {
+      "args": ["aws", "elbv2", "create-load-balancer", "--name", "wp-alb", "--type", "application", "--scheme", "internet-facing", "--subnets", "<SUBNET_1>", "<SUBNET_2>", "--security-groups", "<ALB_SG_ID>"],
+      "reason": "Public ALB",
+      "produces": {"ALB_ARN": "$.LoadBalancers[0].LoadBalancerArn", "ALB_DNS": "$.LoadBalancers[0].DNSName"}
+    },
+    {
+      "args": ["aws", "elbv2", "create-listener", "--load-balancer-arn", "<ALB_ARN>", "--protocol", "HTTP", "--port", "80", "--default-actions", "Type=forward,TargetGroupArn=<TG_ARN>"],
+      "reason": "Forward HTTP to target group"
+    },
+    {
+      "args": ["aws", "ec2", "run-instances", "--image-id", "<AMI_ID>", "--instance-type", "t3.small", "--subnet-id", "<SUBNET_1>", "--security-group-ids", "<EC2_SG_ID>", "--user-data", "<USER_DATA>", "--tag-specifications", "ResourceType=instance,Tags=[{Key=Name,Value=wordpress}]"],
+      "reason": "Launch EC2 with Docker bootstrap (the runner/maker will generate <USER_DATA> to run mariadb + wordpress and use WORDPRESS_DB_PASSWORD)",
+      "produces": {"INSTANCE_ID": "$.Instances[0].InstanceId"}
+    },
+    {
+      "args": ["aws", "elbv2", "register-targets", "--target-group-arn", "<TG_ARN>", "--targets", "Id=<INSTANCE_ID>,Port=80"],
+      "reason": "Attach instance to ALB target group"
+    }
+  ],
+  "notes": ["Visit http://<ALB_DNS>/ after targets are healthy"]
+}
+`)
+		wpExample = "\n\n" + wpExample + "\n\n"
 	}
 
 	return fmt.Sprintf(`You are an infrastructure maker planner.
@@ -95,6 +181,8 @@ Service guidance (when relevant to the user request):
 - Queued/batch jobs: use AWS Batch (compute environment + job queue + job definition).
 - GenAI: use Amazon Bedrock (and Bedrock Agents if needed).
 - Traditional ML training/hosting: use SageMaker (model, endpoint config, endpoint) when requested.
+
+%s
 
 AWS CLI syntax reference (use these exact patterns):
 
@@ -251,7 +339,7 @@ AWS Lambda code packaging:
 - If you need to reference the AWS account id, use the literal token "<YOUR_ACCOUNT_ID>" in ARNs (the runner will substitute it).
 
 User request:
-%q`, destructiveRule, question)
+%q`, wpExample, destructiveRule, question)
 }
 
 func AzurePlanPrompt(question string) string {
