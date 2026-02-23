@@ -1,9 +1,17 @@
 package cmd
 
 import (
+	"bufio"
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -186,8 +194,625 @@ var configShowCmd = &cobra.Command{
 	},
 }
 
+var configScanCmd = &cobra.Command{
+	Use:   "scan",
+	Short: "Scan system for available credentials",
+	Long: `Detect AWS profiles, GCP projects, Azure subscriptions, Cloudflare, and LLM API keys.
+
+This command scans the local system for available cloud provider credentials
+and API keys that can be used with clanker.
+
+You can specify custom file paths and environment variable keys to scan
+in addition to the default locations.
+
+Examples:
+  clanker config scan
+  clanker config scan --output json
+  clanker config scan --aws-paths ~/.custom/aws-creds,~/.another/credentials
+  clanker config scan --gcp-paths ~/.config/gcloud/custom-creds.json
+  clanker config scan --llm-env MY_OPENAI_KEY,MY_ANTHROPIC_KEY`,
+	RunE: runConfigScan,
+}
+
+// CustomScanConfig holds custom paths and env keys for scanning
+type CustomScanConfig struct {
+	AWSPaths      []string
+	GCPPaths      []string
+	CloudflareEnv []string
+	LLMEnv        []string
+}
+
+// ScanResult holds all detected credentials
+type ScanResult struct {
+	AWS        AWSCredentialsScan        `json:"aws"`
+	GCP        GCPCredentialsScan        `json:"gcp"`
+	Azure      AzureCredentialsScan      `json:"azure"`
+	Cloudflare CloudflareCredentialsScan `json:"cloudflare"`
+	LLM        LLMCredentialsScan        `json:"llm"`
+}
+
+// AWSCredentialsScan holds detected AWS profiles
+type AWSCredentialsScan struct {
+	Profiles []AWSProfileInfo `json:"profiles"`
+	Error    string           `json:"error,omitempty"`
+}
+
+// AWSProfileInfo holds info about a single AWS profile
+type AWSProfileInfo struct {
+	Name   string `json:"name"`
+	Region string `json:"region,omitempty"`
+	Source string `json:"source"`
+}
+
+// GCPCredentialsScan holds detected GCP credentials
+type GCPCredentialsScan struct {
+	HasADC       bool     `json:"hasADC"`
+	ADCPath      string   `json:"adcPath,omitempty"`
+	Projects     []string `json:"projects,omitempty"`
+	CustomPaths  []string `json:"customPaths,omitempty"`
+	CLIAvailable bool     `json:"cliAvailable"`
+	Error        string   `json:"error,omitempty"`
+}
+
+// AzureCredentialsScan holds detected Azure subscriptions
+type AzureCredentialsScan struct {
+	CLIAvailable  bool                    `json:"cliAvailable"`
+	Subscriptions []AzureSubscriptionInfo `json:"subscriptions,omitempty"`
+	Error         string                  `json:"error,omitempty"`
+}
+
+// AzureSubscriptionInfo holds info about an Azure subscription
+type AzureSubscriptionInfo struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	State     string `json:"state,omitempty"`
+	IsDefault bool   `json:"isDefault,omitempty"`
+}
+
+// CloudflareCredentialsScan holds detected Cloudflare credentials
+type CloudflareCredentialsScan struct {
+	HasToken      bool     `json:"hasToken"`
+	HasAccountID  bool     `json:"hasAccountId"`
+	CustomEnvKeys []string `json:"customEnvKeys,omitempty"`
+	Error         string   `json:"error,omitempty"`
+}
+
+// LLMCredentialsScan holds detected LLM API keys
+type LLMCredentialsScan struct {
+	OpenAI        LLMKeyStatus `json:"openai"`
+	Anthropic     LLMKeyStatus `json:"anthropic"`
+	Gemini        LLMKeyStatus `json:"gemini"`
+	CustomEnvKeys []string     `json:"customEnvKeys,omitempty"`
+}
+
+// LLMKeyStatus indicates whether an LLM key was detected
+type LLMKeyStatus struct {
+	HasKey bool   `json:"hasKey"`
+	Error  string `json:"error,omitempty"`
+}
+
+func runConfigScan(cmd *cobra.Command, args []string) error {
+	outputFormat, _ := cmd.Flags().GetString("output")
+	awsPaths, _ := cmd.Flags().GetStringSlice("aws-paths")
+	gcpPaths, _ := cmd.Flags().GetStringSlice("gcp-paths")
+	cloudflareEnv, _ := cmd.Flags().GetStringSlice("cloudflare-env")
+	llmEnv, _ := cmd.Flags().GetStringSlice("llm-env")
+
+	customConfig := CustomScanConfig{
+		AWSPaths:      awsPaths,
+		GCPPaths:      gcpPaths,
+		CloudflareEnv: cloudflareEnv,
+		LLMEnv:        llmEnv,
+	}
+
+	result := ScanResult{
+		AWS:        scanAWSProfiles(customConfig),
+		GCP:        scanGCPCredentials(customConfig),
+		Azure:      scanAzureSubscriptions(),
+		Cloudflare: scanCloudflareCredentials(customConfig),
+		LLM:        scanLLMKeys(customConfig),
+	}
+
+	if outputFormat == "json" {
+		return json.NewEncoder(os.Stdout).Encode(result)
+	}
+
+	// Pretty print for human consumption
+	printScanResult(result)
+	return nil
+}
+
+func printScanResult(result ScanResult) {
+	fmt.Println("=== System Credentials Scan ===")
+	fmt.Println()
+
+	// AWS
+	fmt.Println("AWS Profiles:")
+	if len(result.AWS.Profiles) == 0 {
+		fmt.Println("  No profiles detected")
+	} else {
+		for _, p := range result.AWS.Profiles {
+			region := p.Region
+			if region == "" {
+				region = "(no region)"
+			}
+			fmt.Printf("  - %s [%s] (%s)\n", p.Name, region, p.Source)
+		}
+	}
+	if result.AWS.Error != "" {
+		fmt.Printf("  Error: %s\n", result.AWS.Error)
+	}
+	fmt.Println()
+
+	// GCP
+	fmt.Println("GCP:")
+	if result.GCP.HasADC {
+		fmt.Printf("  Application Default Credentials: Found at %s\n", result.GCP.ADCPath)
+	} else {
+		fmt.Println("  Application Default Credentials: Not found")
+	}
+	if len(result.GCP.CustomPaths) > 0 {
+		fmt.Println("  Custom credential files found:")
+		for _, p := range result.GCP.CustomPaths {
+			fmt.Printf("    - %s\n", p)
+		}
+	}
+	fmt.Printf("  gcloud CLI: %v\n", result.GCP.CLIAvailable)
+	if len(result.GCP.Projects) > 0 {
+		fmt.Printf("  Projects: %s\n", strings.Join(result.GCP.Projects, ", "))
+	}
+	if result.GCP.Error != "" {
+		fmt.Printf("  Error: %s\n", result.GCP.Error)
+	}
+	fmt.Println()
+
+	// Azure
+	fmt.Println("Azure:")
+	fmt.Printf("  az CLI: %v\n", result.Azure.CLIAvailable)
+	if len(result.Azure.Subscriptions) == 0 {
+		fmt.Println("  Subscriptions: None detected")
+	} else {
+		fmt.Println("  Subscriptions:")
+		for _, s := range result.Azure.Subscriptions {
+			defaultMark := ""
+			if s.IsDefault {
+				defaultMark = " (default)"
+			}
+			fmt.Printf("    - %s (%s)%s\n", s.Name, s.ID, defaultMark)
+		}
+	}
+	if result.Azure.Error != "" {
+		fmt.Printf("  Error: %s\n", result.Azure.Error)
+	}
+	fmt.Println()
+
+	// Cloudflare
+	fmt.Println("Cloudflare:")
+	fmt.Printf("  API Token (env): %v\n", result.Cloudflare.HasToken)
+	fmt.Printf("  Account ID (env): %v\n", result.Cloudflare.HasAccountID)
+	if len(result.Cloudflare.CustomEnvKeys) > 0 {
+		fmt.Printf("  Custom env keys found: %s\n", strings.Join(result.Cloudflare.CustomEnvKeys, ", "))
+	}
+	fmt.Println()
+
+	// LLM Keys
+	fmt.Println("LLM API Keys (from environment):")
+	fmt.Printf("  OpenAI: %v\n", result.LLM.OpenAI.HasKey)
+	fmt.Printf("  Anthropic: %v\n", result.LLM.Anthropic.HasKey)
+	fmt.Printf("  Gemini: %v\n", result.LLM.Gemini.HasKey)
+	if len(result.LLM.CustomEnvKeys) > 0 {
+		fmt.Printf("  Custom env keys found: %s\n", strings.Join(result.LLM.CustomEnvKeys, ", "))
+	}
+}
+
+func scanAWSProfiles(customConfig CustomScanConfig) AWSCredentialsScan {
+	result := AWSCredentialsScan{
+		Profiles: []AWSProfileInfo{},
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		result.Error = "could not determine home directory"
+		return result
+	}
+
+	// Default paths
+	credPath := filepath.Join(home, ".aws", "credentials")
+	configPath := filepath.Join(home, ".aws", "config")
+
+	credProfiles := parseAWSINIFile(credPath, "credentials")
+	configProfiles := parseAWSINIFile(configPath, "config")
+
+	profileMap := make(map[string]*AWSProfileInfo)
+
+	for _, p := range credProfiles {
+		profileMap[p.Name] = &AWSProfileInfo{
+			Name:   p.Name,
+			Region: p.Region,
+			Source: p.Source,
+		}
+	}
+
+	for _, p := range configProfiles {
+		if existing, ok := profileMap[p.Name]; ok {
+			if existing.Region == "" && p.Region != "" {
+				existing.Region = p.Region
+			}
+		} else {
+			profileMap[p.Name] = &AWSProfileInfo{
+				Name:   p.Name,
+				Region: p.Region,
+				Source: p.Source,
+			}
+		}
+	}
+
+	// Scan custom AWS paths
+	for _, customPath := range customConfig.AWSPaths {
+		expandedPath := expandTilde(customPath, home)
+		customProfiles := parseAWSINIFile(expandedPath, "custom:"+customPath)
+		for _, p := range customProfiles {
+			if _, exists := profileMap[p.Name]; !exists {
+				profileMap[p.Name] = &AWSProfileInfo{
+					Name:   p.Name,
+					Region: p.Region,
+					Source: p.Source,
+				}
+			}
+		}
+	}
+
+	for _, p := range profileMap {
+		result.Profiles = append(result.Profiles, *p)
+	}
+
+	return result
+}
+
+// expandTilde expands ~ to home directory in paths
+func expandTilde(path string, home string) string {
+	if strings.HasPrefix(path, "~/") {
+		return filepath.Join(home, path[2:])
+	}
+	if path == "~" {
+		return home
+	}
+	return path
+}
+
+func parseAWSINIFile(path string, source string) []AWSProfileInfo {
+	profiles := []AWSProfileInfo{}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return profiles
+	}
+	defer file.Close()
+
+	sectionPattern := regexp.MustCompile(`^\s*\[([^\]]+)\]\s*$`)
+	kvPattern := regexp.MustCompile(`^\s*([^=\s]+)\s*=\s*(.+?)\s*$`)
+
+	var currentProfile *AWSProfileInfo
+	scanner := bufio.NewScanner(file)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if matches := sectionPattern.FindStringSubmatch(line); len(matches) == 2 {
+			if currentProfile != nil {
+				profiles = append(profiles, *currentProfile)
+			}
+
+			sectionName := strings.TrimSpace(matches[1])
+			profileName := sectionName
+
+			if source == "config" && strings.HasPrefix(sectionName, "profile ") {
+				profileName = strings.TrimPrefix(sectionName, "profile ")
+			}
+
+			currentProfile = &AWSProfileInfo{
+				Name:   profileName,
+				Source: source,
+			}
+			continue
+		}
+
+		if currentProfile != nil {
+			if matches := kvPattern.FindStringSubmatch(line); len(matches) == 3 {
+				key := strings.ToLower(strings.TrimSpace(matches[1]))
+				value := strings.TrimSpace(matches[2])
+
+				if key == "region" {
+					currentProfile.Region = value
+				}
+			}
+		}
+	}
+
+	if currentProfile != nil {
+		profiles = append(profiles, *currentProfile)
+	}
+
+	return profiles
+}
+
+func scanGCPCredentials(customConfig CustomScanConfig) GCPCredentialsScan {
+	result := GCPCredentialsScan{
+		Projects:    []string{},
+		CustomPaths: []string{},
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		result.Error = "could not determine home directory"
+		return result
+	}
+
+	// Default ADC path
+	adcPath := filepath.Join(home, ".config", "gcloud", "application_default_credentials.json")
+	if _, err := os.Stat(adcPath); err == nil {
+		result.HasADC = true
+		result.ADCPath = adcPath
+	}
+
+	// Check custom GCP paths
+	for _, customPath := range customConfig.GCPPaths {
+		expandedPath := expandTilde(customPath, home)
+		if _, err := os.Stat(expandedPath); err == nil {
+			result.CustomPaths = append(result.CustomPaths, expandedPath)
+		}
+	}
+
+	gcloudPath, err := findGcloudBinary()
+	if err != nil {
+		result.CLIAvailable = false
+		return result
+	}
+	result.CLIAvailable = true
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, gcloudPath, "config", "get-value", "project")
+	output, err := cmd.Output()
+	if err == nil {
+		project := strings.TrimSpace(string(output))
+		if project != "" && project != "(unset)" {
+			result.Projects = append(result.Projects, project)
+		}
+	}
+
+	cmd = exec.CommandContext(ctx, gcloudPath, "config", "configurations", "list", "--format=json")
+	output, err = cmd.Output()
+	if err == nil {
+		var configs []struct {
+			Name       string `json:"name"`
+			IsActive   bool   `json:"is_active"`
+			Properties struct {
+				Core struct {
+					Project string `json:"project"`
+				} `json:"core"`
+			} `json:"properties"`
+		}
+		if json.Unmarshal(output, &configs) == nil {
+			for _, cfg := range configs {
+				if cfg.Properties.Core.Project != "" {
+					found := false
+					for _, p := range result.Projects {
+						if p == cfg.Properties.Core.Project {
+							found = true
+							break
+						}
+					}
+					if !found {
+						result.Projects = append(result.Projects, cfg.Properties.Core.Project)
+					}
+				}
+			}
+		}
+	}
+
+	return result
+}
+
+func findGcloudBinary() (string, error) {
+	names := []string{"gcloud"}
+	if runtime.GOOS == "windows" {
+		names = []string{"gcloud.cmd", "gcloud.exe", "gcloud"}
+	}
+
+	for _, name := range names {
+		if p, err := exec.LookPath(name); err == nil {
+			return p, nil
+		}
+	}
+
+	home, _ := os.UserHomeDir()
+	var candidates []string
+
+	switch runtime.GOOS {
+	case "darwin":
+		candidates = []string{
+			"/opt/homebrew/bin/gcloud",
+			"/usr/local/bin/gcloud",
+		}
+	case "linux":
+		candidates = []string{
+			"/usr/bin/gcloud",
+			"/usr/local/bin/gcloud",
+			"/snap/bin/gcloud",
+		}
+		if home != "" {
+			candidates = append(candidates, filepath.Join(home, "google-cloud-sdk", "bin", "gcloud"))
+		}
+	case "windows":
+		programFiles := os.Getenv("ProgramFiles")
+		programFilesX86 := os.Getenv("ProgramFiles(x86)")
+		if programFiles != "" {
+			candidates = append(candidates, filepath.Join(programFiles, "Google", "Cloud SDK", "google-cloud-sdk", "bin", "gcloud.cmd"))
+		}
+		if programFilesX86 != "" {
+			candidates = append(candidates, filepath.Join(programFilesX86, "Google", "Cloud SDK", "google-cloud-sdk", "bin", "gcloud.cmd"))
+		}
+		if home != "" {
+			candidates = append(candidates, filepath.Join(home, "AppData", "Local", "Google", "Cloud SDK", "google-cloud-sdk", "bin", "gcloud.cmd"))
+		}
+	}
+
+	for _, p := range candidates {
+		if p == "" {
+			continue
+		}
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p, nil
+		}
+	}
+
+	return "", os.ErrNotExist
+}
+
+func scanAzureSubscriptions() AzureCredentialsScan {
+	result := AzureCredentialsScan{
+		Subscriptions: []AzureSubscriptionInfo{},
+	}
+
+	azPath, err := findAzureCLI()
+	if err != nil {
+		result.CLIAvailable = false
+		return result
+	}
+	result.CLIAvailable = true
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, azPath, "account", "list", "--output", "json")
+	output, err := cmd.Output()
+	if err != nil {
+		result.Error = "failed to list subscriptions (may need az login)"
+		return result
+	}
+
+	var subs []struct {
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		State     string `json:"state"`
+		IsDefault bool   `json:"isDefault"`
+	}
+
+	if json.Unmarshal(output, &subs) != nil {
+		result.Error = "failed to parse subscription list"
+		return result
+	}
+
+	for _, sub := range subs {
+		result.Subscriptions = append(result.Subscriptions, AzureSubscriptionInfo{
+			ID:        sub.ID,
+			Name:      sub.Name,
+			State:     sub.State,
+			IsDefault: sub.IsDefault,
+		})
+	}
+
+	return result
+}
+
+func findAzureCLI() (string, error) {
+	names := []string{"az"}
+	if runtime.GOOS == "windows" {
+		names = []string{"az.cmd", "az.exe", "az"}
+	}
+
+	for _, name := range names {
+		if p, err := exec.LookPath(name); err == nil {
+			return p, nil
+		}
+	}
+
+	home, _ := os.UserHomeDir()
+	var candidates []string
+
+	switch runtime.GOOS {
+	case "darwin":
+		candidates = []string{
+			"/opt/homebrew/bin/az",
+			"/usr/local/bin/az",
+		}
+	case "linux":
+		candidates = []string{
+			"/usr/bin/az",
+			"/usr/local/bin/az",
+		}
+	case "windows":
+		programFiles := os.Getenv("ProgramFiles")
+		programFilesX86 := os.Getenv("ProgramFiles(x86)")
+		if programFiles != "" {
+			candidates = append(candidates, filepath.Join(programFiles, "Microsoft SDKs", "Azure", "CLI2", "wbin", "az.cmd"))
+		}
+		if programFilesX86 != "" {
+			candidates = append(candidates, filepath.Join(programFilesX86, "Microsoft SDKs", "Azure", "CLI2", "wbin", "az.cmd"))
+		}
+		if home != "" {
+			candidates = append(candidates, filepath.Join(home, "AppData", "Local", "Programs", "Azure CLI", "az.cmd"))
+		}
+	}
+
+	for _, p := range candidates {
+		if p == "" {
+			continue
+		}
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p, nil
+		}
+	}
+
+	return "", os.ErrNotExist
+}
+
+func scanCloudflareCredentials(customConfig CustomScanConfig) CloudflareCredentialsScan {
+	result := CloudflareCredentialsScan{
+		HasToken:      os.Getenv("CLOUDFLARE_API_TOKEN") != "",
+		HasAccountID:  os.Getenv("CLOUDFLARE_ACCOUNT_ID") != "",
+		CustomEnvKeys: []string{},
+	}
+
+	// Check custom env keys for Cloudflare
+	for _, envKey := range customConfig.CloudflareEnv {
+		if os.Getenv(envKey) != "" {
+			result.CustomEnvKeys = append(result.CustomEnvKeys, envKey)
+		}
+	}
+
+	return result
+}
+
+func scanLLMKeys(customConfig CustomScanConfig) LLMCredentialsScan {
+	result := LLMCredentialsScan{
+		OpenAI:        LLMKeyStatus{HasKey: os.Getenv("OPENAI_API_KEY") != ""},
+		Anthropic:     LLMKeyStatus{HasKey: os.Getenv("ANTHROPIC_API_KEY") != ""},
+		Gemini:        LLMKeyStatus{HasKey: os.Getenv("GEMINI_API_KEY") != ""},
+		CustomEnvKeys: []string{},
+	}
+
+	// Check custom LLM env keys
+	for _, envKey := range customConfig.LLMEnv {
+		if os.Getenv(envKey) != "" {
+			result.CustomEnvKeys = append(result.CustomEnvKeys, envKey)
+		}
+	}
+
+	return result
+}
+
 func init() {
 	rootCmd.AddCommand(configCmd)
 	configCmd.AddCommand(configInitCmd)
 	configCmd.AddCommand(configShowCmd)
+	configCmd.AddCommand(configScanCmd)
+
+	configScanCmd.Flags().StringP("output", "o", "", "Output format (json for JSON output)")
+	configScanCmd.Flags().StringSlice("aws-paths", []string{}, "Custom AWS credential file paths to scan (comma-separated)")
+	configScanCmd.Flags().StringSlice("gcp-paths", []string{}, "Custom GCP credential file paths to scan (comma-separated)")
+	configScanCmd.Flags().StringSlice("cloudflare-env", []string{}, "Custom Cloudflare environment variable keys to check (comma-separated)")
+	configScanCmd.Flags().StringSlice("llm-env", []string{}, "Custom LLM API key environment variables to check (comma-separated)")
 }
