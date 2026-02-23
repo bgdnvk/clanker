@@ -131,6 +131,9 @@ Rules for commands:
 - Do NOT include shell operators, pipes, redirects, or subshells.
 - Do NOT include --profile, --region, or --no-cli-pager (the runner injects them).
 - Prefer idempotent operations where possible.
+- If the user request is ambiguous or missing required details, output a DISCOVERY-ONLY plan:
+  - Still output a NON-EMPTY commands array.
+  - Use READ-ONLY commands to gather missing inputs (examples: aws sts get-caller-identity, aws ec2 describe-vpcs, aws ec2 describe-subnets, aws iam get-user, aws organizations describe-organization).
 - Region-awareness (CRITICAL):
   - If a command targets a resource by ARN, keep that ARN and do NOT transform it.
   - When mixing regions (for example us-east-1 + us-east-2), keep commands grouped by region in contiguous blocks.
@@ -378,11 +381,15 @@ Constraints:
 }
 
 Rules for commands:
+- The "commands" array MUST contain at least 1 command.
 - Provide args as an array; do NOT provide a single string.
 - Commands MUST be Azure CLI only. Every command args MUST start with "az".
 - Do NOT include any non-az programs (no python/node/bash/curl/terraform/etc).
 - Do NOT include shell operators, pipes, redirects, or subshells.
 - Prefer idempotent operations where possible.
+- If the user request is ambiguous or missing required details, output a DISCOVERY-ONLY plan:
+  - Still output a NON-EMPTY commands array.
+  - Use READ-ONLY commands to gather missing inputs (examples: az account show, az group list, az resource list, az role assignment list).
 %s
 
 Placeholders and bindings (CRITICAL):
@@ -461,11 +468,15 @@ Constraints:
 }
 
 Rules for commands:
+- The "commands" array MUST contain at least 1 command.
 - Provide args as an array; do NOT provide a single string.
 - Commands MUST be gcloud only. Every command args MUST start with "gcloud".
 - Do NOT include any non-gcloud programs (no aws/kubectl/python/node/bash/curl/zip/terraform/etc).
 - Do NOT include shell operators, pipes, redirects, or subshells.
 - Prefer idempotent operations where possible.
+- If the user request is ambiguous or missing required details, output a DISCOVERY-ONLY plan:
+  - Still output a NON-EMPTY commands array.
+  - Use READ-ONLY commands to gather missing inputs (examples: gcloud config list core/project --format=json, gcloud projects describe <PROJECT_ID> --format=json, gcloud services list --enabled --format=json).
 
 Placeholders and bindings (CRITICAL):
 - You MAY use placeholder tokens inside args like "<SERVICE_URL>" or "<SA_EMAIL>".
@@ -588,11 +599,15 @@ Tools available:
 - API calls: For DNS, WAF, Analytics (use method + endpoint format)
 
 Rules for commands:
+- The "commands" array MUST contain at least 1 command.
 - For wrangler commands: args start with "wrangler"
 - For cloudflared commands: args start with "cloudflared"
 - For API commands: args are ["METHOD", "/endpoint", "optional-json-body"]
 - Do NOT include shell operators, pipes, or redirects.
 - Prefer idempotent operations where possible.
+- If the user request is ambiguous or missing required details, output a DISCOVERY-ONLY plan:
+  - Still output a NON-EMPTY commands array.
+  - Use READ-ONLY commands to gather missing inputs (examples: ["GET","/zones"], ["GET","/zones/<ZONE_ID>/dns_records"], ["wrangler","whoami"]).
 
 %s
 

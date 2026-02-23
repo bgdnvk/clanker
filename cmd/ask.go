@@ -354,16 +354,32 @@ Examples:
 				prompt = maker.PlanPromptWithMode(question, destroyer)
 			}
 
-			const maxMakerPlanAttempts = 3
+			const maxMakerPlanAttempts = 4
 			var lastParseErr error
 			var plan *maker.Plan
 			for attempt := 1; attempt <= maxMakerPlanAttempts; attempt++ {
 				attemptPrompt := prompt
 				if attempt > 1 {
+					extra := "Regenerate a VALID JSON plan that matches the schema exactly and includes a NON-EMPTY commands array."
+					if lastParseErr != nil {
+						errText := strings.ToLower(lastParseErr.Error())
+						switch {
+						case strings.Contains(errText, "plan has no commands") || strings.Contains(errText, "no commands"):
+							extra = "Your previous output had an empty (or missing) commands array. Regenerate a VALID JSON plan with commands. If the user request is ambiguous or missing required details, output a DISCOVERY-ONLY plan with at least 3 READ-ONLY commands that gather the missing inputs (still a non-empty commands array)."
+						case strings.Contains(errText, "empty plan") || strings.Contains(errText, "unexpected end of json") || strings.Contains(errText, "unexpected eof"):
+							extra = "Your previous output was empty or truncated. Regenerate a COMPLETE, VALID JSON plan that matches the schema exactly and includes a NON-EMPTY commands array."
+						case strings.Contains(errText, "invalid character") || strings.Contains(errText, "cannot unmarshal") || strings.Contains(errText, "json:"):
+							extra = "Your previous output was not valid JSON. Output ONLY a single JSON object matching the schema exactly (no code fences, no markdown, no backticks, no commentary). Include a NON-EMPTY commands array."
+						case strings.Contains(errText, "has empty args") || strings.Contains(errText, "empty args"):
+							extra = "One of your commands had empty args. Ensure every command has a non-empty args array and args are individual tokens (no single-string commands)."
+						}
+					}
+
 					attemptPrompt = fmt.Sprintf(
-						"%s\n\nIMPORTANT: Your previous output was invalid (%v). Regenerate a VALID JSON plan that matches the schema exactly and includes a NON-EMPTY commands array.",
+						"%s\n\nIMPORTANT: Your previous output was invalid (%v). %s\n\nOutput rules (STRICT):\n- Output ONLY JSON (no markdown, no prose).\n- Do NOT wrap in ``` or any other code fences.\n- The response MUST start with '{' and end with '}'.\n- Include required fields: version, createdAt (RFC3339), provider, question, summary, commands.\n- commands MUST be non-empty.",
 						prompt,
 						lastParseErr,
+						extra,
 					)
 				}
 				resp, err := aiClient.AskPrompt(ctx, attemptPrompt)
@@ -372,7 +388,16 @@ Examples:
 				}
 
 				cleaned := aiClient.CleanJSONResponse(resp)
-				parsed, err := maker.ParsePlan(cleaned)
+				trimmed := strings.TrimSpace(cleaned)
+				if trimmed == "" {
+					lastParseErr = fmt.Errorf("empty plan")
+					continue
+				}
+				if !strings.HasPrefix(trimmed, "{") || !strings.HasSuffix(trimmed, "}") {
+					lastParseErr = fmt.Errorf("invalid json: response must be a single JSON object")
+					continue
+				}
+				parsed, err := maker.ParsePlan(trimmed)
 				if err == nil {
 					plan = parsed
 					break
