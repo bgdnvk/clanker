@@ -216,10 +216,10 @@ Examples:
 
 // CustomScanConfig holds custom paths and env keys for scanning
 type CustomScanConfig struct {
-	AWSPaths        []string
-	GCPPaths        []string
-	CloudflareEnv   []string
-	LLMEnv          []string
+	AWSPaths      []string
+	GCPPaths      []string
+	CloudflareEnv []string
+	LLMEnv        []string
 }
 
 // ScanResult holds all detected credentials
@@ -771,8 +771,8 @@ func findAzureCLI() (string, error) {
 
 func scanCloudflareCredentials(customConfig CustomScanConfig) CloudflareCredentialsScan {
 	result := CloudflareCredentialsScan{
-		HasToken:     os.Getenv("CLOUDFLARE_API_TOKEN") != "",
-		HasAccountID: os.Getenv("CLOUDFLARE_ACCOUNT_ID") != "",
+		HasToken:      os.Getenv("CLOUDFLARE_API_TOKEN") != "",
+		HasAccountID:  os.Getenv("CLOUDFLARE_ACCOUNT_ID") != "",
 		CustomEnvKeys: []string{},
 	}
 
