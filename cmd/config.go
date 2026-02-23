@@ -202,10 +202,24 @@ var configScanCmd = &cobra.Command{
 This command scans the local system for available cloud provider credentials
 and API keys that can be used with clanker.
 
+You can specify custom file paths and environment variable keys to scan
+in addition to the default locations.
+
 Examples:
   clanker config scan
-  clanker config scan --output json`,
+  clanker config scan --output json
+  clanker config scan --aws-paths ~/.custom/aws-creds,~/.another/credentials
+  clanker config scan --gcp-paths ~/.config/gcloud/custom-creds.json
+  clanker config scan --llm-env MY_OPENAI_KEY,MY_ANTHROPIC_KEY`,
 	RunE: runConfigScan,
+}
+
+// CustomScanConfig holds custom paths and env keys for scanning
+type CustomScanConfig struct {
+	AWSPaths        []string
+	GCPPaths        []string
+	CloudflareEnv   []string
+	LLMEnv          []string
 }
 
 // ScanResult holds all detected credentials
@@ -235,6 +249,7 @@ type GCPCredentialsScan struct {
 	HasADC       bool     `json:"hasADC"`
 	ADCPath      string   `json:"adcPath,omitempty"`
 	Projects     []string `json:"projects,omitempty"`
+	CustomPaths  []string `json:"customPaths,omitempty"`
 	CLIAvailable bool     `json:"cliAvailable"`
 	Error        string   `json:"error,omitempty"`
 }
@@ -256,16 +271,18 @@ type AzureSubscriptionInfo struct {
 
 // CloudflareCredentialsScan holds detected Cloudflare credentials
 type CloudflareCredentialsScan struct {
-	HasToken     bool   `json:"hasToken"`
-	HasAccountID bool   `json:"hasAccountId"`
-	Error        string `json:"error,omitempty"`
+	HasToken      bool     `json:"hasToken"`
+	HasAccountID  bool     `json:"hasAccountId"`
+	CustomEnvKeys []string `json:"customEnvKeys,omitempty"`
+	Error         string   `json:"error,omitempty"`
 }
 
 // LLMCredentialsScan holds detected LLM API keys
 type LLMCredentialsScan struct {
-	OpenAI    LLMKeyStatus `json:"openai"`
-	Anthropic LLMKeyStatus `json:"anthropic"`
-	Gemini    LLMKeyStatus `json:"gemini"`
+	OpenAI        LLMKeyStatus `json:"openai"`
+	Anthropic     LLMKeyStatus `json:"anthropic"`
+	Gemini        LLMKeyStatus `json:"gemini"`
+	CustomEnvKeys []string     `json:"customEnvKeys,omitempty"`
 }
 
 // LLMKeyStatus indicates whether an LLM key was detected
@@ -276,13 +293,24 @@ type LLMKeyStatus struct {
 
 func runConfigScan(cmd *cobra.Command, args []string) error {
 	outputFormat, _ := cmd.Flags().GetString("output")
+	awsPaths, _ := cmd.Flags().GetStringSlice("aws-paths")
+	gcpPaths, _ := cmd.Flags().GetStringSlice("gcp-paths")
+	cloudflareEnv, _ := cmd.Flags().GetStringSlice("cloudflare-env")
+	llmEnv, _ := cmd.Flags().GetStringSlice("llm-env")
+
+	customConfig := CustomScanConfig{
+		AWSPaths:      awsPaths,
+		GCPPaths:      gcpPaths,
+		CloudflareEnv: cloudflareEnv,
+		LLMEnv:        llmEnv,
+	}
 
 	result := ScanResult{
-		AWS:        scanAWSProfiles(),
-		GCP:        scanGCPCredentials(),
+		AWS:        scanAWSProfiles(customConfig),
+		GCP:        scanGCPCredentials(customConfig),
 		Azure:      scanAzureSubscriptions(),
-		Cloudflare: scanCloudflareCredentials(),
-		LLM:        scanLLMKeys(),
+		Cloudflare: scanCloudflareCredentials(customConfig),
+		LLM:        scanLLMKeys(customConfig),
 	}
 
 	if outputFormat == "json" {
@@ -323,6 +351,12 @@ func printScanResult(result ScanResult) {
 	} else {
 		fmt.Println("  Application Default Credentials: Not found")
 	}
+	if len(result.GCP.CustomPaths) > 0 {
+		fmt.Println("  Custom credential files found:")
+		for _, p := range result.GCP.CustomPaths {
+			fmt.Printf("    - %s\n", p)
+		}
+	}
 	fmt.Printf("  gcloud CLI: %v\n", result.GCP.CLIAvailable)
 	if len(result.GCP.Projects) > 0 {
 		fmt.Printf("  Projects: %s\n", strings.Join(result.GCP.Projects, ", "))
@@ -356,6 +390,9 @@ func printScanResult(result ScanResult) {
 	fmt.Println("Cloudflare:")
 	fmt.Printf("  API Token (env): %v\n", result.Cloudflare.HasToken)
 	fmt.Printf("  Account ID (env): %v\n", result.Cloudflare.HasAccountID)
+	if len(result.Cloudflare.CustomEnvKeys) > 0 {
+		fmt.Printf("  Custom env keys found: %s\n", strings.Join(result.Cloudflare.CustomEnvKeys, ", "))
+	}
 	fmt.Println()
 
 	// LLM Keys
@@ -363,9 +400,12 @@ func printScanResult(result ScanResult) {
 	fmt.Printf("  OpenAI: %v\n", result.LLM.OpenAI.HasKey)
 	fmt.Printf("  Anthropic: %v\n", result.LLM.Anthropic.HasKey)
 	fmt.Printf("  Gemini: %v\n", result.LLM.Gemini.HasKey)
+	if len(result.LLM.CustomEnvKeys) > 0 {
+		fmt.Printf("  Custom env keys found: %s\n", strings.Join(result.LLM.CustomEnvKeys, ", "))
+	}
 }
 
-func scanAWSProfiles() AWSCredentialsScan {
+func scanAWSProfiles(customConfig CustomScanConfig) AWSCredentialsScan {
 	result := AWSCredentialsScan{
 		Profiles: []AWSProfileInfo{},
 	}
@@ -376,6 +416,7 @@ func scanAWSProfiles() AWSCredentialsScan {
 		return result
 	}
 
+	// Default paths
 	credPath := filepath.Join(home, ".aws", "credentials")
 	configPath := filepath.Join(home, ".aws", "config")
 
@@ -406,11 +447,37 @@ func scanAWSProfiles() AWSCredentialsScan {
 		}
 	}
 
+	// Scan custom AWS paths
+	for _, customPath := range customConfig.AWSPaths {
+		expandedPath := expandTilde(customPath, home)
+		customProfiles := parseAWSINIFile(expandedPath, "custom:"+customPath)
+		for _, p := range customProfiles {
+			if _, exists := profileMap[p.Name]; !exists {
+				profileMap[p.Name] = &AWSProfileInfo{
+					Name:   p.Name,
+					Region: p.Region,
+					Source: p.Source,
+				}
+			}
+		}
+	}
+
 	for _, p := range profileMap {
 		result.Profiles = append(result.Profiles, *p)
 	}
 
 	return result
+}
+
+// expandTilde expands ~ to home directory in paths
+func expandTilde(path string, home string) string {
+	if strings.HasPrefix(path, "~/") {
+		return filepath.Join(home, path[2:])
+	}
+	if path == "~" {
+		return home
+	}
+	return path
 }
 
 func parseAWSINIFile(path string, source string) []AWSProfileInfo {
@@ -469,9 +536,10 @@ func parseAWSINIFile(path string, source string) []AWSProfileInfo {
 	return profiles
 }
 
-func scanGCPCredentials() GCPCredentialsScan {
+func scanGCPCredentials(customConfig CustomScanConfig) GCPCredentialsScan {
 	result := GCPCredentialsScan{
-		Projects: []string{},
+		Projects:    []string{},
+		CustomPaths: []string{},
 	}
 
 	home, err := os.UserHomeDir()
@@ -480,10 +548,19 @@ func scanGCPCredentials() GCPCredentialsScan {
 		return result
 	}
 
+	// Default ADC path
 	adcPath := filepath.Join(home, ".config", "gcloud", "application_default_credentials.json")
 	if _, err := os.Stat(adcPath); err == nil {
 		result.HasADC = true
 		result.ADCPath = adcPath
+	}
+
+	// Check custom GCP paths
+	for _, customPath := range customConfig.GCPPaths {
+		expandedPath := expandTilde(customPath, home)
+		if _, err := os.Stat(expandedPath); err == nil {
+			result.CustomPaths = append(result.CustomPaths, expandedPath)
+		}
 	}
 
 	gcloudPath, err := findGcloudBinary()
@@ -692,19 +769,39 @@ func findAzureCLI() (string, error) {
 	return "", os.ErrNotExist
 }
 
-func scanCloudflareCredentials() CloudflareCredentialsScan {
-	return CloudflareCredentialsScan{
+func scanCloudflareCredentials(customConfig CustomScanConfig) CloudflareCredentialsScan {
+	result := CloudflareCredentialsScan{
 		HasToken:     os.Getenv("CLOUDFLARE_API_TOKEN") != "",
 		HasAccountID: os.Getenv("CLOUDFLARE_ACCOUNT_ID") != "",
+		CustomEnvKeys: []string{},
 	}
+
+	// Check custom env keys for Cloudflare
+	for _, envKey := range customConfig.CloudflareEnv {
+		if os.Getenv(envKey) != "" {
+			result.CustomEnvKeys = append(result.CustomEnvKeys, envKey)
+		}
+	}
+
+	return result
 }
 
-func scanLLMKeys() LLMCredentialsScan {
-	return LLMCredentialsScan{
-		OpenAI:    LLMKeyStatus{HasKey: os.Getenv("OPENAI_API_KEY") != ""},
-		Anthropic: LLMKeyStatus{HasKey: os.Getenv("ANTHROPIC_API_KEY") != ""},
-		Gemini:    LLMKeyStatus{HasKey: os.Getenv("GEMINI_API_KEY") != ""},
+func scanLLMKeys(customConfig CustomScanConfig) LLMCredentialsScan {
+	result := LLMCredentialsScan{
+		OpenAI:        LLMKeyStatus{HasKey: os.Getenv("OPENAI_API_KEY") != ""},
+		Anthropic:     LLMKeyStatus{HasKey: os.Getenv("ANTHROPIC_API_KEY") != ""},
+		Gemini:        LLMKeyStatus{HasKey: os.Getenv("GEMINI_API_KEY") != ""},
+		CustomEnvKeys: []string{},
 	}
+
+	// Check custom LLM env keys
+	for _, envKey := range customConfig.LLMEnv {
+		if os.Getenv(envKey) != "" {
+			result.CustomEnvKeys = append(result.CustomEnvKeys, envKey)
+		}
+	}
+
+	return result
 }
 
 func init() {
@@ -714,4 +811,8 @@ func init() {
 	configCmd.AddCommand(configScanCmd)
 
 	configScanCmd.Flags().StringP("output", "o", "", "Output format (json for JSON output)")
+	configScanCmd.Flags().StringSlice("aws-paths", []string{}, "Custom AWS credential file paths to scan (comma-separated)")
+	configScanCmd.Flags().StringSlice("gcp-paths", []string{}, "Custom GCP credential file paths to scan (comma-separated)")
+	configScanCmd.Flags().StringSlice("cloudflare-env", []string{}, "Custom Cloudflare environment variable keys to check (comma-separated)")
+	configScanCmd.Flags().StringSlice("llm-env", []string{}, "Custom LLM API key environment variables to check (comma-separated)")
 }
