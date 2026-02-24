@@ -175,51 +175,114 @@ Examples:
 			userConfig = deploy.DefaultUserConfig(intel.DeepAnalysis, rp)
 		}
 
-		enrichedQuestion := intel.EnrichedPrompt
+		baseQuestion := intel.EnrichedPrompt
 		if debug {
-			fmt.Fprintf(os.Stderr, "[deploy] enriched prompt:\n%s\n", enrichedQuestion)
+			fmt.Fprintf(os.Stderr, "[deploy] enriched prompt:\n%s\n", baseQuestion)
+		}
+
+		planProvider := strings.ToLower(strings.TrimSpace(targetProvider))
+		if planProvider == "" {
+			planProvider = strings.ToLower(strings.TrimSpace(intel.Architecture.Provider))
+		}
+		if planProvider == "" {
+			planProvider = "aws"
+		}
+
+		requiredLaunchOps := []string{}
+		switch strings.ToLower(strings.TrimSpace(intel.Architecture.Method)) {
+		case "ec2":
+			requiredLaunchOps = []string{"ec2 run-instances"}
+		case "ecs-fargate", "ecs":
+			requiredLaunchOps = []string{"ecs create-service", "ecs run-task"}
+		case "app-runner":
+			requiredLaunchOps = []string{"apprunner create-service"}
+		case "lambda":
+			requiredLaunchOps = []string{"lambda create-function"}
+		case "s3-cloudfront":
+			requiredLaunchOps = []string{"s3api create-bucket", "cloudfront create-distribution"}
+		case "lightsail":
+			requiredLaunchOps = []string{"lightsail create-container-service"}
+		case "cf-pages":
+			requiredLaunchOps = []string{"wrangler pages"}
+		case "cf-workers":
+			requiredLaunchOps = []string{"wrangler deploy"}
+		case "cf-containers":
+			requiredLaunchOps = []string{"wrangler containers"}
+		case "cloud-run":
+			requiredLaunchOps = []string{"run deploy"}
+		case "gcp-compute-engine", "gcp-compute", "compute-engine":
+			requiredLaunchOps = []string{"compute instances"}
+		case "gke":
+			requiredLaunchOps = []string{"container clusters"}
+		case "azure-vm":
+			requiredLaunchOps = []string{"vm create"}
+		case "azure-container-apps", "container-apps":
+			requiredLaunchOps = []string{"containerapp create"}
+		case "aks":
+			requiredLaunchOps = []string{"aks create"}
 		}
 
 		// 4. Generate the maker plan via LLM
 		fmt.Fprintf(os.Stderr, "[deploy] phase 3: generating execution plan with %s ...\n", provider)
 
-		const maxValidationRounds = 5
+		// Generate a plan incrementally in small pages to avoid LLM truncation.
+		const maxPlanPages = 20
+		const maxCommandsPerPage = 8
 		var plan *maker.Plan
-		var lastPlanRaw string
+		var mustFixIssues []string
+		var lastDetValidation *deploy.PlanValidation
+		stuckPages := 0
 
-		for round := 0; round <= maxValidationRounds; round++ {
-			prompt := maker.PlanPromptWithMode(enrichedQuestion, false)
+		plan = &maker.Plan{
+			Version:   maker.CurrentPlanVersion,
+			CreatedAt: time.Now().UTC(),
+			Provider:  planProvider,
+			Question:  fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, planProvider, intel.Architecture.Method),
+			Summary:   "",
+			Commands:  nil,
+		}
+		if strings.TrimSpace(intel.Architecture.Provider) != "" {
+			plan.Provider = strings.TrimSpace(intel.Architecture.Provider)
+		}
+
+		for pageRound := 1; pageRound <= maxPlanPages; pageRound++ {
+			questionForPrompt := baseQuestion
+			if len(questionForPrompt) > 18000 {
+				questionForPrompt = questionForPrompt[:18000] + "…"
+			}
+			prompt := deploy.BuildPlanPagePrompt(planProvider, questionForPrompt, plan, requiredLaunchOps, mustFixIssues, maxCommandsPerPage)
 			resp, err := aiClient.AskPrompt(ctx, prompt)
 			if err != nil {
 				return fmt.Errorf("plan generation failed: %w", err)
 			}
 
 			cleaned := aiClient.CleanJSONResponse(resp)
-			plan, err = maker.ParsePlan(cleaned)
+			page, err := deploy.ParsePlanPage(cleaned)
 			if err != nil {
-				lastPlanRaw = strings.TrimSpace(cleaned)
-				// Self-heal: the model sometimes returns markdown/code fences or omits commands.
-				// Retry by hardening instructions and asking again.
-				if round < maxValidationRounds {
-					logf("[deploy] warning: plan parse failed (%v), retrying (round %d/%d)...", err, round+1, maxValidationRounds)
-					enrichedQuestion += "\n\n" + strings.TrimSpace(`IMPORTANT: Your next response MUST be a single valid JSON object ONLY (no markdown, no backticks, no code fences, no prose).
-
-Schema requirements:
-- {\"version\": number, \"provider\": \"aws\", \"question\": string, \"summary\": string, \"commands\": [ { \"args\": [string,...], \"reason\": string } , ... ] }
-- commands MUST be a non-empty array.
-- args MUST be an array and MUST NOT include the leading program name (e.g. do NOT include \"aws\" as args[0]).
-`) + "\n"
-					continue
-				}
-				snippet := lastPlanRaw
-				if len(snippet) > 600 {
-					snippet = snippet[:600] + "…"
-				}
-				return fmt.Errorf("failed to parse plan after %d attempts: %w\nRaw (truncated): %s", maxValidationRounds+1, err, snippet)
+				logf("[deploy] warning: plan page parse failed (%v), retrying (page %d/%d)...", err, pageRound, maxPlanPages)
+				continue
 			}
 
-			plan.Provider = intel.Architecture.Provider
-			plan.Question = enrichedQuestion
+			if len(page.Commands) > 0 {
+				// Normalize args and validate command shapes via maker.ParsePlan.
+				tmp := &maker.Plan{Provider: planProvider, Question: "", Summary: "", Commands: page.Commands}
+				tmpJSON, _ := json.Marshal(tmp)
+				normalized, nErr := maker.ParsePlan(string(tmpJSON))
+				if nErr != nil {
+					logf("[deploy] warning: plan page had invalid commands (%v), retrying (page %d/%d)...", nErr, pageRound, maxPlanPages)
+					continue
+				}
+				page.Commands = normalized.Commands
+			}
+
+			added := deploy.AppendPlanPage(plan, page)
+			logf("[deploy] plan page %d/%d: added %d command(s) (total=%d)", pageRound, maxPlanPages, added, len(plan.Commands))
+
+			// Ensure plan metadata is consistent.
+			if strings.TrimSpace(intel.Architecture.Provider) != "" {
+				plan.Provider = strings.TrimSpace(intel.Architecture.Provider)
+			}
+			plan.Question = fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, strings.ToLower(strings.TrimSpace(plan.Provider)), intel.Architecture.Method)
 			if plan.CreatedAt.IsZero() {
 				plan.CreatedAt = time.Now().UTC()
 			}
@@ -227,45 +290,348 @@ Schema requirements:
 				plan.Version = maker.CurrentPlanVersion
 			}
 
-			// skip validation on last round
-			if round == maxValidationRounds {
-				break
+			// Deterministic checkpoint validation (AWS only).
+			if strings.EqualFold(strings.TrimSpace(planProvider), "aws") {
+				planJSON, _ := json.MarshalIndent(plan, "", "  ")
+				lastDetValidation = deploy.DeterministicValidatePlan(string(planJSON), rp, intel.DeepAnalysis, intel.Docker)
+				if lastDetValidation != nil && !lastDetValidation.IsValid {
+					mustFixIssues = lastDetValidation.Issues
+				} else {
+					mustFixIssues = nil
+				}
+			}
+			if added == 0 {
+				stuckPages++
+			} else {
+				stuckPages = 0
+			}
+			if stuckPages >= 3 && len(mustFixIssues) > 0 {
+				logf("[deploy] error: planning is stuck (no new commands added for %d pages) while %d hard issue(s) remain", stuckPages, len(mustFixIssues))
+				for i, issue := range mustFixIssues {
+					if i >= 12 {
+						break
+					}
+					logf("[deploy]   hard issue: %s", strings.TrimSpace(issue))
+				}
+				return fmt.Errorf("failed to generate a deterministically valid plan (stuck with issues=%d)", len(mustFixIssues))
 			}
 
-			// 5. Validate the plan (LLM reviews its own work)
-			planJSON, _ := json.MarshalIndent(plan, "", "  ")
-			validation, fixPrompt, err := deploy.ValidatePlan(ctx,
-				string(planJSON), rp, intel.DeepAnalysis,
-				intel.Docker,
-				false,
-				aiClient.AskPrompt, aiClient.CleanJSONResponse, logf,
-			)
-			if err != nil {
-				logf("[deploy] warning: validation failed (%v), using plan as-is", err)
-				break
+			if page.Done {
+				// Ignore done=true if deterministic hard issues remain; force another page.
+				if len(mustFixIssues) == 0 {
+					break
+				}
+				logf("[deploy] warning: model returned done=true but deterministic issues remain; continuing")
+			}
+		}
+
+		if len(plan.Commands) == 0 {
+			return fmt.Errorf("failed to generate a plan (no commands produced)")
+		}
+		if lastDetValidation != nil {
+			intel.Validation = lastDetValidation
+		}
+		if lastDetValidation != nil && !lastDetValidation.IsValid {
+			logf("[deploy] deterministic validation failed with %d issue(s)", len(lastDetValidation.Issues))
+			for i, issue := range lastDetValidation.Issues {
+				if i >= 12 {
+					logf("[deploy]   issue: (and %d more)", len(lastDetValidation.Issues)-i)
+					break
+				}
+				logf("[deploy]   issue: %s", strings.TrimSpace(issue))
+			}
+			for i, fix := range lastDetValidation.Fixes {
+				if i >= 12 {
+					break
+				}
+				if strings.TrimSpace(fix) == "" {
+					continue
+				}
+				logf("[deploy]   fix: %s", strings.TrimSpace(fix))
 			}
 
-			intel.Validation = validation
-
-			if validation.IsValid {
-				logf("[deploy] plan validated successfully")
-				if len(validation.Warnings) > 0 {
-					for _, w := range validation.Warnings {
-						logf("[deploy] warning: %s", w)
+			// Try to repair deterministic issues (e.g., missing onboarding steps) before failing.
+			repairAgent := deploy.NewPlanRepairAgent(aiClient.AskPrompt, aiClient.CleanJSONResponse, logf)
+			requiredEnvNames := make([]string, 0, 16)
+			if len(rp.EnvVars) > 0 {
+				requiredEnvNames = append(requiredEnvNames, rp.EnvVars...)
+			}
+			if intel.DeepAnalysis != nil {
+				for _, spec := range intel.DeepAnalysis.RequiredEnvVars {
+					if strings.TrimSpace(spec.Name) != "" {
+						requiredEnvNames = append(requiredEnvNames, strings.TrimSpace(spec.Name))
 					}
 				}
-				break
+			}
+			{
+				seen := make(map[string]struct{}, len(requiredEnvNames))
+				out := make([]string, 0, len(requiredEnvNames))
+				for _, name := range requiredEnvNames {
+					name = strings.TrimSpace(name)
+					if name == "" {
+						continue
+					}
+					if _, ok := seen[name]; ok {
+						continue
+					}
+					seen[name] = struct{}{}
+					out = append(out, name)
+				}
+				requiredEnvNames = out
 			}
 
-			// Keep iterating; validation + deterministic preflight should converge within maxValidationRounds.
-
-			// plan has issues — feed fixes back into prompt and retry
-			logf("[deploy] validation found %d issues, regenerating (round %d/%d)...",
-				len(validation.Issues), round+1, maxValidationRounds)
-			for _, issue := range validation.Issues {
-				logf("[deploy]   issue: %s", issue)
+			repairCtx := deploy.PlanRepairContext{
+				Provider:            intel.Architecture.Provider,
+				Method:              intel.Architecture.Method,
+				RepoURL:             rp.RepoURL,
+				GCPProject:          strings.TrimSpace(gcpProject),
+				AzureSubscriptionID: strings.TrimSpace(azureSubscription),
+				CloudflareAccountID: "",
+				Ports:               rp.Ports,
+				ComposeHardEnvVars: func() []string {
+					if intel.Preflight != nil {
+						return intel.Preflight.ComposeHardEnvVars
+					}
+					return nil
+				}(),
+				RequiredEnvVarNames: requiredEnvNames,
+				RequiredLaunchOps:   requiredLaunchOps,
+				Region:              region,
+				VPCID: func() string {
+					if intel.InfraSnap != nil && intel.InfraSnap.VPC != nil {
+						return intel.InfraSnap.VPC.VPCID
+					}
+					return ""
+				}(),
+				Subnets: func() []string {
+					if intel.InfraSnap != nil && intel.InfraSnap.VPC != nil {
+						return intel.InfraSnap.VPC.Subnets
+					}
+					return nil
+				}(),
+				AMIID: func() string {
+					if intel.InfraSnap != nil {
+						return intel.InfraSnap.LatestAMI
+					}
+					return ""
+				}(),
+				Account: func() string {
+					if intel.InfraSnap != nil {
+						return intel.InfraSnap.AccountID
+					}
+					return ""
+				}(),
 			}
-			enrichedQuestion += fixPrompt
+
+			currentValidation := lastDetValidation
+			currentPlanJSONBytes, _ := json.MarshalIndent(plan, "", "  ")
+			currentPlanJSON := string(currentPlanJSONBytes)
+			const maxDetRepairRounds = 3
+			for r := 1; r <= maxDetRepairRounds; r++ {
+				logf("[deploy] attempting deterministic repair (round %d/%d)...", r, maxDetRepairRounds)
+				repairedRaw, rErr := repairAgent.Repair(ctx, currentPlanJSON, currentValidation, repairCtx)
+				if rErr != nil {
+					break
+				}
+				repaired, pErr := maker.ParsePlan(repairedRaw)
+				if pErr != nil {
+					break
+				}
+				repaired.Provider = intel.Architecture.Provider
+				repaired.Question = fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, strings.ToLower(strings.TrimSpace(repaired.Provider)), intel.Architecture.Method)
+				if repaired.CreatedAt.IsZero() {
+					repaired.CreatedAt = time.Now().UTC()
+				}
+				if repaired.Version == 0 {
+					repaired.Version = maker.CurrentPlanVersion
+				}
+
+				repairedJSONBytes, _ := json.MarshalIndent(repaired, "", "  ")
+				detV := deploy.DeterministicValidatePlan(string(repairedJSONBytes), rp, intel.DeepAnalysis, intel.Docker)
+				intel.Validation = detV
+				if detV != nil && detV.IsValid {
+					plan = repaired
+					lastDetValidation = detV
+					logf("[deploy] deterministic repair succeeded")
+					break
+				}
+				currentValidation = detV
+				currentPlanJSON = string(repairedJSONBytes)
+			}
+
+			if lastDetValidation != nil && !lastDetValidation.IsValid {
+				return fmt.Errorf("failed to generate a deterministically valid plan (issues=%d)", len(lastDetValidation.Issues))
+			}
+		}
+
+		// Final validation (LLM) + optional repair pass.
+		planJSON, _ := json.MarshalIndent(plan, "", "  ")
+		validation, _, err := deploy.ValidatePlan(ctx,
+			string(planJSON), rp, intel.DeepAnalysis,
+			intel.Docker,
+			false,
+			aiClient.AskPrompt, aiClient.CleanJSONResponse, logf,
+		)
+		if err != nil {
+			return fmt.Errorf("plan validation failed: %w", err)
+		}
+		intel.Validation = validation
+		if validation != nil && !validation.IsValid {
+			logf("[deploy] validation found %d issue(s)", len(validation.Issues))
+			for i, issue := range validation.Issues {
+				if i >= 12 {
+					logf("[deploy]   issue: (and %d more)", len(validation.Issues)-i)
+					break
+				}
+				logf("[deploy]   issue: %s", strings.TrimSpace(issue))
+			}
+			for i, fix := range validation.Fixes {
+				if i >= 12 {
+					break
+				}
+				if strings.TrimSpace(fix) == "" {
+					continue
+				}
+				logf("[deploy]   fix: %s", strings.TrimSpace(fix))
+			}
+		}
+
+		repairAgent := deploy.NewPlanRepairAgent(aiClient.AskPrompt, aiClient.CleanJSONResponse, logf)
+		if !validation.IsValid {
+			// Attempt repair passes to address validator feedback without re-generating from scratch.
+			requiredEnvNames := make([]string, 0, 16)
+			if len(rp.EnvVars) > 0 {
+				requiredEnvNames = append(requiredEnvNames, rp.EnvVars...)
+			}
+			if intel.DeepAnalysis != nil {
+				for _, spec := range intel.DeepAnalysis.RequiredEnvVars {
+					if strings.TrimSpace(spec.Name) != "" {
+						requiredEnvNames = append(requiredEnvNames, strings.TrimSpace(spec.Name))
+					}
+				}
+			}
+			{
+				seen := make(map[string]struct{}, len(requiredEnvNames))
+				out := make([]string, 0, len(requiredEnvNames))
+				for _, name := range requiredEnvNames {
+					name = strings.TrimSpace(name)
+					if name == "" {
+						continue
+					}
+					if _, ok := seen[name]; ok {
+						continue
+					}
+					seen[name] = struct{}{}
+					out = append(out, name)
+				}
+				requiredEnvNames = out
+			}
+
+			repairCtx := deploy.PlanRepairContext{
+				Provider:            intel.Architecture.Provider,
+				Method:              intel.Architecture.Method,
+				RepoURL:             rp.RepoURL,
+				GCPProject:          strings.TrimSpace(gcpProject),
+				AzureSubscriptionID: strings.TrimSpace(azureSubscription),
+				CloudflareAccountID: "",
+				Ports:               rp.Ports,
+				ComposeHardEnvVars: func() []string {
+					if intel.Preflight != nil {
+						return intel.Preflight.ComposeHardEnvVars
+					}
+					return nil
+				}(),
+				RequiredEnvVarNames: requiredEnvNames,
+				RequiredLaunchOps:   requiredLaunchOps,
+				Region:              region,
+				VPCID: func() string {
+					if intel.InfraSnap != nil && intel.InfraSnap.VPC != nil {
+						return intel.InfraSnap.VPC.VPCID
+					}
+					return ""
+				}(),
+				Subnets: func() []string {
+					if intel.InfraSnap != nil && intel.InfraSnap.VPC != nil {
+						return intel.InfraSnap.VPC.Subnets
+					}
+					return nil
+				}(),
+				AMIID: func() string {
+					if intel.InfraSnap != nil {
+						return intel.InfraSnap.LatestAMI
+					}
+					return ""
+				}(),
+				Account: func() string {
+					if intel.InfraSnap != nil {
+						return intel.InfraSnap.AccountID
+					}
+					return ""
+				}(),
+			}
+
+			const maxRepairRounds = 3
+			currentValidation := validation
+			currentPlanJSON := string(planJSON)
+			for r := 1; r <= maxRepairRounds; r++ {
+				logf("[deploy] attempting plan repair (round %d/%d)...", r, maxRepairRounds)
+				repairedRaw, rErr := repairAgent.Repair(ctx, currentPlanJSON, currentValidation, repairCtx)
+				if rErr != nil {
+					return fmt.Errorf("plan is invalid and repair failed: %v", rErr)
+				}
+				repaired, pErr := maker.ParsePlan(repairedRaw)
+				if pErr != nil {
+					return fmt.Errorf("plan repair produced an unparseable plan: %v", pErr)
+				}
+				repaired.Provider = intel.Architecture.Provider
+				repaired.Question = fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, strings.ToLower(strings.TrimSpace(repaired.Provider)), intel.Architecture.Method)
+				if repaired.CreatedAt.IsZero() {
+					repaired.CreatedAt = time.Now().UTC()
+				}
+				if repaired.Version == 0 {
+					repaired.Version = maker.CurrentPlanVersion
+				}
+
+				repairedJSON, _ := json.MarshalIndent(repaired, "", "  ")
+				repairedValidation, _, vErr := deploy.ValidatePlan(ctx,
+					string(repairedJSON), rp, intel.DeepAnalysis,
+					intel.Docker,
+					false,
+					aiClient.AskPrompt, aiClient.CleanJSONResponse, logf,
+				)
+				if vErr != nil {
+					return fmt.Errorf("plan validation failed after repair: %v", vErr)
+				}
+				intel.Validation = repairedValidation
+
+				if repairedValidation != nil && repairedValidation.IsValid {
+					plan = repaired
+					logf("[deploy] plan repaired + validated successfully")
+					break
+				}
+
+				// Not valid yet; iterate.
+				currentValidation = repairedValidation
+				currentPlanJSON = string(repairedJSON)
+				if repairedValidation != nil {
+					logf("[deploy] repair round %d still invalid (issues=%d)", r, len(repairedValidation.Issues))
+					for i, issue := range repairedValidation.Issues {
+						if i >= 12 {
+							logf("[deploy]   issue: (and %d more)", len(repairedValidation.Issues)-i)
+							break
+						}
+						logf("[deploy]   issue: %s", strings.TrimSpace(issue))
+					}
+				}
+
+				if r == maxRepairRounds {
+					issueCount := 0
+					if repairedValidation != nil {
+						issueCount = len(repairedValidation.Issues)
+					}
+					return fmt.Errorf("plan is invalid after repair (issues=%d)", issueCount)
+				}
+			}
 		}
 
 		// 6. Enrich w/ existing infra context (AWS only)
@@ -318,7 +684,7 @@ Schema requirements:
 		}
 
 		// 8. Output plan JSON (or apply)
-		planJSON, err := json.MarshalIndent(plan, "", "  ")
+		planJSON, err = json.MarshalIndent(plan, "", "  ")
 		if err != nil {
 			return err
 		}
@@ -332,7 +698,7 @@ Schema requirements:
 		// can't be misinterpreted as placeholders by downstream scanners.
 		plan = deploy.Base64EncodeEC2UserDataScripts(plan)
 
-		planProvider := strings.ToLower(strings.TrimSpace(plan.Provider))
+		planProvider = strings.ToLower(strings.TrimSpace(plan.Provider))
 		if planProvider == "" {
 			planProvider = strings.ToLower(strings.TrimSpace(targetProvider))
 		}

@@ -29,6 +29,53 @@ func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepA
 
 	isOpenClaw := IsOpenClawRepo(p, deep)
 	preflight := BuildPreflightReport(p, docker, deep)
+
+	// Generic sanity check: a deploy plan should actually launch *something*.
+	// This is intentionally conservative and only triggers when no obvious launch op is present.
+	hasLaunch := false
+	for _, cmd := range plan.Commands {
+		args := cmd.Args
+		if len(args) < 2 {
+			continue
+		}
+		service := strings.ToLower(strings.TrimSpace(args[0]))
+		op := strings.ToLower(strings.TrimSpace(args[1]))
+		// Common launch operations across AWS deployment targets.
+		switch service {
+		case "ec2":
+			if op == "run-instances" {
+				hasLaunch = true
+			}
+		case "ecs":
+			if op == "create-service" || op == "run-task" {
+				hasLaunch = true
+			}
+		case "apprunner":
+			if op == "create-service" {
+				hasLaunch = true
+			}
+		case "lambda":
+			if op == "create-function" {
+				hasLaunch = true
+			}
+		case "lightsail":
+			if op == "create-container-service" || op == "create-instances" {
+				hasLaunch = true
+			}
+		}
+		if hasLaunch {
+			break
+		}
+	}
+	if !hasLaunch {
+		out.Issues = append(out.Issues, "[HARD] deploy plan does not launch any workload (missing EC2/ECS/AppRunner/Lambda/Lightsail launch step)")
+		// Keep the fix generic; provider-specific repair agent will use method constraints.
+		if isOpenClaw {
+			out.Fixes = append(out.Fixes, "Add an ec2 run-instances command that starts the workload via user-data + Docker and captures INSTANCE_ID via produces")
+		} else {
+			out.Fixes = append(out.Fixes, "Add a launch command appropriate for the chosen method (e.g., ec2 run-instances, ecs create-service, apprunner create-service, lambda create-function, or lightsail create-container-service)")
+		}
+	}
 	appPorts := uniqueInts(nil)
 	if p != nil {
 		for _, port := range p.Ports {
@@ -143,6 +190,16 @@ func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepA
 	out.Fixes = uniqueStrings(out.Fixes)
 	out.Warnings = uniqueStrings(out.Warnings)
 	return out
+}
+
+// DeterministicValidatePlan runs only the deterministic validation checks and returns a PlanValidation.
+// This is used for incremental / checkpointed plan generation to avoid repeated LLM validation calls.
+func DeterministicValidatePlan(planJSON string, profile *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis) *PlanValidation {
+	det := runDeterministicPlanValidation(planJSON, profile, deep, docker)
+	if len(det.Issues) > 0 {
+		return &PlanValidation{IsValid: false, Issues: det.Issues, Fixes: det.Fixes, Warnings: det.Warnings}
+	}
+	return &PlanValidation{IsValid: true, Issues: nil, Fixes: nil, Warnings: det.Warnings}
 }
 
 type awsPlanChecks struct {

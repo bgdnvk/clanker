@@ -109,7 +109,7 @@ Constraints:
   "version": 1,
   "createdAt": "RFC3339 timestamp",
   "provider": "aws",
-  "question": "original user question",
+  "question": "short user request summary (max 200 chars)",
   "summary": "short summary of what will be created/changed",
   "commands": [
     {
@@ -126,7 +126,10 @@ Constraints:
 Rules for commands:
 - The "commands" array MUST contain at least 1 command.
 - Provide args as an array; do NOT provide a single string.
-- Commands MUST be AWS CLI only. Every command args MUST start with "aws".
+- Commands MUST be AWS CLI only.
+- Args may either start with "aws" (program name) OR start directly with the AWS service name (e.g. "ec2"). The runner will normalize.
+- The output fields "question" and "summary" MUST be concise. Do NOT copy the full prompt/context into them.
+- NEVER copy the entire "User request" text into the plan JSON.
 - Do NOT include any non-AWS programs (no python/node/bash/curl/zip/terraform/etc).
 - Do NOT include shell operators, pipes, redirects, or subshells.
 - Do NOT include --profile, --region, or --no-cli-pager (the runner injects them).

@@ -451,8 +451,17 @@ func ValidatePlan(ctx context.Context, planJSON string, profile *RepoProfile, de
 
 	v, err := parseValidation(clean(resp))
 	if err != nil {
-		logf("[intelligence] warning: validation parse failed (%v), assuming plan is ok", err)
-		return &PlanValidation{IsValid: true}, "", nil
+		logf("[intelligence] warning: validation parse failed (%v)", err)
+		v := &PlanValidation{
+			IsValid: false,
+			Issues: []string{
+				"Validator returned an unparseable response (must be a single JSON object with keys: isValid/issues/fixes/warnings)",
+			},
+			Fixes: []string{
+				"Re-run validation and respond with JSON ONLY (top-level object, not an array, no markdown/code fences)",
+			},
+		}
+		return v, buildFixPrompt(v), nil
 	}
 
 	if !v.IsValid && len(v.Fixes) > 0 {
@@ -978,6 +987,36 @@ func parseValidation(raw string) (*PlanValidation, error) {
 
 	var v PlanValidation
 	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		// Common failure mode: model returns an array (often a list of issues).
+		var issues []string
+		if err2 := json.Unmarshal([]byte(raw), &issues); err2 == nil {
+			return &PlanValidation{IsValid: false, Issues: uniqueStrings(issues)}, nil
+		}
+
+		// Another failure mode: array of objects (each an issue/fix/warning item).
+		var items []map[string]any
+		if err3 := json.Unmarshal([]byte(raw), &items); err3 == nil {
+			var out PlanValidation
+			out.IsValid = false
+			for _, it := range items {
+				if s, ok := it["issue"].(string); ok && strings.TrimSpace(s) != "" {
+					out.Issues = append(out.Issues, strings.TrimSpace(s))
+				}
+				if s, ok := it["fix"].(string); ok && strings.TrimSpace(s) != "" {
+					out.Fixes = append(out.Fixes, strings.TrimSpace(s))
+				}
+				if s, ok := it["warning"].(string); ok && strings.TrimSpace(s) != "" {
+					out.Warnings = append(out.Warnings, strings.TrimSpace(s))
+				}
+			}
+			out.Issues = uniqueStrings(out.Issues)
+			out.Fixes = uniqueStrings(out.Fixes)
+			out.Warnings = uniqueStrings(out.Warnings)
+			if len(out.Issues) > 0 || len(out.Fixes) > 0 || len(out.Warnings) > 0 {
+				return &out, nil
+			}
+		}
+
 		return nil, fmt.Errorf("failed to parse validation: %w", err)
 	}
 	return &v, nil
