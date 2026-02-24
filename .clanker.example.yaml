@@ -19,6 +19,16 @@ ai:
       model: gpt-5
       api_key: ""
 
+    # DeepSeek example:
+    # deepseek:
+    #   model: deepseek-chat
+    #   api_key_env: DEEPSEEK_API_KEY
+
+    # MiniMax example:
+    # minimax:
+    #   model: MiniMax-M2.5
+    #   api_key_env: MINIMAX_API_KEY
+
 infra:
   default_provider: aws
   default_environment: dev
@@ -51,6 +61,24 @@ infra:
 #     openai:
 #       model: gpt-5
 #       api_key: "sk-..."  # or pass at runtime: clanker ask --openai-key "$OPENAI_API_KEY" ...
+
+# Use DeepSeek:
+# ai:
+#   default_provider: deepseek
+#   providers:
+#     deepseek:
+#       model: deepseek-chat  # or deepseek-reasoner
+#       api_key_env: DEEPSEEK_API_KEY
+#   # Pass at runtime: clanker ask --ai-profile deepseek --deepseek-key "$DEEPSEEK_API_KEY" ...
+
+# Use MiniMax:
+# ai:
+#   default_provider: minimax
+#   providers:
+#     minimax:
+#       model: MiniMax-M2.5  # or MiniMax-M2.5-highspeed, MiniMax-M2.1, MiniMax-M2.1-highspeed, MiniMax-M2
+#       api_key_env: MINIMAX_API_KEY
+#   # Pass at runtime: clanker ask --ai-profile minimax --minimax-key "$MINIMAX_API_KEY" ...
 
 # Multiple AWS environments (dev/stage/prod):
 # infra:

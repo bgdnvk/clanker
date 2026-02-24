@@ -52,13 +52,26 @@ func GetAIProfile(providerName string) (*AIProfile, error) {
 
 	profileKey := fmt.Sprintf("ai.providers.%s", providerName)
 	if !viper.IsSet(profileKey) {
-		// Allow a minimal OpenAI setup without a config file.
+		// Allow a minimal setup without a config file.
 		// The API key can still come from flags/env; this just supplies a default model.
-		if providerName == "openai" {
+		switch providerName {
+		case "openai":
 			return &AIProfile{
 				Provider:  "openai",
 				Model:     "gpt-5",
 				APIKeyEnv: "OPENAI_API_KEY",
+			}, nil
+		case "deepseek":
+			return &AIProfile{
+				Provider:  "deepseek",
+				Model:     "deepseek-chat",
+				APIKeyEnv: "DEEPSEEK_API_KEY",
+			}, nil
+		case "minimax":
+			return &AIProfile{
+				Provider:  "minimax",
+				Model:     "MiniMax-M2.5",
+				APIKeyEnv: "MINIMAX_API_KEY",
 			}, nil
 		}
 		return nil, fmt.Errorf("AI provider '%s' not found in configuration", providerName)
