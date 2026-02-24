@@ -72,6 +72,14 @@ ai:
       model: gemini-2.5-flash
       api_key_env: GEMINI_API_KEY
 
+    deepseek:
+      model: deepseek-chat
+      api_key_env: DEEPSEEK_API_KEY
+
+    minimax:
+      model: MiniMax-M2.1
+      api_key_env: MINIMAX_API_KEY
+
 # Infrastructure Providers Configuration
 infra:
   default_environment: dev             # Default environment to use
@@ -282,6 +290,8 @@ type LLMCredentialsScan struct {
 	OpenAI        LLMKeyStatus `json:"openai"`
 	Anthropic     LLMKeyStatus `json:"anthropic"`
 	Gemini        LLMKeyStatus `json:"gemini"`
+	DeepSeek      LLMKeyStatus `json:"deepseek"`
+	MiniMax       LLMKeyStatus `json:"minimax"`
 	CustomEnvKeys []string     `json:"customEnvKeys,omitempty"`
 }
 
@@ -791,6 +801,8 @@ func scanLLMKeys(customConfig CustomScanConfig) LLMCredentialsScan {
 		OpenAI:        LLMKeyStatus{HasKey: os.Getenv("OPENAI_API_KEY") != ""},
 		Anthropic:     LLMKeyStatus{HasKey: os.Getenv("ANTHROPIC_API_KEY") != ""},
 		Gemini:        LLMKeyStatus{HasKey: os.Getenv("GEMINI_API_KEY") != ""},
+		DeepSeek:      LLMKeyStatus{HasKey: os.Getenv("DEEPSEEK_API_KEY") != ""},
+		MiniMax:       LLMKeyStatus{HasKey: os.Getenv("MINIMAX_API_KEY") != ""},
 		CustomEnvKeys: []string{},
 	}
 
