@@ -224,8 +224,28 @@ func handleGeneralCfQuery(ctx context.Context, client *cloudflare.Client, questi
 		aiProfile = viper.GetString("ai.default_provider")
 	}
 
+	// Resolve API key based on provider
+	var apiKey string
+	switch aiProfile {
+	case "bedrock", "claude":
+		apiKey = ""
+	case "gemini":
+		apiKey = ""
+	case "gemini-api":
+		apiKey = resolveGeminiAPIKey("")
+	case "openai":
+		apiKey = resolveOpenAIKey("")
+	case "anthropic":
+		apiKey = resolveAnthropicKey("")
+	case "deepseek":
+		apiKey = resolveDeepSeekKey("")
+	case "minimax":
+		apiKey = resolveMiniMaxKey("")
+	default:
+		apiKey = viper.GetString(fmt.Sprintf("ai.providers.%s.api_key", aiProfile))
+	}
+
 	// Create AI client
-	apiKey := viper.GetString(fmt.Sprintf("ai.providers.%s.api_key", aiProfile))
 	aiClient := ai.NewClient(aiProfile, apiKey, debug)
 
 	// Get AI response
