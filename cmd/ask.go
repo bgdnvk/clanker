@@ -84,9 +84,13 @@ Examples:
 		openaiKey, _ := cmd.Flags().GetString("openai-key")
 		anthropicKey, _ := cmd.Flags().GetString("anthropic-key")
 		geminiKey, _ := cmd.Flags().GetString("gemini-key")
+		deepseekKey, _ := cmd.Flags().GetString("deepseek-key")
+		minimaxKey, _ := cmd.Flags().GetString("minimax-key")
 		geminiModel, _ := cmd.Flags().GetString("gemini-model")
 		openaiModel, _ := cmd.Flags().GetString("openai-model")
 		anthropicModel, _ := cmd.Flags().GetString("anthropic-model")
+		deepseekModel, _ := cmd.Flags().GetString("deepseek-model")
+		minimaxModel, _ := cmd.Flags().GetString("minimax-model")
 		makerMode, _ := cmd.Flags().GetBool("maker")
 		applyMode, _ := cmd.Flags().GetBool("apply")
 		planFile, _ := cmd.Flags().GetString("plan-file")
@@ -232,6 +236,10 @@ Examples:
 				apiKey = resolveOpenAIKey(openaiKey)
 			case "anthropic":
 				apiKey = resolveAnthropicKey(anthropicKey)
+			case "deepseek":
+				apiKey = resolveDeepSeekKey(deepseekKey)
+			case "minimax":
+				apiKey = resolveMiniMaxKey(minimaxKey)
 			default:
 				apiKey = viper.GetString("ai.api_key")
 			}
@@ -263,7 +271,7 @@ Examples:
 				}
 			}
 
-			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel)
+			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, minimaxModel)
 
 			// Resolve API key based on provider.
 			var apiKey string
@@ -276,6 +284,10 @@ Examples:
 				apiKey = resolveOpenAIKey(openaiKey)
 			case "anthropic":
 				apiKey = resolveAnthropicKey(anthropicKey)
+			case "deepseek":
+				apiKey = resolveDeepSeekKey(deepseekKey)
+			case "minimax":
+				apiKey = resolveMiniMaxKey(minimaxKey)
 			default:
 				apiKey = viper.GetString("ai.api_key")
 			}
@@ -934,7 +946,7 @@ Format as a professional compliance table suitable for government security docum
 				}
 			}
 
-			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel)
+			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, minimaxModel)
 
 			// Get the appropriate API key based on provider
 			var apiKey string
@@ -948,6 +960,10 @@ Format as a professional compliance table suitable for government security docum
 				apiKey = resolveOpenAIKey(openaiKey)
 			case "anthropic":
 				apiKey = resolveAnthropicKey(anthropicKey)
+			case "deepseek":
+				apiKey = resolveDeepSeekKey(deepseekKey)
+			case "minimax":
+				apiKey = resolveMiniMaxKey(minimaxKey)
 			default:
 				// Default/other providers
 				apiKey = viper.GetString("ai.api_key")
@@ -971,7 +987,7 @@ Format as a professional compliance table suitable for government security docum
 				}
 			}
 
-			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel)
+			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, minimaxModel)
 
 			// Get the appropriate API key based on provider
 			var apiKey string
@@ -985,6 +1001,10 @@ Format as a professional compliance table suitable for government security docum
 				apiKey = resolveOpenAIKey(openaiKey)
 			case "anthropic":
 				apiKey = resolveAnthropicKey(anthropicKey)
+			case "deepseek":
+				apiKey = resolveDeepSeekKey(deepseekKey)
+			case "minimax":
+				apiKey = resolveMiniMaxKey(minimaxKey)
 			default:
 				// Default/other providers
 				apiKey = viper.GetString("ai.api_key")
@@ -1065,9 +1085,13 @@ func init() {
 	askCmd.Flags().String("openai-key", "", "OpenAI API key (overrides config)")
 	askCmd.Flags().String("anthropic-key", "", "Anthropic API key (overrides config)")
 	askCmd.Flags().String("gemini-key", "", "Gemini API key (overrides config and env vars)")
+	askCmd.Flags().String("deepseek-key", "", "DeepSeek API key (overrides config)")
+	askCmd.Flags().String("minimax-key", "", "MiniMax API key (overrides config)")
 	askCmd.Flags().String("openai-model", "", "OpenAI model to use (overrides config)")
 	askCmd.Flags().String("anthropic-model", "", "Anthropic model to use (overrides config)")
 	askCmd.Flags().String("gemini-model", "", "Gemini model to use (overrides config)")
+	askCmd.Flags().String("deepseek-model", "", "DeepSeek model to use (overrides config)")
+	askCmd.Flags().String("minimax-model", "", "MiniMax model to use (overrides config)")
 	askCmd.Flags().Bool("agent-trace", false, "Show detailed coordinator agent lifecycle logs (overrides config)")
 	askCmd.Flags().Bool("maker", false, "Generate an AWS, GCP, Azure, or Cloudflare CLI plan (JSON) for infrastructure changes")
 	askCmd.Flags().Bool("destroyer", false, "Allow destructive operations when using --maker (requires explicit confirmation in UI/workflow)")
@@ -1130,6 +1154,42 @@ func resolveAnthropicKey(flagValue string) string {
 	return ""
 }
 
+func resolveDeepSeekKey(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if key := viper.GetString("ai.providers.deepseek.api_key"); key != "" {
+		return key
+	}
+	if envName := viper.GetString("ai.providers.deepseek.api_key_env"); envName != "" {
+		if envVal := os.Getenv(envName); envVal != "" {
+			return envVal
+		}
+	}
+	if envVal := os.Getenv("DEEPSEEK_API_KEY"); envVal != "" {
+		return envVal
+	}
+	return ""
+}
+
+func resolveMiniMaxKey(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if key := viper.GetString("ai.providers.minimax.api_key"); key != "" {
+		return key
+	}
+	if envName := viper.GetString("ai.providers.minimax.api_key_env"); envName != "" {
+		if envVal := os.Getenv(envName); envVal != "" {
+			return envVal
+		}
+	}
+	if envVal := os.Getenv("MINIMAX_API_KEY"); envVal != "" {
+		return envVal
+	}
+	return ""
+}
+
 func maybeRunTerraformCommand(ctx context.Context, question string, tfClient *tfclient.Client) (bool, error) {
 	q := strings.ToLower(strings.TrimSpace(question))
 	if q == "" {
@@ -1167,7 +1227,7 @@ func maybeRunTerraformCommand(ctx context.Context, question string, tfClient *tf
 	return true, nil
 }
 
-func maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel string) {
+func maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, minimaxModel string) {
 	switch provider {
 	case "openai":
 		if strings.TrimSpace(openaiModel) != "" {
@@ -1180,6 +1240,14 @@ func maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiMod
 	case "gemini", "gemini-api":
 		if model := resolveGeminiModel(provider, geminiModel); model != "" {
 			viper.Set(fmt.Sprintf("ai.providers.%s.model", provider), model)
+		}
+	case "deepseek":
+		if strings.TrimSpace(deepseekModel) != "" {
+			viper.Set("ai.providers.deepseek.model", strings.TrimSpace(deepseekModel))
+		}
+	case "minimax":
+		if strings.TrimSpace(minimaxModel) != "" {
+			viper.Set("ai.providers.minimax.model", strings.TrimSpace(minimaxModel))
 		}
 	}
 }
