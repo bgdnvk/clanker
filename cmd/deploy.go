@@ -46,9 +46,13 @@ Examples:
 		openaiKey, _ := cmd.Flags().GetString("openai-key")
 		anthropicKey, _ := cmd.Flags().GetString("anthropic-key")
 		geminiKey, _ := cmd.Flags().GetString("gemini-key")
+		deepseekKey, _ := cmd.Flags().GetString("deepseek-key")
+		minimaxKey, _ := cmd.Flags().GetString("minimax-key")
 		openaiModel, _ := cmd.Flags().GetString("openai-model")
 		anthropicModel, _ := cmd.Flags().GetString("anthropic-model")
 		geminiModel, _ := cmd.Flags().GetString("gemini-model")
+		deepseekModel, _ := cmd.Flags().GetString("deepseek-model")
+		minimaxModel, _ := cmd.Flags().GetString("minimax-model")
 		targetProvider, _ := cmd.Flags().GetString("provider")
 		deployTarget, _ := cmd.Flags().GetString("target")
 		instanceType, _ := cmd.Flags().GetString("instance-type")
@@ -87,11 +91,15 @@ Examples:
 			apiKey = resolveOpenAIKey(openaiKey)
 		case "anthropic":
 			apiKey = resolveAnthropicKey(anthropicKey)
+		case "deepseek":
+			apiKey = resolveDeepSeekKey(deepseekKey)
+		case "minimax":
+			apiKey = resolveMiniMaxKey(minimaxKey)
 		default:
 			apiKey = viper.GetString("ai.api_key")
 		}
 
-		maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel)
+		maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, minimaxModel)
 
 		aiClient := ai.NewClient(provider, apiKey, debug, aiProfile)
 
@@ -632,9 +640,13 @@ func init() {
 	deployCmd.Flags().String("openai-key", "", "OpenAI API key")
 	deployCmd.Flags().String("anthropic-key", "", "Anthropic API key")
 	deployCmd.Flags().String("gemini-key", "", "Gemini API key")
+	deployCmd.Flags().String("deepseek-key", "", "DeepSeek API key")
+	deployCmd.Flags().String("minimax-key", "", "MiniMax API key")
 	deployCmd.Flags().String("openai-model", "", "OpenAI model to use (overrides config)")
 	deployCmd.Flags().String("anthropic-model", "", "Anthropic model to use (overrides config)")
 	deployCmd.Flags().String("gemini-model", "", "Gemini model to use (overrides config)")
+	deployCmd.Flags().String("deepseek-model", "", "DeepSeek model to use (overrides config)")
+	deployCmd.Flags().String("minimax-model", "", "MiniMax model to use (overrides config)")
 	deployCmd.Flags().Bool("apply", false, "Apply the plan immediately after generation")
 	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws, gcp, azure, or cloudflare")
 	deployCmd.Flags().String("target", "fargate", "Deployment target: fargate (default), ec2, or eks")
