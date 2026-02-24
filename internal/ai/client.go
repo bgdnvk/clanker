@@ -215,7 +215,7 @@ func NewClient(provider, apiKey string, debug bool, aiProfile ...string) *Client
 	case "deepseek":
 		client.baseURL = "https://api.deepseek.com/v1"
 	case "minimax":
-		client.baseURL = "https://api.minimax.io/v1"
+		client.baseURL = "https://api.minimax.io/anthropic"
 	default:
 		// Default to OpenAI for best compatibility when no provider specified
 		client.provider = "openai"

@@ -77,7 +77,7 @@ ai:
       api_key_env: DEEPSEEK_API_KEY
 
     minimax:
-      model: MiniMax-M2.1
+      model: MiniMax-M2.5
       api_key_env: MINIMAX_API_KEY
 
 # Infrastructure Providers Configuration

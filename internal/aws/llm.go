@@ -70,7 +70,7 @@ func GetAIProfile(providerName string) (*AIProfile, error) {
 		case "minimax":
 			return &AIProfile{
 				Provider:  "minimax",
-				Model:     "MiniMax-M2.1",
+				Model:     "MiniMax-M2.5",
 				APIKeyEnv: "MINIMAX_API_KEY",
 			}, nil
 		}

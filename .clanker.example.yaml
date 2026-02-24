@@ -26,7 +26,7 @@ ai:
 
     # MiniMax example:
     # minimax:
-    #   model: MiniMax-M2.1
+    #   model: MiniMax-M2.5
     #   api_key_env: MINIMAX_API_KEY
 
 infra:
@@ -76,7 +76,7 @@ infra:
 #   default_provider: minimax
 #   providers:
 #     minimax:
-#       model: MiniMax-M2.1  # or MiniMax-M2.1-lightning, MiniMax-M2
+#       model: MiniMax-M2.5  # or MiniMax-M2.5-highspeed, MiniMax-M2.1, MiniMax-M2.1-highspeed, MiniMax-M2
 #       api_key_env: MINIMAX_API_KEY
 #   # Pass at runtime: clanker ask --ai-profile minimax --minimax-key "$MINIMAX_API_KEY" ...
 
