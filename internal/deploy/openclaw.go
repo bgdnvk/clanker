@@ -219,6 +219,8 @@ func AppendOpenClawDeploymentRequirements(b *strings.Builder, p *RepoProfile, de
 	b.WriteString("- Persist OpenClaw state and workspace directories\n")
 	b.WriteString("- Configure gateway token via environment variable\n")
 	b.WriteString("- Expose gateway port (default 18789) intentionally and securely\n")
+	b.WriteString("- For AWS EC2+ALB deployments, ALWAYS create CloudFront in front of ALB and set HTTPS as the primary endpoint\n")
+	b.WriteString("- Plan output must include HTTPS URL (CloudFront domain) used for pairing; ALB HTTP URL is fallback/debug only\n")
 	b.WriteString("- Use environment variables for channel/provider secrets; avoid committing tokens\n")
 	if p != nil && len(p.BootstrapScripts) > 0 {
 		b.WriteString("- This repo has bootstrap scripts; for first-run, run docker onboarding/setup before starting the gateway\n")

@@ -184,8 +184,8 @@ func ssmEnsureECRLoginAndPullCommands(region, accountID, image string) []string 
 		"echo '[bootstrap] ECR login + pull'",
 		"# Ensure AWS CLI exists for aws ecr login",
 		"if command -v aws >/dev/null 2>&1; then true; else . /etc/os-release || true; if [ \"${ID:-}\" = \"amzn\" ]; then (dnf -y install awscli || yum -y install awscli); elif command -v apt-get >/dev/null 2>&1; then apt-get update -y && apt-get install -y awscli; else echo 'unsupported OS for aws cli install' && exit 1; fi; fi",
-		fmt.Sprintf("aws ecr get-login-password --region %s | docker login --username AWS --password-stdin %s", region, registry),
-		fmt.Sprintf("docker pull %s || true", image),
+		fmt.Sprintf("if aws ecr get-login-password --region %s | docker login --username AWS --password-stdin %s; then echo '[bootstrap] ECR login ok'; else echo '[bootstrap] ECR login failed (continuing with local image cache)'; fi", region, registry),
+		fmt.Sprintf("if docker pull %s; then echo '[bootstrap] docker pull ok'; else echo '[bootstrap] docker pull failed (continuing with local image cache)'; fi", image),
 	}
 }
 

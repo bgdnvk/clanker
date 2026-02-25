@@ -1804,11 +1804,30 @@ func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts
 	b.WriteString("5. Wait for target to be healthy:\n")
 	b.WriteString("   aws elbv2 wait target-in-service --target-group-arn <TG_ARN> --targets Id=<INSTANCE_ID>\n\n")
 
+	if IsOpenClawRepo(p, deep) {
+		b.WriteString("## OpenClaw HTTPS Requirement (CloudFront)")
+		b.WriteString("\nFor OpenClaw pairing, HTTPS is required. Create CloudFront in front of ALB:\n")
+		b.WriteString("6. Create CloudFront distribution with ALB DNS as origin:\n")
+		b.WriteString("   aws cloudfront create-distribution --distribution-config '{...}'\n")
+		b.WriteString("   - Origin DomainName: <ALB_DNS>\n")
+		b.WriteString("   - ViewerProtocolPolicy: redirect-to-https\n")
+		b.WriteString("   Save CloudFront DomainName as <CLOUDFRONT_DOMAIN>.\n\n")
+		b.WriteString("7. Wait for distribution deployment:\n")
+		b.WriteString("   aws cloudfront wait distribution-deployed --id <CLOUDFRONT_ID>\n\n")
+		b.WriteString("8. Output HTTPS pairing URL:\n")
+		b.WriteString("   https://<CLOUDFRONT_DOMAIN>\n\n")
+	}
+
 	b.WriteString("## Output\n")
-	b.WriteString("The application will be accessible at the ALB DNS name (from step 1).\n")
-	b.WriteString("URLs for this app:\n")
-	b.WriteString("- Settings: http://<ALB_DNS>/settings\n")
-	b.WriteString("- Chat: http://<ALB_DNS>/chat\n")
+	if IsOpenClawRepo(p, deep) {
+		b.WriteString("Primary URL (required for pairing): https://<CLOUDFRONT_DOMAIN>\n")
+		b.WriteString("Fallback debug URL: http://<ALB_DNS>\n")
+	} else {
+		b.WriteString("The application will be accessible at the ALB DNS name (from step 1).\n")
+		b.WriteString("URLs for this app:\n")
+		b.WriteString("- Settings: http://<ALB_DNS>/settings\n")
+		b.WriteString("- Chat: http://<ALB_DNS>/chat\n")
+	}
 	b.WriteString("DO NOT create any Lambda or CloudWatch Lambda alarms - this is an EC2 deployment.\n")
 
 	return b.String()

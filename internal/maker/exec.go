@@ -518,8 +518,21 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	if question == "" {
 		question = strings.TrimSpace(bindings["QUESTION"])
 	}
-	openclaw.MaybePrintPostDeployInstructions(bindings, opts.Profile, opts.Region, opts.Writer, question, extractRepoURLFromQuestion(question))
-	wordpress.MaybePrintPostDeployInstructions(bindings, opts.Writer, question, extractRepoURLFromQuestion(question))
+	repoURL := extractRepoURLFromQuestion(question)
+	if openclaw.Detect(question, repoURL) {
+		httpsURL := strings.TrimSpace(bindings["HTTPS_URL"])
+		if httpsURL == "" {
+			if cf := strings.TrimSpace(bindings["CLOUDFRONT_DOMAIN"]); cf != "" {
+				httpsURL = "https://" + cf
+				bindings["HTTPS_URL"] = httpsURL
+			}
+		}
+		if strings.TrimSpace(httpsURL) == "" {
+			return fmt.Errorf("openclaw requires HTTPS pairing URL but CloudFront URL is missing")
+		}
+	}
+	openclaw.MaybePrintPostDeployInstructions(bindings, opts.Profile, opts.Region, opts.Writer, question, repoURL)
+	wordpress.MaybePrintPostDeployInstructions(bindings, opts.Writer, question, repoURL)
 
 	// Populate output bindings for the caller
 	if opts.OutputBindings != nil {

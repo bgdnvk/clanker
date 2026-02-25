@@ -65,6 +65,7 @@ func MaybePrintPostDeployInstructions(bindings map[string]string, profile, regio
 	_, _ = fmt.Fprintf(w, "[openclaw] post-deploy connect + pairing\n")
 	if httpsURL != "" {
 		_, _ = fmt.Fprintf(w, "[openclaw] Control UI (HTTPS): %s\n", httpsURL)
+		_, _ = fmt.Fprintf(w, "[openclaw] Pairing URL: %s\n", httpsURL)
 	}
 	if albDNS != "" {
 		_, _ = fmt.Fprintf(w, "[openclaw] ALB origin (HTTP): http://%s\n", albDNS)
@@ -77,7 +78,7 @@ func MaybePrintPostDeployInstructions(bindings map[string]string, profile, regio
 	} else if albDNS != "" {
 		_, _ = fmt.Fprintf(w, "[openclaw]  1) Open http://%s (note: some browsers require HTTPS for the Control UI)\n", albDNS)
 	} else {
-		_, _ = fmt.Fprintf(w, "[openclaw]  1) Open the HTTPS CloudFront URL (if created)\n")
+		_, _ = fmt.Fprintf(w, "[openclaw]  1) Open the HTTPS URL printed above\n")
 	}
 	_, _ = fmt.Fprintf(w, "[openclaw]  2) When prompted, enter your gateway token (env var OPENCLAW_GATEWAY_TOKEN)\n")
 	_, _ = fmt.Fprintf(w, "[openclaw]  3) Click Connect\n")

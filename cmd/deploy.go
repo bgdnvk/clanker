@@ -17,6 +17,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/cloudflare"
 	"github.com/bgdnvk/clanker/internal/deploy"
 	"github.com/bgdnvk/clanker/internal/maker"
+	"github.com/bgdnvk/clanker/internal/openclaw"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -662,6 +663,47 @@ Examples:
 			}
 		}
 
+		// Final non-blocking review pass: allow the reviewer agent to add missing
+		// requirement commands to the latest plan (e.g. OpenClaw AWS CloudFront HTTPS).
+		{
+			reviewer := deploy.NewPlanReviewAgent(aiClient.AskPrompt, aiClient.CleanJSONResponse, logf)
+			currentPlanJSON, _ := json.MarshalIndent(plan, "", "  ")
+			isOpenClawRepo := deploy.IsOpenClawRepo(rp, intel.DeepAnalysis)
+			openClawCloudFrontMissing := false
+			if isOpenClawRepo {
+				openClawCloudFrontMissing = !deploy.HasOpenClawCloudFront(string(currentPlanJSON))
+			}
+			reviewCtx := deploy.PlanReviewContext{
+				Provider:                  intel.Architecture.Provider,
+				Method:                    intel.Architecture.Method,
+				RepoURL:                   rp.RepoURL,
+				IsOpenClaw:                isOpenClawRepo,
+				OpenClawCloudFrontMissing: openClawCloudFrontMissing,
+				IsWordPress:               deploy.IsWordPressRepo(rp, intel.DeepAnalysis),
+			}
+
+			reviewedRaw, reviewErr := reviewer.Review(ctx, string(currentPlanJSON), reviewCtx)
+			if reviewErr != nil {
+				logf("[deploy] warning: final plan review skipped (%v)", reviewErr)
+			} else {
+				reviewedPlan, parseErr := maker.ParsePlan(reviewedRaw)
+				if parseErr != nil {
+					logf("[deploy] warning: final plan review produced unparseable plan (%v); keeping current plan", parseErr)
+				} else if reviewedPlan != nil && len(reviewedPlan.Commands) > 0 {
+					reviewedPlan.Provider = intel.Architecture.Provider
+					reviewedPlan.Question = fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, strings.ToLower(strings.TrimSpace(reviewedPlan.Provider)), intel.Architecture.Method)
+					if reviewedPlan.CreatedAt.IsZero() {
+						reviewedPlan.CreatedAt = time.Now().UTC()
+					}
+					if reviewedPlan.Version == 0 {
+						reviewedPlan.Version = maker.CurrentPlanVersion
+					}
+					plan = deploy.SanitizePlanConservative(reviewedPlan, rp, intel.DeepAnalysis, intel.Docker, logf)
+					logf("[deploy] final plan review applied (commands=%d)", len(plan.Commands))
+				}
+			}
+		}
+
 		// 6. Enrich w/ existing infra context (AWS only)
 		if strings.EqualFold(strings.TrimSpace(targetProvider), "aws") {
 			_ = maker.EnrichPlan(ctx, plan, maker.ExecOptions{
@@ -891,6 +933,9 @@ Examples:
 				baseURL = httpsURL
 			}
 			path := "/health"
+			if openclaw.Detect(strings.TrimSpace(baseQuestion), rp.RepoURL) {
+				path = "/"
+			}
 			if intel.DeepAnalysis != nil && strings.TrimSpace(intel.DeepAnalysis.HealthEndpoint) != "" {
 				path = strings.TrimSpace(intel.DeepAnalysis.HealthEndpoint)
 				if !strings.HasPrefix(path, "/") {
@@ -916,6 +961,10 @@ Examples:
 		if httpsURL == "" && cfDomain != "" {
 			httpsURL = "https://" + cfDomain
 		}
+		isOpenClaw := openclaw.Detect(strings.TrimSpace(baseQuestion), rp.RepoURL)
+		if isOpenClaw && strings.TrimSpace(httpsURL) == "" {
+			return fmt.Errorf("openclaw deploy requires HTTPS pairing URL but CloudFront URL is missing")
+		}
 		if httpsURL != "" {
 			fmt.Fprintf(os.Stderr, "\n========================================\n")
 			fmt.Fprintf(os.Stderr, "Application URL: %s\n", httpsURL)
@@ -928,6 +977,23 @@ Examples:
 			fmt.Fprintf(os.Stderr, "\n========================================\n")
 			fmt.Fprintf(os.Stderr, "Instance IP: %s\n", instanceIP)
 			fmt.Fprintf(os.Stderr, "========================================\n\n")
+		}
+
+		if isOpenClaw {
+			fmt.Fprintf(os.Stderr, "[openclaw-summary] deployment + pairing endpoints\n")
+			if httpsURL != "" {
+				fmt.Fprintf(os.Stderr, "[openclaw-summary] Pairing URL (HTTPS): %s\n", httpsURL)
+			}
+			if cfDomain != "" {
+				fmt.Fprintf(os.Stderr, "[openclaw-summary] CloudFront Domain: https://%s\n", cfDomain)
+			}
+			if albDNS != "" {
+				fmt.Fprintf(os.Stderr, "[openclaw-summary] ALB Origin (HTTP): http://%s\n", albDNS)
+			}
+			if instanceID := strings.TrimSpace(outputBindings["INSTANCE_ID"]); instanceID != "" {
+				fmt.Fprintf(os.Stderr, "[openclaw-summary] Local fallback (SSM): aws ssm start-session --target %s --document-name AWS-StartPortForwardingSession --parameters 'portNumber=[\"18789\"],localPortNumber=[\"18789\"]' --profile %s --region %s\n", instanceID, targetProfile, region)
+			}
+			fmt.Fprintf(os.Stderr, "[openclaw-summary] Use OPENCLAW_GATEWAY_TOKEN when prompted in the Control UI.\n\n")
 		}
 		return nil
 	},

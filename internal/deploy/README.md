@@ -50,7 +50,13 @@ This package powers the `clanker deploy` intelligence flow from user query to pl
 
 - In `--apply`, validation remains strict; in plan-only mode, unresolved validator issues are advisory and plan output is still returned.
 
-8. **Plan finalize + apply orchestration**
+8. **Final review pass (`plan_review_agent.go`)**
+
+- A final reviewer agent reads the latest plan JSON and can append missing requirement commands.
+- OpenClaw-on-AWS guidance is reinforced here (EC2 + CloudFront HTTPS pairing flow).
+- This pass is **non-blocking**: parse/call failures keep the current plan and continue.
+
+9. **Plan finalize + apply orchestration**
     - Placeholder/binding resolution and provider-specific enrichment.
     - In `--apply`, execution is staged (infra → build/push when needed → workload launch → verification).
 
@@ -66,6 +72,7 @@ sequenceDiagram
     participant D as Deterministic Validator
     participant R as Plan Repair Agent
     participant V as LLM Validator
+    participant W as Plan Reviewer
     participant E as Maker Executor
 
     U->>C: clanker deploy <repo>
@@ -102,6 +109,9 @@ sequenceDiagram
       end
     end
 
+    C->>W: final non-blocking review(plan)
+    W-->>C: reviewed plan JSON (or keep current on failure)
+
     alt --apply
       C->>E: execute staged plan
       E-->>U: deploy result + outputs
@@ -120,4 +130,5 @@ sequenceDiagram
 - `plan_preflight_validate.go` — deterministic hard checks
 - `plan_repair_agent.go` — plan rewrite/repair agent
 - `plan_sanitize.go` — conservative fail-open plan sanitizer
+- `plan_review_agent.go` — final non-blocking plan reviewer pass
 - `resolve.go` / `userdata_fixups.go` / `nodejs_userdata.go` — placeholder and user-data fixups
