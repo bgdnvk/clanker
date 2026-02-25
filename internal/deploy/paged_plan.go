@@ -22,23 +22,122 @@ func ParsePlanPage(cleanedJSON string) (*PlanPage, error) {
 	if trimmed == "" {
 		return nil, fmt.Errorf("empty response")
 	}
-	var page PlanPage
-	if err := json.Unmarshal([]byte(trimmed), &page); err != nil {
-		// Common fallback: model returns a plain array of commands.
-		var cmds []maker.Command
-		if err2 := json.Unmarshal([]byte(trimmed), &cmds); err2 == nil {
-			if len(cmds) == 0 {
-				return nil, fmt.Errorf("page has no commands")
-			}
-			return &PlanPage{Done: false, Commands: cmds}, nil
+
+	if page, ok, err := parseSinglePlanPage(trimmed); ok {
+		if err != nil {
+			return nil, err
 		}
-		return nil, err
+		return page, nil
 	}
-	// Allow an empty commands array only if done=true (means: nothing more to add).
+
+	if page, ok, err := parsePlanPageArray(trimmed); ok {
+		if err != nil {
+			return nil, err
+		}
+		return page, nil
+	}
+
+	if page, ok, err := parseWrappedPlanPage(trimmed); ok {
+		if err != nil {
+			return nil, err
+		}
+		return page, nil
+	}
+
+	var cmds []maker.Command
+	if err := json.Unmarshal([]byte(trimmed), &cmds); err == nil {
+		if len(cmds) == 0 {
+			return nil, fmt.Errorf("page has no commands")
+		}
+		return &PlanPage{Done: false, Commands: cmds}, nil
+	}
+
+	return nil, fmt.Errorf("unsupported plan page envelope")
+}
+
+func parseSinglePlanPage(raw string) (*PlanPage, bool, error) {
+	var page PlanPage
+	if err := json.Unmarshal([]byte(raw), &page); err != nil {
+		return nil, false, nil
+	}
+
 	if len(page.Commands) == 0 && !page.Done {
-		return nil, fmt.Errorf("page has no commands")
+		return nil, true, fmt.Errorf("page has no commands")
 	}
-	return &page, nil
+	return &page, true, nil
+}
+
+func parsePlanPageArray(raw string) (*PlanPage, bool, error) {
+	var pages []PlanPage
+	if err := json.Unmarshal([]byte(raw), &pages); err != nil {
+		return nil, false, nil
+	}
+	if len(pages) == 0 {
+		return nil, true, fmt.Errorf("page array is empty")
+	}
+
+	out := &PlanPage{Done: pages[len(pages)-1].Done}
+	for _, p := range pages {
+		if len(p.Commands) > 0 {
+			out.Commands = append(out.Commands, p.Commands...)
+		}
+		if strings.TrimSpace(out.Summary) == "" && strings.TrimSpace(p.Summary) != "" {
+			out.Summary = strings.TrimSpace(p.Summary)
+		}
+		for _, n := range p.Notes {
+			n = strings.TrimSpace(n)
+			if n == "" {
+				continue
+			}
+			out.Notes = append(out.Notes, n)
+		}
+	}
+	if len(out.Commands) == 0 && !out.Done {
+		return nil, true, fmt.Errorf("page has no commands")
+	}
+	return out, true, nil
+}
+
+func parseWrappedPlanPage(raw string) (*PlanPage, bool, error) {
+	var wrapped struct {
+		Page  *PlanPage  `json:"page"`
+		Pages []PlanPage `json:"pages"`
+	}
+	if err := json.Unmarshal([]byte(raw), &wrapped); err != nil {
+		return nil, false, nil
+	}
+
+	if wrapped.Page != nil {
+		if len(wrapped.Page.Commands) == 0 && !wrapped.Page.Done {
+			return nil, true, fmt.Errorf("page has no commands")
+		}
+		return wrapped.Page, true, nil
+	}
+
+	if len(wrapped.Pages) == 0 {
+		return nil, false, nil
+	}
+
+	out := &PlanPage{Done: wrapped.Pages[len(wrapped.Pages)-1].Done}
+	for _, p := range wrapped.Pages {
+		if len(p.Commands) > 0 {
+			out.Commands = append(out.Commands, p.Commands...)
+		}
+		if strings.TrimSpace(out.Summary) == "" && strings.TrimSpace(p.Summary) != "" {
+			out.Summary = strings.TrimSpace(p.Summary)
+		}
+		for _, n := range p.Notes {
+			n = strings.TrimSpace(n)
+			if n == "" {
+				continue
+			}
+			out.Notes = append(out.Notes, n)
+		}
+	}
+	if len(out.Commands) == 0 && !out.Done {
+		return nil, true, fmt.Errorf("page has no commands")
+	}
+	return out, true, nil
 }
 
 func AppendPlanPage(plan *maker.Plan, page *PlanPage) int {
@@ -82,7 +181,7 @@ func AppendPlanPage(plan *maker.Plan, page *PlanPage) int {
 	return added
 }
 
-func BuildPlanPagePrompt(provider string, enrichedPrompt string, currentPlan *maker.Plan, requiredLaunchOps []string, mustFixIssues []string, maxCommands int) string {
+func BuildPlanPagePrompt(provider string, enrichedPrompt string, currentPlan *maker.Plan, requiredLaunchOps []string, mustFixIssues []string, maxCommands int, formatHint string) string {
 	if maxCommands <= 0 {
 		maxCommands = 8
 	}
@@ -136,6 +235,9 @@ func BuildPlanPagePrompt(provider string, enrichedPrompt string, currentPlan *ma
 	}
 
 	b.WriteString("Return JSON ONLY. No markdown, no prose.\n\n")
+	b.WriteString("Placeholder format rules:\n")
+	b.WriteString("- Use angle placeholders only: <SG_ID>, <INSTANCE_ID>, <TG_ARN>.\n")
+	b.WriteString("- Do NOT use shell-style placeholders like ${SG_ID} or $SG_ID.\n\n")
 	b.WriteString("Output schema:\n")
 	b.WriteString("{\n")
 	b.WriteString("  \"done\": boolean,\n")
@@ -145,6 +247,21 @@ func BuildPlanPagePrompt(provider string, enrichedPrompt string, currentPlan *ma
 	b.WriteString("    { \"args\": [string,...], \"reason\": string, \"produces\": {string:string}? }\n")
 	b.WriteString("  ]\n")
 	b.WriteString("}\n\n")
+	b.WriteString("Valid JSON example (shape only):\n")
+	b.WriteString("{\n")
+	b.WriteString("  \"done\": false,\n")
+	b.WriteString("  \"summary\": \"Continue infra setup\",\n")
+	b.WriteString("  \"notes\": [\"Keep commands idempotent\"],\n")
+	b.WriteString("  \"commands\": [\n")
+	b.WriteString("    {\"args\":[\"ec2\",\"describe-vpcs\"],\"reason\":\"Discover default VPC\",\"produces\":{\"VPC_ID\":\"$.Vpcs[0].VpcId\"}}\n")
+	b.WriteString("  ]\n")
+	b.WriteString("}\n")
+	b.WriteString("INVALID examples: [\"explanation\"], {\"analysis\":\"...\"}, markdown, ${SG_ID}.\n\n")
+	if strings.TrimSpace(formatHint) != "" {
+		b.WriteString("Format correction from previous attempt:\n")
+		b.WriteString(strings.TrimSpace(formatHint))
+		b.WriteString("\n\n")
+	}
 
 	b.WriteString(fmt.Sprintf("Generate the NEXT up to %d commands to CONTINUE the plan.\n", maxCommands))
 	b.WriteString("Do not repeat existing commands.\n")

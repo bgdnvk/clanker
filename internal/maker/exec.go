@@ -633,6 +633,16 @@ func shouldAutoPrepareImage(args []string, question string, bindings map[string]
 	if strings.TrimSpace(opts.Profile) == "" || strings.TrimSpace(opts.Region) == "" {
 		return false
 	}
+	userData := strings.TrimSpace(flagValue(args, "--user-data"))
+	if userData != "" {
+		if decoded, ok := decodeLikelyBase64UserData(userData); ok {
+			userData = decoded
+		}
+		lowerUserData := strings.ToLower(userData)
+		if strings.Contains(lowerUserData, "docker build") && strings.Contains(lowerUserData, "docker run") && !strings.Contains(lowerUserData, ".dkr.ecr.") {
+			return false
+		}
+	}
 	if strings.TrimSpace(bindings["ECR_URI"]) == "" {
 		if ref, ok := extractECRImageRefFromRunInstances(args); ok {
 			bindings["ECR_URI"] = ref.ECRURI
@@ -774,6 +784,13 @@ func inferRequiredDockerPlatformsForEC2RunInstances(ctx context.Context, args []
 	if amiID == "" {
 		return nil, nil
 	}
+	if strings.HasPrefix(strings.ToLower(amiID), "resolve:ssm:") {
+		resolved, rErr := awsResolveSSMAmiReference(ctx, amiID, opts)
+		if rErr != nil || strings.TrimSpace(resolved) == "" {
+			return nil, nil
+		}
+		amiID = strings.TrimSpace(resolved)
+	}
 
 	amiArch, err := awsDescribeAMIArchitecture(ctx, amiID, opts)
 	if err != nil {
@@ -830,6 +847,36 @@ func awsDescribeAMIArchitecture(ctx context.Context, amiID string, opts ExecOpti
 		return "", fmt.Errorf("describe-images failed for %s: %w (%s)", amiID, err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func awsResolveSSMAmiReference(ctx context.Context, amiRef string, opts ExecOptions) (string, error) {
+	ref := strings.TrimSpace(amiRef)
+	if !strings.HasPrefix(strings.ToLower(ref), "resolve:ssm:") {
+		return ref, nil
+	}
+	paramName := strings.TrimSpace(ref[len("resolve:ssm:"):])
+	if paramName == "" {
+		return "", fmt.Errorf("missing ssm parameter name in image-id reference")
+	}
+	args := []string{
+		"ssm", "get-parameter",
+		"--name", paramName,
+		"--query", "Parameter.Value",
+		"--output", "text",
+		"--profile", opts.Profile,
+		"--region", opts.Region,
+		"--no-cli-pager",
+	}
+	cmd := exec.CommandContext(ctx, "aws", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("resolve ssm ami failed for %s: %w (%s)", paramName, err, strings.TrimSpace(string(out)))
+	}
+	resolved := strings.TrimSpace(string(out))
+	if resolved == "" || !strings.HasPrefix(strings.ToLower(resolved), "ami-") {
+		return "", fmt.Errorf("ssm parameter %s did not resolve to AMI id (got %q)", paramName, resolved)
+	}
+	return resolved, nil
 }
 
 func awsDescribeInstanceTypeArchitectures(ctx context.Context, instanceType string, opts ExecOptions) ([]string, error) {

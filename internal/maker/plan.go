@@ -3,9 +3,12 @@ package maker
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
+
+var dollarPlaceholderRe = regexp.MustCompile(`\$\{([A-Z0-9_]+)\}`)
 
 const CurrentPlanVersion = 1
 
@@ -137,6 +140,7 @@ func normalizeArgs(args []string) []string {
 		if a == "" {
 			continue
 		}
+		a = normalizePlaceholderSyntaxArg(a)
 		out = append(out, a)
 	}
 
@@ -152,4 +156,18 @@ func normalizeArgs(args []string) []string {
 	}
 
 	return out
+}
+
+func normalizePlaceholderSyntaxArg(arg string) string {
+	v := strings.TrimSpace(arg)
+	if v == "" {
+		return v
+	}
+	if strings.Contains(v, "\n") || strings.HasPrefix(v, "#!") || strings.HasPrefix(strings.ToLower(v), "#cloud-config") {
+		return v
+	}
+	if !strings.Contains(v, "${") {
+		return v
+	}
+	return dollarPlaceholderRe.ReplaceAllString(v, "<$1>")
 }

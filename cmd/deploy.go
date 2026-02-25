@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -229,10 +230,14 @@ Examples:
 		// Generate a plan incrementally in small pages to avoid LLM truncation.
 		const maxPlanPages = 20
 		const maxCommandsPerPage = 8
+		const maxConsecutivePageFailures = 5
+		const earlyRepairAfterFailures = 3
 		var plan *maker.Plan
 		var mustFixIssues []string
 		var lastDetValidation *deploy.PlanValidation
 		stuckPages := 0
+		consecutivePageFailures := 0
+		pageFormatHint := ""
 
 		plan = &maker.Plan{
 			Version:   maker.CurrentPlanVersion,
@@ -247,20 +252,34 @@ Examples:
 		}
 
 		for pageRound := 1; pageRound <= maxPlanPages; pageRound++ {
-			questionForPrompt := baseQuestion
-			if len(questionForPrompt) > 18000 {
-				questionForPrompt = questionForPrompt[:18000] + "…"
-			}
-			prompt := deploy.BuildPlanPagePrompt(planProvider, questionForPrompt, plan, requiredLaunchOps, mustFixIssues, maxCommandsPerPage)
+			questionForPrompt := compactPlanningContext(baseQuestion, planProvider)
+			prompt := deploy.BuildPlanPagePrompt(planProvider, questionForPrompt, plan, requiredLaunchOps, mustFixIssues, maxCommandsPerPage, pageFormatHint)
 			resp, err := aiClient.AskPrompt(ctx, prompt)
 			if err != nil {
+				if !applyMode && len(plan.Commands) > 0 && (errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "deadline exceeded")) {
+					logf("[deploy] warning: planner request timed out after %d page(s); continuing with partial plan (%d command(s))", pageRound-1, len(plan.Commands))
+					break
+				}
 				return fmt.Errorf("plan generation failed: %w", err)
 			}
 
 			cleaned := aiClient.CleanJSONResponse(resp)
 			page, err := deploy.ParsePlanPage(cleaned)
 			if err != nil {
-				logf("[deploy] warning: plan page parse failed (%v), retrying (page %d/%d)...", err, pageRound, maxPlanPages)
+				consecutivePageFailures++
+				pageFormatHint = "Last response was invalid JSON for this schema (often an array of prose strings). Return ONLY one JSON object with keys: done, commands, optional summary, optional notes. Do not return arrays of explanations."
+				logf("[deploy] warning: plan page parse failed (%v, root=%s, sample=%q), retrying (page %d/%d)...", err, jsonRootKind(cleaned), compactOneLine(cleaned, 180), pageRound, maxPlanPages)
+				if consecutivePageFailures >= earlyRepairAfterFailures && len(plan.Commands) > 0 {
+					logf("[deploy] warning: switching early to deterministic repair after %d consecutive page failures", consecutivePageFailures)
+					break
+				}
+				if consecutivePageFailures >= maxConsecutivePageFailures {
+					if !applyMode && len(plan.Commands) > 0 {
+						logf("[deploy] warning: stopping after %d consecutive page failures; continuing with partial plan (%d command(s))", consecutivePageFailures, len(plan.Commands))
+						break
+					}
+					return fmt.Errorf("plan generation failed: too many consecutive page parse failures (%d)", consecutivePageFailures)
+				}
 				continue
 			}
 
@@ -270,11 +289,26 @@ Examples:
 				tmpJSON, _ := json.Marshal(tmp)
 				normalized, nErr := maker.ParsePlan(string(tmpJSON))
 				if nErr != nil {
+					consecutivePageFailures++
+					pageFormatHint = "Last response included commands that failed normalization. Return CLI argument arrays only, with no prose fields beyond reason/produces."
 					logf("[deploy] warning: plan page had invalid commands (%v), retrying (page %d/%d)...", nErr, pageRound, maxPlanPages)
+					if consecutivePageFailures >= earlyRepairAfterFailures && len(plan.Commands) > 0 {
+						logf("[deploy] warning: switching early to deterministic repair after %d consecutive page failures", consecutivePageFailures)
+						break
+					}
+					if consecutivePageFailures >= maxConsecutivePageFailures {
+						if !applyMode && len(plan.Commands) > 0 {
+							logf("[deploy] warning: stopping after %d consecutive page failures; continuing with partial plan (%d command(s))", consecutivePageFailures, len(plan.Commands))
+							break
+						}
+						return fmt.Errorf("plan generation failed: too many consecutive invalid plan pages (%d)", consecutivePageFailures)
+					}
 					continue
 				}
 				page.Commands = normalized.Commands
 			}
+			consecutivePageFailures = 0
+			pageFormatHint = ""
 
 			added := deploy.AppendPlanPage(plan, page)
 			logf("[deploy] plan page %d/%d: added %d command(s) (total=%d)", pageRound, maxPlanPages, added, len(plan.Commands))
@@ -509,6 +543,15 @@ Examples:
 
 		repairAgent := deploy.NewPlanRepairAgent(aiClient.AskPrompt, aiClient.CleanJSONResponse, logf)
 		if !validation.IsValid {
+			triage := deploy.TriageValidationForRepair(validation)
+			if len(triage.LikelyNoise) > 0 || len(triage.ContextNeeded) > 0 {
+				logf("[deploy] triage: hard=%d noise=%d context-needed=%d", len(triage.Hard.Issues), len(triage.LikelyNoise), len(triage.ContextNeeded))
+			}
+			if triage.Hard == nil || triage.Hard.IsValid || len(triage.Hard.Issues) == 0 {
+				logf("[deploy] no hard-fixable issues after triage; skipping repair loop")
+				goto finalReviewPass
+			}
+
 			// Attempt repair passes to address validator feedback without re-generating from scratch.
 			requiredEnvNames := make([]string, 0, 16)
 			if len(rp.EnvVars) > 0 {
@@ -582,7 +625,7 @@ Examples:
 			}
 
 			const maxRepairRounds = 3
-			currentValidation := validation
+			currentValidation := triage.Hard
 			currentPlanJSON := string(planJSON)
 			for r := 1; r <= maxRepairRounds; r++ {
 				logf("[deploy] attempting plan repair (round %d/%d)...", r, maxRepairRounds)
@@ -615,6 +658,25 @@ Examples:
 				plan = repaired
 
 				repairedJSON, _ := json.MarshalIndent(repaired, "", "  ")
+				invariants := deploy.CheckBulkRepairInvariants(repaired, rp, intel.DeepAnalysis)
+				if invariants != nil && !invariants.IsValid {
+					logf("[deploy] bulk invariant check failed after repair round %d (issues=%d)", r, len(invariants.Issues))
+					for i, issue := range invariants.Issues {
+						if i >= 8 {
+							break
+						}
+						logf("[deploy]   invariant: %s", strings.TrimSpace(issue))
+					}
+					currentValidation = invariants
+					currentPlanJSON = string(repairedJSON)
+					if r == maxRepairRounds {
+						if applyMode {
+							return fmt.Errorf("plan is invalid after repair (openclaw invariants failed=%d)", len(invariants.Issues))
+						}
+						logf("[deploy] warning: invariants still failing after final repair round; continuing in plan-only mode")
+					}
+					continue
+				}
 				repairedValidation, _, vErr := deploy.ValidatePlan(ctx,
 					string(repairedJSON), rp, intel.DeepAnalysis,
 					intel.Docker,
@@ -640,10 +702,15 @@ Examples:
 				currentValidation = repairedValidation
 				currentPlanJSON = string(repairedJSON)
 				if repairedValidation != nil {
-					logf("[deploy] repair round %d still invalid (issues=%d)", r, len(repairedValidation.Issues))
-					for i, issue := range repairedValidation.Issues {
+					roundTriage := deploy.TriageValidationForRepair(repairedValidation)
+					if len(roundTriage.LikelyNoise) > 0 || len(roundTriage.ContextNeeded) > 0 {
+						logf("[deploy] triage (round %d): hard=%d noise=%d context-needed=%d", r, len(roundTriage.Hard.Issues), len(roundTriage.LikelyNoise), len(roundTriage.ContextNeeded))
+					}
+					currentValidation = roundTriage.Hard
+					logf("[deploy] repair round %d still invalid (hard issues=%d)", r, len(currentValidation.Issues))
+					for i, issue := range currentValidation.Issues {
 						if i >= 12 {
-							logf("[deploy]   issue: (and %d more)", len(repairedValidation.Issues)-i)
+							logf("[deploy]   issue: (and %d more)", len(currentValidation.Issues)-i)
 							break
 						}
 						logf("[deploy]   issue: %s", strings.TrimSpace(issue))
@@ -652,8 +719,8 @@ Examples:
 
 				if r == maxRepairRounds {
 					issueCount := 0
-					if repairedValidation != nil {
-						issueCount = len(repairedValidation.Issues)
+					if currentValidation != nil {
+						issueCount = len(currentValidation.Issues)
 					}
 					if applyMode {
 						return fmt.Errorf("plan is invalid after repair (issues=%d)", issueCount)
@@ -665,6 +732,7 @@ Examples:
 
 		// Final non-blocking review pass: allow the reviewer agent to add missing
 		// requirement commands to the latest plan (e.g. OpenClaw AWS CloudFront HTTPS).
+	finalReviewPass:
 		{
 			reviewer := deploy.NewPlanReviewAgent(aiClient.AskPrompt, aiClient.CleanJSONResponse, logf)
 			currentPlanJSON, _ := json.MarshalIndent(plan, "", "  ")
@@ -673,13 +741,93 @@ Examples:
 			if isOpenClawRepo {
 				openClawCloudFrontMissing = !deploy.HasOpenClawCloudFront(string(currentPlanJSON))
 			}
+			reviewIssues := make([]string, 0, 24)
+			reviewFixes := make([]string, 0, 24)
+			reviewWarnings := make([]string, 0, 16)
+			if det := deploy.DeterministicValidatePlan(string(currentPlanJSON), rp, intel.DeepAnalysis, intel.Docker); det != nil {
+				reviewIssues = append(reviewIssues, det.Issues...)
+				reviewFixes = append(reviewFixes, det.Fixes...)
+				reviewWarnings = append(reviewWarnings, det.Warnings...)
+			}
+			if intel.Validation != nil {
+				reviewIssues = append(reviewIssues, intel.Validation.Issues...)
+				reviewFixes = append(reviewFixes, intel.Validation.Fixes...)
+				reviewWarnings = append(reviewWarnings, intel.Validation.Warnings...)
+			}
+			dedupe := func(in []string, max int) []string {
+				seen := make(map[string]struct{}, len(in))
+				out := make([]string, 0, len(in))
+				for _, raw := range in {
+					v := strings.TrimSpace(raw)
+					if v == "" {
+						continue
+					}
+					if _, ok := seen[v]; ok {
+						continue
+					}
+					seen[v] = struct{}{}
+					out = append(out, v)
+					if max > 0 && len(out) >= max {
+						break
+					}
+				}
+				return out
+			}
+			reviewIssues = dedupe(reviewIssues, 20)
+			reviewFixes = dedupe(reviewFixes, 20)
+			reviewWarnings = dedupe(reviewWarnings, 12)
+			reviewTriage := deploy.TriageValidationForRepair(&deploy.PlanValidation{
+				IsValid:  len(reviewIssues) == 0,
+				Issues:   reviewIssues,
+				Fixes:    reviewFixes,
+				Warnings: reviewWarnings,
+			})
+			reviewIssues = dedupe(reviewTriage.Hard.Issues, 20)
+			reviewFixes = dedupe(reviewTriage.Hard.Fixes, 20)
+			reviewWarnings = dedupe(reviewTriage.Hard.Warnings, 12)
+			if len(reviewTriage.LikelyNoise) > 0 || len(reviewTriage.ContextNeeded) > 0 {
+				logf("[deploy] final review triage: hard=%d noise=%d context-needed=%d", len(reviewIssues), len(reviewTriage.LikelyNoise), len(reviewTriage.ContextNeeded))
+			}
+
+			projectSummary := rp.Summary
+			projectCharacteristics := make([]string, 0, 12)
+			if intel.DeepAnalysis != nil {
+				if strings.TrimSpace(intel.DeepAnalysis.AppDescription) != "" {
+					projectSummary = strings.TrimSpace(intel.DeepAnalysis.AppDescription)
+				}
+				if strings.TrimSpace(intel.DeepAnalysis.Complexity) != "" {
+					projectCharacteristics = append(projectCharacteristics, "Complexity: "+strings.TrimSpace(intel.DeepAnalysis.Complexity))
+				}
+				if intel.DeepAnalysis.ListeningPort > 0 {
+					projectCharacteristics = append(projectCharacteristics, fmt.Sprintf("Listening port: %d", intel.DeepAnalysis.ListeningPort))
+				}
+				if len(intel.DeepAnalysis.Services) > 0 {
+					projectCharacteristics = append(projectCharacteristics, "Services: "+strings.Join(intel.DeepAnalysis.Services, ", "))
+				}
+				if len(intel.DeepAnalysis.ExternalDeps) > 0 {
+					projectCharacteristics = append(projectCharacteristics, "External deps: "+strings.Join(intel.DeepAnalysis.ExternalDeps, ", "))
+				}
+			}
+			if rp.HasDocker || (intel.Docker != nil && intel.Docker.HasCompose) {
+				projectCharacteristics = append(projectCharacteristics, "Runtime: Docker/Compose")
+			}
+			if isOpenClawRepo {
+				projectCharacteristics = append(projectCharacteristics, "OpenClaw pairing requires HTTPS URL")
+			}
+			projectCharacteristics = dedupe(projectCharacteristics, 12)
+
 			reviewCtx := deploy.PlanReviewContext{
 				Provider:                  intel.Architecture.Provider,
 				Method:                    intel.Architecture.Method,
 				RepoURL:                   rp.RepoURL,
+				ProjectSummary:            projectSummary,
+				ProjectCharacteristics:    projectCharacteristics,
 				IsOpenClaw:                isOpenClawRepo,
 				OpenClawCloudFrontMissing: openClawCloudFrontMissing,
 				IsWordPress:               deploy.IsWordPressRepo(rp, intel.DeepAnalysis),
+				Issues:                    reviewIssues,
+				Fixes:                     reviewFixes,
+				Warnings:                  reviewWarnings,
 			}
 
 			reviewedRaw, reviewErr := reviewer.Review(ctx, string(currentPlanJSON), reviewCtx)
@@ -1081,6 +1229,127 @@ func inferEnvVarNamesFromText(text string) []string {
 		}
 	}
 	sort.Strings(out)
+	return out
+}
+
+func jsonRootKind(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "empty"
+	}
+	switch trimmed[0] {
+	case '{':
+		return "object"
+	case '[':
+		return "array"
+	default:
+		return "scalar"
+	}
+}
+
+func compactOneLine(raw string, limit int) string {
+	v := strings.TrimSpace(raw)
+	v = strings.ReplaceAll(v, "\n", " ")
+	v = strings.ReplaceAll(v, "\r", " ")
+	v = strings.ReplaceAll(v, "\t", " ")
+	for strings.Contains(v, "  ") {
+		v = strings.ReplaceAll(v, "  ", " ")
+	}
+	if limit > 0 && len(v) > limit {
+		return strings.TrimSpace(v[:limit]) + "…"
+	}
+	return strings.TrimSpace(v)
+}
+
+func compactPlanningContext(text, provider string) string {
+	maxChars := maxPlanningPromptChars(provider)
+	trimmed := strings.TrimSpace(text)
+	if len(trimmed) <= maxChars {
+		return trimmed
+	}
+	return summarizePlanningContext(trimmed, maxChars)
+}
+
+func maxPlanningPromptChars(provider string) int {
+	p := strings.ToLower(strings.TrimSpace(provider))
+	switch p {
+	case "gemini", "gemini-api":
+		return 220000
+	case "openai":
+		return 180000
+	case "anthropic":
+		return 120000
+	default:
+		return 100000
+	}
+}
+
+func summarizePlanningContext(text string, maxChars int) string {
+	if maxChars <= 0 {
+		return ""
+	}
+	if len(text) <= maxChars {
+		return text
+	}
+
+	lines := strings.Split(strings.ReplaceAll(text, "\r", ""), "\n")
+	keyed := make([]string, 0, len(lines))
+	for _, line := range lines {
+		l := strings.TrimSpace(line)
+		if l == "" {
+			continue
+		}
+		ll := strings.ToLower(l)
+		if strings.Contains(ll, "required") ||
+			strings.Contains(ll, "must") ||
+			strings.Contains(ll, "env") ||
+			strings.Contains(ll, "port") ||
+			strings.Contains(ll, "security") ||
+			strings.Contains(ll, "iam") ||
+			strings.Contains(ll, "ssm") ||
+			strings.Contains(ll, "docker") ||
+			strings.Contains(ll, "openclaw") {
+			keyed = append(keyed, l)
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString("[summarized planning context]\n")
+	for _, line := range keyed {
+		if b.Len()+len(line)+2 > maxChars-300 {
+			break
+		}
+		b.WriteString("- ")
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+
+	headSize := maxChars / 3
+	tailSize := maxChars / 4
+	if headSize < 1000 {
+		headSize = 1000
+	}
+	if tailSize < 1000 {
+		tailSize = 1000
+	}
+	head := text
+	if len(head) > headSize {
+		head = head[:headSize]
+	}
+	tail := text
+	if len(tail) > tailSize {
+		tail = tail[len(tail)-tailSize:]
+	}
+
+	b.WriteString("\n[head]\n")
+	b.WriteString(head)
+	b.WriteString("\n\n[tail]\n")
+	b.WriteString(tail)
+
+	out := strings.TrimSpace(b.String())
+	if len(out) > maxChars {
+		out = strings.TrimSpace(out[:maxChars]) + "…"
+	}
 	return out
 }
 

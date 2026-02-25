@@ -98,6 +98,13 @@ func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepA
 	out.Fixes = append(out.Fixes, awsChecks.Fixes...)
 	out.Warnings = append(out.Warnings, awsChecks.Warnings...)
 
+	if isOpenClaw {
+		openClawChecks := validateOpenClawPlanCommands(&plan)
+		out.Issues = append(out.Issues, openClawChecks.Issues...)
+		out.Fixes = append(out.Fixes, openClawChecks.Fixes...)
+		out.Warnings = append(out.Warnings, openClawChecks.Warnings...)
+	}
+
 	for _, cmd := range plan.Commands {
 		args := cmd.Args
 		if len(args) < 2 {
@@ -116,6 +123,10 @@ func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepA
 		if containsSecretLikeText(script) {
 			out.Issues = append(out.Issues, "[HARD] user-data script appears to inline secrets")
 			out.Fixes = append(out.Fixes, "Do not inline secrets in user-data; fetch them from Secrets Manager/SSM at boot")
+		}
+		if hasLikelyBrokenSingleQuoteLine(script) {
+			out.Issues = append(out.Issues, "[HARD] user-data script appears to contain an unterminated single-quoted string")
+			out.Fixes = append(out.Fixes, "Fix user-data quoting (e.g., close trailing single quotes such as echo '...') before execution")
 		}
 
 		lower := strings.ToLower(script)
@@ -202,6 +213,125 @@ func DeterministicValidatePlan(planJSON string, profile *RepoProfile, deep *Deep
 	return &PlanValidation{IsValid: true, Issues: nil, Fixes: nil, Warnings: det.Warnings}
 }
 
+func CheckBulkRepairInvariants(plan *maker.Plan, profile *RepoProfile, deep *DeepAnalysis) *PlanValidation {
+	if plan == nil {
+		return &PlanValidation{IsValid: true}
+	}
+
+	issues := make([]string, 0, 12)
+	fixes := make([]string, 0, 12)
+	warnings := make([]string, 0, 8)
+
+	if len(plan.Commands) == 0 {
+		issues = append(issues, "[HARD] bulk invariant failed: plan has no commands")
+		fixes = append(fixes, "Ensure repaired plan keeps a non-empty commands array")
+	}
+	if unresolved := GetUnresolvedPlaceholders(plan); len(unresolved) > 0 {
+		issues = append(issues, "[HARD] bulk invariant failed: unresolved placeholders remain")
+		fixes = append(fixes, "Resolve placeholder bindings so every <TOKEN> has a concrete produced value")
+	}
+
+	hasAddRoleToProfile := false
+	hasGetInstanceProfileBeforeRun := false
+	seenRunInstances := false
+
+	for _, cmd := range plan.Commands {
+		args := cmd.Args
+		if len(args) < 2 {
+			continue
+		}
+		svc := strings.ToLower(strings.TrimSpace(args[0]))
+		op := strings.ToLower(strings.TrimSpace(args[1]))
+		if svc == "iam" && op == "add-role-to-instance-profile" {
+			hasAddRoleToProfile = true
+		}
+		if !seenRunInstances && svc == "iam" && op == "get-instance-profile" {
+			hasGetInstanceProfileBeforeRun = true
+		}
+		if svc == "ec2" && op == "run-instances" {
+			seenRunInstances = true
+			script := extractEC2UserDataScript(args)
+			if hasLikelyBrokenSingleQuoteLine(script) {
+				issues = append(issues, "[HARD] bulk invariant failed: user-data quote sanity check failed")
+				fixes = append(fixes, "Fix unterminated single-quoted strings in user-data (for example closing echo '...')")
+			}
+		}
+	}
+
+	if hasAddRoleToProfile && seenRunInstances && !hasGetInstanceProfileBeforeRun {
+		issues = append(issues, "[HARD] bulk invariant failed: missing IAM profile readiness check before ec2 run-instances")
+		fixes = append(fixes, "Insert iam get-instance-profile after add-role-to-instance-profile and before ec2 run-instances")
+	}
+
+	if IsOpenClawRepo(profile, deep) {
+		ocIssues, ocFixes := checkOpenClawProjectInvariants(plan)
+		issues = append(issues, ocIssues...)
+		fixes = append(fixes, ocFixes...)
+	}
+
+	issues = uniqueStrings(issues)
+	fixes = uniqueStrings(fixes)
+	warnings = uniqueStrings(warnings)
+	return &PlanValidation{IsValid: len(issues) == 0, Issues: issues, Fixes: fixes, Warnings: warnings}
+}
+
+func CheckOpenClawBulkInvariants(plan *maker.Plan, profile *RepoProfile, deep *DeepAnalysis) *PlanValidation {
+	return CheckBulkRepairInvariants(plan, profile, deep)
+}
+
+func checkOpenClawProjectInvariants(plan *maker.Plan) ([]string, []string) {
+	issues := make([]string, 0, 8)
+	fixes := make([]string, 0, 8)
+	hasCFCreate := false
+	hasCFWait := false
+	hasCFOutput := false
+	hasALB := false
+
+	for _, cmd := range plan.Commands {
+		args := cmd.Args
+		if len(args) < 2 {
+			continue
+		}
+		svc := strings.ToLower(strings.TrimSpace(args[0]))
+		op := strings.ToLower(strings.TrimSpace(args[1]))
+		if svc == "elbv2" && op == "create-load-balancer" {
+			hasALB = true
+		}
+		if svc == "cloudfront" && op == "create-distribution" {
+			hasCFCreate = true
+		}
+		if svc == "cloudfront" && op == "wait" && len(args) >= 3 && strings.EqualFold(strings.TrimSpace(args[2]), "distribution-deployed") {
+			hasCFWait = true
+		}
+		if svc == "ec2" && op == "run-instances" {
+			script := extractEC2UserDataScript(args)
+			lower := strings.ToLower(script)
+			onboardIdx := strings.Index(lower, "docker-setup.sh")
+			if onboardIdx < 0 {
+				onboardIdx = strings.Index(lower, "openclaw-cli onboard")
+			}
+			startIdx := strings.Index(lower, "up -d openclaw-gateway")
+			if startIdx >= 0 && (onboardIdx < 0 || onboardIdx > startIdx) {
+				issues = append(issues, "[HARD] OpenClaw invariant failed: onboarding must run before starting openclaw-gateway")
+				fixes = append(fixes, "Run docker-setup.sh or openclaw-cli onboard before docker compose up -d openclaw-gateway")
+			}
+		}
+		for k := range cmd.Produces {
+			ku := strings.ToUpper(strings.TrimSpace(k))
+			if ku == "CLOUDFRONT_DOMAIN" || ku == "HTTPS_URL" {
+				hasCFOutput = true
+			}
+		}
+	}
+
+	if hasALB && !(hasCFCreate && hasCFWait && hasCFOutput) {
+		issues = append(issues, "[HARD] OpenClaw invariant failed: HTTPS pairing URL must be shipped via CloudFront (create + wait + output)")
+		fixes = append(fixes, "Add CloudFront create-distribution, cloudfront wait distribution-deployed, and produces for CLOUDFRONT_DOMAIN/HTTPS_URL")
+	}
+
+	return uniqueStrings(issues), uniqueStrings(fixes)
+}
+
 type awsPlanChecks struct {
 	Issues   []string
 	Fixes    []string
@@ -222,6 +352,9 @@ func validateAWSPlanCommands(plan *maker.Plan, appPorts []int, deep *DeepAnalysi
 	sgPorts := map[int]bool{}
 	tgPort := 0
 	healthPath := ""
+	hasAddRoleToProfile := false
+	hasGetInstanceProfileBeforeRun := false
+	seenRunInstances := false
 	for _, cmd := range plan.Commands {
 		args := cmd.Args
 		if len(args) < 2 {
@@ -229,6 +362,15 @@ func validateAWSPlanCommands(plan *maker.Plan, appPorts []int, deep *DeepAnalysi
 		}
 		service := strings.ToLower(strings.TrimSpace(args[0]))
 		op := strings.ToLower(strings.TrimSpace(args[1]))
+		if service == "iam" && op == "add-role-to-instance-profile" {
+			hasAddRoleToProfile = true
+		}
+		if !seenRunInstances && service == "iam" && op == "get-instance-profile" {
+			hasGetInstanceProfileBeforeRun = true
+		}
+		if service == "ec2" && op == "run-instances" {
+			seenRunInstances = true
+		}
 		if service == "ec2" && op == "authorize-security-group-ingress" {
 			if port := parseFlagInt(args, "--port"); port > 0 {
 				sgPorts[port] = true
@@ -263,6 +405,54 @@ func validateAWSPlanCommands(plan *maker.Plan, appPorts []int, deep *DeepAnalysi
 		if strings.HasPrefix(want, "/") && healthPath == "" {
 			out.Warnings = append(out.Warnings, "detected health endpoint but plan does not set --health-check-path")
 		}
+	}
+	if hasAddRoleToProfile && seenRunInstances && !hasGetInstanceProfileBeforeRun {
+		out.Issues = append(out.Issues, "[HARD] missing IAM instance-profile readiness check before ec2 run-instances")
+		out.Fixes = append(out.Fixes, "Insert iam get-instance-profile (or equivalent retry/wait step) after add-role-to-instance-profile and before ec2 run-instances")
+	}
+
+	return out
+}
+
+func validateOpenClawPlanCommands(plan *maker.Plan) awsPlanChecks {
+	var out awsPlanChecks
+	if plan == nil || len(plan.Commands) == 0 {
+		return out
+	}
+
+	hasALB := false
+	hasCloudFrontCreate := false
+	hasCloudFrontWait := false
+	hasCloudFrontOutput := false
+	for _, cmd := range plan.Commands {
+		args := cmd.Args
+		if len(args) < 2 {
+			continue
+		}
+		service := strings.ToLower(strings.TrimSpace(args[0]))
+		op := strings.ToLower(strings.TrimSpace(args[1]))
+		if service == "elbv2" && op == "create-load-balancer" {
+			hasALB = true
+		}
+		if service == "cloudfront" && op == "create-distribution" {
+			hasCloudFrontCreate = true
+		}
+		if service == "cloudfront" && op == "wait" {
+			if len(args) >= 3 && strings.EqualFold(strings.TrimSpace(args[2]), "distribution-deployed") {
+				hasCloudFrontWait = true
+			}
+		}
+		for k := range cmd.Produces {
+			ku := strings.ToUpper(strings.TrimSpace(k))
+			if ku == "CLOUDFRONT_DOMAIN" || ku == "HTTPS_URL" {
+				hasCloudFrontOutput = true
+			}
+		}
+	}
+
+	if hasALB && !(hasCloudFrontCreate && hasCloudFrontWait && hasCloudFrontOutput) {
+		out.Issues = append(out.Issues, "[HARD] OpenClaw AWS plan with ALB is missing complete CloudFront HTTPS pairing steps")
+		out.Fixes = append(out.Fixes, "Add cloudfront create-distribution + cloudfront wait distribution-deployed and produce CLOUDFRONT_DOMAIN/HTTPS_URL")
 	}
 
 	return out
@@ -404,6 +594,25 @@ func missingEnvVarsInScript(script string, envVars []string) []string {
 		missing = append(missing, k)
 	}
 	return uniqueStrings(missing)
+}
+
+func hasLikelyBrokenSingleQuoteLine(script string) bool {
+	if strings.TrimSpace(script) == "" {
+		return false
+	}
+	lines := strings.Split(strings.ReplaceAll(script, "\r", ""), "\n")
+	for _, line := range lines {
+		l := strings.TrimSpace(line)
+		if l == "" || strings.HasPrefix(l, "#") {
+			continue
+		}
+		if strings.Count(l, "'")%2 != 0 {
+			if strings.Contains(strings.ToLower(l), "echo '") || strings.Contains(strings.ToLower(l), "printf '") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func scriptRunsNodeInstall(script string) bool {

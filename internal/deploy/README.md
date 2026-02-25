@@ -37,6 +37,24 @@ This package powers the `clanker deploy` intelligence flow from user query to pl
     - If paged planning ends with deterministic issues, repair rounds are run to patch the plan JSON.
     - Re-validated deterministically each round before continuing.
 
+- Validation findings are triaged (`plan_issue_triage.go`) into:
+    - `hard-fixable` (sent to repair prompts),
+    - `likely-noise` (excluded from repair loop),
+    - `context-needed` (logged for operator follow-up).
+- Repair prompts enforce a strict contract: preserve valid commands, minimal diff, fix only listed issues, avoid architecture changes unless required.
+
+5.5 **Bulk invariant pass (`plan_preflight_validate.go`)**
+
+- After each bulk repair round, invariants are checked before moving on.
+- **Generic baseline invariants (all repos):**
+    - non-empty command list,
+    - no unresolved placeholders,
+    - IAM instance-profile readiness (`get-instance-profile`) before EC2 launch when role/profile wiring exists,
+    - user-data quote sanity (detects common unterminated quote breakages).
+- **Project overlay invariants:**
+    - OpenClaw: HTTPS pairing URL shipped via CloudFront (create + wait + output), onboarding before gateway start.
+- Overlay model keeps baseline checks generic while allowing targeted rules for known one-click projects.
+
 6. **Conservative sanitizer (`plan_sanitize.go`)**
 
 - Sanitization is **fail-open**: original vs sanitized plans are compared via deterministic issue count.
@@ -129,6 +147,7 @@ sequenceDiagram
 - `paged_plan.go` — paginated planning protocol + prompt builder
 - `plan_preflight_validate.go` — deterministic hard checks
 - `plan_repair_agent.go` — plan rewrite/repair agent
+- `plan_issue_triage.go` — triage for hard-fixable vs noise/context findings
 - `plan_sanitize.go` — conservative fail-open plan sanitizer
 - `plan_review_agent.go` — final non-blocking plan reviewer pass
 - `resolve.go` / `userdata_fixups.go` / `nodejs_userdata.go` — placeholder and user-data fixups

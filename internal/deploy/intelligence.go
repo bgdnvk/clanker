@@ -463,6 +463,7 @@ func ValidatePlan(ctx context.Context, planJSON string, profile *RepoProfile, de
 		}
 		return v, buildFixPrompt(v), nil
 	}
+	v = normalizeValidation(v)
 
 	if !v.IsValid && len(v.Fixes) > 0 {
 		// build a fix prompt that the caller can feed back into plan generation
@@ -480,6 +481,49 @@ func ValidatePlan(ctx context.Context, planJSON string, profile *RepoProfile, de
 		v.Warnings = uniqueStrings(v.Warnings)
 	}
 	return v, "", nil
+}
+
+func normalizeValidation(v *PlanValidation) *PlanValidation {
+	if v == nil {
+		return v
+	}
+	keepIssue := func(s string) bool {
+		l := strings.ToLower(strings.TrimSpace(s))
+		if l == "" {
+			return false
+		}
+		if strings.Contains(l, "disregard") {
+			return false
+		}
+		if strings.Contains(l, "cloudfront does not") && strings.Contains(l, "websocket") {
+			return false
+		}
+		if strings.Contains(l, "iam policy arn is malformed") && strings.Contains(l, "arn:aws:iam::aws:policy/") {
+			return false
+		}
+		return true
+	}
+
+	issues := make([]string, 0, len(v.Issues))
+	for _, item := range v.Issues {
+		if keepIssue(item) {
+			issues = append(issues, strings.TrimSpace(item))
+		}
+	}
+	warnings := make([]string, 0, len(v.Warnings))
+	for _, item := range v.Warnings {
+		if keepIssue(item) {
+			warnings = append(warnings, strings.TrimSpace(item))
+		}
+	}
+
+	v.Issues = uniqueStrings(issues)
+	v.Warnings = uniqueStrings(warnings)
+	if len(v.Issues) == 0 {
+		v.IsValid = true
+		v.Fixes = nil
+	}
+	return v
 }
 
 // --- Phase 1: Deep Understanding ---

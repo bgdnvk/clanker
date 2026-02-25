@@ -10,9 +10,14 @@ type PlanReviewContext struct {
 	Provider                  string
 	Method                    string
 	RepoURL                   string
+	ProjectSummary            string
+	ProjectCharacteristics    []string
 	IsOpenClaw                bool
 	OpenClawCloudFrontMissing bool
 	IsWordPress               bool
+	Issues                    []string
+	Fixes                     []string
+	Warnings                  []string
 }
 
 type PlanReviewAgent struct {
@@ -44,6 +49,18 @@ func (a *PlanReviewAgent) Review(ctx context.Context, planJSON string, c PlanRev
 	reviewed := strings.TrimSpace(a.clean(resp))
 	if reviewed == "" {
 		reviewed = strings.TrimSpace(planJSON)
+	}
+
+	if len(c.Issues) > 0 || len(c.Fixes) > 0 {
+		respFix, errFix := a.ask(ctx, a.buildIssueFixPrompt(reviewed, c))
+		if errFix == nil {
+			patched := strings.TrimSpace(a.clean(respFix))
+			if patched != "" {
+				reviewed = patched
+			}
+		} else {
+			a.logf("[deploy] final review: issue-fix pass skipped (%v)", errFix)
+		}
 	}
 
 	if c.IsOpenClaw && c.OpenClawCloudFrontMissing && strings.EqualFold(strings.TrimSpace(c.Provider), "aws") {
@@ -110,6 +127,19 @@ func (a *PlanReviewAgent) buildPrompt(planJSON string, c PlanReviewContext) stri
 	if strings.TrimSpace(c.RepoURL) != "" {
 		b.WriteString("- repo: " + strings.TrimSpace(c.RepoURL) + "\n")
 	}
+	if strings.TrimSpace(c.ProjectSummary) != "" {
+		b.WriteString("- project_summary: " + strings.TrimSpace(c.ProjectSummary) + "\n")
+	}
+	if len(c.ProjectCharacteristics) > 0 {
+		b.WriteString("- project_characteristics:\n")
+		for _, s := range c.ProjectCharacteristics {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			b.WriteString("  - " + s + "\n")
+		}
+	}
 	b.WriteString("- openclaw: ")
 	if c.IsOpenClaw {
 		b.WriteString("true\n\n")
@@ -134,12 +164,12 @@ func (a *PlanReviewAgent) buildPrompt(planJSON string, c PlanReviewContext) stri
 	if c.IsOpenClaw && c.OpenClawCloudFrontMissing {
 		b.WriteString("- If openclaw=true and openclaw_cloudfront_missing=true and provider=aws:\n")
 		b.WriteString("  1) deployment method must be EC2 (include ec2 run-instances),\n")
-		b.WriteString("  2) include CloudFront HTTPS in front of ALB for pairing:\n")
+		b.WriteString("  2) include CloudFront HTTPS in front of ALB; this HTTPS URL is REQUIRED for OpenClaw pairing (not just websocket transport):\n")
 		b.WriteString("     - cloudfront create-distribution (with ALB origin),\n")
 		b.WriteString("     - cloudfront wait distribution-deployed,\n")
-		b.WriteString("  3) include produces bindings for CLOUDFRONT_DOMAIN and/or HTTPS_URL when feasible.\n")
+		b.WriteString("  3) include produces bindings for CLOUDFRONT_DOMAIN and/or HTTPS_URL when feasible and make HTTPS primary URL in notes.\n")
 	} else if c.IsOpenClaw {
-		b.WriteString("- If openclaw=true and openclaw_cloudfront_missing=false: do NOT add duplicate CloudFront commands; keep existing CloudFront/HTTPS steps unchanged.\n")
+		b.WriteString("- If openclaw=true and openclaw_cloudfront_missing=false: do NOT add duplicate CloudFront commands; keep existing CloudFront/HTTPS pairing steps unchanged.\n")
 	}
 	b.WriteString("- If wordpress=true and provider=aws:\n")
 	b.WriteString("  1) deployment method should be EC2 (include ec2 run-instances),\n")
@@ -147,6 +177,41 @@ func (a *PlanReviewAgent) buildPrompt(planJSON string, c PlanReviewContext) stri
 	b.WriteString("  3) include Docker Hub wordpress + mariadb runtime steps and persistent Docker volumes,\n")
 	b.WriteString("  4) require WORDPRESS_DB_PASSWORD as user-provided secret and do not persist it to SSM Parameter Store.\n")
 	b.WriteString("- If requirements are already satisfied, return the plan unchanged.\n\n")
+
+	if len(c.Issues) > 0 || len(c.Fixes) > 0 || len(c.Warnings) > 0 {
+		b.WriteString("Current known plan findings to address:\n")
+		for i, issue := range c.Issues {
+			if i >= 15 {
+				break
+			}
+			issue = strings.TrimSpace(issue)
+			if issue == "" {
+				continue
+			}
+			b.WriteString("- ISSUE: " + issue + "\n")
+		}
+		for i, fix := range c.Fixes {
+			if i >= 15 {
+				break
+			}
+			fix = strings.TrimSpace(fix)
+			if fix == "" {
+				continue
+			}
+			b.WriteString("- FIX: " + fix + "\n")
+		}
+		for i, warning := range c.Warnings {
+			if i >= 10 {
+				break
+			}
+			warning = strings.TrimSpace(warning)
+			if warning == "" {
+				continue
+			}
+			b.WriteString("- WARNING: " + warning + "\n")
+		}
+		b.WriteString("\n")
+	}
 
 	b.WriteString("Current plan JSON:\n")
 	b.WriteString(p)
@@ -169,6 +234,7 @@ func (a *PlanReviewAgent) buildOpenClawCloudFrontPrompt(planJSON string, c PlanR
 	b.WriteString("- Include cloudfront create-distribution in front of ALB origin.\n")
 	b.WriteString("- Include cloudfront wait distribution-deployed.\n")
 	b.WriteString("- Ensure resulting plan includes produces bindings for CLOUDFRONT_DOMAIN and/or HTTPS_URL.\n")
+	b.WriteString("- Ensure notes/state make it explicit that HTTPS via CloudFront is the REQUIRED OpenClaw pairing URL.\n")
 	b.WriteString("- Keep AWS CLI args without leading 'aws'.\n")
 	b.WriteString("- No markdown, no prose, JSON object only.\n\n")
 	b.WriteString("Context:\n")
@@ -179,6 +245,52 @@ func (a *PlanReviewAgent) buildOpenClawCloudFrontPrompt(planJSON string, c PlanR
 	}
 	b.WriteString("- openclaw: true\n\n")
 	b.WriteString("Current plan JSON:\n")
+	b.WriteString(p)
+	b.WriteString("\n\nReturn corrected plan JSON only.\n")
+	return b.String()
+}
+
+func (a *PlanReviewAgent) buildIssueFixPrompt(planJSON string, c PlanReviewContext) string {
+	p := strings.TrimSpace(planJSON)
+	if len(p) > 26000 {
+		p = p[:26000] + "…"
+	}
+
+	var b strings.Builder
+	b.WriteString("You are doing a focused issue-fix pass on a deployment plan JSON.\n")
+	b.WriteString("Return ONE corrected plan JSON object only.\n")
+	b.WriteString("Apply fixes for the listed issues while preserving valid commands and ordering.\n")
+	b.WriteString("Do not output markdown or prose.\n\n")
+
+	b.WriteString("Context:\n")
+	b.WriteString("- provider: " + strings.TrimSpace(c.Provider) + "\n")
+	b.WriteString("- method: " + strings.TrimSpace(c.Method) + "\n")
+	if strings.TrimSpace(c.ProjectSummary) != "" {
+		b.WriteString("- project_summary: " + strings.TrimSpace(c.ProjectSummary) + "\n")
+	}
+	b.WriteString("\nFindings to fix:\n")
+	for i, issue := range c.Issues {
+		if i >= 20 {
+			break
+		}
+		issue = strings.TrimSpace(issue)
+		if issue == "" {
+			continue
+		}
+		b.WriteString("- ISSUE: " + issue + "\n")
+	}
+	for i, fix := range c.Fixes {
+		if i >= 20 {
+			break
+		}
+		fix = strings.TrimSpace(fix)
+		if fix == "" {
+			continue
+		}
+		b.WriteString("- FIX: " + fix + "\n")
+	}
+
+	b.WriteString("\nCurrent plan JSON:\n")
 	b.WriteString(p)
 	b.WriteString("\n\nReturn corrected plan JSON only.\n")
 	return b.String()
