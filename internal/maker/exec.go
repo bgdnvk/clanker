@@ -351,8 +351,8 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 			isOpenClaw := openclaw.Detect(question, repoURL)
 			isWordPress := wordpress.Detect(question, repoURL)
 			if isOpenClaw {
-				if p := strings.TrimSpace(flagValue(args, "--health-check-path")); p == "" || p == "/" {
-					args = setFlagValue(args, "--health-check-path", "/health")
+				if p := strings.TrimSpace(flagValue(args, "--health-check-path")); p == "" || p == "/health" {
+					args = setFlagValue(args, "--health-check-path", "/")
 				}
 				if m := strings.TrimSpace(flagValue(args, "--matcher")); m == "" || strings.Contains(m, "HttpCode=200-399") {
 					args = setFlagValue(args, "--matcher", "HttpCode=200-499")
@@ -2400,9 +2400,11 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 	// Check if we have a specific start command that includes the port
 	// This handles apps that need --port flag instead of PORT env var
 	startCmd := bindings["START_COMMAND"]
-	if startCmd == "" && isOpenClaw {
-		// OpenClaw defaults to loopback binding; force LAN binding for ALB health checks.
-		startCmd = fmt.Sprintf("node openclaw.mjs gateway --allow-unconfigured --bind lan --port %s", appPort)
+	if isOpenClaw {
+		s := strings.ToLower(strings.TrimSpace(startCmd))
+		if s == "" || strings.Contains(s, "docker compose") || strings.Contains(s, "docker-compose") || strings.Contains(s, "docker run") {
+			startCmd = fmt.Sprintf("node openclaw.mjs gateway --allow-unconfigured --bind lan --port %s", appPort)
+		}
 	}
 
 	var dockerRunCmd string
@@ -2519,8 +2521,41 @@ JS
 	}
 
 	loginLine := "echo '[bootstrap] skipping ECR login'"
+	pullLine := fmt.Sprintf("docker pull %s", imageRef)
 	if needsECRLogin && region != "" {
-		loginLine = fmt.Sprintf("aws ecr get-login-password --region %s | docker login --username AWS --password-stdin %s", region, registryHost)
+		loginLine = fmt.Sprintf(`
+echo "[bootstrap] ecr login retry loop enabled (max=5)"
+ECR_LOGIN_OK=0
+for i in 1 2 3 4 5; do
+	if aws ecr get-login-password --region %s | docker login --username AWS --password-stdin %s; then
+		ECR_LOGIN_OK=1
+		echo "[bootstrap] ecr login succeeded (attempt=$i)"
+		break
+	fi
+	echo "[bootstrap] ecr login attempt $i failed; retrying..."
+	sleep $((i*3))
+done
+if [ "$ECR_LOGIN_OK" -ne 1 ]; then
+	echo "[bootstrap] ecr login failed after retries"
+	exit 1
+fi`, region, registryHost)
+
+		pullLine = fmt.Sprintf(`
+echo "[bootstrap] docker pull retry loop enabled (max=5)"
+IMAGE_PULL_OK=0
+for i in 1 2 3 4 5; do
+	if docker pull %s; then
+		IMAGE_PULL_OK=1
+		echo "[bootstrap] docker pull succeeded (attempt=$i)"
+		break
+	fi
+	echo "[bootstrap] docker pull attempt $i failed; retrying..."
+	sleep $((i*3))
+done
+if [ "$IMAGE_PULL_OK" -ne 1 ]; then
+	echo "[bootstrap] docker pull failed after retries"
+	exit 1
+fi`, imageRef)
 	}
 
 	// Generate the startup script (NO -x; user-data can contain secrets)
@@ -2561,14 +2596,14 @@ systemctl start docker || true
 
 echo '[bootstrap] login/pull'
 %s
-docker pull %s
+%s
 
 %s
 %s
 	%s
 
 echo 'Deployment complete!'
-`, loginLine, imageRef, preRun, dockerRunCmd, postRun)
+`, loginLine, pullLine, preRun, dockerRunCmd, postRun)
 
 	// Base64 encode the script
 	encoded := base64.StdEncoding.EncodeToString([]byte(script))

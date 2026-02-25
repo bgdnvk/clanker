@@ -1007,6 +1007,12 @@ func (c *Client) askAnthropic(ctx context.Context, prompt string) (string, error
 	}
 
 	model := strings.TrimSpace(profileLLMCall.Model)
+	if strings.EqualFold(model, "claude-3-sonnet-20240229") {
+		latest, lErr := c.getLatestAnthropicModelID(ctx)
+		if lErr == nil && strings.TrimSpace(latest) != "" {
+			model = strings.TrimSpace(latest)
+		}
+	}
 	if model == "" {
 		latest, lErr := c.getLatestAnthropicModelID(ctx)
 		if lErr != nil {
@@ -1036,6 +1042,7 @@ func (c *Client) askAnthropic(ctx context.Context, prompt string) (string, error
 
 	client := &http.Client{}
 	var body []byte
+	triedModelFallback := false
 	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
 		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.baseURL, "/")+"/messages", bytes.NewBuffer(jsonData))
 		if reqErr != nil {
@@ -1067,6 +1074,19 @@ func (c *Client) askAnthropic(ctx context.Context, prompt string) (string, error
 			break
 		}
 
+		if !triedModelFallback && anthropicModelNotFound(resp.StatusCode, body) {
+			latest, lErr := c.getLatestAnthropicModelID(ctx)
+			if lErr == nil && strings.TrimSpace(latest) != "" {
+				reqBody.Model = strings.TrimSpace(latest)
+				jsonData, err = json.Marshal(reqBody)
+				if err != nil {
+					return "", fmt.Errorf("failed to marshal anthropic fallback request: %w", err)
+				}
+				triedModelFallback = true
+				continue
+			}
+		}
+
 		if attempt == aiRetryMaxAttempts || !(isRetryableHTTPStatus(resp.StatusCode) || isRetryableProviderErrorText(string(body))) {
 			return "", fmt.Errorf("Anthropic API request failed with status %d (keyLen=%d keyHash=%s): %s", resp.StatusCode, keyLen, keyHash, string(body))
 		}
@@ -1092,6 +1112,17 @@ func (c *Client) askAnthropic(ctx context.Context, prompt string) (string, error
 	}
 
 	return "", fmt.Errorf("no response content from Anthropic")
+}
+
+func anthropicModelNotFound(statusCode int, body []byte) bool {
+	if statusCode != http.StatusNotFound {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(string(body)))
+	if text == "" {
+		return false
+	}
+	return strings.Contains(text, "not_found_error") && strings.Contains(text, "model")
 }
 
 func (c *Client) getLatestAnthropicModelID(ctx context.Context) (string, error) {

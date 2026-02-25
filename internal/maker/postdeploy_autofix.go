@@ -127,7 +127,8 @@ func maybeAutoFixUnhealthyALBTargets(ctx context.Context, bindings map[string]st
 	restartCmds := ssmRestartCommands(appPort, opts.Region, accountID, image)
 	if isOpenClaw {
 		startCmd := strings.TrimSpace(bindings["START_COMMAND"])
-		if startCmd == "" {
+		lowerStart := strings.ToLower(startCmd)
+		if startCmd == "" || strings.Contains(lowerStart, "docker compose") || strings.Contains(lowerStart, "docker-compose") || strings.Contains(lowerStart, "docker run") {
 			startCmd = fmt.Sprintf("node openclaw.mjs gateway --allow-unconfigured --bind lan --port %d", appPort)
 		}
 		prelude := make([]string, 0, 16)

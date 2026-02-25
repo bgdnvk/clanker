@@ -127,6 +127,21 @@ func dropEC2TerminateInstanceIDs(args []string, drop map[string]bool) (rewritten
 }
 
 func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, awsArgs []string, stdinBytes []byte, failure AWSFailure, output string, bindings map[string]string) (bool, error) {
+	// IAM get-instance-profile: some repaired plans accidentally pass a role name instead of
+	// an instance profile name (e.g. *-role instead of *-profile). Rewrite and retry deterministically.
+	if args0(args) == "iam" && args1(args) == "get-instance-profile" {
+		if failure.Category == FailureNotFound || failure.Code == "NoSuchEntity" {
+			if rewritten, ok := remediateIAMGetInstanceProfileName(args, bindings); ok {
+				rewrittenAWSArgs := append(append([]string{}, rewritten...), "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: rewriting iam get-instance-profile --instance-profile-name and retrying\n")
+				if _, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, opts.Writer); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+	}
+
 	// EC2 subnet CIDR: plan may emit a CIDR not inside the target VPC (e.g. 10.0.0.0/16 against default 172.31.0.0/16).
 	// On InvalidSubnet.Range, pick a free /24 inside the VPC, rewrite --cidr-block, retry, and learn bindings.
 	if args0(args) == "ec2" && args1(args) == "create-subnet" {
@@ -3457,6 +3472,34 @@ func rewriteAPIGatewayV2CreateApiLambdaTargetFunctionNameToArn(ctx context.Conte
 		out[i] = "--target=" + fixed
 		return out, true
 	}
+	return nil, false
+}
+
+func remediateIAMGetInstanceProfileName(args []string, bindings map[string]string) ([]string, bool) {
+	current := strings.TrimSpace(flagValue(args, "--instance-profile-name"))
+	if current == "" {
+		return nil, false
+	}
+
+	candidates := make([]string, 0, 4)
+	if v := strings.TrimSpace(bindings["INSTANCE_PROFILE_NAME"]); v != "" {
+		candidates = append(candidates, v)
+	}
+	if strings.HasSuffix(current, "-role") {
+		candidates = append(candidates, strings.TrimSuffix(current, "-role")+"-profile")
+	}
+	if strings.HasSuffix(current, "_role") {
+		candidates = append(candidates, strings.TrimSuffix(current, "_role")+"_profile")
+	}
+
+	for _, candidate := range candidates {
+		c := strings.TrimSpace(candidate)
+		if c == "" || c == current {
+			continue
+		}
+		return setFlagValue(args, "--instance-profile-name", c), true
+	}
+
 	return nil, false
 }
 
