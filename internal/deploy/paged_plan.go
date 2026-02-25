@@ -233,6 +233,8 @@ func BuildPlanPagePrompt(provider string, enrichedPrompt string, currentPlan *ma
 		b.WriteString("You are generating an AWS deployment command plan in small pages.\n")
 		b.WriteString("Use AWS CLI command args WITHOUT the leading 'aws' program name (start with the service, e.g. ['ec2','run-instances',...]).\n\n")
 	}
+	b.WriteString("One-click deploy objective: plan.commands are executed sequentially by the runner to provision infrastructure and ship the app.\n")
+	b.WriteString("Keep previously generated valid commands; only add missing next steps.\n\n")
 
 	b.WriteString("Return JSON ONLY. No markdown, no prose.\n\n")
 	b.WriteString("Placeholder format rules:\n")

@@ -88,13 +88,15 @@ func (a *PlanRepairAgent) buildPrompt(planJSON string, v *PlanValidation, c Plan
 	if prov == "" {
 		prov = "aws"
 	}
-	b.WriteString("You are a deployment plan repair agent. Your job is to REWRITE the given deployment plan JSON into a corrected plan.\n\n")
+	b.WriteString("You are a deployment plan repair agent. Your job is to REWRITE the given deployment plan JSON into a corrected plan.\n")
+	b.WriteString("One-click deploy objective: commands are executed strictly in order to provision infrastructure and ship the project.\n\n")
 	b.WriteString("Hard rules:\n")
 	b.WriteString("- Output ONLY one JSON object (no markdown, no prose, no code fences).\n")
 	b.WriteString("- Top-level MUST be a plan object with a NON-EMPTY commands array.\n")
 	b.WriteString("- Keep plan.question and plan.summary SHORT (<=200 chars each).\n")
 	b.WriteString("- STRICT REPAIR CONTRACT: preserve existing commands whenever valid; make minimal diff.\n")
 	b.WriteString("- Fix ONLY listed issues/fixes; do NOT invent unrelated improvements.\n")
+	b.WriteString("- Do NOT delete unaffected commands. Edit only commands tied to listed issues/fixes.\n")
 	b.WriteString("- Do NOT change architecture/provider/method unless an issue explicitly requires it.\n")
 	b.WriteString("- Preserve intent but fix missing steps, ordering, and placeholder binding.\n")
 	b.WriteString("- Placeholders must use angle syntax: <NAME>. Never emit ${NAME} or $NAME.\n")

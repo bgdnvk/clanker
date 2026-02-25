@@ -12,6 +12,7 @@ type PlanReviewContext struct {
 	RepoURL                   string
 	ProjectSummary            string
 	ProjectCharacteristics    []string
+	RequiredLaunchOps         []string
 	IsOpenClaw                bool
 	OpenClawCloudFrontMissing bool
 	IsWordPress               bool
@@ -110,10 +111,12 @@ func (a *PlanReviewAgent) buildPrompt(planJSON string, c PlanReviewContext) stri
 
 	var b strings.Builder
 	b.WriteString("You are the FINAL deployment plan reviewer.\n")
+	b.WriteString("One-click deploy objective: these commands are executed strictly in sequence to provision infrastructure and ship the project.\n")
 	b.WriteString("Read the current plan JSON and return a corrected FINAL plan JSON.\n\n")
 	b.WriteString("Rules:\n")
 	b.WriteString("- Output ONLY one valid plan JSON object (no markdown/prose).\n")
 	b.WriteString("- Keep existing valid commands; add only what is missing.\n")
+	b.WriteString("- Do NOT delete commands unless a listed ISSUE/FIX requires changing that exact step.\n")
 	b.WriteString("- Keep command args as CLI tokens (no shell wrappers, pipes, redirects).\n")
 	b.WriteString("- Keep provider constraints: AWS CLI command args without leading 'aws'.\n")
 	b.WriteString("- Do NOT add --profile/--region/--no-cli-pager; runtime injects those.\n")
@@ -129,6 +132,9 @@ func (a *PlanReviewAgent) buildPrompt(planJSON string, c PlanReviewContext) stri
 	}
 	if strings.TrimSpace(c.ProjectSummary) != "" {
 		b.WriteString("- project_summary: " + strings.TrimSpace(c.ProjectSummary) + "\n")
+	}
+	if len(c.RequiredLaunchOps) > 0 {
+		b.WriteString("- required_launch_ops: " + strings.Join(c.RequiredLaunchOps, " | ") + "\n")
 	}
 	if len(c.ProjectCharacteristics) > 0 {
 		b.WriteString("- project_characteristics:\n")
@@ -161,6 +167,9 @@ func (a *PlanReviewAgent) buildPrompt(planJSON string, c PlanReviewContext) stri
 
 	b.WriteString("Requirement checklist:\n")
 	b.WriteString("- Plan must include a concrete workload launch step for the chosen method.\n")
+	if len(c.RequiredLaunchOps) > 0 {
+		b.WriteString("- Plan MUST retain at least one launch op matching: " + strings.Join(c.RequiredLaunchOps, " | ") + "\n")
+	}
 	if c.IsOpenClaw && c.OpenClawCloudFrontMissing {
 		b.WriteString("- If openclaw=true and openclaw_cloudfront_missing=true and provider=aws:\n")
 		b.WriteString("  1) deployment method must be EC2 (include ec2 run-instances),\n")
@@ -228,6 +237,7 @@ func (a *PlanReviewAgent) buildOpenClawCloudFrontPrompt(planJSON string, c PlanR
 
 	var b strings.Builder
 	b.WriteString("You are patching a FINAL OpenClaw AWS EC2 plan that is missing CloudFront HTTPS steps.\n")
+	b.WriteString("One-click deploy objective: commands run sequentially to provision infra and ship the app; preserve existing sequence and append missing CloudFront steps.\n")
 	b.WriteString("Return ONE corrected plan JSON object only.\n\n")
 	b.WriteString("Hard requirements for this patch:\n")
 	b.WriteString("- Keep existing valid commands intact; append missing commands only.\n")
@@ -258,8 +268,10 @@ func (a *PlanReviewAgent) buildIssueFixPrompt(planJSON string, c PlanReviewConte
 
 	var b strings.Builder
 	b.WriteString("You are doing a focused issue-fix pass on a deployment plan JSON.\n")
+	b.WriteString("One-click deploy objective: command list is executed sequentially to create infrastructure and ship the app.\n")
 	b.WriteString("Return ONE corrected plan JSON object only.\n")
 	b.WriteString("Apply fixes for the listed issues while preserving valid commands and ordering.\n")
+	b.WriteString("Do NOT delete unaffected commands.\n")
 	b.WriteString("Do not output markdown or prose.\n\n")
 
 	b.WriteString("Context:\n")

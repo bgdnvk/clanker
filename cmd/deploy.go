@@ -189,6 +189,7 @@ Examples:
 		if planProvider == "" {
 			planProvider = "aws"
 		}
+		deployObjectiveContext := withOneClickDeployContext(baseQuestion, planProvider, intel.Architecture.Method)
 
 		requiredLaunchOps := []string{}
 		switch strings.ToLower(strings.TrimSpace(intel.Architecture.Method)) {
@@ -252,7 +253,7 @@ Examples:
 		}
 
 		for pageRound := 1; pageRound <= maxPlanPages; pageRound++ {
-			questionForPrompt := compactPlanningContext(baseQuestion, planProvider)
+			questionForPrompt := compactPlanningContext(deployObjectiveContext, planProvider)
 			prompt := deploy.BuildPlanPagePrompt(planProvider, questionForPrompt, plan, requiredLaunchOps, mustFixIssues, maxCommandsPerPage, pageFormatHint)
 			resp, err := aiClient.AskPrompt(ctx, prompt)
 			if err != nil {
@@ -628,6 +629,7 @@ Examples:
 			currentValidation := triage.Hard
 			currentPlanJSON := string(planJSON)
 			for r := 1; r <= maxRepairRounds; r++ {
+				baselinePlan := plan
 				logf("[deploy] attempting plan repair (round %d/%d)...", r, maxRepairRounds)
 				repairedRaw, rErr := repairAgent.Repair(ctx, currentPlanJSON, currentValidation, repairCtx)
 				if rErr != nil {
@@ -654,6 +656,13 @@ Examples:
 					repaired.Version = maker.CurrentPlanVersion
 				}
 				repaired = deploy.SanitizePlanConservative(repaired, rp, intel.DeepAnalysis, intel.Docker, logf)
+				if retainErr := enforceStrictPlanRetention(baselinePlan, repaired, requiredLaunchOps, currentValidation.Issues); retainErr != nil {
+					logf("[deploy] warning: repair candidate rejected by strict retention guard: %v", retainErr)
+					if applyMode {
+						return fmt.Errorf("plan repair candidate rejected: %v", retainErr)
+					}
+					continue
+				}
 				// Keep the latest repaired candidate even if validator still has concerns.
 				plan = repaired
 
@@ -822,6 +831,7 @@ Examples:
 				RepoURL:                   rp.RepoURL,
 				ProjectSummary:            projectSummary,
 				ProjectCharacteristics:    projectCharacteristics,
+				RequiredLaunchOps:         requiredLaunchOps,
 				IsOpenClaw:                isOpenClawRepo,
 				OpenClawCloudFrontMissing: openClawCloudFrontMissing,
 				IsWordPress:               deploy.IsWordPressRepo(rp, intel.DeepAnalysis),
@@ -830,6 +840,7 @@ Examples:
 				Warnings:                  reviewWarnings,
 			}
 
+			baselinePlan := plan
 			reviewedRaw, reviewErr := reviewer.Review(ctx, string(currentPlanJSON), reviewCtx)
 			if reviewErr != nil {
 				logf("[deploy] warning: final plan review skipped (%v)", reviewErr)
@@ -846,8 +857,13 @@ Examples:
 					if reviewedPlan.Version == 0 {
 						reviewedPlan.Version = maker.CurrentPlanVersion
 					}
-					plan = deploy.SanitizePlanConservative(reviewedPlan, rp, intel.DeepAnalysis, intel.Docker, logf)
-					logf("[deploy] final plan review applied (commands=%d)", len(plan.Commands))
+					reviewedPlan = deploy.SanitizePlanConservative(reviewedPlan, rp, intel.DeepAnalysis, intel.Docker, logf)
+					if retainErr := enforceStrictPlanRetention(baselinePlan, reviewedPlan, requiredLaunchOps, reviewIssues); retainErr != nil {
+						logf("[deploy] warning: final review candidate rejected by strict retention guard: %v", retainErr)
+					} else {
+						plan = reviewedPlan
+						logf("[deploy] final plan review applied (commands=%d)", len(plan.Commands))
+					}
 				}
 			}
 		}
@@ -902,6 +918,14 @@ Examples:
 		}
 
 		// 8. Output plan JSON (or apply)
+		normalized := normalizeShellStylePlaceholdersForExecution(plan)
+		if normalized > 0 {
+			logf("[deploy] normalized %d shell-style placeholder token(s) to angle format before execution", normalized)
+		}
+		if remaining := countShellStylePlaceholders(plan); remaining > 0 {
+			logf("[deploy] warning: %d shell-style placeholder token(s) remain; continuing without hard fail so self-healing/runtime binding can resolve them", remaining)
+		}
+
 		planJSON, err = json.MarshalIndent(plan, "", "  ")
 		if err != nil {
 			return err
@@ -1259,6 +1283,180 @@ func compactOneLine(raw string, limit int) string {
 		return strings.TrimSpace(v[:limit]) + "…"
 	}
 	return strings.TrimSpace(v)
+}
+
+var shellStylePlaceholderRe = regexp.MustCompile(`\$\{([A-Z0-9_]+)\}`)
+
+func withOneClickDeployContext(base, provider, method string) string {
+	context := buildOneClickDeployObjective(provider, method)
+	base = strings.TrimSpace(base)
+	if base == "" {
+		return context
+	}
+	return context + "\n\n" + base
+}
+
+func buildOneClickDeployObjective(provider, method string) string {
+	prov := strings.ToLower(strings.TrimSpace(provider))
+	if prov == "" {
+		prov = "aws"
+	}
+	m := strings.ToLower(strings.TrimSpace(method))
+	if m == "" {
+		m = "ec2"
+	}
+	return fmt.Sprintf("[one-click deploy objective]\nGenerate command plan steps for one-click deploy. The runner executes plan.commands strictly in order, sequentially, to provision infrastructure and ship the app to production.\nUse provider=%s method=%s. Keep commands actionable/idempotent and preserve earlier produced bindings for later steps.", prov, m)
+}
+
+func enforceStrictPlanRetention(baseline *maker.Plan, candidate *maker.Plan, requiredLaunchOps []string, issueTexts []string) error {
+	if baseline == nil || len(baseline.Commands) == 0 {
+		return nil
+	}
+	if candidate == nil || len(candidate.Commands) == 0 {
+		return fmt.Errorf("candidate plan has no commands")
+	}
+	if len(candidate.Commands) < len(baseline.Commands) {
+		return fmt.Errorf("candidate shrank command count from %d to %d", len(baseline.Commands), len(candidate.Commands))
+	}
+
+	basePairs := commandPairCounts(baseline)
+	candPairs := commandPairCounts(candidate)
+	for pair, baseCount := range basePairs {
+		candCount := candPairs[pair]
+		if candCount >= baseCount {
+			continue
+		}
+		if !pairChangeMentionedInIssues(pair, issueTexts) {
+			return fmt.Errorf("candidate removed %d command(s) for '%s' without issue-driven justification", baseCount-candCount, pair)
+		}
+	}
+
+	if len(requiredLaunchOps) > 0 && !hasRequiredLaunchOp(candidate, requiredLaunchOps) {
+		return fmt.Errorf("candidate removed required launch operation; expected one of: %s", strings.Join(requiredLaunchOps, " | "))
+	}
+
+	return nil
+}
+
+func commandPairCounts(plan *maker.Plan) map[string]int {
+	out := make(map[string]int)
+	if plan == nil {
+		return out
+	}
+	for _, c := range plan.Commands {
+		pair := commandPair(c.Args)
+		if pair == "" {
+			continue
+		}
+		out[pair]++
+	}
+	return out
+}
+
+func commandPair(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	first := strings.ToLower(strings.TrimSpace(args[0]))
+	if first == "" {
+		return ""
+	}
+	if len(args) == 1 {
+		return first
+	}
+	second := strings.ToLower(strings.TrimSpace(args[1]))
+	if second == "" {
+		return first
+	}
+	return first + " " + second
+}
+
+func pairChangeMentionedInIssues(pair string, issueTexts []string) bool {
+	pair = strings.ToLower(strings.TrimSpace(pair))
+	if pair == "" {
+		return false
+	}
+	parts := strings.Fields(pair)
+	for _, issue := range issueTexts {
+		line := strings.ToLower(strings.TrimSpace(issue))
+		if line == "" {
+			continue
+		}
+		if strings.Contains(line, pair) {
+			return true
+		}
+		if len(parts) == 2 && strings.Contains(line, parts[0]) && strings.Contains(line, parts[1]) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasRequiredLaunchOp(plan *maker.Plan, requiredLaunchOps []string) bool {
+	if plan == nil || len(plan.Commands) == 0 || len(requiredLaunchOps) == 0 {
+		return len(requiredLaunchOps) == 0
+	}
+	required := make(map[string]struct{}, len(requiredLaunchOps))
+	for _, op := range requiredLaunchOps {
+		tok := strings.ToLower(strings.TrimSpace(op))
+		if tok == "" {
+			continue
+		}
+		required[tok] = struct{}{}
+	}
+	if len(required) == 0 {
+		return true
+	}
+	for _, c := range plan.Commands {
+		pair := commandPair(c.Args)
+		if pair == "" {
+			continue
+		}
+		if _, ok := required[pair]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeShellStylePlaceholdersForExecution(plan *maker.Plan) int {
+	if plan == nil || len(plan.Commands) == 0 {
+		return 0
+	}
+	changed := 0
+	for ci := range plan.Commands {
+		if len(plan.Commands[ci].Args) == 0 {
+			continue
+		}
+		for ai, arg := range plan.Commands[ci].Args {
+			v := strings.TrimSpace(arg)
+			if v == "" || !strings.Contains(v, "${") {
+				continue
+			}
+			if strings.Contains(v, "\n") || strings.HasPrefix(v, "#!") || strings.HasPrefix(strings.ToLower(v), "#cloud-config") {
+				continue
+			}
+			n := shellStylePlaceholderRe.ReplaceAllString(v, "<$1>")
+			if n != v {
+				plan.Commands[ci].Args[ai] = n
+				changed++
+			}
+		}
+	}
+	return changed
+}
+
+func countShellStylePlaceholders(plan *maker.Plan) int {
+	if plan == nil || len(plan.Commands) == 0 {
+		return 0
+	}
+	total := 0
+	for _, cmd := range plan.Commands {
+		for _, arg := range cmd.Args {
+			total += len(shellStylePlaceholderRe.FindAllString(arg, -1))
+		}
+	}
+	return total
 }
 
 func compactPlanningContext(text, provider string) string {
