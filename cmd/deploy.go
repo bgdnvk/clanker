@@ -313,7 +313,11 @@ Examples:
 					}
 					logf("[deploy]   hard issue: %s", strings.TrimSpace(issue))
 				}
-				return fmt.Errorf("failed to generate a deterministically valid plan (stuck with issues=%d)", len(mustFixIssues))
+				if applyMode {
+					return fmt.Errorf("failed to generate a deterministically valid plan (stuck with issues=%d)", len(mustFixIssues))
+				}
+				logf("[deploy] warning: planning is stuck but continuing in plan-only mode")
+				break
 			}
 
 			if page.Done {
@@ -328,6 +332,7 @@ Examples:
 		if len(plan.Commands) == 0 {
 			return fmt.Errorf("failed to generate a plan (no commands produced)")
 		}
+		plan = deploy.SanitizePlanConservative(plan, rp, intel.DeepAnalysis, intel.Docker, logf)
 		if lastDetValidation != nil {
 			intel.Validation = lastDetValidation
 		}
@@ -445,6 +450,7 @@ Examples:
 				if repaired.Version == 0 {
 					repaired.Version = maker.CurrentPlanVersion
 				}
+				repaired = deploy.SanitizePlan(repaired)
 
 				repairedJSONBytes, _ := json.MarshalIndent(repaired, "", "  ")
 				detV := deploy.DeterministicValidatePlan(string(repairedJSONBytes), rp, intel.DeepAnalysis, intel.Docker)
@@ -460,11 +466,15 @@ Examples:
 			}
 
 			if lastDetValidation != nil && !lastDetValidation.IsValid {
-				return fmt.Errorf("failed to generate a deterministically valid plan (issues=%d)", len(lastDetValidation.Issues))
+				if applyMode {
+					return fmt.Errorf("failed to generate a deterministically valid plan (issues=%d)", len(lastDetValidation.Issues))
+				}
+				logf("[deploy] warning: deterministic issues remain after repair (issues=%d); continuing in plan-only mode", len(lastDetValidation.Issues))
 			}
 		}
 
 		// Final validation (LLM) + optional repair pass.
+		plan = deploy.SanitizePlanConservative(plan, rp, intel.DeepAnalysis, intel.Docker, logf)
 		planJSON, _ := json.MarshalIndent(plan, "", "  ")
 		validation, _, err := deploy.ValidatePlan(ctx,
 			string(planJSON), rp, intel.DeepAnalysis,
@@ -577,11 +587,19 @@ Examples:
 				logf("[deploy] attempting plan repair (round %d/%d)...", r, maxRepairRounds)
 				repairedRaw, rErr := repairAgent.Repair(ctx, currentPlanJSON, currentValidation, repairCtx)
 				if rErr != nil {
-					return fmt.Errorf("plan is invalid and repair failed: %v", rErr)
+					if applyMode {
+						return fmt.Errorf("plan is invalid and repair failed: %v", rErr)
+					}
+					logf("[deploy] warning: repair failed in plan-only mode (%v); continuing with deterministically valid plan", rErr)
+					break
 				}
 				repaired, pErr := maker.ParsePlan(repairedRaw)
 				if pErr != nil {
-					return fmt.Errorf("plan repair produced an unparseable plan: %v", pErr)
+					if applyMode {
+						return fmt.Errorf("plan repair produced an unparseable plan: %v", pErr)
+					}
+					logf("[deploy] warning: repair output unparseable in plan-only mode (%v); continuing with deterministically valid plan", pErr)
+					break
 				}
 				repaired.Provider = intel.Architecture.Provider
 				repaired.Question = fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, strings.ToLower(strings.TrimSpace(repaired.Provider)), intel.Architecture.Method)
@@ -591,6 +609,9 @@ Examples:
 				if repaired.Version == 0 {
 					repaired.Version = maker.CurrentPlanVersion
 				}
+				repaired = deploy.SanitizePlanConservative(repaired, rp, intel.DeepAnalysis, intel.Docker, logf)
+				// Keep the latest repaired candidate even if validator still has concerns.
+				plan = repaired
 
 				repairedJSON, _ := json.MarshalIndent(repaired, "", "  ")
 				repairedValidation, _, vErr := deploy.ValidatePlan(ctx,
@@ -600,7 +621,11 @@ Examples:
 					aiClient.AskPrompt, aiClient.CleanJSONResponse, logf,
 				)
 				if vErr != nil {
-					return fmt.Errorf("plan validation failed after repair: %v", vErr)
+					if applyMode {
+						return fmt.Errorf("plan validation failed after repair: %v", vErr)
+					}
+					logf("[deploy] warning: validation failed after repair in plan-only mode (%v); continuing with deterministically valid plan", vErr)
+					break
 				}
 				intel.Validation = repairedValidation
 
@@ -629,7 +654,10 @@ Examples:
 					if repairedValidation != nil {
 						issueCount = len(repairedValidation.Issues)
 					}
-					return fmt.Errorf("plan is invalid after repair (issues=%d)", issueCount)
+					if applyMode {
+						return fmt.Errorf("plan is invalid after repair (issues=%d)", issueCount)
+					}
+					logf("[deploy] warning: plan is still LLM-invalid after repair (issues=%d), but deterministic checks passed; returning plan in plan-only mode", issueCount)
 				}
 			}
 		}

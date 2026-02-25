@@ -24,6 +24,14 @@ func ParsePlanPage(cleanedJSON string) (*PlanPage, error) {
 	}
 	var page PlanPage
 	if err := json.Unmarshal([]byte(trimmed), &page); err != nil {
+		// Common fallback: model returns a plain array of commands.
+		var cmds []maker.Command
+		if err2 := json.Unmarshal([]byte(trimmed), &cmds); err2 == nil {
+			if len(cmds) == 0 {
+				return nil, fmt.Errorf("page has no commands")
+			}
+			return &PlanPage{Done: false, Commands: cmds}, nil
+		}
 		return nil, err
 	}
 	// Allow an empty commands array only if done=true (means: nothing more to add).
