@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // CloudflareClient defines the interface for Cloudflare operations
@@ -122,7 +123,7 @@ func (s *SubAgent) detectOperation(queryLower string) string {
 
 // extractResourceName extracts the resource name from query
 func (s *SubAgent) extractResourceName(query string) string {
-	// Look for quoted names
+	// Look for quoted names first
 	if strings.Contains(query, "\"") {
 		parts := strings.Split(query, "\"")
 		if len(parts) > 1 {
@@ -133,6 +134,23 @@ func (s *SubAgent) extractResourceName(query string) string {
 		parts := strings.Split(query, "'")
 		if len(parts) > 1 {
 			return parts[1]
+		}
+	}
+
+	// Look for "called X" or "named X" patterns
+	queryLower := strings.ToLower(query)
+	for _, pattern := range []string{"called ", "named ", "name "} {
+		if idx := strings.Index(queryLower, pattern); idx >= 0 {
+			remaining := query[idx+len(pattern):]
+			// Extract until next space or end
+			words := strings.Fields(remaining)
+			if len(words) > 0 {
+				// Clean up the name
+				name := strings.Trim(words[0], "\"'.,;:!?")
+				if name != "" {
+					return name
+				}
+			}
 		}
 	}
 
@@ -299,20 +317,39 @@ func (s *SubAgent) listPagesProjects(ctx context.Context) (*Response, error) {
 
 // generatePlan creates a plan for Workers modifications
 func (s *SubAgent) generatePlan(ctx context.Context, query string, analysis QueryAnalysis, opts QueryOptions) (*Plan, error) {
+	var plan *Plan
+	var err error
+
 	switch analysis.ResourceType {
 	case "kv":
-		return s.generateKVPlan(analysis)
+		plan, err = s.generateKVPlan(query, analysis)
 	case "d1":
-		return s.generateD1Plan(analysis)
+		plan, err = s.generateD1Plan(query, analysis)
 	case "r2":
-		return s.generateR2Plan(analysis)
+		plan, err = s.generateR2Plan(query, analysis)
+	case "pages":
+		plan, err = s.generatePagesPlan(query, analysis)
+	case "worker":
+		plan, err = s.generateWorkerPlan(query, analysis)
 	default:
-		return nil, fmt.Errorf("worker deployment plans should use 'wrangler deploy' directly")
+		plan, err = s.generateWorkerPlan(query, analysis)
 	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Ensure maker-compatible format
+	plan.Version = 1
+	plan.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	plan.Provider = "cloudflare"
+	plan.Question = query
+
+	return plan, nil
 }
 
 // generateKVPlan creates a plan for KV operations
-func (s *SubAgent) generateKVPlan(analysis QueryAnalysis) (*Plan, error) {
+func (s *SubAgent) generateKVPlan(query string, analysis QueryAnalysis) (*Plan, error) {
 	plan := &Plan{
 		Commands: []Command{},
 	}
@@ -324,9 +361,11 @@ func (s *SubAgent) generateKVPlan(analysis QueryAnalysis) (*Plan, error) {
 			name = "my-kv-namespace"
 		}
 		plan.Commands = append(plan.Commands, Command{
-			Tool:   "wrangler",
-			Args:   []string{"kv", "namespace", "create", name},
+			Args:   []string{"wrangler", "kv", "namespace", "create", name},
 			Reason: fmt.Sprintf("Create KV namespace '%s'", name),
+			Produces: map[string]string{
+				"KV_NAMESPACE_ID": "$.result.id",
+			},
 		})
 		plan.Summary = fmt.Sprintf("Create KV namespace: %s", name)
 
@@ -335,8 +374,7 @@ func (s *SubAgent) generateKVPlan(analysis QueryAnalysis) (*Plan, error) {
 			return nil, fmt.Errorf("namespace name or ID is required to delete")
 		}
 		plan.Commands = append(plan.Commands, Command{
-			Tool:   "wrangler",
-			Args:   []string{"kv", "namespace", "delete", "--namespace-id", analysis.ResourceName},
+			Args:   []string{"wrangler", "kv", "namespace", "delete", "--namespace-id", analysis.ResourceName},
 			Reason: fmt.Sprintf("Delete KV namespace '%s'", analysis.ResourceName),
 		})
 		plan.Summary = fmt.Sprintf("Delete KV namespace: %s", analysis.ResourceName)
@@ -349,7 +387,7 @@ func (s *SubAgent) generateKVPlan(analysis QueryAnalysis) (*Plan, error) {
 }
 
 // generateD1Plan creates a plan for D1 operations
-func (s *SubAgent) generateD1Plan(analysis QueryAnalysis) (*Plan, error) {
+func (s *SubAgent) generateD1Plan(query string, analysis QueryAnalysis) (*Plan, error) {
 	plan := &Plan{
 		Commands: []Command{},
 	}
@@ -361,9 +399,11 @@ func (s *SubAgent) generateD1Plan(analysis QueryAnalysis) (*Plan, error) {
 			name = "my-database"
 		}
 		plan.Commands = append(plan.Commands, Command{
-			Tool:   "wrangler",
-			Args:   []string{"d1", "create", name},
+			Args:   []string{"wrangler", "d1", "create", name},
 			Reason: fmt.Sprintf("Create D1 database '%s'", name),
+			Produces: map[string]string{
+				"D1_DATABASE_ID": "$.result.uuid",
+			},
 		})
 		plan.Summary = fmt.Sprintf("Create D1 database: %s", name)
 
@@ -372,8 +412,7 @@ func (s *SubAgent) generateD1Plan(analysis QueryAnalysis) (*Plan, error) {
 			return nil, fmt.Errorf("database name is required to delete")
 		}
 		plan.Commands = append(plan.Commands, Command{
-			Tool:   "wrangler",
-			Args:   []string{"d1", "delete", analysis.ResourceName},
+			Args:   []string{"wrangler", "d1", "delete", analysis.ResourceName, "-y"},
 			Reason: fmt.Sprintf("Delete D1 database '%s'", analysis.ResourceName),
 		})
 		plan.Summary = fmt.Sprintf("Delete D1 database: %s", analysis.ResourceName)
@@ -386,7 +425,7 @@ func (s *SubAgent) generateD1Plan(analysis QueryAnalysis) (*Plan, error) {
 }
 
 // generateR2Plan creates a plan for R2 operations
-func (s *SubAgent) generateR2Plan(analysis QueryAnalysis) (*Plan, error) {
+func (s *SubAgent) generateR2Plan(query string, analysis QueryAnalysis) (*Plan, error) {
 	plan := &Plan{
 		Commands: []Command{},
 	}
@@ -398,8 +437,7 @@ func (s *SubAgent) generateR2Plan(analysis QueryAnalysis) (*Plan, error) {
 			name = "my-bucket"
 		}
 		plan.Commands = append(plan.Commands, Command{
-			Tool:   "wrangler",
-			Args:   []string{"r2", "bucket", "create", name},
+			Args:   []string{"wrangler", "r2", "bucket", "create", name},
 			Reason: fmt.Sprintf("Create R2 bucket '%s'", name),
 		})
 		plan.Summary = fmt.Sprintf("Create R2 bucket: %s", name)
@@ -409,14 +447,130 @@ func (s *SubAgent) generateR2Plan(analysis QueryAnalysis) (*Plan, error) {
 			return nil, fmt.Errorf("bucket name is required to delete")
 		}
 		plan.Commands = append(plan.Commands, Command{
-			Tool:   "wrangler",
-			Args:   []string{"r2", "bucket", "delete", analysis.ResourceName},
+			Args:   []string{"wrangler", "r2", "bucket", "delete", analysis.ResourceName},
 			Reason: fmt.Sprintf("Delete R2 bucket '%s'", analysis.ResourceName),
 		})
 		plan.Summary = fmt.Sprintf("Delete R2 bucket: %s", analysis.ResourceName)
 
 	default:
 		return nil, fmt.Errorf("unsupported R2 operation: %s", analysis.Operation)
+	}
+
+	return plan, nil
+}
+
+// generateWorkerPlan creates a plan for Worker operations
+func (s *SubAgent) generateWorkerPlan(query string, analysis QueryAnalysis) (*Plan, error) {
+	plan := &Plan{
+		Commands: []Command{},
+	}
+
+	switch analysis.Operation {
+	case "deploy":
+		name := analysis.ResourceName
+		if name == "" {
+			return nil, fmt.Errorf("worker name is required for deployment. Use: deploy worker 'my-worker'")
+		}
+		plan.Commands = append(plan.Commands, Command{
+			Args:   []string{"wrangler", "deploy", "--name", name},
+			Reason: fmt.Sprintf("Deploy Worker '%s'", name),
+		})
+		plan.Summary = fmt.Sprintf("Deploy Worker: %s", name)
+		plan.Notes = []string{
+			"Ensure you have a wrangler.toml in your project directory",
+			"Or specify the script path with --script flag",
+		}
+
+	case "create":
+		name := analysis.ResourceName
+		if name == "" {
+			name = "my-worker"
+		}
+		plan.Commands = append(plan.Commands, Command{
+			Args:   []string{"wrangler", "init", name},
+			Reason: fmt.Sprintf("Initialize new Worker project '%s'", name),
+		})
+		plan.Summary = fmt.Sprintf("Create Worker project: %s", name)
+
+	case "delete":
+		if analysis.ResourceName == "" {
+			return nil, fmt.Errorf("worker name is required to delete")
+		}
+		accountID := s.client.GetAccountID()
+		if accountID == "" {
+			return nil, fmt.Errorf("account ID is required for worker deletion")
+		}
+		plan.Commands = append(plan.Commands, Command{
+			Args:   []string{"DELETE", fmt.Sprintf("/accounts/%s/workers/scripts/%s", accountID, analysis.ResourceName)},
+			Reason: fmt.Sprintf("Delete Worker '%s'", analysis.ResourceName),
+		})
+		plan.Summary = fmt.Sprintf("Delete Worker: %s", analysis.ResourceName)
+
+	default:
+		// Default to listing workers for unknown operations
+		return nil, fmt.Errorf("use 'deploy', 'create', or 'delete' for worker operations")
+	}
+
+	return plan, nil
+}
+
+// generatePagesPlan creates a plan for Pages operations
+func (s *SubAgent) generatePagesPlan(query string, analysis QueryAnalysis) (*Plan, error) {
+	plan := &Plan{
+		Commands: []Command{},
+	}
+
+	accountID := s.client.GetAccountID()
+
+	switch analysis.Operation {
+	case "deploy":
+		name := analysis.ResourceName
+		if name == "" {
+			return nil, fmt.Errorf("project name is required for Pages deployment. Use: deploy pages 'my-site'")
+		}
+		plan.Commands = append(plan.Commands, Command{
+			Args:   []string{"wrangler", "pages", "deploy", ".", "--project-name", name},
+			Reason: fmt.Sprintf("Deploy to Pages project '%s'", name),
+		})
+		plan.Summary = fmt.Sprintf("Deploy to Pages: %s", name)
+		plan.Notes = []string{
+			"Run this command from the directory containing your built assets",
+			"The '.' represents the current directory as the source",
+		}
+
+	case "create":
+		name := analysis.ResourceName
+		if name == "" {
+			name = "my-site"
+		}
+		if accountID == "" {
+			return nil, fmt.Errorf("account ID is required for Pages project creation")
+		}
+		body := fmt.Sprintf(`{"name":"%s","production_branch":"main"}`, name)
+		plan.Commands = append(plan.Commands, Command{
+			Args:   []string{"POST", fmt.Sprintf("/accounts/%s/pages/projects", accountID), body},
+			Reason: fmt.Sprintf("Create Pages project '%s'", name),
+			Produces: map[string]string{
+				"PAGES_PROJECT_NAME": "$.result.name",
+			},
+		})
+		plan.Summary = fmt.Sprintf("Create Pages project: %s", name)
+
+	case "delete":
+		if analysis.ResourceName == "" {
+			return nil, fmt.Errorf("project name is required to delete")
+		}
+		if accountID == "" {
+			return nil, fmt.Errorf("account ID is required for Pages project deletion")
+		}
+		plan.Commands = append(plan.Commands, Command{
+			Args:   []string{"DELETE", fmt.Sprintf("/accounts/%s/pages/projects/%s", accountID, analysis.ResourceName)},
+			Reason: fmt.Sprintf("Delete Pages project '%s'", analysis.ResourceName),
+		})
+		plan.Summary = fmt.Sprintf("Delete Pages project: %s", analysis.ResourceName)
+
+	default:
+		return nil, fmt.Errorf("use 'deploy', 'create', or 'delete' for pages operations")
 	}
 
 	return plan, nil

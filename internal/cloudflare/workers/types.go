@@ -102,20 +102,22 @@ type Response struct {
 	Message string       `json:"message,omitempty"`
 }
 
-// Plan represents a Workers modification plan
+// Plan represents a Workers modification plan (maker-compatible format)
 type Plan struct {
-	Summary  string    `json:"summary"`
-	Commands []Command `json:"commands"`
+	Version   int       `json:"version"`
+	CreatedAt string    `json:"createdAt"`
+	Provider  string    `json:"provider"`
+	Question  string    `json:"question,omitempty"`
+	Summary   string    `json:"summary"`
+	Commands  []Command `json:"commands"`
+	Notes     []string  `json:"notes,omitempty"`
 }
 
-// Command represents a single Workers command (wrangler or API)
+// Command represents a single Workers command (maker-compatible format)
 type Command struct {
-	Tool     string   `json:"tool"` // wrangler, api
-	Args     []string `json:"args,omitempty"`
-	Method   string   `json:"method,omitempty"`
-	Endpoint string   `json:"endpoint,omitempty"`
-	Body     string   `json:"body,omitempty"`
-	Reason   string   `json:"reason"`
+	Args     []string          `json:"args"`
+	Reason   string            `json:"reason"`
+	Produces map[string]string `json:"produces,omitempty"`
 }
 
 // QueryAnalysis contains the result of analyzing a Workers query
