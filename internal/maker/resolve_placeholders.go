@@ -677,18 +677,8 @@ func autoResolvePlaceholdersWithTools(ctx context.Context, opts ExecOptions, unr
 		}
 	}
 
-	// 2) ADMIN_CIDR: infer from public IP when missing.
-	if _, ok := need["ADMIN_CIDR"]; ok {
-		if strings.TrimSpace(bindings["ADMIN_CIDR"]) == "" {
-			if ip := discoverPublicIP(ctx); ip != "" {
-				bindings["ADMIN_CIDR"] = ip + "/32"
-				changed = true
-				if opts.Writer != nil {
-					_, _ = fmt.Fprintf(opts.Writer, "[maker] placeholder tool: inferred ADMIN_CIDR=%s\n", bindings["ADMIN_CIDR"])
-				}
-			}
-		}
-	}
+	// 2) ADMIN_CIDR: intentionally do not infer from caller public IP.
+	// Require explicit operator intent via env/bindings, or remove SSH ingress from plan.
 
 	// 3) EC2_KEYPAIR_NAME: discover via AWS (read-only) when missing.
 	if _, ok := need["EC2_KEYPAIR_NAME"]; ok {

@@ -30,6 +30,8 @@ This package powers the `clanker deploy` intelligence flow from user query to pl
         - missing compose-required env vars,
         - secret inlining,
         - AWS wiring sanity checks.
+    - waiter/order sanity for AWS runtime wiring (`ec2 wait instance-running` before target registration, `elbv2 wait load-balancer-available` before listener creation).
+    - CloudFront command-shape sanity (`create-distribution` must not carry `--tags`) and OpenClaw output contract (`CLOUDFRONT_DOMAIN` + full `HTTPS_URL` with `https://`).
     - If hard issues remain, planner is forced to continue (`done=true` is ignored while issues remain).
     - Stuck detection fails fast in `--apply`; in plan-only mode it logs warnings and returns best-effort output.
 
@@ -43,7 +45,7 @@ This package powers the `clanker deploy` intelligence flow from user query to pl
     - `context-needed` (logged for operator follow-up).
 - Repair prompts enforce a strict contract: preserve valid commands, minimal diff, fix only listed issues, avoid architecture changes unless required.
 
-5.5 **Bulk invariant pass (`plan_preflight_validate.go`)**
+    5.5 **Bulk invariant pass (`plan_preflight_validate.go`)**
 
 - After each bulk repair round, invariants are checked before moving on.
 - **Generic baseline invariants (all repos):**
@@ -66,7 +68,9 @@ This package powers the `clanker deploy` intelligence flow from user query to pl
     - If invalid, repair rounds rewrite plan JSON and re-validate.
     - Validation parsing is hardened against malformed model output.
 
-- In `--apply`, validation remains strict; in plan-only mode, unresolved validator issues are advisory and plan output is still returned.
+- Repair/review parsing now uses LLM JSON-repair helpers (`llm_plan_integrity.go`) before giving up on a candidate.
+- Retention guard is issue-driven: allows focused removals when issues/fixes justify them, blocks broad command collapse.
+- In `--apply`, unresolved validation/repair issues are warning-first and flow continues to execution where runtime self-heal checks can remediate command-time failures.
 
 8. **Final review pass (`plan_review_agent.go`)**
 
@@ -74,9 +78,21 @@ This package powers the `clanker deploy` intelligence flow from user query to pl
 - OpenClaw-on-AWS guidance is reinforced here (EC2 + CloudFront HTTPS pairing flow).
 - This pass is **non-blocking**: parse/call failures keep the current plan and continue.
 
+    8.5 **Generic integrity pass (`llm_plan_integrity.go`)**
+
+- A provider-agnostic LLM integrity pass runs before final output/apply.
+- Goal: minimal-diff command integrity fixes (tokenization, malformed waiter usage, `run-instances` flag/script boundary, CloudFront config arg shape), without architecture drift.
+- Prompt policy is **balanced**: allows small safety corrections while preserving command order and intent.
+- Includes explicit acceptance checks for recurring defects (for example merged `--tag-specifications` into user-data, missing ALB chain when ALB SG intent exists, and OpenClaw+ALB CloudFront HTTPS chain completeness).
+
 9. **Plan finalize + apply orchestration**
     - Placeholder/binding resolution and provider-specific enrichment.
     - In `--apply`, execution is staged (infra → build/push when needed → workload launch → verification).
+
+- OpenClaw apply path now seeds runtime env bindings from collected config and process env for key vars (gateway token/password, model API key, channel tokens, config/workspace dirs) so container startup receives complete runtime config.
+- Optional CLI flag `--enforce-image-deploy` forces image-based deploy semantics (ECR image build/push + pull/run) and avoids relying on build-on-EC2 user-data paths.
+- SSH safety rule: plans with SSH ingress on port 22 must use an explicit CIDR (not unresolved `<ADMIN_CIDR>` at apply time) or remove SSH ingress and rely on SSM-only access.
+- Auto-remediation AI prompts now include deployment intent (plan question/context) so self-heal fixes stay aligned with the original deploy objective.
 
 ## Compact Sequence Diagram
 
@@ -150,4 +166,5 @@ sequenceDiagram
 - `plan_issue_triage.go` — triage for hard-fixable vs noise/context findings
 - `plan_sanitize.go` — conservative fail-open plan sanitizer
 - `plan_review_agent.go` — final non-blocking plan reviewer pass
+- `llm_plan_integrity.go` — LLM JSON repair + generic integrity pass
 - `resolve.go` / `userdata_fixups.go` / `nodejs_userdata.go` — placeholder and user-data fixups

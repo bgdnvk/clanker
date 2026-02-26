@@ -190,15 +190,33 @@ func BuildPlanPagePrompt(provider string, enrichedPrompt string, currentPlan *ma
 		provider = "aws"
 	}
 
-	// Keep the incremental context compact.
+	// Keep incremental context informative with broader plan state.
 	cmdCount := 0
 	var tail []string
-	produces := make([]string, 0, 16)
+	produces := make([]string, 0, 128)
 	if currentPlan != nil {
 		cmdCount = len(currentPlan.Commands)
-		start := cmdCount - 6
+		start := cmdCount - 16
 		if start < 0 {
 			start = 0
+		}
+		seenProduces := make(map[string]struct{}, 128)
+		for i := cmdCount - 1; i >= 0 && len(produces) < 120; i-- {
+			c := currentPlan.Commands[i]
+			for k := range c.Produces {
+				k = strings.TrimSpace(k)
+				if k == "" {
+					continue
+				}
+				if _, ok := seenProduces[k]; ok {
+					continue
+				}
+				seenProduces[k] = struct{}{}
+				produces = append([]string{k}, produces...)
+				if len(produces) >= 120 {
+					break
+				}
+			}
 		}
 		for i := start; i < cmdCount; i++ {
 			c := currentPlan.Commands[i]
@@ -206,12 +224,6 @@ func BuildPlanPagePrompt(provider string, enrichedPrompt string, currentPlan *ma
 				continue
 			}
 			tail = append(tail, fmt.Sprintf("%d) %s", i+1, strings.Join(c.Args, " ")))
-			for k := range c.Produces {
-				k = strings.TrimSpace(k)
-				if k != "" {
-					produces = append(produces, k)
-				}
-			}
 		}
 	}
 	produces = uniqueStrings(produces)
@@ -277,6 +289,14 @@ func BuildPlanPagePrompt(provider string, enrichedPrompt string, currentPlan *ma
 
 	b.WriteString("Current plan state:\n")
 	b.WriteString(fmt.Sprintf("- existingCommands: %d\n", cmdCount))
+	if currentPlan != nil {
+		if q := strings.TrimSpace(currentPlan.Question); q != "" {
+			b.WriteString("- planIntent: " + q + "\n")
+		}
+		if s := strings.TrimSpace(currentPlan.Summary); s != "" {
+			b.WriteString("- planSummary: " + s + "\n")
+		}
+	}
 	if len(tail) > 0 {
 		b.WriteString("- lastCommands:\n")
 		for _, t := range tail {
@@ -284,7 +304,15 @@ func BuildPlanPagePrompt(provider string, enrichedPrompt string, currentPlan *ma
 		}
 	}
 	if len(produces) > 0 {
-		b.WriteString("- producedBindings: " + strings.Join(produces, ", ") + "\n")
+		display := produces
+		if len(display) > 120 {
+			display = display[:120]
+		}
+		b.WriteString(fmt.Sprintf("- producedBindings (%d): %s", len(produces), strings.Join(display, ", ")))
+		if len(display) < len(produces) {
+			b.WriteString(", ...")
+		}
+		b.WriteString("\n")
 	}
 	b.WriteString("\n")
 
@@ -301,7 +329,7 @@ func BuildPlanPagePrompt(provider string, enrichedPrompt string, currentPlan *ma
 
 	if len(mustFixIssues) > 0 {
 		b.WriteString("You MUST address these HARD issues in the next commands you generate (or by reaching the missing step):\n")
-		max := 10
+		max := 12
 		if len(mustFixIssues) < max {
 			max = len(mustFixIssues)
 		}

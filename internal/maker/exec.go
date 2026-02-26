@@ -625,6 +625,13 @@ func shouldAutoPrepareImage(args []string, question string, bindings map[string]
 	if len(args) < 2 || args[0] != "ec2" || args[1] != "run-instances" {
 		return false
 	}
+	forceImageDeploy := false
+	if bindings != nil {
+		switch strings.ToLower(strings.TrimSpace(bindings["FORCE_IMAGE_DEPLOY"])) {
+		case "1", "true", "yes", "on":
+			forceImageDeploy = true
+		}
+	}
 	// WordPress one-click uses Docker Hub images (no ECR build/push).
 	q := strings.TrimSpace(question)
 	if wordpress.Detect(q, extractRepoURLFromQuestion(q)) {
@@ -639,7 +646,7 @@ func shouldAutoPrepareImage(args []string, question string, bindings map[string]
 			userData = decoded
 		}
 		lowerUserData := strings.ToLower(userData)
-		if strings.Contains(lowerUserData, "docker build") && strings.Contains(lowerUserData, "docker run") && !strings.Contains(lowerUserData, ".dkr.ecr.") {
+		if strings.Contains(lowerUserData, "docker build") && strings.Contains(lowerUserData, "docker run") && !strings.Contains(lowerUserData, ".dkr.ecr.") && !forceImageDeploy {
 			return false
 		}
 	}
@@ -1912,7 +1919,7 @@ func handleAWSFailure(
 	}
 
 	if policy.consumeAttempt(runtime) {
-		if remediated, remErr := maybeAutoRemediateAndRetry(ctx, plan, opts, idx, args, awsArgs, stdinBytes, out, failure); remErr == nil && remediated {
+		if remediated, remErr := maybeAutoRemediateAndRetry(ctx, plan, opts, idx, args, awsArgs, stdinBytes, out, failure, bindings); remErr == nil && remediated {
 			remediationAttempted[idx] = true
 			return true, nil
 		}

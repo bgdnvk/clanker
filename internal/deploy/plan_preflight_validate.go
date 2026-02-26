@@ -284,7 +284,8 @@ func checkOpenClawProjectInvariants(plan *maker.Plan) ([]string, []string) {
 	fixes := make([]string, 0, 8)
 	hasCFCreate := false
 	hasCFWait := false
-	hasCFOutput := false
+	hasCFDomainOutput := false
+	hasCFHTTPSOutput := false
 	hasALB := false
 
 	for _, cmd := range plan.Commands {
@@ -297,8 +298,17 @@ func checkOpenClawProjectInvariants(plan *maker.Plan) ([]string, []string) {
 		if svc == "elbv2" && op == "create-load-balancer" {
 			hasALB = true
 		}
-		if svc == "cloudfront" && op == "create-distribution" {
+		if svc == "cloudfront" && (op == "create-distribution" || op == "create-distribution-with-tags") {
 			hasCFCreate = true
+			if op == "create-distribution" {
+				for i := 2; i < len(args); i++ {
+					if strings.EqualFold(strings.TrimSpace(args[i]), "--tags") || strings.HasPrefix(strings.TrimSpace(args[i]), "--tags=") {
+						issues = append(issues, "[HARD] OpenClaw invariant failed: cloudfront create-distribution does not accept --tags")
+						fixes = append(fixes, "Use cloudfront create-distribution-with-tags (or remove --tags and tag separately)")
+						break
+					}
+				}
+			}
 		}
 		if svc == "cloudfront" && op == "wait" && len(args) >= 3 && strings.EqualFold(strings.TrimSpace(args[2]), "distribution-deployed") {
 			hasCFWait = true
@@ -316,17 +326,22 @@ func checkOpenClawProjectInvariants(plan *maker.Plan) ([]string, []string) {
 				fixes = append(fixes, "Run docker-setup.sh or openclaw-cli onboard before docker compose up -d openclaw-gateway")
 			}
 		}
-		for k := range cmd.Produces {
+		for k, v := range cmd.Produces {
 			ku := strings.ToUpper(strings.TrimSpace(k))
-			if ku == "CLOUDFRONT_DOMAIN" || ku == "HTTPS_URL" {
-				hasCFOutput = true
+			if ku == "CLOUDFRONT_DOMAIN" {
+				hasCFDomainOutput = true
+			}
+			if ku == "HTTPS_URL" {
+				if strings.HasPrefix(strings.ToLower(strings.TrimSpace(v)), "https://") {
+					hasCFHTTPSOutput = true
+				}
 			}
 		}
 	}
 
-	if hasALB && !(hasCFCreate && hasCFWait && hasCFOutput) {
+	if hasALB && !(hasCFCreate && hasCFWait && hasCFDomainOutput && hasCFHTTPSOutput) {
 		issues = append(issues, "[HARD] OpenClaw invariant failed: HTTPS pairing URL must be shipped via CloudFront (create + wait + output)")
-		fixes = append(fixes, "Add CloudFront create-distribution, cloudfront wait distribution-deployed, and produces for CLOUDFRONT_DOMAIN/HTTPS_URL")
+		fixes = append(fixes, "Add CloudFront create-distribution(+optional tags variant), cloudfront wait distribution-deployed, produces CLOUDFRONT_DOMAIN, and set HTTPS_URL to full https:// URL")
 	}
 
 	return uniqueStrings(issues), uniqueStrings(fixes)
@@ -355,7 +370,15 @@ func validateAWSPlanCommands(plan *maker.Plan, appPorts []int, deep *DeepAnalysi
 	hasAddRoleToProfile := false
 	hasGetInstanceProfileBeforeRun := false
 	seenRunInstances := false
-	for _, cmd := range plan.Commands {
+	runInstancesIndex := -1
+	instanceWaitIndex := -1
+	createLBIndex := -1
+	waitLBAvailableIndex := -1
+	createListenerIndex := -1
+	registerTargetsIndex := -1
+	hasSSHAdminCIDRPlaceholder := false
+	for idx := range plan.Commands {
+		cmd := plan.Commands[idx]
 		args := cmd.Args
 		if len(args) < 2 {
 			continue
@@ -370,10 +393,24 @@ func validateAWSPlanCommands(plan *maker.Plan, appPorts []int, deep *DeepAnalysi
 		}
 		if service == "ec2" && op == "run-instances" {
 			seenRunInstances = true
+			if runInstancesIndex < 0 {
+				runInstancesIndex = idx
+			}
+		}
+		if service == "ec2" && op == "wait" && len(args) >= 3 && strings.EqualFold(strings.TrimSpace(args[2]), "instance-running") {
+			if instanceWaitIndex < 0 {
+				instanceWaitIndex = idx
+			}
 		}
 		if service == "ec2" && op == "authorize-security-group-ingress" {
 			if port := parseFlagInt(args, "--port"); port > 0 {
 				sgPorts[port] = true
+				if port == 22 {
+					cidr := strings.TrimSpace(parseFlag(args, "--cidr"))
+					if strings.EqualFold(cidr, "<ADMIN_CIDR>") || strings.HasPrefix(cidr, "<") {
+						hasSSHAdminCIDRPlaceholder = true
+					}
+				}
 			}
 			// If using ip-permissions, we can't reliably parse; ignore.
 		}
@@ -385,6 +422,20 @@ func validateAWSPlanCommands(plan *maker.Plan, appPorts []int, deep *DeepAnalysi
 			if strings.HasPrefix(hp, "/") {
 				healthPath = hp
 			}
+		}
+		if service == "elbv2" && op == "register-targets" && registerTargetsIndex < 0 {
+			registerTargetsIndex = idx
+		}
+		if service == "elbv2" && op == "create-load-balancer" && createLBIndex < 0 {
+			createLBIndex = idx
+		}
+		if service == "elbv2" && op == "wait" && len(args) >= 3 && strings.EqualFold(strings.TrimSpace(args[2]), "load-balancer-available") {
+			if waitLBAvailableIndex < 0 {
+				waitLBAvailableIndex = idx
+			}
+		}
+		if service == "elbv2" && op == "create-listener" && createListenerIndex < 0 {
+			createListenerIndex = idx
 		}
 	}
 
@@ -407,8 +458,20 @@ func validateAWSPlanCommands(plan *maker.Plan, appPorts []int, deep *DeepAnalysi
 		}
 	}
 	if hasAddRoleToProfile && seenRunInstances && !hasGetInstanceProfileBeforeRun {
-		out.Issues = append(out.Issues, "[HARD] missing IAM instance-profile readiness check before ec2 run-instances")
-		out.Fixes = append(out.Fixes, "Insert iam get-instance-profile (or equivalent retry/wait step) after add-role-to-instance-profile and before ec2 run-instances")
+		out.Warnings = append(out.Warnings, "suggestion: add iam get-instance-profile before ec2 run-instances to reduce IAM propagation race risk")
+	}
+	if runInstancesIndex >= 0 && registerTargetsIndex >= 0 {
+		if instanceWaitIndex < 0 || instanceWaitIndex <= runInstancesIndex || instanceWaitIndex > registerTargetsIndex {
+			out.Warnings = append(out.Warnings, "suggestion: add ec2 wait instance-running between run-instances and register-targets")
+		}
+	}
+	if createLBIndex >= 0 && createListenerIndex >= 0 {
+		if waitLBAvailableIndex < 0 || waitLBAvailableIndex <= createLBIndex || waitLBAvailableIndex > createListenerIndex {
+			out.Warnings = append(out.Warnings, "suggestion: add elbv2 wait load-balancer-available between create-load-balancer and create-listener")
+		}
+	}
+	if hasSSHAdminCIDRPlaceholder {
+		out.Warnings = append(out.Warnings, "suggestion: replace <ADMIN_CIDR> with an explicit trusted CIDR or remove SSH ingress and use SSM-only access")
 	}
 
 	return out
@@ -420,10 +483,11 @@ func validateOpenClawPlanCommands(plan *maker.Plan) awsPlanChecks {
 		return out
 	}
 
-	hasALB := false
+	hasEC2RunInstances := false
 	hasCloudFrontCreate := false
 	hasCloudFrontWait := false
-	hasCloudFrontOutput := false
+	hasCloudFrontDomainOutput := false
+	hasCloudFrontHTTPSOutput := false
 	for _, cmd := range plan.Commands {
 		args := cmd.Args
 		if len(args) < 2 {
@@ -431,28 +495,46 @@ func validateOpenClawPlanCommands(plan *maker.Plan) awsPlanChecks {
 		}
 		service := strings.ToLower(strings.TrimSpace(args[0]))
 		op := strings.ToLower(strings.TrimSpace(args[1]))
-		if service == "elbv2" && op == "create-load-balancer" {
-			hasALB = true
+		if service == "ec2" && op == "run-instances" {
+			hasEC2RunInstances = true
 		}
-		if service == "cloudfront" && op == "create-distribution" {
+		if service == "cloudfront" && (op == "create-distribution" || op == "create-distribution-with-tags") {
 			hasCloudFrontCreate = true
+			if op == "create-distribution" {
+				for i := 2; i < len(args); i++ {
+					if strings.EqualFold(strings.TrimSpace(args[i]), "--tags") || strings.HasPrefix(strings.TrimSpace(args[i]), "--tags=") {
+						out.Warnings = append(out.Warnings, "suggestion: cloudfront create-distribution does not accept --tags; use create-distribution-with-tags or tag separately")
+						break
+					}
+				}
+			}
 		}
 		if service == "cloudfront" && op == "wait" {
 			if len(args) >= 3 && strings.EqualFold(strings.TrimSpace(args[2]), "distribution-deployed") {
 				hasCloudFrontWait = true
 			}
 		}
-		for k := range cmd.Produces {
+		for k, v := range cmd.Produces {
 			ku := strings.ToUpper(strings.TrimSpace(k))
-			if ku == "CLOUDFRONT_DOMAIN" || ku == "HTTPS_URL" {
-				hasCloudFrontOutput = true
+			if ku == "CLOUDFRONT_DOMAIN" {
+				hasCloudFrontDomainOutput = true
+			}
+			if ku == "HTTPS_URL" {
+				vv := strings.TrimSpace(v)
+				if strings.HasPrefix(strings.ToLower(vv), "https://") {
+					hasCloudFrontHTTPSOutput = true
+				}
 			}
 		}
 	}
 
-	if hasALB && !(hasCloudFrontCreate && hasCloudFrontWait && hasCloudFrontOutput) {
-		out.Issues = append(out.Issues, "[HARD] OpenClaw AWS plan with ALB is missing complete CloudFront HTTPS pairing steps")
-		out.Fixes = append(out.Fixes, "Add cloudfront create-distribution + cloudfront wait distribution-deployed and produce CLOUDFRONT_DOMAIN/HTTPS_URL")
+	if !hasEC2RunInstances {
+		out.Issues = append(out.Issues, "[HARD] OpenClaw AWS plan must include ec2 run-instances")
+		out.Fixes = append(out.Fixes, "Add ec2 run-instances for OpenClaw workload launch")
+	}
+	if !(hasCloudFrontCreate && hasCloudFrontWait && hasCloudFrontDomainOutput && hasCloudFrontHTTPSOutput) {
+		out.Issues = append(out.Issues, "[HARD] OpenClaw AWS plan is missing required CloudFront HTTPS pairing architecture")
+		out.Fixes = append(out.Fixes, "Add CloudFront create-distribution, cloudfront wait distribution-deployed, produce CLOUDFRONT_DOMAIN, and set HTTPS_URL to a full https:// URL")
 	}
 
 	return out

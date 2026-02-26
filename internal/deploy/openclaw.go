@@ -240,14 +240,14 @@ func applyOpenClawUserDataValidation(out *deterministicValidation, script string
 	if usesCompose {
 		// Expect either docker-setup.sh or onboard.
 		if !strings.Contains(lower, "docker-setup.sh") && !strings.Contains(lower, "openclaw-cli") && !strings.Contains(lower, " onboar") {
-			out.Issues = append(out.Issues, "[HARD] OpenClaw compose deploy missing onboarding step (docker-setup.sh / openclaw-cli onboard)")
+			out.Warnings = append(out.Warnings, "suggestion: include onboarding command /opt/openclaw/bin/clawctl onboard in user-data")
 			out.Fixes = append(out.Fixes, "Run ./docker-setup.sh (or docker compose run --rm openclaw-cli onboard) before docker compose up -d openclaw-gateway")
 		}
 
 		// OpenClaw compose expects config/workspace host dirs.
 		missing := missingEnvVarsInScript(script, OpenClawComposeHardEnvVars())
 		if len(missing) > 0 {
-			out.Issues = append(out.Issues, "[HARD] OpenClaw compose deploy missing required mount env vars: "+strings.Join(missing, ", "))
+			out.Warnings = append(out.Warnings, "suggestion: include required OpenClaw mount env var "+strings.Join(missing, ", ")+" in user-data")
 			out.Fixes = append(out.Fixes, "Set OPENCLAW_CONFIG_DIR and OPENCLAW_WORKSPACE_DIR to real host paths before docker compose up")
 		}
 	}

@@ -10,6 +10,7 @@ type PlanReviewContext struct {
 	Provider                  string
 	Method                    string
 	RepoURL                   string
+	LLMContext                string
 	ProjectSummary            string
 	ProjectCharacteristics    []string
 	RequiredLaunchOps         []string
@@ -129,6 +130,15 @@ func (a *PlanReviewAgent) buildPrompt(planJSON string, c PlanReviewContext) stri
 	}
 	if strings.TrimSpace(c.RepoURL) != "" {
 		b.WriteString("- repo: " + strings.TrimSpace(c.RepoURL) + "\n")
+	}
+	if strings.TrimSpace(c.LLMContext) != "" {
+		ctx := strings.TrimSpace(c.LLMContext)
+		if len(ctx) > 12000 {
+			ctx = strings.TrimSpace(ctx[:12000]) + "…"
+		}
+		b.WriteString("- extended_context:\n")
+		b.WriteString(ctx)
+		b.WriteString("\n")
 	}
 	if strings.TrimSpace(c.ProjectSummary) != "" {
 		b.WriteString("- project_summary: " + strings.TrimSpace(c.ProjectSummary) + "\n")
@@ -277,6 +287,15 @@ func (a *PlanReviewAgent) buildIssueFixPrompt(planJSON string, c PlanReviewConte
 	b.WriteString("Context:\n")
 	b.WriteString("- provider: " + strings.TrimSpace(c.Provider) + "\n")
 	b.WriteString("- method: " + strings.TrimSpace(c.Method) + "\n")
+	if strings.TrimSpace(c.LLMContext) != "" {
+		ctx := strings.TrimSpace(c.LLMContext)
+		if len(ctx) > 8000 {
+			ctx = strings.TrimSpace(ctx[:8000]) + "…"
+		}
+		b.WriteString("- extended_context:\n")
+		b.WriteString(ctx)
+		b.WriteString("\n")
+	}
 	if strings.TrimSpace(c.ProjectSummary) != "" {
 		b.WriteString("- project_summary: " + strings.TrimSpace(c.ProjectSummary) + "\n")
 	}

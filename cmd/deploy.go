@@ -57,6 +57,7 @@ Examples:
 		newVPC, _ := cmd.Flags().GetBool("new-vpc")
 		gcpProject, _ := cmd.Flags().GetString("gcp-project")
 		azureSubscription, _ := cmd.Flags().GetString("azure-subscription")
+		enforceImageDeploy, _ := cmd.Flags().GetBool("enforce-image-deploy")
 
 		// 1. Clone + analyze
 		fmt.Fprintf(os.Stderr, "[deploy] cloning %s ...\n", repoURL)
@@ -189,7 +190,12 @@ Examples:
 		if planProvider == "" {
 			planProvider = "aws"
 		}
-		deployObjectiveContext := withOneClickDeployContext(baseQuestion, planProvider, intel.Architecture.Method)
+		deployObjectiveContext := withOneClickDeployContext(baseQuestion, planProvider, intel.Architecture.Method, enforceImageDeploy)
+		planningContext := compactPlanningContext(deployObjectiveContext, planProvider)
+		projectSummaryForLLM := strings.TrimSpace(rp.Summary)
+		if intel.DeepAnalysis != nil && strings.TrimSpace(intel.DeepAnalysis.AppDescription) != "" {
+			projectSummaryForLLM = strings.TrimSpace(intel.DeepAnalysis.AppDescription)
+		}
 
 		requiredLaunchOps := []string{}
 		switch strings.ToLower(strings.TrimSpace(intel.Architecture.Method)) {
@@ -253,8 +259,7 @@ Examples:
 		}
 
 		for pageRound := 1; pageRound <= maxPlanPages; pageRound++ {
-			questionForPrompt := compactPlanningContext(deployObjectiveContext, planProvider)
-			prompt := deploy.BuildPlanPagePrompt(planProvider, questionForPrompt, plan, requiredLaunchOps, mustFixIssues, maxCommandsPerPage, pageFormatHint)
+			prompt := deploy.BuildPlanPagePrompt(planProvider, planningContext, plan, requiredLaunchOps, mustFixIssues, maxCommandsPerPage, pageFormatHint)
 			resp, err := aiClient.AskPrompt(ctx, prompt)
 			if err != nil {
 				if !applyMode && len(plan.Commands) > 0 && (errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "deadline exceeded")) {
@@ -266,6 +271,15 @@ Examples:
 
 			cleaned := aiClient.CleanJSONResponse(resp)
 			page, err := deploy.ParsePlanPage(cleaned)
+			if err != nil {
+				repairedPage, repairedRaw, rErr := deploy.RepairPlanPageWithLLM(ctx, aiClient.AskPrompt, aiClient.CleanJSONResponse, planProvider, planningContext, projectSummaryForLLM, cleaned, pageFormatHint, logf)
+				if rErr == nil && repairedPage != nil {
+					logf("[deploy] plan page parse auto-repaired via LLM (root=%s)", jsonRootKind(repairedRaw))
+					page = repairedPage
+					cleaned = repairedRaw
+					err = nil
+				}
+			}
 			if err != nil {
 				consecutivePageFailures++
 				pageFormatHint = "Last response was invalid JSON for this schema (often an array of prose strings). Return ONLY one JSON object with keys: done, commands, optional summary, optional notes. Do not return arrays of explanations."
@@ -290,6 +304,30 @@ Examples:
 				tmpJSON, _ := json.Marshal(tmp)
 				normalized, nErr := maker.ParsePlan(string(tmpJSON))
 				if nErr != nil {
+					repairedPage, repairedRaw, rErr := deploy.RepairPlanPageWithLLM(
+						ctx,
+						aiClient.AskPrompt,
+						aiClient.CleanJSONResponse,
+						planProvider,
+						planningContext,
+						projectSummaryForLLM,
+						cleaned,
+						"Last response included command args that failed normalization. Return command args arrays only and keep the same deployment intent.",
+						logf,
+					)
+					if rErr == nil && repairedPage != nil && len(repairedPage.Commands) > 0 {
+						tmp = &maker.Plan{Provider: planProvider, Question: "", Summary: "", Commands: repairedPage.Commands}
+						tmpJSON, _ = json.Marshal(tmp)
+						normalized, nErr = maker.ParsePlan(string(tmpJSON))
+						if nErr == nil {
+							logf("[deploy] plan page command normalization auto-repaired via LLM")
+							page.Commands = normalized.Commands
+							consecutivePageFailures = 0
+							pageFormatHint = ""
+							goto pageNormalized
+						}
+						logf("[deploy] warning: auto-repaired page still invalid (%v, sample=%q)", nErr, compactOneLine(repairedRaw, 180))
+					}
 					consecutivePageFailures++
 					pageFormatHint = "Last response included commands that failed normalization. Return CLI argument arrays only, with no prose fields beyond reason/produces."
 					logf("[deploy] warning: plan page had invalid commands (%v), retrying (page %d/%d)...", nErr, pageRound, maxPlanPages)
@@ -308,6 +346,7 @@ Examples:
 				}
 				page.Commands = normalized.Commands
 			}
+		pageNormalized:
 			consecutivePageFailures = 0
 			pageFormatHint = ""
 
@@ -350,9 +389,10 @@ Examples:
 					logf("[deploy]   hard issue: %s", strings.TrimSpace(issue))
 				}
 				if applyMode {
-					return fmt.Errorf("failed to generate a deterministically valid plan (stuck with issues=%d)", len(mustFixIssues))
+					logf("[deploy] warning: planning is stuck with hard issues=%d; continuing so execution/self-heal can proceed", len(mustFixIssues))
+				} else {
+					logf("[deploy] warning: planning is stuck but continuing in plan-only mode")
 				}
-				logf("[deploy] warning: planning is stuck but continuing in plan-only mode")
 				break
 			}
 
@@ -391,121 +431,8 @@ Examples:
 				logf("[deploy]   fix: %s", strings.TrimSpace(fix))
 			}
 
-			// Try to repair deterministic issues (e.g., missing onboarding steps) before failing.
-			repairAgent := deploy.NewPlanRepairAgent(aiClient.AskPrompt, aiClient.CleanJSONResponse, logf)
-			requiredEnvNames := make([]string, 0, 16)
-			if len(rp.EnvVars) > 0 {
-				requiredEnvNames = append(requiredEnvNames, rp.EnvVars...)
-			}
-			if intel.DeepAnalysis != nil {
-				for _, spec := range intel.DeepAnalysis.RequiredEnvVars {
-					if strings.TrimSpace(spec.Name) != "" {
-						requiredEnvNames = append(requiredEnvNames, strings.TrimSpace(spec.Name))
-					}
-				}
-			}
-			{
-				seen := make(map[string]struct{}, len(requiredEnvNames))
-				out := make([]string, 0, len(requiredEnvNames))
-				for _, name := range requiredEnvNames {
-					name = strings.TrimSpace(name)
-					if name == "" {
-						continue
-					}
-					if _, ok := seen[name]; ok {
-						continue
-					}
-					seen[name] = struct{}{}
-					out = append(out, name)
-				}
-				requiredEnvNames = out
-			}
-
-			repairCtx := deploy.PlanRepairContext{
-				Provider:            intel.Architecture.Provider,
-				Method:              intel.Architecture.Method,
-				RepoURL:             rp.RepoURL,
-				GCPProject:          strings.TrimSpace(gcpProject),
-				AzureSubscriptionID: strings.TrimSpace(azureSubscription),
-				CloudflareAccountID: "",
-				Ports:               rp.Ports,
-				ComposeHardEnvVars: func() []string {
-					if intel.Preflight != nil {
-						return intel.Preflight.ComposeHardEnvVars
-					}
-					return nil
-				}(),
-				RequiredEnvVarNames: requiredEnvNames,
-				RequiredLaunchOps:   requiredLaunchOps,
-				Region:              region,
-				VPCID: func() string {
-					if intel.InfraSnap != nil && intel.InfraSnap.VPC != nil {
-						return intel.InfraSnap.VPC.VPCID
-					}
-					return ""
-				}(),
-				Subnets: func() []string {
-					if intel.InfraSnap != nil && intel.InfraSnap.VPC != nil {
-						return intel.InfraSnap.VPC.Subnets
-					}
-					return nil
-				}(),
-				AMIID: func() string {
-					if intel.InfraSnap != nil {
-						return intel.InfraSnap.LatestAMI
-					}
-					return ""
-				}(),
-				Account: func() string {
-					if intel.InfraSnap != nil {
-						return intel.InfraSnap.AccountID
-					}
-					return ""
-				}(),
-			}
-
-			currentValidation := lastDetValidation
-			currentPlanJSONBytes, _ := json.MarshalIndent(plan, "", "  ")
-			currentPlanJSON := string(currentPlanJSONBytes)
-			const maxDetRepairRounds = 3
-			for r := 1; r <= maxDetRepairRounds; r++ {
-				logf("[deploy] attempting deterministic repair (round %d/%d)...", r, maxDetRepairRounds)
-				repairedRaw, rErr := repairAgent.Repair(ctx, currentPlanJSON, currentValidation, repairCtx)
-				if rErr != nil {
-					break
-				}
-				repaired, pErr := maker.ParsePlan(repairedRaw)
-				if pErr != nil {
-					break
-				}
-				repaired.Provider = intel.Architecture.Provider
-				repaired.Question = fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, strings.ToLower(strings.TrimSpace(repaired.Provider)), intel.Architecture.Method)
-				if repaired.CreatedAt.IsZero() {
-					repaired.CreatedAt = time.Now().UTC()
-				}
-				if repaired.Version == 0 {
-					repaired.Version = maker.CurrentPlanVersion
-				}
-				repaired = deploy.SanitizePlan(repaired)
-
-				repairedJSONBytes, _ := json.MarshalIndent(repaired, "", "  ")
-				detV := deploy.DeterministicValidatePlan(string(repairedJSONBytes), rp, intel.DeepAnalysis, intel.Docker)
-				intel.Validation = detV
-				if detV != nil && detV.IsValid {
-					plan = repaired
-					lastDetValidation = detV
-					logf("[deploy] deterministic repair succeeded")
-					break
-				}
-				currentValidation = detV
-				currentPlanJSON = string(repairedJSONBytes)
-			}
-
 			if lastDetValidation != nil && !lastDetValidation.IsValid {
-				if applyMode {
-					return fmt.Errorf("failed to generate a deterministically valid plan (issues=%d)", len(lastDetValidation.Issues))
-				}
-				logf("[deploy] warning: deterministic issues remain after repair (issues=%d); continuing in plan-only mode", len(lastDetValidation.Issues))
+				logf("[deploy] deterministic hard-repair is disabled; continuing with LLM validation/repair (issues=%d)", len(lastDetValidation.Issues))
 			}
 		}
 
@@ -586,6 +513,7 @@ Examples:
 				Provider:            intel.Architecture.Provider,
 				Method:              intel.Architecture.Method,
 				RepoURL:             rp.RepoURL,
+				LLMContext:          planningContext,
 				GCPProject:          strings.TrimSpace(gcpProject),
 				AzureSubscriptionID: strings.TrimSpace(azureSubscription),
 				CloudflareAccountID: "",
@@ -633,18 +561,18 @@ Examples:
 				logf("[deploy] attempting plan repair (round %d/%d)...", r, maxRepairRounds)
 				repairedRaw, rErr := repairAgent.Repair(ctx, currentPlanJSON, currentValidation, repairCtx)
 				if rErr != nil {
-					if applyMode {
-						return fmt.Errorf("plan is invalid and repair failed: %v", rErr)
-					}
-					logf("[deploy] warning: repair failed in plan-only mode (%v); continuing with deterministically valid plan", rErr)
+					logf("[deploy] warning: repair failed (%v); continuing with current plan so execution/self-heal can proceed", rErr)
 					break
 				}
 				repaired, pErr := maker.ParsePlan(repairedRaw)
 				if pErr != nil {
-					if applyMode {
-						return fmt.Errorf("plan repair produced an unparseable plan: %v", pErr)
+					repaired, pErr = deploy.RepairPlanJSONWithLLM(ctx, aiClient.AskPrompt, aiClient.CleanJSONResponse, planningContext, projectSummaryForLLM, repairedRaw, currentPlanJSON, currentValidation.Issues, requiredLaunchOps, logf)
+					if pErr == nil {
+						logf("[deploy] repair round %d JSON auto-fixed via LLM", r)
 					}
-					logf("[deploy] warning: repair output unparseable in plan-only mode (%v); continuing with deterministically valid plan", pErr)
+				}
+				if pErr != nil {
+					logf("[deploy] warning: repair output remained unparseable (%v); continuing with current plan so execution/self-heal can proceed", pErr)
 					break
 				}
 				repaired.Provider = intel.Architecture.Provider
@@ -656,12 +584,10 @@ Examples:
 					repaired.Version = maker.CurrentPlanVersion
 				}
 				repaired = deploy.SanitizePlanConservative(repaired, rp, intel.DeepAnalysis, intel.Docker, logf)
-				if retainErr := enforceStrictPlanRetention(baselinePlan, repaired, requiredLaunchOps, currentValidation.Issues); retainErr != nil {
-					logf("[deploy] warning: repair candidate rejected by strict retention guard: %v", retainErr)
-					if applyMode {
-						return fmt.Errorf("plan repair candidate rejected: %v", retainErr)
-					}
-					continue
+				retentionContext := append([]string{}, currentValidation.Issues...)
+				retentionContext = append(retentionContext, currentValidation.Fixes...)
+				if retainErr := enforceStrictPlanRetention(baselinePlan, repaired, requiredLaunchOps, retentionContext); retainErr != nil {
+					logf("[deploy] suggestion: retention guard risk detected on repair candidate: %v", retainErr)
 				}
 				// Keep the latest repaired candidate even if validator still has concerns.
 				plan = repaired
@@ -680,9 +606,10 @@ Examples:
 					currentPlanJSON = string(repairedJSON)
 					if r == maxRepairRounds {
 						if applyMode {
-							return fmt.Errorf("plan is invalid after repair (openclaw invariants failed=%d)", len(invariants.Issues))
+							logf("[deploy] warning: invariants still failing after final repair round (issues=%d); continuing so execution/self-heal can proceed", len(invariants.Issues))
+						} else {
+							logf("[deploy] warning: invariants still failing after final repair round; continuing in plan-only mode")
 						}
-						logf("[deploy] warning: invariants still failing after final repair round; continuing in plan-only mode")
 					}
 					continue
 				}
@@ -694,9 +621,10 @@ Examples:
 				)
 				if vErr != nil {
 					if applyMode {
-						return fmt.Errorf("plan validation failed after repair: %v", vErr)
+						logf("[deploy] warning: validation failed after repair (%v); continuing with current plan so execution/self-heal can proceed", vErr)
+					} else {
+						logf("[deploy] warning: validation failed after repair in plan-only mode (%v); continuing with deterministically valid plan", vErr)
 					}
-					logf("[deploy] warning: validation failed after repair in plan-only mode (%v); continuing with deterministically valid plan", vErr)
 					break
 				}
 				intel.Validation = repairedValidation
@@ -732,9 +660,10 @@ Examples:
 						issueCount = len(currentValidation.Issues)
 					}
 					if applyMode {
-						return fmt.Errorf("plan is invalid after repair (issues=%d)", issueCount)
+						logf("[deploy] warning: plan is still LLM-invalid after repair (issues=%d); continuing so execution/self-heal can proceed", issueCount)
+					} else {
+						logf("[deploy] warning: plan is still LLM-invalid after repair (issues=%d), but deterministic checks passed; returning plan in plan-only mode", issueCount)
 					}
-					logf("[deploy] warning: plan is still LLM-invalid after repair (issues=%d), but deterministic checks passed; returning plan in plan-only mode", issueCount)
 				}
 			}
 		}
@@ -829,6 +758,7 @@ Examples:
 				Provider:                  intel.Architecture.Provider,
 				Method:                    intel.Architecture.Method,
 				RepoURL:                   rp.RepoURL,
+				LLMContext:                planningContext,
 				ProjectSummary:            projectSummary,
 				ProjectCharacteristics:    projectCharacteristics,
 				RequiredLaunchOps:         requiredLaunchOps,
@@ -847,8 +777,14 @@ Examples:
 			} else {
 				reviewedPlan, parseErr := maker.ParsePlan(reviewedRaw)
 				if parseErr != nil {
-					logf("[deploy] warning: final plan review produced unparseable plan (%v); keeping current plan", parseErr)
-				} else if reviewedPlan != nil && len(reviewedPlan.Commands) > 0 {
+					reviewedPlan, parseErr = deploy.RepairPlanJSONWithLLM(ctx, aiClient.AskPrompt, aiClient.CleanJSONResponse, planningContext, projectSummaryForLLM, reviewedRaw, string(currentPlanJSON), reviewIssues, requiredLaunchOps, logf)
+					if parseErr != nil {
+						logf("[deploy] warning: final plan review produced unparseable plan (%v); keeping current plan", parseErr)
+					} else {
+						logf("[deploy] final review JSON auto-fixed via LLM")
+					}
+				}
+				if reviewedPlan != nil && len(reviewedPlan.Commands) > 0 && parseErr == nil {
 					reviewedPlan.Provider = intel.Architecture.Provider
 					reviewedPlan.Question = fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, strings.ToLower(strings.TrimSpace(reviewedPlan.Provider)), intel.Architecture.Method)
 					if reviewedPlan.CreatedAt.IsZero() {
@@ -858,12 +794,13 @@ Examples:
 						reviewedPlan.Version = maker.CurrentPlanVersion
 					}
 					reviewedPlan = deploy.SanitizePlanConservative(reviewedPlan, rp, intel.DeepAnalysis, intel.Docker, logf)
-					if retainErr := enforceStrictPlanRetention(baselinePlan, reviewedPlan, requiredLaunchOps, reviewIssues); retainErr != nil {
-						logf("[deploy] warning: final review candidate rejected by strict retention guard: %v", retainErr)
-					} else {
-						plan = reviewedPlan
-						logf("[deploy] final plan review applied (commands=%d)", len(plan.Commands))
+					retentionContext := append([]string{}, reviewIssues...)
+					retentionContext = append(retentionContext, reviewFixes...)
+					if retainErr := enforceStrictPlanRetention(baselinePlan, reviewedPlan, requiredLaunchOps, retentionContext); retainErr != nil {
+						logf("[deploy] suggestion: retention guard risk detected on final review candidate: %v", retainErr)
 					}
+					plan = reviewedPlan
+					logf("[deploy] final plan review applied (commands=%d)", len(plan.Commands))
 				}
 			}
 		}
@@ -915,6 +852,26 @@ Examples:
 						len(unresolved), maxPlaceholderRounds, unresolved)
 				}
 			}
+		}
+
+		if reviewedPlan, err := deploy.RunGenericPlanIntegrityPassWithLLM(
+			ctx,
+			aiClient.AskPrompt,
+			aiClient.CleanJSONResponse,
+			plan,
+			planningContext,
+			projectSummaryForLLM,
+			requiredLaunchOps,
+			logf,
+		); err != nil {
+			logf("[deploy] warning: generic integrity pass skipped (%v)", err)
+		} else if reviewedPlan != nil {
+			reviewedPlan = deploy.SanitizePlanConservative(reviewedPlan, rp, intel.DeepAnalysis, intel.Docker, logf)
+			if retainErr := enforceStrictPlanRetention(plan, reviewedPlan, requiredLaunchOps, nil); retainErr != nil {
+				logf("[deploy] suggestion: retention guard risk detected on integrity-pass candidate: %v", retainErr)
+			}
+			plan = reviewedPlan
+			logf("[deploy] generic integrity pass applied (commands=%d)", len(plan.Commands))
 		}
 
 		// 8. Output plan JSON (or apply)
@@ -1009,6 +966,7 @@ Examples:
 		if userConfig != nil {
 			for name, value := range userConfig.EnvVars {
 				outputBindings["ENV_"+name] = value
+				outputBindings[name] = value
 			}
 			outputBindings["APP_PORT"] = fmt.Sprintf("%d", userConfig.AppPort)
 			// Also pass PORT as env var so the container knows which port to listen on
@@ -1032,6 +990,13 @@ Examples:
 				outputBindings["NODEJS_USER_DATA"] = deploy.GenerateNodeJSUserData(rp.RepoURL, intel.DeepAnalysis, userConfig)
 				fmt.Fprintf(os.Stderr, "[deploy] using native Node.js deployment (PM2)\n")
 			}
+		}
+		if openclaw.Detect(strings.TrimSpace(baseQuestion), rp.RepoURL) {
+			seedOpenClawRuntimeEnvBindings(outputBindings, userConfig)
+		}
+		if enforceImageDeploy {
+			outputBindings["FORCE_IMAGE_DEPLOY"] = "true"
+			fmt.Fprintf(os.Stderr, "[deploy] image deploy enforcement enabled (ECR image build/pull workflow)\n")
 		}
 		execOpts := maker.ExecOptions{
 			Profile:        targetProfile,
@@ -1287,8 +1252,8 @@ func compactOneLine(raw string, limit int) string {
 
 var shellStylePlaceholderRe = regexp.MustCompile(`\$\{([A-Z0-9_]+)\}`)
 
-func withOneClickDeployContext(base, provider, method string) string {
-	context := buildOneClickDeployObjective(provider, method)
+func withOneClickDeployContext(base, provider, method string, enforceImageDeploy bool) string {
+	context := buildOneClickDeployObjective(provider, method, enforceImageDeploy)
 	base = strings.TrimSpace(base)
 	if base == "" {
 		return context
@@ -1296,7 +1261,7 @@ func withOneClickDeployContext(base, provider, method string) string {
 	return context + "\n\n" + base
 }
 
-func buildOneClickDeployObjective(provider, method string) string {
+func buildOneClickDeployObjective(provider, method string, enforceImageDeploy bool) string {
 	prov := strings.ToLower(strings.TrimSpace(provider))
 	if prov == "" {
 		prov = "aws"
@@ -1305,7 +1270,49 @@ func buildOneClickDeployObjective(provider, method string) string {
 	if m == "" {
 		m = "ec2"
 	}
+	if enforceImageDeploy {
+		return fmt.Sprintf("[one-click deploy objective]\nGenerate command plan steps for one-click deploy. The runner executes plan.commands strictly in order, sequentially, to provision infrastructure and ship the app to production.\nUse provider=%s method=%s. Keep commands actionable/idempotent and preserve earlier produced bindings for later steps.\nImage deployment is enforced: do not rely on docker build on EC2 user-data. Ensure ECR image build/push + IMAGE_URI/ECR_URI bindings are preserved and workload launches by pulling that image.", prov, m)
+	}
 	return fmt.Sprintf("[one-click deploy objective]\nGenerate command plan steps for one-click deploy. The runner executes plan.commands strictly in order, sequentially, to provision infrastructure and ship the app to production.\nUse provider=%s method=%s. Keep commands actionable/idempotent and preserve earlier produced bindings for later steps.", prov, m)
+}
+
+func seedOpenClawRuntimeEnvBindings(bindings map[string]string, cfg *deploy.UserConfig) {
+	if bindings == nil {
+		return
+	}
+
+	lookup := func(key string) string {
+		if cfg != nil {
+			if v := strings.TrimSpace(cfg.EnvVars[key]); v != "" {
+				return v
+			}
+		}
+		return strings.TrimSpace(os.Getenv(key))
+	}
+
+	for _, key := range []string{
+		"OPENCLAW_GATEWAY_TOKEN",
+		"OPENCLAW_GATEWAY_PASSWORD",
+		"ANTHROPIC_API_KEY",
+		"OPENAI_API_KEY",
+		"GEMINI_API_KEY",
+		"AI_GATEWAY_API_KEY",
+		"DISCORD_BOT_TOKEN",
+		"TELEGRAM_BOT_TOKEN",
+		"OPENCLAW_CONFIG_DIR",
+		"OPENCLAW_WORKSPACE_DIR",
+	} {
+		val := lookup(key)
+		if val == "" {
+			continue
+		}
+		if strings.TrimSpace(bindings["ENV_"+key]) == "" {
+			bindings["ENV_"+key] = val
+		}
+		if strings.TrimSpace(bindings[key]) == "" {
+			bindings[key] = val
+		}
+	}
 }
 
 func enforceStrictPlanRetention(baseline *maker.Plan, candidate *maker.Plan, requiredLaunchOps []string, issueTexts []string) error {
@@ -1315,8 +1322,19 @@ func enforceStrictPlanRetention(baseline *maker.Plan, candidate *maker.Plan, req
 	if candidate == nil || len(candidate.Commands) == 0 {
 		return fmt.Errorf("candidate plan has no commands")
 	}
-	if len(candidate.Commands) < len(baseline.Commands) {
-		return fmt.Errorf("candidate shrank command count from %d to %d", len(baseline.Commands), len(candidate.Commands))
+
+	removedCount := len(baseline.Commands) - len(candidate.Commands)
+	if removedCount > 0 {
+		if !issuesAllowCommandRemoval(issueTexts) {
+			return fmt.Errorf("candidate shrank command count from %d to %d without explicit removal intent in issues/fixes", len(baseline.Commands), len(candidate.Commands))
+		}
+		maxAllowedRemoval := len(baseline.Commands) / 4
+		if maxAllowedRemoval < 2 {
+			maxAllowedRemoval = 2
+		}
+		if removedCount > maxAllowedRemoval {
+			return fmt.Errorf("candidate removed too many commands (%d); exceeds allowed focused-diff limit (%d)", removedCount, maxAllowedRemoval)
+		}
 	}
 
 	basePairs := commandPairCounts(baseline)
@@ -1336,6 +1354,26 @@ func enforceStrictPlanRetention(baseline *maker.Plan, candidate *maker.Plan, req
 	}
 
 	return nil
+}
+
+func issuesAllowCommandRemoval(issueTexts []string) bool {
+	for _, issue := range issueTexts {
+		line := strings.ToLower(strings.TrimSpace(issue))
+		if line == "" {
+			continue
+		}
+		if strings.Contains(line, "remove") ||
+			strings.Contains(line, "delete") ||
+			strings.Contains(line, "drop") ||
+			strings.Contains(line, "orphan") ||
+			strings.Contains(line, "unused") ||
+			strings.Contains(line, "redundant") ||
+			strings.Contains(line, "duplicate") ||
+			strings.Contains(line, "not used") {
+			return true
+		}
+	}
+	return false
 }
 
 func commandPairCounts(plan *maker.Plan) map[string]int {
@@ -1472,13 +1510,13 @@ func maxPlanningPromptChars(provider string) int {
 	p := strings.ToLower(strings.TrimSpace(provider))
 	switch p {
 	case "gemini", "gemini-api":
-		return 220000
+		return 280000
 	case "openai":
-		return 180000
+		return 230000
 	case "anthropic":
-		return 120000
+		return 170000
 	default:
-		return 100000
+		return 145000
 	}
 }
 
@@ -1567,6 +1605,7 @@ func init() {
 	deployCmd.Flags().String("target", "fargate", "Deployment target: fargate (default), ec2, or eks")
 	deployCmd.Flags().String("instance-type", "t3.small", "EC2 instance type (only used with --target ec2)")
 	deployCmd.Flags().Bool("new-vpc", false, "Create a new VPC instead of using default")
+	deployCmd.Flags().Bool("enforce-image-deploy", false, "Force ECR image-based deploy path (avoid docker build-on-EC2 user-data)")
 	deployCmd.Flags().String("gcp-project", "", "GCP project ID (required for --provider gcp apply)")
 	deployCmd.Flags().String("azure-subscription", "", "Azure subscription ID (required for --provider azure apply)")
 }

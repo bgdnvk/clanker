@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/bgdnvk/clanker/internal/openclaw"
 )
 
 func isEC2DeleteSecurityGroup(args []string) bool {
@@ -20,6 +22,7 @@ func maybeAutoRemediateAndRetry(
 	stdinBytes []byte,
 	out string,
 	failure AWSFailure,
+	bindings map[string]string,
 ) (bool, error) {
 	_ = plan
 	_ = idx
@@ -68,7 +71,20 @@ func maybeAutoRemediateAndRetry(
 	}
 
 	// AI remediation fallback.
-	rp, err := maybeRemediateWithAI(ctx, opts, awsArgs, out)
+	deploymentIntent := ""
+	if plan != nil {
+		deploymentIntent = strings.TrimSpace(plan.Question)
+	}
+	if deploymentIntent == "" && bindings != nil {
+		deploymentIntent = strings.TrimSpace(bindings["PLAN_QUESTION"])
+		if deploymentIntent == "" {
+			deploymentIntent = strings.TrimSpace(bindings["QUESTION"])
+		}
+	}
+	if !openclaw.Detect(deploymentIntent, "") {
+		deploymentIntent = ""
+	}
+	rp, err := maybeRemediateWithAI(ctx, opts, deploymentIntent, awsArgs, out)
 	if err != nil {
 		return false, err
 	}

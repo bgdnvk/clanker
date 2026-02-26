@@ -7,9 +7,10 @@ import (
 )
 
 type PlanRepairContext struct {
-	Provider string
-	Method   string
-	RepoURL  string
+	Provider   string
+	Method     string
+	RepoURL    string
+	LLMContext string
 
 	GCPProject          string
 	AzureSubscriptionID string
@@ -153,6 +154,15 @@ func (a *PlanRepairAgent) buildPrompt(planJSON string, v *PlanValidation, c Plan
 	}
 	if strings.TrimSpace(c.RepoURL) != "" {
 		b.WriteString("- repo: " + strings.TrimSpace(c.RepoURL) + "\n")
+	}
+	if strings.TrimSpace(c.LLMContext) != "" {
+		ctx := strings.TrimSpace(c.LLMContext)
+		if len(ctx) > 16000 {
+			ctx = strings.TrimSpace(ctx[:16000]) + "…"
+		}
+		b.WriteString("- extended_context:\n")
+		b.WriteString(ctx)
+		b.WriteString("\n")
 	}
 	if strings.TrimSpace(c.GCPProject) != "" {
 		b.WriteString("- gcp project: " + strings.TrimSpace(c.GCPProject) + "\n")

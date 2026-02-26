@@ -14,7 +14,7 @@ type remediationPlan struct {
 	Notes    []string  `json:"notes,omitempty"`
 }
 
-func remediationPrompt(destroyer bool, failedAWSArgs []string, combinedOutput string) string {
+func remediationPrompt(destroyer bool, deploymentIntent string, failedAWSArgs []string, combinedOutput string) string {
 	// failedAWSArgs includes injected flags; we strip those in the prompt for clarity.
 	trimmed := make([]string, 0, len(failedAWSArgs))
 	for i := 0; i < len(failedAWSArgs); i++ {
@@ -28,6 +28,9 @@ func remediationPrompt(destroyer bool, failedAWSArgs []string, combinedOutput st
 	return fmt.Sprintf(`You are an AWS CLI remediation planner.
 
 Task: propose a minimal set of additional AWS CLI commands (args arrays only) that will make the failing command succeed.
+
+Deployment intent (preserve this objective while fixing):
+%q
 
 Constraints:
 - Output ONLY valid JSON.
@@ -52,16 +55,16 @@ Failing command args:
 
 Failure output (combined stdout/stderr):
 %q
-`, destroyer, trimmed, strings.TrimSpace(combinedOutput))
+`, deploymentIntent, destroyer, trimmed, strings.TrimSpace(combinedOutput))
 }
 
-func maybeRemediateWithAI(ctx context.Context, opts ExecOptions, failedArgs []string, failedOutput string) (*remediationPlan, error) {
+func maybeRemediateWithAI(ctx context.Context, opts ExecOptions, deploymentIntent string, failedArgs []string, failedOutput string) (*remediationPlan, error) {
 	if strings.TrimSpace(opts.AIProvider) == "" || strings.TrimSpace(opts.AIAPIKey) == "" {
 		return nil, nil
 	}
 
 	client := ai.NewClient(opts.AIProvider, opts.AIAPIKey, opts.Debug, opts.AIProfile)
-	resp, err := client.AskPrompt(ctx, remediationPrompt(opts.Destroyer, failedArgs, failedOutput))
+	resp, err := client.AskPrompt(ctx, remediationPrompt(opts.Destroyer, deploymentIntent, failedArgs, failedOutput))
 	if err != nil {
 		return nil, err
 	}
