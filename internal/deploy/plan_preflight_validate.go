@@ -287,6 +287,7 @@ func checkOpenClawProjectInvariants(plan *maker.Plan) ([]string, []string) {
 	hasCFDomainOutput := false
 	hasCFHTTPSOutput := false
 	hasALB := false
+	hasRunnableOpenClawRuntimePath := false
 
 	for _, cmd := range plan.Commands {
 		args := cmd.Args
@@ -316,6 +317,9 @@ func checkOpenClawProjectInvariants(plan *maker.Plan) ([]string, []string) {
 		if svc == "ec2" && op == "run-instances" {
 			script := extractEC2UserDataScript(args)
 			lower := strings.ToLower(script)
+			usesCompose := strings.Contains(lower, "docker compose") || strings.Contains(lower, "docker-compose")
+			usesDockerRun := strings.Contains(lower, "docker run")
+			hasECRRef := strings.Contains(lower, ".dkr.ecr.") || strings.Contains(lower, "<image_uri>") || strings.Contains(lower, "<ecr_uri>")
 			onboardIdx := strings.Index(lower, "docker-setup.sh")
 			if onboardIdx < 0 {
 				onboardIdx = strings.Index(lower, "openclaw-cli onboard")
@@ -324,6 +328,15 @@ func checkOpenClawProjectInvariants(plan *maker.Plan) ([]string, []string) {
 			if startIdx >= 0 && (onboardIdx < 0 || onboardIdx > startIdx) {
 				issues = append(issues, "[HARD] OpenClaw invariant failed: onboarding must run before starting openclaw-gateway")
 				fixes = append(fixes, "Run docker-setup.sh or openclaw-cli onboard before docker compose up -d openclaw-gateway")
+			}
+			if usesCompose {
+				missing := missingEnvVarsInScript(script, OpenClawComposeHardEnvVars())
+				if len(missing) == 0 && startIdx >= 0 && onboardIdx >= 0 && onboardIdx < startIdx {
+					hasRunnableOpenClawRuntimePath = true
+				}
+			}
+			if usesDockerRun && hasECRRef {
+				hasRunnableOpenClawRuntimePath = true
 			}
 		}
 		for k, v := range cmd.Produces {
@@ -342,6 +355,10 @@ func checkOpenClawProjectInvariants(plan *maker.Plan) ([]string, []string) {
 	if hasALB && !(hasCFCreate && hasCFWait && hasCFDomainOutput && hasCFHTTPSOutput) {
 		issues = append(issues, "[HARD] OpenClaw invariant failed: HTTPS pairing URL must be shipped via CloudFront (create + wait + output)")
 		fixes = append(fixes, "Add CloudFront create-distribution(+optional tags variant), cloudfront wait distribution-deployed, produces CLOUDFRONT_DOMAIN, and set HTTPS_URL to full https:// URL")
+	}
+	if !hasRunnableOpenClawRuntimePath {
+		issues = append(issues, "[HARD] OpenClaw invariant failed: missing runnable runtime path (compose onboarding+mount env or docker-run with ECR image)")
+		fixes = append(fixes, "Use compose onboarding flow with OPENCLAW_CONFIG_DIR/OPENCLAW_WORKSPACE_DIR or docker pull/run using explicit ECR image")
 	}
 
 	return uniqueStrings(issues), uniqueStrings(fixes)
@@ -488,6 +505,7 @@ func validateOpenClawPlanCommands(plan *maker.Plan) awsPlanChecks {
 	hasCloudFrontWait := false
 	hasCloudFrontDomainOutput := false
 	hasCloudFrontHTTPSOutput := false
+	hasRunnableOpenClawRuntimePath := false
 	for _, cmd := range plan.Commands {
 		args := cmd.Args
 		if len(args) < 2 {
@@ -497,6 +515,21 @@ func validateOpenClawPlanCommands(plan *maker.Plan) awsPlanChecks {
 		op := strings.ToLower(strings.TrimSpace(args[1]))
 		if service == "ec2" && op == "run-instances" {
 			hasEC2RunInstances = true
+			script := strings.ToLower(extractEC2UserDataScript(args))
+			usesCompose := strings.Contains(script, "docker compose") || strings.Contains(script, "docker-compose")
+			usesDockerRun := strings.Contains(script, "docker run")
+			hasECRRef := strings.Contains(script, ".dkr.ecr.") || strings.Contains(script, "<image_uri>") || strings.Contains(script, "<ecr_uri>")
+			if usesCompose {
+				missing := missingEnvVarsInScript(script, OpenClawComposeHardEnvVars())
+				onboarded := strings.Contains(script, "docker-setup.sh") || strings.Contains(script, "openclaw-cli onboard")
+				started := strings.Contains(script, "up -d openclaw-gateway")
+				if len(missing) == 0 && onboarded && started {
+					hasRunnableOpenClawRuntimePath = true
+				}
+			}
+			if usesDockerRun && hasECRRef {
+				hasRunnableOpenClawRuntimePath = true
+			}
 		}
 		if service == "cloudfront" && (op == "create-distribution" || op == "create-distribution-with-tags") {
 			hasCloudFrontCreate = true
@@ -535,6 +568,10 @@ func validateOpenClawPlanCommands(plan *maker.Plan) awsPlanChecks {
 	if !(hasCloudFrontCreate && hasCloudFrontWait && hasCloudFrontDomainOutput && hasCloudFrontHTTPSOutput) {
 		out.Issues = append(out.Issues, "[HARD] OpenClaw AWS plan is missing required CloudFront HTTPS pairing architecture")
 		out.Fixes = append(out.Fixes, "Add CloudFront create-distribution, cloudfront wait distribution-deployed, produce CLOUDFRONT_DOMAIN, and set HTTPS_URL to a full https:// URL")
+	}
+	if !hasRunnableOpenClawRuntimePath {
+		out.Issues = append(out.Issues, "[HARD] OpenClaw AWS plan is missing a valid runtime start path (compose onboarding+mount env or docker-run with ECR image)")
+		out.Fixes = append(out.Fixes, "Ensure ec2 user-data starts OpenClaw via compose onboarding flow with OPENCLAW_CONFIG_DIR/OPENCLAW_WORKSPACE_DIR or via docker pull/run using explicit ECR image")
 	}
 
 	return out

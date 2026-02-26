@@ -240,20 +240,29 @@ func applyOpenClawUserDataValidation(out *deterministicValidation, script string
 	if usesCompose {
 		// Expect either docker-setup.sh or onboard.
 		if !strings.Contains(lower, "docker-setup.sh") && !strings.Contains(lower, "openclaw-cli") && !strings.Contains(lower, " onboar") {
-			out.Warnings = append(out.Warnings, "suggestion: include onboarding command /opt/openclaw/bin/clawctl onboard in user-data")
+			out.Issues = append(out.Issues, "[HARD] OpenClaw compose deploy missing onboarding step (docker-setup.sh / openclaw-cli onboard)")
 			out.Fixes = append(out.Fixes, "Run ./docker-setup.sh (or docker compose run --rm openclaw-cli onboard) before docker compose up -d openclaw-gateway")
 		}
 
 		// OpenClaw compose expects config/workspace host dirs.
 		missing := missingEnvVarsInScript(script, OpenClawComposeHardEnvVars())
 		if len(missing) > 0 {
-			out.Warnings = append(out.Warnings, "suggestion: include required OpenClaw mount env var "+strings.Join(missing, ", ")+" in user-data")
+			out.Issues = append(out.Issues, "[HARD] OpenClaw compose deploy missing required mount env vars: "+strings.Join(missing, ", "))
 			out.Fixes = append(out.Fixes, "Set OPENCLAW_CONFIG_DIR and OPENCLAW_WORKSPACE_DIR to real host paths before docker compose up")
+		}
+	}
+
+	if usesDockerRun {
+		hasECRRef := strings.Contains(lower, ".dkr.ecr.") || strings.Contains(lower, "<image_uri>") || strings.Contains(lower, "<ecr_uri>")
+		if !hasECRRef {
+			out.Issues = append(out.Issues, "[HARD] OpenClaw docker-run deploy missing explicit ECR image reference")
+			out.Fixes = append(out.Fixes, "Use ECR image-based runtime in user-data (docker pull <ECR_URI>:<tag> then docker run)")
 		}
 	}
 
 	// If neither compose nor docker run shows up, still probably broken.
 	if !usesCompose && !usesDockerRun {
-		out.Warnings = append(out.Warnings, "OpenClaw repo detected but user-data does not appear to start the gateway")
+		out.Issues = append(out.Issues, "[HARD] OpenClaw user-data does not appear to start the gateway runtime")
+		out.Fixes = append(out.Fixes, "Start OpenClaw via docker compose up -d openclaw-gateway or docker run with an explicit ECR image")
 	}
 }

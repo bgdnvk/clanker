@@ -260,6 +260,12 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		if strings.TrimSpace(bindings["PLAN_QUESTION"]) == "" {
 			bindings["PLAN_QUESTION"] = plan.Question
 		}
+		if openclaw.Detect(strings.TrimSpace(plan.Question), extractRepoURLFromQuestion(plan.Question)) {
+			if strings.TrimSpace(bindings["FORCE_IMAGE_DEPLOY"]) == "" {
+				bindings["FORCE_IMAGE_DEPLOY"] = "true"
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] openclaw detected: forcing image deploy workflow\n")
+			}
+		}
 	}
 
 	// Initialize bindings from OutputBindings if provided (for multi-phase execution)
@@ -528,7 +534,7 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 			}
 		}
 		if strings.TrimSpace(httpsURL) == "" {
-			return fmt.Errorf("openclaw requires HTTPS pairing URL but CloudFront URL is missing")
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: openclaw HTTPS pairing URL is missing (CloudFront output not available yet); continuing\n")
 		}
 	}
 	openclaw.MaybePrintPostDeployInstructions(bindings, opts.Profile, opts.Region, opts.Writer, question, repoURL)
@@ -631,6 +637,9 @@ func shouldAutoPrepareImage(args []string, question string, bindings map[string]
 		case "1", "true", "yes", "on":
 			forceImageDeploy = true
 		}
+	}
+	if openclaw.Detect(strings.TrimSpace(question), extractRepoURLFromQuestion(question)) {
+		forceImageDeploy = true
 	}
 	// WordPress one-click uses Docker Hub images (no ECR build/push).
 	q := strings.TrimSpace(question)

@@ -182,6 +182,11 @@ Examples:
 		if debug {
 			fmt.Fprintf(os.Stderr, "[deploy] enriched prompt:\n%s\n", baseQuestion)
 		}
+		isOpenClawDeploy := openclaw.Detect(strings.TrimSpace(baseQuestion), rp.RepoURL)
+		if isOpenClawDeploy && !enforceImageDeploy {
+			enforceImageDeploy = true
+			fmt.Fprintf(os.Stderr, "[deploy] openclaw detected: enabling image deploy enforcement by default\n")
+		}
 
 		planProvider := strings.ToLower(strings.TrimSpace(targetProvider))
 		if planProvider == "" {
@@ -239,6 +244,8 @@ Examples:
 		const maxCommandsPerPage = 8
 		const maxConsecutivePageFailures = 5
 		const earlyRepairAfterFailures = 3
+		const openClawSoftPlanCommands = 56
+		const openClawHardPlanCommands = 80
 		var plan *maker.Plan
 		var mustFixIssues []string
 		var lastDetValidation *deploy.PlanValidation
@@ -345,6 +352,10 @@ Examples:
 					continue
 				}
 				page.Commands = normalized.Commands
+				if len(page.Commands) > maxCommandsPerPage {
+					logf("[deploy] warning: page returned %d commands; clamping to %d", len(page.Commands), maxCommandsPerPage)
+					page.Commands = page.Commands[:maxCommandsPerPage]
+				}
 			}
 		pageNormalized:
 			consecutivePageFailures = 0
@@ -402,6 +413,17 @@ Examples:
 					break
 				}
 				logf("[deploy] warning: model returned done=true but deterministic issues remain; continuing")
+			}
+
+			if isOpenClawDeploy {
+				if len(plan.Commands) >= openClawHardPlanCommands {
+					logf("[deploy] warning: openclaw plan exceeded hard command ceiling (%d); moving to validation/repair", openClawHardPlanCommands)
+					break
+				}
+				if len(plan.Commands) >= openClawSoftPlanCommands && len(mustFixIssues) == 0 && added <= 1 {
+					logf("[deploy] info: openclaw plan reached soft ceiling (%d) with low incremental progress; moving to validation/repair", openClawSoftPlanCommands)
+					break
+				}
 			}
 		}
 
@@ -587,7 +609,8 @@ Examples:
 				retentionContext := append([]string{}, currentValidation.Issues...)
 				retentionContext = append(retentionContext, currentValidation.Fixes...)
 				if retainErr := enforceStrictPlanRetention(baselinePlan, repaired, requiredLaunchOps, retentionContext); retainErr != nil {
-					logf("[deploy] suggestion: retention guard risk detected on repair candidate: %v", retainErr)
+					logf("[deploy] warning: retention guard rejected repair candidate; keeping previous plan: %v", retainErr)
+					continue
 				}
 				// Keep the latest repaired candidate even if validator still has concerns.
 				plan = repaired
@@ -797,11 +820,13 @@ Examples:
 					retentionContext := append([]string{}, reviewIssues...)
 					retentionContext = append(retentionContext, reviewFixes...)
 					if retainErr := enforceStrictPlanRetention(baselinePlan, reviewedPlan, requiredLaunchOps, retentionContext); retainErr != nil {
-						logf("[deploy] suggestion: retention guard risk detected on final review candidate: %v", retainErr)
+						logf("[deploy] warning: retention guard rejected final review candidate; keeping previous plan: %v", retainErr)
+						goto skipFinalReviewApply
 					}
 					plan = reviewedPlan
 					logf("[deploy] final plan review applied (commands=%d)", len(plan.Commands))
 				}
+			skipFinalReviewApply:
 			}
 		}
 
@@ -868,10 +893,30 @@ Examples:
 		} else if reviewedPlan != nil {
 			reviewedPlan = deploy.SanitizePlanConservative(reviewedPlan, rp, intel.DeepAnalysis, intel.Docker, logf)
 			if retainErr := enforceStrictPlanRetention(plan, reviewedPlan, requiredLaunchOps, nil); retainErr != nil {
-				logf("[deploy] suggestion: retention guard risk detected on integrity-pass candidate: %v", retainErr)
+				logf("[deploy] warning: retention guard rejected integrity-pass candidate; keeping previous plan: %v", retainErr)
+				goto skipIntegrityApply
 			}
 			plan = reviewedPlan
 			logf("[deploy] generic integrity pass applied (commands=%d)", len(plan.Commands))
+		}
+	skipIntegrityApply:
+
+		if patched := deploy.ApplyOpenClawPlanAutofix(plan, rp, intel.DeepAnalysis, logf); patched != nil {
+			plan = patched
+		}
+
+		openClawUnresolvedApplyBlock := false
+		openClawUnresolvedCritical := make([]string, 0, 12)
+		if isOpenClawDeploy {
+			if unresolved := deploy.GetUnresolvedPlaceholders(plan); len(unresolved) > 0 {
+				if !deploy.AllPlaceholdersAreProduced(plan, unresolved) {
+					openClawUnresolvedApplyBlock = true
+					openClawUnresolvedCritical = append(openClawUnresolvedCritical, unresolved...)
+					logf("[deploy] warning: openclaw plan has unresolved non-runtime placeholders (%d): %v", len(unresolved), unresolved)
+				} else {
+					logf("[deploy] openclaw placeholders are runtime-produced; continuing with non-deterministic plan")
+				}
+			}
 		}
 
 		// 8. Output plan JSON (or apply)
@@ -891,6 +936,14 @@ Examples:
 		if !applyMode {
 			fmt.Println(string(planJSON))
 			return nil
+		}
+
+		if isOpenClawDeploy && openClawUnresolvedApplyBlock {
+			capped := openClawUnresolvedCritical
+			if len(capped) > 12 {
+				capped = capped[:12]
+			}
+			return fmt.Errorf("openclaw apply blocked: unresolved non-runtime placeholders remain (%d): %v", len(openClawUnresolvedCritical), capped)
 		}
 
 		// Apply mode: normalize any inline EC2 user-data scripts to base64 so heredocs like <<EOF
@@ -991,8 +1044,10 @@ Examples:
 				fmt.Fprintf(os.Stderr, "[deploy] using native Node.js deployment (PM2)\n")
 			}
 		}
-		if openclaw.Detect(strings.TrimSpace(baseQuestion), rp.RepoURL) {
+		if isOpenClawDeploy {
 			seedOpenClawRuntimeEnvBindings(outputBindings, userConfig)
+			outputBindings["FORCE_IMAGE_DEPLOY"] = "true"
+			fmt.Fprintf(os.Stderr, "[deploy] openclaw runtime: forcing ECR image deploy workflow\n")
 		}
 		if enforceImageDeploy {
 			outputBindings["FORCE_IMAGE_DEPLOY"] = "true"
@@ -1100,7 +1155,7 @@ Examples:
 		}
 		isOpenClaw := openclaw.Detect(strings.TrimSpace(baseQuestion), rp.RepoURL)
 		if isOpenClaw && strings.TrimSpace(httpsURL) == "" {
-			return fmt.Errorf("openclaw deploy requires HTTPS pairing URL but CloudFront URL is missing")
+			fmt.Fprintf(os.Stderr, "[deploy] warning: openclaw HTTPS pairing URL missing (CloudFront output not available); continuing\n")
 		}
 		if httpsURL != "" {
 			fmt.Fprintf(os.Stderr, "\n========================================\n")
