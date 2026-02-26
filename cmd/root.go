@@ -65,9 +65,10 @@ func init() {
 	azureCmd := azure.CreateAzureCommands()
 	rootCmd.AddCommand(azureCmd)
 
-	// Register Cloudflare static commands and ask command
+	// Register Cloudflare static commands, ask command, and deploy commands
 	cfCmd := cloudflare.CreateCloudflareCommands()
 	AddCfAskCommand(cfCmd)
+	AddCfDeployCommands(cfCmd)
 	rootCmd.AddCommand(cfCmd)
 }
 

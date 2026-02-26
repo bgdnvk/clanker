@@ -539,6 +539,11 @@ Format as a professional compliance table suitable for government security docum
 			includeTerraform = true
 		}
 
+		// Handle explicit --cloudflare flag
+		if includeCloudflare {
+			return handleCloudflareQuery(context.Background(), question, debug)
+		}
+
 		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare {
 			routingQuestion := questionForRouting(question)
 
