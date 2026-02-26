@@ -181,7 +181,7 @@ func (e *Exporter) trendToCSV(trend *CostTrendResponse) ([]byte, error) {
 	w.Write([]string{"Date", "Cost", "Provider"})
 
 	// Daily data
-	for _, dc := range trend.DailyCosts {
+	for _, dc := range trend.Trend {
 		provider := dc.Provider
 		if provider == "" {
 			provider = "all"

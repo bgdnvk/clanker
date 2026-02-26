@@ -106,8 +106,8 @@ type CostExportRequest struct {
 
 // CostTrendResponse represents the response for cost trend data
 type CostTrendResponse struct {
-	DailyCosts []DailyCost `json:"dailyCosts"`
-	Period     CostPeriod  `json:"period"`
+	Trend       []DailyCost `json:"trend"`
+	Granularity string      `json:"granularity"`
 }
 
 // CostAnomaliesResponse represents the response for cost anomalies

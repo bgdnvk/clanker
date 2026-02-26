@@ -158,15 +158,22 @@ func (f *Formatter) FormatTrend(trend *CostTrendResponse) (string, error) {
 	var sb strings.Builder
 
 	sb.WriteString(f.header("Cost Trend"))
-	sb.WriteString(fmt.Sprintf("Period: %s to %s\n",
-		trend.Period.StartDate.Format("2006-01-02"),
-		trend.Period.EndDate.Format("2006-01-02")))
+
+	// Calculate period from trend data
+	if len(trend.Trend) > 0 {
+		startDate := trend.Trend[0].Date
+		endDate := trend.Trend[len(trend.Trend)-1].Date
+		sb.WriteString(fmt.Sprintf("Period: %s to %s (%s)\n",
+			startDate.Format("2006-01-02"),
+			endDate.Format("2006-01-02"),
+			trend.Granularity))
+	}
 	sb.WriteString("\n")
 
 	w := tabwriter.NewWriter(&sb, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "DATE\tCOST\tPROVIDER")
 	fmt.Fprintln(w, "----\t----\t--------")
-	for _, dc := range trend.DailyCosts {
+	for _, dc := range trend.Trend {
 		provider := dc.Provider
 		if provider == "" {
 			provider = "all"
