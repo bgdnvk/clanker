@@ -434,23 +434,35 @@ func getCostAggregator(ctx context.Context, debug bool) *cost.Aggregator {
 		aggregator.RegisterProvider(awsProvider)
 	}
 
-	// TODO: Add GCP provider when implemented
-	// gpcProvider, err := cost.NewGCPProvider(ctx, debug)
-	// if err == nil {
-	//     aggregator.RegisterProvider(gcpProvider)
-	// }
+	// Initialize GCP provider
+	gcpProvider, err := cost.NewGCPProvider(ctx, os.Getenv("GCP_PROJECT_ID"), debug)
+	if err != nil {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[cost] GCP provider not available: %v\n", err)
+		}
+	} else {
+		aggregator.RegisterProvider(gcpProvider)
+	}
 
-	// TODO: Add Azure provider when implemented
-	// azureProvider, err := cost.NewAzureProvider(ctx, debug)
-	// if err == nil {
-	//     aggregator.RegisterProvider(azureProvider)
-	// }
+	// Initialize Azure provider
+	azureProvider, err := cost.NewAzureProvider(ctx, os.Getenv("AZURE_SUBSCRIPTION_ID"), debug)
+	if err != nil {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[cost] Azure provider not available: %v\n", err)
+		}
+	} else {
+		aggregator.RegisterProvider(azureProvider)
+	}
 
-	// TODO: Add Cloudflare provider when implemented
-	// cfProvider, err := cost.NewCloudflareProvider(ctx, debug)
-	// if err == nil {
-	//     aggregator.RegisterProvider(cfProvider)
-	// }
+	// Initialize Cloudflare provider
+	cfProvider, err := cost.NewCloudflareProvider(ctx, debug)
+	if err != nil {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[cost] Cloudflare provider not available: %v\n", err)
+		}
+	} else {
+		aggregator.RegisterProvider(cfProvider)
+	}
 
 	return aggregator
 }

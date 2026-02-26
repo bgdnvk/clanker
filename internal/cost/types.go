@@ -99,7 +99,7 @@ type CostExportRequest struct {
 	Providers       []string          `json:"providers"`
 	StartDate       string            `json:"startDate"`
 	EndDate         string            `json:"endDate"`
-	Format          string            `json:"format"` // csv, pdf, json
+	Format          string            `json:"format"`  // csv, pdf, json
 	GroupBy         string            `json:"groupBy"` // provider, service, tag
 	TagFilters      map[string]string `json:"tagFilters"`
 	IncludeForecast bool              `json:"includeForecast"`
