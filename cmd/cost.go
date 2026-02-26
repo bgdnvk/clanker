@@ -21,6 +21,7 @@ var (
 	costTop       int
 	costTagKey    string
 	costGroupBy   string
+	costProfile   string
 )
 
 func init() {
@@ -37,11 +38,12 @@ func init() {
 	costCmd.AddCommand(costLLMCmd)
 
 	// Persistent flags for all cost commands
-	costCmd.PersistentFlags().StringVar(&costProvider, "provider", "all", "Filter by provider (aws, gcp, azure, cloudflare, llm, all)")
+	costCmd.PersistentFlags().StringVar(&costProvider, "provider", "all", "Filter by provider (aws, gcp, azure, cloudflare, all)")
 	costCmd.PersistentFlags().StringVar(&costStartDate, "start", "", "Start date YYYY-MM-DD (default: first of month)")
 	costCmd.PersistentFlags().StringVar(&costEndDate, "end", "", "End date YYYY-MM-DD (default: today)")
 	costCmd.PersistentFlags().StringVar(&costFormat, "format", "table", "Output format: table, json")
 	costCmd.PersistentFlags().IntVar(&costTop, "top", 10, "Limit results (default: 10)")
+	costCmd.PersistentFlags().StringVar(&costProfile, "profile", "", "AWS profile to use (default: from AWS_PROFILE env)")
 
 	// Export specific flags
 	costExportCmd.Flags().StringVar(&costOutput, "output", "", "Output file path (required)")
@@ -56,16 +58,21 @@ func init() {
 var costCmd = &cobra.Command{
 	Use:   "cost",
 	Short: "View and analyze cloud infrastructure costs",
-	Long: `View and analyze cost data across all configured cloud providers.
+	Long: `View and analyze cost data directly from cloud provider APIs.
 
-Supports AWS, GCP, Azure, Cloudflare, and LLM providers.
+Fetches real cost data using your configured cloud credentials:
+- AWS: Uses Cost Explorer API with your AWS profile/credentials
+- GCP: Uses Cloud Billing API (coming soon)
+- Azure: Uses Cost Management API (coming soon)
+- Cloudflare: Uses Analytics API (coming soon)
 
 Examples:
   clanker cost                              # Show cost summary
   clanker cost summary --provider aws       # AWS costs only
-  clanker cost detail --provider llm        # LLM cost details
+  clanker cost detail --provider aws        # AWS service breakdown
   clanker cost trend --start 2024-01-01     # Cost trend from Jan 1
-  clanker cost export --output costs.csv    # Export to CSV`,
+  clanker cost export --output costs.csv    # Export to CSV
+  clanker cost --profile myaws              # Use specific AWS profile`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Default to summary when no subcommand is provided
 		runCostSummary(cmd, args)
@@ -82,7 +89,7 @@ Shows total cost, per-provider breakdown, top services, and forecast.
 
 Examples:
   clanker cost summary
-  clanker cost summary --provider aws,gcp
+  clanker cost summary --provider aws
   clanker cost summary --start 2024-01-01 --end 2024-01-31`,
 	Run: runCostSummary,
 }
@@ -91,12 +98,12 @@ func runCostSummary(cmd *cobra.Command, args []string) {
 	ctx := context.Background()
 	debug := viper.GetBool("debug")
 
-	client := getCostClient(debug)
+	aggregator := getCostAggregator(ctx, debug)
 	formatter := cost.NewFormatter(costFormat, true)
 
-	startDate, endDate := resolveDateRange()
+	start, end := resolveDateRangeAsTime()
 
-	summary, err := client.GetSummary(ctx, startDate, endDate)
+	summary, err := aggregator.GetSummary(ctx, start, end)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error fetching cost summary: %v\n", err)
 		os.Exit(1)
@@ -141,25 +148,25 @@ var costDetailCmd = &cobra.Command{
 
 Examples:
   clanker cost detail --provider aws
-  clanker cost detail --provider llm --format json`,
+  clanker cost detail --format json`,
 	Run: func(cmd *cobra.Command, args []string) {
 		ctx := context.Background()
 		debug := viper.GetBool("debug")
 
-		client := getCostClient(debug)
+		aggregator := getCostAggregator(ctx, debug)
 		formatter := cost.NewFormatter(costFormat, true)
 
-		startDate, endDate := resolveDateRange()
+		start, end := resolveDateRangeAsTime()
 
 		if costProvider == "all" || costProvider == "" {
-			// Get services for all providers
-			services, err := client.GetServices(ctx, "", startDate, endDate)
+			// Get summary for all providers
+			summary, err := aggregator.GetSummary(ctx, start, end)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error fetching services: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Error fetching costs: %v\n", err)
 				os.Exit(1)
 			}
 
-			output, err := formatter.FormatServices(services, costTop)
+			output, err := formatter.FormatServices(summary.TopServices, costTop)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error formatting output: %v\n", err)
 				os.Exit(1)
@@ -167,9 +174,14 @@ Examples:
 			formatter.Print(output)
 		} else {
 			// Get provider-specific breakdown
-			providerCost, err := client.GetByProvider(ctx, costProvider, startDate, endDate)
+			providerCost, err := aggregator.GetByProvider(ctx, costProvider, start, end)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error fetching provider costs: %v\n", err)
+				os.Exit(1)
+			}
+
+			if providerCost == nil {
+				fmt.Fprintf(os.Stderr, "Provider '%s' not configured or no data available\n", costProvider)
 				os.Exit(1)
 			}
 
@@ -197,12 +209,12 @@ Examples:
 		ctx := context.Background()
 		debug := viper.GetBool("debug")
 
-		client := getCostClient(debug)
+		aggregator := getCostAggregator(ctx, debug)
 		formatter := cost.NewFormatter(costFormat, true)
 
-		startDate, endDate := resolveDateRange()
+		start, end := resolveDateRangeAsTime()
 
-		trend, err := client.GetTrend(ctx, startDate, endDate, "daily")
+		trend, err := aggregator.GetTrend(ctx, start, end)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error fetching trend data: %v\n", err)
 			os.Exit(1)
@@ -231,13 +243,18 @@ Examples:
 		ctx := context.Background()
 		debug := viper.GetBool("debug")
 
-		client := getCostClient(debug)
+		aggregator := getCostAggregator(ctx, debug)
 		formatter := cost.NewFormatter(costFormat, true)
 
-		forecast, err := client.GetForecast(ctx)
+		forecast, err := aggregator.GetForecast(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error fetching forecast: %v\n", err)
 			os.Exit(1)
+		}
+
+		if forecast == nil {
+			fmt.Println("No forecast data available. AWS Cost Explorer forecast requires sufficient historical data.")
+			os.Exit(0)
 		}
 
 		output, err := formatter.FormatForecast(forecast)
@@ -263,10 +280,10 @@ Examples:
 		ctx := context.Background()
 		debug := viper.GetBool("debug")
 
-		client := getCostClient(debug)
+		aggregator := getCostAggregator(ctx, debug)
 		formatter := cost.NewFormatter(costFormat, true)
 
-		anomalies, err := client.GetAnomalies(ctx)
+		anomalies, err := aggregator.GetAnomalies(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error fetching anomalies: %v\n", err)
 			os.Exit(1)
@@ -296,12 +313,17 @@ Examples:
 		ctx := context.Background()
 		debug := viper.GetBool("debug")
 
-		client := getCostClient(debug)
+		aggregator := getCostAggregator(ctx, debug)
 		formatter := cost.NewFormatter(costFormat, true)
 
-		startDate, endDate := resolveDateRange()
+		start, end := resolveDateRangeAsTime()
 
-		tags, err := client.GetTags(ctx, costTagKey, startDate, endDate)
+		tagKey := costTagKey
+		if tagKey == "" {
+			tagKey = "Environment" // default tag key
+		}
+
+		tags, err := aggregator.GetTags(ctx, tagKey, start, end)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error fetching tag data: %v\n", err)
 			os.Exit(1)
@@ -321,36 +343,20 @@ Examples:
 var costLLMCmd = &cobra.Command{
 	Use:   "llm",
 	Short: "Show LLM usage and costs",
-	Long: `Display LLM usage and cost data for all configured AI providers.
+	Long: `Display LLM usage and cost data.
 
-Supports OpenAI, Anthropic, Gemini, DeepSeek, MiniMax, and AWS Bedrock.
+Note: LLM cost tracking requires the clanker-cloud backend to record usage.
+For direct AWS Bedrock costs, use: clanker cost detail --provider aws
 
 Examples:
   clanker cost llm
-  clanker cost llm --start 2024-01-01
   clanker cost llm --format json`,
 	Run: func(cmd *cobra.Command, args []string) {
-		ctx := context.Background()
-		debug := viper.GetBool("debug")
-
-		client := getCostClient(debug)
-		formatter := cost.NewFormatter(costFormat, true)
-
-		startDate, endDate := resolveDateRange()
-
-		usage, err := client.GetLLMUsage(ctx, startDate, endDate)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error fetching LLM usage: %v\n", err)
-			os.Exit(1)
-		}
-
-		output, err := formatter.FormatLLMUsage(usage)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error formatting output: %v\n", err)
-			os.Exit(1)
-		}
-
-		formatter.Print(output)
+		fmt.Println("LLM cost tracking is available through the clanker-cloud backend.")
+		fmt.Println("For AWS Bedrock costs, use: clanker cost detail --provider aws")
+		fmt.Println("\nBedrock costs are included in your AWS bill under service names like:")
+		fmt.Println("  - Claude Opus 4.5 (Amazon Bedrock Edition)")
+		fmt.Println("  - Claude Haiku 4.5 (Amazon Bedrock Edition)")
 	},
 }
 
@@ -368,10 +374,10 @@ Examples:
 		ctx := context.Background()
 		debug := viper.GetBool("debug")
 
-		client := getCostClient(debug)
+		aggregator := getCostAggregator(ctx, debug)
 		exporter := cost.NewExporter()
 
-		startDate, endDate := resolveDateRange()
+		start, end := resolveDateRangeAsTime()
 
 		// Determine format from output filename if not specified
 		format := costFormat
@@ -387,12 +393,10 @@ Examples:
 		var data interface{}
 		var err error
 
-		if costProvider == "llm" {
-			data, err = client.GetLLMUsage(ctx, startDate, endDate)
-		} else if costProvider != "" && costProvider != "all" {
-			data, err = client.GetByProvider(ctx, costProvider, startDate, endDate)
+		if costProvider != "" && costProvider != "all" {
+			data, err = aggregator.GetByProvider(ctx, costProvider, start, end)
 		} else {
-			data, err = client.GetSummary(ctx, startDate, endDate)
+			data, err = aggregator.GetSummary(ctx, start, end)
 		}
 
 		if err != nil {
@@ -411,32 +415,73 @@ Examples:
 
 // Helper functions
 
-func getCostClient(debug bool) *cost.Client {
-	// Try to get backend URL from config
-	backendURL := viper.GetString("backend.url")
-	if backendURL == "" {
-		// Fall back to local development server
-		backendURL = "http://localhost:8080"
+func getCostAggregator(ctx context.Context, debug bool) *cost.Aggregator {
+	aggregator := cost.NewAggregator(debug)
+
+	// Get AWS profile from flag or environment
+	awsProfile := costProfile
+	if awsProfile == "" {
+		awsProfile = os.Getenv("AWS_PROFILE")
 	}
 
-	return cost.NewClient(backendURL, debug)
+	// Initialize AWS provider
+	awsProvider, err := cost.NewAWSProvider(ctx, awsProfile, debug)
+	if err != nil {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[cost] AWS provider not available: %v\n", err)
+		}
+	} else {
+		aggregator.RegisterProvider(awsProvider)
+	}
+
+	// TODO: Add GCP provider when implemented
+	// gpcProvider, err := cost.NewGCPProvider(ctx, debug)
+	// if err == nil {
+	//     aggregator.RegisterProvider(gcpProvider)
+	// }
+
+	// TODO: Add Azure provider when implemented
+	// azureProvider, err := cost.NewAzureProvider(ctx, debug)
+	// if err == nil {
+	//     aggregator.RegisterProvider(azureProvider)
+	// }
+
+	// TODO: Add Cloudflare provider when implemented
+	// cfProvider, err := cost.NewCloudflareProvider(ctx, debug)
+	// if err == nil {
+	//     aggregator.RegisterProvider(cfProvider)
+	// }
+
+	return aggregator
 }
 
-func resolveDateRange() (string, string) {
-	startDate := costStartDate
-	endDate := costEndDate
+func resolveDateRangeAsTime() (time.Time, time.Time) {
+	var start, end time.Time
 
-	if startDate == "" {
+	if costStartDate == "" {
 		// Default to first of current month
 		now := time.Now()
-		firstOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.Local)
-		startDate = firstOfMonth.Format("2006-01-02")
+		start = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	} else {
+		parsed, err := time.Parse("2006-01-02", costStartDate)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid start date format: %v\n", err)
+			os.Exit(1)
+		}
+		start = parsed
 	}
 
-	if endDate == "" {
+	if costEndDate == "" {
 		// Default to today
-		endDate = time.Now().Format("2006-01-02")
+		end = time.Now().UTC().Truncate(24 * time.Hour)
+	} else {
+		parsed, err := time.Parse("2006-01-02", costEndDate)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid end date format: %v\n", err)
+			os.Exit(1)
+		}
+		end = parsed
 	}
 
-	return startDate, endDate
+	return start, end
 }

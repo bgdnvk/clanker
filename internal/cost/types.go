@@ -5,6 +5,7 @@ import "time"
 // CostSummary represents the overall cost summary across all providers
 type CostSummary struct {
 	TotalCost     float64        `json:"totalCost"`
+	LastMonthCost float64        `json:"lastMonthCost"`
 	Currency      string         `json:"currency"`
 	Period        CostPeriod     `json:"period"`
 	ProviderCosts []ProviderCost `json:"providerCosts"`
@@ -123,5 +124,6 @@ type ProvidersResponse struct {
 // TagsResponse represents the response for cost by tags
 type TagsResponse struct {
 	Tags   []TagCost  `json:"tags"`
+	TagKey string     `json:"tagKey"`
 	Period CostPeriod `json:"period"`
 }
