@@ -60,9 +60,6 @@ func (e *Exporter) toJSON(data interface{}) ([]byte, error) {
 
 // toCSV converts data to CSV format
 func (e *Exporter) toCSV(data interface{}) ([]byte, error) {
-	var sb strings.Builder
-	w := csv.NewWriter(&sb)
-
 	switch v := data.(type) {
 	case *CostSummary:
 		return e.summaryToCSV(v)
@@ -81,13 +78,6 @@ func (e *Exporter) toCSV(data interface{}) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("unsupported data type for CSV export")
 	}
-
-	w.Flush()
-	if err := w.Error(); err != nil {
-		return nil, err
-	}
-
-	return []byte(sb.String()), nil
 }
 
 func (e *Exporter) summaryToCSV(summary *CostSummary) ([]byte, error) {
