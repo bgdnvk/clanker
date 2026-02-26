@@ -47,14 +47,14 @@ Examples:
 }
 
 var (
-	cfWorkerName        string
-	cfWorkerScript      string
-	cfWorkerCompat      string
-	cfWorkerRoutes      []string
-	cfWorkerKV          []string
-	cfWorkerR2          []string
-	cfWorkerD1          []string
-	cfWorkerEnv         []string
+	cfWorkerName   string
+	cfWorkerScript string
+	cfWorkerCompat string
+	cfWorkerRoutes []string
+	cfWorkerKV     []string
+	cfWorkerR2     []string
+	cfWorkerD1     []string
+	cfWorkerEnv    []string
 )
 
 func init() {

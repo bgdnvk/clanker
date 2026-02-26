@@ -11,16 +11,16 @@ import (
 
 // DeployWorkerOptions contains options for deploying a Worker
 type DeployWorkerOptions struct {
-	Name           string            // Worker name
-	ScriptPath     string            // Path to the worker script file
-	ScriptContent  string            // Direct script content (alternative to ScriptPath)
-	Compatibility  string            // Compatibility date (e.g., "2024-01-01")
-	Bindings       map[string]string // Environment variable bindings
-	KVNamespaces   []KVBinding       // KV namespace bindings
-	R2Buckets      []R2Binding       // R2 bucket bindings
-	D1Databases    []D1Binding       // D1 database bindings
-	Routes         []string          // Worker routes
-	CustomDomains  []string          // Custom domains
+	Name          string            // Worker name
+	ScriptPath    string            // Path to the worker script file
+	ScriptContent string            // Direct script content (alternative to ScriptPath)
+	Compatibility string            // Compatibility date (e.g., "2024-01-01")
+	Bindings      map[string]string // Environment variable bindings
+	KVNamespaces  []KVBinding       // KV namespace bindings
+	R2Buckets     []R2Binding       // R2 bucket bindings
+	D1Databases   []D1Binding       // D1 database bindings
+	Routes        []string          // Worker routes
+	CustomDomains []string          // Custom domains
 }
 
 // KVBinding represents a KV namespace binding for a Worker
@@ -43,12 +43,12 @@ type D1Binding struct {
 
 // DeployWorkerResult contains the result of a Worker deployment
 type DeployWorkerResult struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	Etag       string   `json:"etag"`
-	Size       int      `json:"size"`
-	Routes     []string `json:"routes,omitempty"`
-	ScriptURL  string   `json:"script_url,omitempty"`
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	Etag      string   `json:"etag"`
+	Size      int      `json:"size"`
+	Routes    []string `json:"routes,omitempty"`
+	ScriptURL string   `json:"script_url,omitempty"`
 }
 
 // DeployWorker deploys a Cloudflare Worker
@@ -234,11 +234,11 @@ func (c *Client) DeleteWorker(ctx context.Context, name string) error {
 
 // CreatePagesProjectOptions contains options for creating a Pages project
 type CreatePagesProjectOptions struct {
-	Name             string   // Project name
-	ProductionBranch string   // Production branch name (default: main)
-	BuildCommand     string   // Build command
-	BuildDirectory   string   // Build output directory
-	RootDirectory    string   // Root directory containing source
+	Name             string            // Project name
+	ProductionBranch string            // Production branch name (default: main)
+	BuildCommand     string            // Build command
+	BuildDirectory   string            // Build output directory
+	RootDirectory    string            // Root directory containing source
 	EnvironmentVars  map[string]string // Environment variables
 }
 
