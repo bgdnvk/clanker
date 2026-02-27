@@ -139,7 +139,7 @@ func SSMRestartCommands(prelude []string, port int, image string, startCmd strin
 	}
 
 	cmds = append(cmds,
-		"docker run -d --restart unless-stopped --name \""+containerName+"\" -p \"$PORT:$PORT\" -v openclaw_data:/home/node/.openclaw --env-file /tmp/clanker.env --env PORT=\"$PORT\" --env HOST=0.0.0.0 --env BIND=0.0.0.0 \"$IMAGE\" sh -lc \"$START\"",
+		"docker run -d --restart unless-stopped --name \""+containerName+"\" -p \"$PORT:$PORT\" -v openclaw_data:/home/node/.openclaw --env-file /tmp/clanker.env --env PORT=\"$PORT\" --env HOST=0.0.0.0 --env BIND=0.0.0.0 --env OPENCLAW_GATEWAY_CONTROLUI_DANGEROUSLYALLOWHOSTHEADERORIGINFALLBACK=true --env OPENCLAW_GATEWAY_CONTROL_UI_DANGEROUSLY_ALLOW_HOST_HEADER_ORIGIN_FALLBACK=true --env GATEWAY_CONTROLUI_DANGEROUSLYALLOWHOSTHEADERORIGINFALLBACK=true --env GATEWAY_CONTROL_UI_DANGEROUSLY_ALLOW_HOST_HEADER_ORIGIN_FALLBACK=true \"$IMAGE\" sh -lc \"$START\"",
 		"sleep 2",
 		"docker ps --format '{{.ID}} {{.Image}} {{.Ports}} {{.Names}}' | sed 's/^/[ps] /' || true",
 	)

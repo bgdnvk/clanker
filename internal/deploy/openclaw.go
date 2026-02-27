@@ -222,6 +222,9 @@ func AppendOpenClawDeploymentRequirements(b *strings.Builder, p *RepoProfile, de
 	b.WriteString("- For AWS EC2+ALB deployments, ALWAYS create CloudFront in front of ALB and set HTTPS as the primary endpoint\n")
 	b.WriteString("- Plan output must include HTTPS URL (CloudFront domain) used for pairing; ALB HTTP URL is fallback/debug only\n")
 	b.WriteString("- Use environment variables for channel/provider secrets; avoid committing tokens\n")
+	b.WriteString("- IMPORTANT: When running the gateway container (via docker run or docker compose), you MUST set the environment variable OPENCLAW_GATEWAY_CONTROLUI_DANGEROUSLYALLOWHOSTHEADERORIGINFALLBACK=true to bypass strict origin checks behind dynamic ALBs/CloudFront.\n")
+	b.WriteString("- IMPORTANT: You MUST run the onboarding step (`./docker-setup.sh` or `openclaw-cli onboard`) BEFORE starting the gateway container.\n")
+	b.WriteString("- IMPORTANT: If using docker compose, you MUST explicitly write `export OPENCLAW_CONFIG_DIR=/opt/openclaw/data` and `export OPENCLAW_WORKSPACE_DIR=/opt/openclaw/workspace` directly in the user-data bash script before running docker compose up. Do NOT just put them in Secrets Manager, the validator needs to see them in the script text.\n")
 	if p != nil && len(p.BootstrapScripts) > 0 {
 		b.WriteString("- This repo has bootstrap scripts; for first-run, run docker onboarding/setup before starting the gateway\n")
 	}
@@ -237,18 +240,19 @@ func applyOpenClawUserDataValidation(out *deterministicValidation, script string
 	}
 
 	lower := strings.ToLower(script)
-	if usesCompose {
-		// Expect either docker-setup.sh or onboard.
-		if !strings.Contains(lower, "docker-setup.sh") && !strings.Contains(lower, "openclaw-cli") && !strings.Contains(lower, " onboar") {
-			out.Issues = append(out.Issues, "[HARD] OpenClaw compose deploy missing onboarding step (docker-setup.sh / openclaw-cli onboard)")
-			out.Fixes = append(out.Fixes, "Run ./docker-setup.sh (or docker compose run --rm openclaw-cli onboard) before docker compose up -d openclaw-gateway")
-		}
 
+	// Expect either docker-setup.sh or onboard, regardless of compose vs run.
+	if !strings.Contains(lower, "docker-setup.sh") && !strings.Contains(lower, "openclaw-cli") && !strings.Contains(lower, " onboar") {
+		out.Issues = append(out.Issues, "[HARD] OpenClaw deploy missing onboarding step (docker-setup.sh / openclaw-cli onboard)")
+		out.Fixes = append(out.Fixes, "Run ./docker-setup.sh (or docker run/compose openclaw-cli onboard) before starting openclaw-gateway")
+	}
+
+	if usesCompose {
 		// OpenClaw compose expects config/workspace host dirs.
 		missing := missingEnvVarsInScript(script, OpenClawComposeHardEnvVars())
 		if len(missing) > 0 {
 			out.Issues = append(out.Issues, "[HARD] OpenClaw compose deploy missing required mount env vars: "+strings.Join(missing, ", "))
-			out.Fixes = append(out.Fixes, "Set OPENCLAW_CONFIG_DIR and OPENCLAW_WORKSPACE_DIR to real host paths before docker compose up")
+			out.Fixes = append(out.Fixes, "Explicitly write `export OPENCLAW_CONFIG_DIR=/opt/openclaw/data` and `export OPENCLAW_WORKSPACE_DIR=/opt/openclaw/workspace` directly in the user-data bash script before running docker compose up")
 		}
 	}
 

@@ -129,7 +129,9 @@ func maybeAutoFixUnhealthyALBTargets(ctx context.Context, bindings map[string]st
 		startCmd := strings.TrimSpace(bindings["START_COMMAND"])
 		lowerStart := strings.ToLower(startCmd)
 		if startCmd == "" || strings.Contains(lowerStart, "docker compose") || strings.Contains(lowerStart, "docker-compose") || strings.Contains(lowerStart, "docker run") {
-			startCmd = fmt.Sprintf("node openclaw.mjs gateway --allow-unconfigured --bind lan --port %d", appPort)
+			startCmd = fmt.Sprintf("node openclaw.mjs gateway --allow-unconfigured --bind lan --port %d --dangerously-allow-host-header-origin-fallback", appPort)
+		} else if !strings.Contains(startCmd, "--dangerously-allow-host-header-origin-fallback") {
+			startCmd += " --dangerously-allow-host-header-origin-fallback"
 		}
 		prelude := make([]string, 0, 16)
 		prelude = append(prelude, ssmEnsureDockerCommands()...)

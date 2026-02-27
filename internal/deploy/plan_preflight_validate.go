@@ -336,7 +336,12 @@ func checkOpenClawProjectInvariants(plan *maker.Plan) ([]string, []string) {
 				}
 			}
 			if usesDockerRun && hasECRRef {
-				hasRunnableOpenClawRuntimePath = true
+				if onboardIdx >= 0 {
+					hasRunnableOpenClawRuntimePath = true
+				} else {
+					issues = append(issues, "[HARD] OpenClaw invariant failed: onboarding must run before starting openclaw-gateway")
+					fixes = append(fixes, "Run docker-setup.sh or openclaw-cli onboard before docker run")
+				}
 			}
 		}
 		for k, v := range cmd.Produces {
@@ -528,7 +533,10 @@ func validateOpenClawPlanCommands(plan *maker.Plan) awsPlanChecks {
 				}
 			}
 			if usesDockerRun && hasECRRef {
-				hasRunnableOpenClawRuntimePath = true
+				onboarded := strings.Contains(script, "docker-setup.sh") || strings.Contains(script, "openclaw-cli onboard")
+				if onboarded {
+					hasRunnableOpenClawRuntimePath = true
+				}
 			}
 		}
 		if service == "cloudfront" && (op == "create-distribution" || op == "create-distribution-with-tags") {
