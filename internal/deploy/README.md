@@ -117,6 +117,7 @@ sequenceDiagram
     loop page 1..N
       C->>P: BuildPlanPagePrompt(current state)
       P-->>C: {done, commands[]}
+      C->>C: ApplyOpenClawPlanAutofix (if OpenClaw)
       C->>D: deterministic validate(current plan)
       D-->>C: hard issues / pass
       alt hard issues remain

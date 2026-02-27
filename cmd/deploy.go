@@ -376,6 +376,12 @@ Examples:
 				plan.Version = maker.CurrentPlanVersion
 			}
 
+			if isOpenClawDeploy {
+				if patched := deploy.ApplyOpenClawPlanAutofix(plan, rp, intel.DeepAnalysis, logf); patched != nil {
+					plan = patched
+				}
+			}
+
 			// Deterministic checkpoint validation (AWS only).
 			if strings.EqualFold(strings.TrimSpace(planProvider), "aws") {
 				planJSON, _ := json.MarshalIndent(plan, "", "  ")

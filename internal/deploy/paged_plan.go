@@ -252,6 +252,7 @@ func BuildPlanPagePrompt(provider string, enrichedPrompt string, currentPlan *ma
 	b.WriteString("Placeholder format rules:\n")
 	b.WriteString("- Use angle placeholders only: <SG_ID>, <INSTANCE_ID>, <TG_ARN>.\n")
 	b.WriteString("- Do NOT use shell-style placeholders like ${SG_ID} or $SG_ID.\n\n")
+
 	b.WriteString("Output schema:\n")
 	b.WriteString("{\n")
 	b.WriteString("  \"done\": boolean,\n")
