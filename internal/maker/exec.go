@@ -2466,7 +2466,9 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 	if isOpenClaw {
 		s := strings.ToLower(strings.TrimSpace(startCmd))
 		if s == "" || strings.Contains(s, "docker compose") || strings.Contains(s, "docker-compose") || strings.Contains(s, "docker run") {
-			startCmd = fmt.Sprintf("node openclaw.mjs gateway --allow-unconfigured --bind lan --port %s", appPort)
+			startCmd = fmt.Sprintf("node openclaw.mjs gateway --allow-unconfigured --bind lan --port %s --dangerously-allow-host-header-origin-fallback", appPort)
+		} else if !strings.Contains(s, "--dangerously-allow-host-header-origin-fallback") {
+			startCmd += " --dangerously-allow-host-header-origin-fallback"
 		}
 	}
 
@@ -2488,12 +2490,17 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 			containerName = "openclaw"
 		}
 		preRun = "docker volume create openclaw_data || true\n" +
-			"docker run --rm -v openclaw_data:/home/node/.openclaw alpine:3.20 sh -lc 'mkdir -p /home/node/.openclaw/workspace; if [ ! -f /home/node/.openclaw/openclaw.json ]; then printf \"%s\\n\" \"{ gateway: { mode: \\\"local\\\" } }\" > /home/node/.openclaw/openclaw.json; fi; chown -R 1000:1000 /home/node/.openclaw' || true\n" +
+			`docker run --rm -v openclaw_data:/home/node/.openclaw alpine:3.20 sh -lc 'mkdir -p /home/node/.openclaw/workspace /home/node/.openclaw/devices; printf "%s\n" '"'"'{"gateway":{"mode":"local","controlUi":{"dangerouslyAllowHostHeaderOriginFallback":true}}}'"'"' > /home/node/.openclaw/openclaw.json; chown -R 1000:1000 /home/node/.openclaw' || true` + "\n" +
 			"docker rm -f openclaw || true\n" +
 			fmt.Sprintf("docker rm -f %s || true\n", containerName)
 		// Ensure the persistent volume is mounted.
 		if !strings.Contains(dockerRunCmd, "/home/node/.openclaw") {
 			dockerRunCmd = strings.Replace(dockerRunCmd, "docker run -d", fmt.Sprintf("docker run -d --name %s -v openclaw_data:/home/node/.openclaw", containerName), 1)
+		}
+		// Belt-and-suspenders: pass fallback flag as env vars too (config file is primary).
+		if !strings.Contains(dockerRunCmd, "DANGEROUSLYALLOWHOSTHEADERORIGINFALLBACK") {
+			dockerRunCmd = strings.Replace(dockerRunCmd, "docker run -d",
+				"docker run -d -e OPENCLAW_GATEWAY_CONTROLUI_DANGEROUSLYALLOWHOSTHEADERORIGINFALLBACK=true -e OPENCLAW_GATEWAY_CONTROL_UI_DANGEROUSLY_ALLOW_HOST_HEADER_ORIGIN_FALLBACK=true", 1)
 		}
 
 		// OpenClaw requires device pairing approvals. Start a short background loop to auto-approve

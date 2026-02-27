@@ -576,9 +576,10 @@ func ssmRerunUserDataCommands(port int, region, accountID, image string, isOpenC
 		containerName := openclaw.ContainerName(bindings)
 		cmds = append(cmds,
 			"docker volume create openclaw_data || true",
-			"docker run --rm -v openclaw_data:/home/node/.openclaw alpine:3.20 sh -lc 'chown -R 1000:1000 /home/node/.openclaw' || true",
+			// Write openclaw.json with fallback flag (config file takes precedence over env vars).
+			`docker run --rm -v openclaw_data:/home/node/.openclaw alpine:3.20 sh -lc 'mkdir -p /home/node/.openclaw/workspace /home/node/.openclaw/devices; printf "%s\n" '"'"'{"gateway":{"mode":"local","controlUi":{"dangerouslyAllowHostHeaderOriginFallback":true}}}'"'"' > /home/node/.openclaw/openclaw.json; chown -R 1000:1000 /home/node/.openclaw' || true`,
 			fmt.Sprintf("docker rm -f %s 2>/dev/null || true", containerName),
-			fmt.Sprintf("docker run -d --restart unless-stopped --name %s -p %s:%s -v openclaw_data:/home/node/.openclaw --env-file /opt/openclaw/.env --env PORT=%s --env HOST=0.0.0.0 --env BIND=0.0.0.0 %s sh -lc %q",
+			fmt.Sprintf("docker run -d --restart unless-stopped --name %s -p %s:%s -v openclaw_data:/home/node/.openclaw --env-file /opt/openclaw/.env --env PORT=%s --env HOST=0.0.0.0 --env BIND=0.0.0.0 --env OPENCLAW_GATEWAY_CONTROLUI_DANGEROUSLYALLOWHOSTHEADERORIGINFALLBACK=true --env OPENCLAW_GATEWAY_CONTROL_UI_DANGEROUSLY_ALLOW_HOST_HEADER_ORIGIN_FALLBACK=true %s sh -lc %q",
 				containerName, p, p, p, img, startCmd),
 			"sleep 3",
 			"docker ps --format '{{.ID}} {{.Image}} {{.Ports}} {{.Names}}' | sed 's/^/[ps] /' || true",

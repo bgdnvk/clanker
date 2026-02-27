@@ -127,7 +127,8 @@ func SSMRestartCommands(prelude []string, port int, image string, startCmd strin
 		"if [ -n \"${CID:-}\" ]; then docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \"$CID\" | grep -vE '^(HOST|BIND|PORT)=' > /tmp/clanker.env || true; fi",
 		"if [ -n \"${CID:-}\" ]; then docker rm -f \"$CID\" || true; fi",
 		"docker volume create openclaw_data || true",
-		"docker run --rm -v openclaw_data:/home/node/.openclaw alpine:3.20 sh -lc 'chown -R 1000:1000 /home/node/.openclaw' || true",
+		// Patch openclaw.json to include the fallback flag (config file overrides env vars).
+		`docker run --rm -v openclaw_data:/home/node/.openclaw alpine:3.20 sh -lc 'mkdir -p /home/node/.openclaw/workspace /home/node/.openclaw/devices; printf "%s\n" '"'"'{"gateway":{"mode":"local","controlUi":{"dangerouslyAllowHostHeaderOriginFallback":true}}}'"'"' > /home/node/.openclaw/openclaw.json; chown -R 1000:1000 /home/node/.openclaw' || true`,
 		"docker rm -f openclaw || true",
 		"docker rm -f \""+containerName+"\" || true",
 		"touch /tmp/clanker.env || true",
