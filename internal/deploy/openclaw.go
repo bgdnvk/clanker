@@ -224,7 +224,36 @@ func AppendOpenClawDeploymentRequirements(b *strings.Builder, p *RepoProfile, de
 	b.WriteString("- Use environment variables for channel/provider secrets; avoid committing tokens\n")
 	b.WriteString("- IMPORTANT: When running the gateway container (via docker run or docker compose), you MUST set the environment variable OPENCLAW_GATEWAY_CONTROLUI_DANGEROUSLYALLOWHOSTHEADERORIGINFALLBACK=true to bypass strict origin checks behind dynamic ALBs/CloudFront.\n")
 	b.WriteString("- IMPORTANT: You MUST run the onboarding step (`./docker-setup.sh` or `openclaw-cli onboard`) BEFORE starting the gateway container.\n")
-	b.WriteString("- IMPORTANT: If using docker compose, you MUST explicitly write `export OPENCLAW_CONFIG_DIR=/opt/openclaw/data` and `export OPENCLAW_WORKSPACE_DIR=/opt/openclaw/workspace` directly in the user-data bash script before running docker compose up. Do NOT just put them in Secrets Manager, the validator needs to see them in the script text.\n")
+
+	// IAM + Secrets Manager ordering: EC2 user-data fetches secrets at boot,
+	// so IAM permissions and the secrets themselves must exist first.
+	b.WriteString("\n### Deployment Ordering (CRITICAL — race-condition prevention)\n")
+	b.WriteString("- The EC2 user-data script runs at first boot and fetches secrets from Secrets Manager immediately.\n")
+	b.WriteString("- If the IAM role lacks SecretsManagerReadWrite or the secrets don't exist yet, user-data crashes and the container never starts.\n")
+	b.WriteString("- Therefore you MUST order the plan so that ALL of these happen BEFORE `ec2 run-instances`:\n")
+	b.WriteString("  1. Create IAM role\n")
+	b.WriteString("  2. Attach SecretsManagerReadWrite policy (`arn:aws:iam::aws:policy/SecretsManagerReadWrite`) to the IAM role\n")
+	b.WriteString("  3. Create instance profile and add role\n")
+	b.WriteString("  4. Create ALL Secrets Manager secrets the app needs\n")
+	b.WriteString("  5. `iam get-instance-profile` wait/readiness check\n")
+	b.WriteString("  6. ONLY THEN launch `ec2 run-instances`\n")
+	b.WriteString("- If you place secretsmanager create-secret or iam attach-role-policy AFTER ec2 run-instances, the deployment WILL fail.\n")
+
+	// .env file instead of export for docker compose
+	b.WriteString("\n### Environment Variables in user-data (CRITICAL)\n")
+	b.WriteString("- `docker compose` does NOT inherit host shell `export` variables into containers.\n")
+	b.WriteString("- You MUST write env vars to a `.env` file in the project directory, which docker compose reads automatically.\n")
+	b.WriteString("- In the user-data script, write a .env file like this:\n")
+	b.WriteString("  ```\n")
+	b.WriteString("  cat > /opt/openclaw/.env << 'ENVEOF'\n")
+	b.WriteString("  OPENCLAW_CONFIG_DIR=/opt/openclaw/data\n")
+	b.WriteString("  OPENCLAW_WORKSPACE_DIR=/opt/openclaw/workspace\n")
+	b.WriteString("  OPENCLAW_GATEWAY_CONTROLUI_DANGEROUSLYALLOWHOSTHEADERORIGINFALLBACK=true\n")
+	b.WriteString("  ENVEOF\n")
+	b.WriteString("  ```\n")
+	b.WriteString("- Do NOT use `export VAR=VALUE` and expect docker compose to pick it up — it won't.\n")
+	b.WriteString("- For secrets fetched from Secrets Manager at boot, write them into the same .env file after retrieval.\n")
+
 	if p != nil && len(p.BootstrapScripts) > 0 {
 		b.WriteString("- This repo has bootstrap scripts; for first-run, run docker onboarding/setup before starting the gateway\n")
 	}
@@ -252,7 +281,7 @@ func applyOpenClawUserDataValidation(out *deterministicValidation, script string
 		missing := missingEnvVarsInScript(script, OpenClawComposeHardEnvVars())
 		if len(missing) > 0 {
 			out.Issues = append(out.Issues, "[HARD] OpenClaw compose deploy missing required mount env vars: "+strings.Join(missing, ", "))
-			out.Fixes = append(out.Fixes, "Explicitly write `export OPENCLAW_CONFIG_DIR=/opt/openclaw/data` and `export OPENCLAW_WORKSPACE_DIR=/opt/openclaw/workspace` directly in the user-data bash script before running docker compose up")
+			out.Fixes = append(out.Fixes, "Write OPENCLAW_CONFIG_DIR and OPENCLAW_WORKSPACE_DIR into a .env file (cat > .env << 'EOF' ...) in the project directory before docker compose up; docker compose does NOT inherit host shell exports")
 		}
 	}
 

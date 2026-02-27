@@ -2533,7 +2533,7 @@ const requestIds = Object.keys(pending || {});
 const pairedCount = Object.keys(paired || {}).length;
 
 if (requestIds.length === 0) {
-	console.log("CLANKER_PAIR_NONE PAIRED=" + pairedCount);
+	console.log("DEPLOY_PAIR_NONE PAIRED=" + pairedCount);
 	process.exit(0);
 }
 
@@ -2549,11 +2549,11 @@ for (const rid of requestIds) {
 fs.mkdirSync(path.dirname(pendingPath), { recursive: true });
 fs.writeFileSync(pairedPath, JSON.stringify(paired, null, 2));
 fs.writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
-console.log("CLANKER_PAIR_APPROVED=" + approved + " PAIRED=" + Object.keys(paired || {}).length);
+console.log("DEPLOY_PAIR_APPROVED=" + approved + " PAIRED=" + Object.keys(paired || {}).length);
 JS
 )
 		OUT=$(docker exec "$OC_CONTAINER" node -e "$JS" 2>/dev/null)
-		APPROVED=$(echo "$OUT" | sed -n 's/^.*CLANKER_PAIR_APPROVED=\([0-9][0-9]*\).*$/\1/p')
+		APPROVED=$(echo "$OUT" | sed -n 's/^.*DEPLOY_PAIR_APPROVED=\([0-9][0-9]*\).*$/\1/p')
 		PAIRED=$(echo "$OUT" | sed -n 's/^.*PAIRED=\([0-9][0-9]*\).*$/\1/p')
 		if [ -n "$APPROVED" ] && [ "$APPROVED" -gt 0 ] 2>/dev/null; then
 			echo "[openclaw] $OUT"

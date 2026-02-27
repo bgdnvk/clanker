@@ -234,6 +234,9 @@ func CheckBulkRepairInvariants(plan *maker.Plan, profile *RepoProfile, deep *Dee
 	hasAddRoleToProfile := false
 	hasGetInstanceProfileBeforeRun := false
 	seenRunInstances := false
+	hasSecretsManagerCreateBeforeRun := true // assume ok until disproven
+	hasSMPolicyBeforeRun := true             // assume ok until disproven
+	planUsesSecretsManager := false
 
 	for _, cmd := range plan.Commands {
 		args := cmd.Args
@@ -248,6 +251,22 @@ func CheckBulkRepairInvariants(plan *maker.Plan, profile *RepoProfile, deep *Dee
 		if !seenRunInstances && svc == "iam" && op == "get-instance-profile" {
 			hasGetInstanceProfileBeforeRun = true
 		}
+		// Track SM secrets and IAM SM policy relative to EC2 launch.
+		if svc == "secretsmanager" && op == "create-secret" {
+			planUsesSecretsManager = true
+			if seenRunInstances {
+				hasSecretsManagerCreateBeforeRun = false
+			}
+		}
+		if svc == "iam" && (op == "attach-role-policy" || op == "put-role-policy") {
+			raw := strings.Join(args, " ")
+			if strings.Contains(strings.ToLower(raw), "secretsmanager") {
+				planUsesSecretsManager = true
+				if seenRunInstances {
+					hasSMPolicyBeforeRun = false
+				}
+			}
+		}
 		if svc == "ec2" && op == "run-instances" {
 			seenRunInstances = true
 			script := extractEC2UserDataScript(args)
@@ -261,6 +280,17 @@ func CheckBulkRepairInvariants(plan *maker.Plan, profile *RepoProfile, deep *Dee
 	if hasAddRoleToProfile && seenRunInstances && !hasGetInstanceProfileBeforeRun {
 		issues = append(issues, "[HARD] bulk invariant failed: missing IAM profile readiness check before ec2 run-instances")
 		fixes = append(fixes, "Insert iam get-instance-profile after add-role-to-instance-profile and before ec2 run-instances")
+	}
+	// Secrets Manager race: secrets + IAM policy must exist before EC2 boots.
+	if planUsesSecretsManager && seenRunInstances {
+		if !hasSecretsManagerCreateBeforeRun {
+			issues = append(issues, "[HARD] bulk invariant failed: secretsmanager create-secret appears AFTER ec2 run-instances (user-data will crash)")
+			fixes = append(fixes, "Move all secretsmanager create-secret commands before ec2 run-instances so user-data can fetch them at boot")
+		}
+		if !hasSMPolicyBeforeRun {
+			issues = append(issues, "[HARD] bulk invariant failed: IAM SecretsManager policy attached AFTER ec2 run-instances (Access Denied at boot)")
+			fixes = append(fixes, "Attach SecretsManagerReadWrite policy to the IAM role before ec2 run-instances")
+		}
 	}
 
 	if IsOpenClawRepo(profile, deep) {
