@@ -222,7 +222,7 @@ func AppendOpenClawDeploymentRequirements(b *strings.Builder, p *RepoProfile, de
 	b.WriteString("- For AWS EC2+ALB deployments, ALWAYS create CloudFront in front of ALB and set HTTPS as the primary endpoint\n")
 	b.WriteString("- Plan output must include HTTPS URL (CloudFront domain) used for pairing; ALB HTTP URL is fallback/debug only\n")
 	b.WriteString("- Use environment variables for channel/provider secrets; avoid committing tokens\n")
-	b.WriteString("- IMPORTANT: When running the gateway container (via docker run or docker compose), you MUST set the environment variable OPENCLAW_GATEWAY_CONTROLUI_DANGEROUSLYALLOWHOSTHEADERORIGINFALLBACK=true to bypass strict origin checks behind dynamic ALBs/CloudFront.\n")
+	b.WriteString("- IMPORTANT: The gateway's openclaw.json config MUST include gateway.controlUi.allowedOrigins with the CloudFront HTTPS domain and localhost. The exec engine handles this automatically.\n")
 	b.WriteString("- IMPORTANT: You MUST run the onboarding step (`./docker-setup.sh` or `openclaw-cli onboard`) BEFORE starting the gateway container.\n")
 
 	// IAM + Secrets Manager ordering: EC2 user-data fetches secrets at boot,
@@ -248,7 +248,6 @@ func AppendOpenClawDeploymentRequirements(b *strings.Builder, p *RepoProfile, de
 	b.WriteString("  cat > /opt/openclaw/.env << 'ENVEOF'\n")
 	b.WriteString("  OPENCLAW_CONFIG_DIR=/opt/openclaw/data\n")
 	b.WriteString("  OPENCLAW_WORKSPACE_DIR=/opt/openclaw/workspace\n")
-	b.WriteString("  OPENCLAW_GATEWAY_CONTROLUI_DANGEROUSLYALLOWHOSTHEADERORIGINFALLBACK=true\n")
 	b.WriteString("  ENVEOF\n")
 	b.WriteString("  ```\n")
 	b.WriteString("- Do NOT use `export VAR=VALUE` and expect docker compose to pick it up — it won't.\n")

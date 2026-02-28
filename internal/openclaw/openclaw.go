@@ -10,6 +10,29 @@ import (
 
 const DefaultPort = 18789
 
+// ConfigJSON returns the openclaw.json config with proper origin allowlist.
+// Always includes localhost; if cfDomain is non-empty, adds the HTTPS origin.
+func ConfigJSON(cfDomain string, port int) string {
+	origins := fmt.Sprintf(`"http://127.0.0.1:%d"`, port)
+	if d := strings.TrimSpace(cfDomain); d != "" {
+		d = strings.TrimPrefix(d, "https://")
+		d = strings.TrimPrefix(d, "http://")
+		origins += fmt.Sprintf(`,"https://%s"`, d)
+	}
+	return fmt.Sprintf(`{"gateway":{"mode":"local","controlUi":{"allowedOrigins":[%s]}}}`, origins)
+}
+
+// ConfigWriteShellCmd returns a shell command that writes openclaw.json via an alpine init container.
+func ConfigWriteShellCmd(cfDomain string, port int) string {
+	json := ConfigJSON(cfDomain, port)
+	// Single-quote the JSON for shell safety; escape inner single quotes.
+	escaped := strings.ReplaceAll(json, "'", "'\\''")
+	return fmt.Sprintf(
+		`docker run --rm -v openclaw_data:/home/node/.openclaw alpine:3.20 sh -lc 'mkdir -p /home/node/.openclaw/workspace /home/node/.openclaw/devices; printf "%%s\n" '"'"'%s'"'"' > /home/node/.openclaw/openclaw.json; chown -R 1000:1000 /home/node/.openclaw' || true`,
+		escaped,
+	)
+}
+
 func Detect(question string, repoURL string) bool {
 	lq := strings.ToLower(strings.TrimSpace(question))
 	lr := strings.ToLower(strings.TrimSpace(repoURL))
@@ -119,6 +142,9 @@ func SSMRestartCommands(prelude []string, port int, image string, startCmd strin
 
 	containerName := ContainerName(bindings)
 
+	// Use CloudFront domain for allowedOrigins if available.
+	cfDomain := strings.TrimSpace(bindings["CLOUDFRONT_DOMAIN"])
+
 	cmds = append(cmds,
 		"PORT="+p,
 		"IMAGE=\""+strings.ReplaceAll(img, "\"", "\\\"")+"\"",
@@ -127,8 +153,8 @@ func SSMRestartCommands(prelude []string, port int, image string, startCmd strin
 		"if [ -n \"${CID:-}\" ]; then docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \"$CID\" | grep -vE '^(HOST|BIND|PORT)=' > /tmp/clanker.env || true; fi",
 		"if [ -n \"${CID:-}\" ]; then docker rm -f \"$CID\" || true; fi",
 		"docker volume create openclaw_data || true",
-		// Patch openclaw.json to include the fallback flag (config file overrides env vars).
-		`docker run --rm -v openclaw_data:/home/node/.openclaw alpine:3.20 sh -lc 'mkdir -p /home/node/.openclaw/workspace /home/node/.openclaw/devices; printf "%s\n" '"'"'{"gateway":{"mode":"local","controlUi":{"dangerouslyAllowHostHeaderOriginFallback":true}}}'"'"' > /home/node/.openclaw/openclaw.json; chown -R 1000:1000 /home/node/.openclaw' || true`,
+		// Write openclaw.json with allowedOrigins (localhost + CloudFront if known).
+		ConfigWriteShellCmd(cfDomain, port),
 		"docker rm -f openclaw || true",
 		"docker rm -f \""+containerName+"\" || true",
 		"touch /tmp/clanker.env || true",
@@ -140,7 +166,7 @@ func SSMRestartCommands(prelude []string, port int, image string, startCmd strin
 	}
 
 	cmds = append(cmds,
-		"docker run -d --restart unless-stopped --name \""+containerName+"\" -p \"$PORT:$PORT\" -v openclaw_data:/home/node/.openclaw --env-file /tmp/clanker.env --env PORT=\"$PORT\" --env HOST=0.0.0.0 --env BIND=0.0.0.0 --env OPENCLAW_GATEWAY_CONTROLUI_DANGEROUSLYALLOWHOSTHEADERORIGINFALLBACK=true --env OPENCLAW_GATEWAY_CONTROL_UI_DANGEROUSLY_ALLOW_HOST_HEADER_ORIGIN_FALLBACK=true --env GATEWAY_CONTROLUI_DANGEROUSLYALLOWHOSTHEADERORIGINFALLBACK=true --env GATEWAY_CONTROL_UI_DANGEROUSLY_ALLOW_HOST_HEADER_ORIGIN_FALLBACK=true \"$IMAGE\" sh -lc \"$START\"",
+		"docker run -d --restart unless-stopped --name \""+containerName+"\" -p \"$PORT:$PORT\" -v openclaw_data:/home/node/.openclaw --env-file /tmp/clanker.env --env PORT=\"$PORT\" --env HOST=0.0.0.0 --env BIND=0.0.0.0 \"$IMAGE\" sh -lc \"$START\"",
 		"sleep 2",
 		"docker ps --format '{{.ID}} {{.Image}} {{.Ports}} {{.Names}}' | sed 's/^/[ps] /' || true",
 	)

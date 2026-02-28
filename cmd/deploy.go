@@ -244,8 +244,8 @@ Examples:
 		const maxCommandsPerPage = 8
 		const maxConsecutivePageFailures = 5
 		const earlyRepairAfterFailures = 3
-		const openClawSoftPlanCommands = 56
-		const openClawHardPlanCommands = 80
+		const openClawSoftPlanCommands = 35
+		const openClawHardPlanCommands = 50
 		var plan *maker.Plan
 		var mustFixIssues []string
 		var lastDetValidation *deploy.PlanValidation

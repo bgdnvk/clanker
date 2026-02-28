@@ -1,49 +1,48 @@
 # OpenClaw Package
 
-## TODO: Switch from `dangerouslyAllowHostHeaderOriginFallback` to `allowedOrigins`
+## Origin allowlist approach (`allowedOrigins`)
 
-Currently we use the break-glass flag `gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback: true`
-in `openclaw.json` to bypass origin checks on non-loopback binds. This works but is the "dangerous" path
-per OpenClaw docs.
+We use `gateway.controlUi.allowedOrigins` in `openclaw.json` per OpenClaw docs.
+This is the recommended way (same as `docker-setup.sh`'s `ensure_control_ui_allowed_origins`).
 
-### Recommended approach (per official docs + `docker-setup.sh`)
+### How it works
 
-Set `gateway.controlUi.allowedOrigins` with the actual CloudFront domain instead:
+1. **Initial boot** (`exec.go` user-data): Container starts with `allowedOrigins: ["http://127.0.0.1:<port>"]`.
+   CloudFront doesn't exist yet, but localhost is enough for health checks and SSM port-forward access.
+2. **Post-deploy** (`exec.go` after `MaybeEnsureHTTPSViaCloudFront`): Once the CloudFront domain is known,
+   SSM patches `openclaw.json` to add `"https://<cf-domain>"` and restarts the container.
+3. **SSM restart / re-bootstrap** (`openclaw.go`, `postdeploy_autofix.go`): Uses `ConfigWriteShellCmd(cfDomain, port)`
+   which reads `CLOUDFRONT_DOMAIN` from bindings and includes it if available.
+
+### Config written
 
 ```json
 {
     "gateway": {
         "mode": "local",
         "controlUi": {
-            "allowedOrigins": ["https://d1234abcdef.cloudfront.net"]
+            "allowedOrigins": [
+                "http://127.0.0.1:18789",
+                "https://d1234abcdef.cloudfront.net"
+            ]
         }
     }
 }
 ```
 
-### Implementation plan
+### Key functions
 
-1. Keep the fallback flag during initial deploy (we don't know the CloudFront URL yet)
-2. In `postdeploy_autofix.go`, after confirming the instance is healthy, patch `openclaw.json`
-   via SSM to replace the fallback flag with the actual CloudFront `allowedOrigins`:
-    ```
-    docker run --rm -v openclaw_data:/data alpine:3.20 sh -c \
-      'cat > /data/openclaw.json <<EOF
-    {"gateway":{"mode":"local","controlUi":{"allowedOrigins":["https://<CF_DOMAIN>"]}}}
-    EOF'
-    ```
-3. Restart the container so the config change takes effect (gateway.\* changes require restart)
-4. Remove the fallback flag from `exec.go` and `openclaw.go` SSMRestartCommands once this is stable
+- `ConfigJSON(cfDomain, port)` — returns the JSON config string
+- `ConfigWriteShellCmd(cfDomain, port)` — returns the shell command to write it via alpine init container
 
-### Where the CloudFront domain lives
+### Legacy cleanup
 
-- It's in the deploy plan output or can be fetched via `aws cloudfront list-distributions`
-- The `resourcesGlue` step already knows about CloudFront resources
-- Could also parse it from the plan's CloudFront command
+The `--dangerously-allow-host-header-origin-fallback` CLI flag is stripped from start commands
+if found (backward compat with old plans).
 
 ### References
 
-- Config ref: https://docs.openclaw.ai/gateway/configuration-reference (gateway.controlUi section)
+- Config ref: https://docs.openclaw.ai/gateway/configuration-reference (`gateway.controlUi` section)
 - Docker setup script: https://github.com/openclaw/openclaw/blob/main/docker-setup.sh
   (see `ensure_control_ui_allowed_origins` function)
 - Hetzner VPS guide: https://docs.openclaw.ai/install/hetzner

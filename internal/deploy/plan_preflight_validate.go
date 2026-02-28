@@ -168,7 +168,9 @@ func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepA
 		}
 
 		// OpenClaw special cases: if compose is used, onboarding/bootstrap must happen.
-		if isOpenClaw {
+		// Skip user-data validation when SSM commands handle the runtime path
+		// (the exec engine does onboarding + gateway start via SSM after boot).
+		if isOpenClaw && !hasOpenClawSSMRuntimePath(&plan) {
 			applyOpenClawUserDataValidation(&out, script, usesCompose, usesDockerRun)
 		}
 
@@ -391,6 +393,10 @@ func checkOpenClawProjectInvariants(plan *maker.Plan) ([]string, []string) {
 		issues = append(issues, "[HARD] OpenClaw invariant failed: HTTPS pairing URL must be shipped via CloudFront (create + wait + output)")
 		fixes = append(fixes, "Add CloudFront create-distribution(+optional tags variant), cloudfront wait distribution-deployed, produces CLOUDFRONT_DOMAIN, and set HTTPS_URL to full https:// URL")
 	}
+	// Also accept SSM-based runtime path (exec engine pattern).
+	if !hasRunnableOpenClawRuntimePath {
+		hasRunnableOpenClawRuntimePath = hasOpenClawSSMRuntimePath(plan)
+	}
 	if !hasRunnableOpenClawRuntimePath {
 		issues = append(issues, "[HARD] OpenClaw invariant failed: missing runnable runtime path (compose onboarding+mount env or docker-run with ECR image)")
 		fixes = append(fixes, "Use compose onboarding flow with OPENCLAW_CONFIG_DIR/OPENCLAW_WORKSPACE_DIR or docker pull/run using explicit ECR image")
@@ -599,6 +605,12 @@ func validateOpenClawPlanCommands(plan *maker.Plan) awsPlanChecks {
 		}
 	}
 
+	// Also check SSM send-command scripts — the exec engine uses SSM for
+	// onboarding + gateway start after user-data finishes.
+	if !hasRunnableOpenClawRuntimePath {
+		hasRunnableOpenClawRuntimePath = hasOpenClawSSMRuntimePath(plan)
+	}
+
 	if !hasEC2RunInstances {
 		out.Issues = append(out.Issues, "[HARD] OpenClaw AWS plan must include ec2 run-instances")
 		out.Fixes = append(out.Fixes, "Add ec2 run-instances for OpenClaw workload launch")
@@ -612,6 +624,55 @@ func validateOpenClawPlanCommands(plan *maker.Plan) awsPlanChecks {
 		out.Fixes = append(out.Fixes, "Ensure ec2 user-data starts OpenClaw via compose onboarding flow with OPENCLAW_CONFIG_DIR/OPENCLAW_WORKSPACE_DIR or via docker pull/run using explicit ECR image")
 	}
 
+	return out
+}
+
+// hasOpenClawSSMRuntimePath checks if SSM send-command steps collectively
+// provide onboarding + gateway start (the exec engine pattern).
+func hasOpenClawSSMRuntimePath(plan *maker.Plan) bool {
+	scripts := extractSSMShellScripts(plan)
+	if len(scripts) == 0 {
+		return false
+	}
+	merged := strings.ToLower(strings.Join(scripts, "\n"))
+	onboarded := strings.Contains(merged, "docker-setup.sh") ||
+		strings.Contains(merged, "openclaw-cli onboard") ||
+		strings.Contains(merged, "openclaw-cli\" onboard")
+	started := strings.Contains(merged, "up -d openclaw-gateway") ||
+		strings.Contains(merged, "docker run") ||
+		strings.Contains(merged, "docker compose up")
+	return onboarded && started
+}
+
+// extractSSMShellScripts returns the shell command strings from all
+// ssm send-command --parameters {"commands":[...]} in the plan.
+func extractSSMShellScripts(plan *maker.Plan) []string {
+	if plan == nil {
+		return nil
+	}
+	var out []string
+	for _, cmd := range plan.Commands {
+		if len(cmd.Args) < 4 {
+			continue
+		}
+		svc := strings.ToLower(strings.TrimSpace(cmd.Args[0]))
+		op := strings.ToLower(strings.TrimSpace(cmd.Args[1]))
+		if svc != "ssm" || op != "send-command" {
+			continue
+		}
+		params := parseFlag(cmd.Args, "--parameters")
+		if params == "" {
+			continue
+		}
+		// Parse {"commands":["...","..."]}
+		var parsed struct {
+			Commands []string `json:"commands"`
+		}
+		if json.Unmarshal([]byte(params), &parsed) != nil || len(parsed.Commands) == 0 {
+			continue
+		}
+		out = append(out, strings.Join(parsed.Commands, "\n"))
+	}
 	return out
 }
 

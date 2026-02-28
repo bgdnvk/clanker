@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/bgdnvk/clanker/internal/maker"
@@ -20,6 +21,12 @@ func ApplyOpenClawPlanAutofix(plan *maker.Plan, profile *RepoProfile, deep *Deep
 	removed := pruneOpenClawExactDuplicates(plan)
 	if removed > 0 {
 		logf("[deploy] openclaw autofix: removed %d exact duplicate command(s)", removed)
+	}
+
+	// Prune semantic SSM duplicates (multiple onboarding / start / health check variants).
+	ssmRemoved := pruneOpenClawSemanticSSMDuplicates(plan)
+	if ssmRemoved > 0 {
+		logf("[deploy] openclaw autofix: removed %d redundant SSM command(s)", ssmRemoved)
 	}
 
 	hasCloudFrontCreate := false
@@ -142,4 +149,124 @@ func openClawCommandSignature(args []string) string {
 		return ""
 	}
 	return strings.Join(clean, "\x1f")
+}
+
+// pruneOpenClawSemanticSSMDuplicates collapses SSM send-command steps that
+// repeat the same intent (onboarding, env-setup, gateway-start, diagnostics).
+// For each intent category we keep only the LAST occurrence (the most refined
+// version the LLM produced). Non-SSM commands and uncategorised SSM commands
+// are never removed.
+func pruneOpenClawSemanticSSMDuplicates(plan *maker.Plan) int {
+	if plan == nil || len(plan.Commands) == 0 {
+		return 0
+	}
+
+	type tagged struct {
+		cmd      maker.Command
+		idx      int
+		category string // empty = keep unconditionally
+	}
+
+	items := make([]tagged, len(plan.Commands))
+	for i, cmd := range plan.Commands {
+		items[i] = tagged{cmd: cmd, idx: i, category: classifySSMIntent(cmd.Args)}
+	}
+
+	// Find the last index of each non-empty category.
+	lastOfCategory := map[string]int{}
+	for _, t := range items {
+		if t.category != "" {
+			lastOfCategory[t.category] = t.idx
+		}
+	}
+
+	filtered := make([]maker.Command, 0, len(plan.Commands))
+	removed := 0
+	for _, t := range items {
+		if t.category == "" {
+			filtered = append(filtered, t.cmd)
+			continue
+		}
+		// Keep only the last of each category.
+		if t.idx == lastOfCategory[t.category] {
+			filtered = append(filtered, t.cmd)
+		} else {
+			removed++
+		}
+	}
+	if removed > 0 {
+		plan.Commands = filtered
+	}
+	return removed
+}
+
+// classifySSMIntent returns a semantic category for SSM send-command steps.
+// Returns "" for non-SSM commands or unrecognised SSM commands.
+func classifySSMIntent(args []string) string {
+	if len(args) < 4 {
+		return ""
+	}
+	svc := strings.ToLower(strings.TrimSpace(args[0]))
+	op := strings.ToLower(strings.TrimSpace(args[1]))
+	if svc != "ssm" || op != "send-command" {
+		return ""
+	}
+
+	// Grab the --parameters value and flatten commands array.
+	script := extractSSMScriptFromArgs(args)
+	if script == "" {
+		return ""
+	}
+	l := strings.ToLower(script)
+
+	// Classify by dominant intent.
+	hasOnboard := strings.Contains(l, "docker-setup.sh") || strings.Contains(l, "openclaw-cli onboard") || strings.Contains(l, "openclaw-cli\" onboard")
+	hasStart := strings.Contains(l, "docker compose up") || strings.Contains(l, "docker-compose up") || (strings.Contains(l, "docker run") && strings.Contains(l, "openclaw"))
+	hasEnvWrite := strings.Contains(l, "> /opt/openclaw/.env") || strings.Contains(l, ">> /opt/openclaw/.env") || strings.Contains(l, "> .env") || strings.Contains(l, "cat > /opt/openclaw/.env")
+	hasECRPull := strings.Contains(l, "ecr get-login-password") || (strings.Contains(l, "docker pull") && strings.Contains(l, ".dkr.ecr."))
+	hasDiag := strings.Contains(l, "docker logs") || strings.Contains(l, "docker ps") || strings.Contains(l, "curl -s") || strings.Contains(l, "health")
+	hasClone := strings.Contains(l, "git clone")
+
+	// Priority order: a command may match multiple; pick the most specific.
+	switch {
+	case hasOnboard && !hasStart:
+		return "ssm-onboard"
+	case hasStart && !hasOnboard:
+		return "ssm-gateway-start"
+	case hasOnboard && hasStart:
+		return "ssm-onboard-and-start"
+	case hasEnvWrite && !hasStart && !hasOnboard:
+		return "ssm-env-setup"
+	case hasECRPull && !hasStart:
+		return "ssm-ecr-pull"
+	case hasClone && !hasStart && !hasOnboard:
+		return "ssm-clone"
+	case hasDiag && !hasStart && !hasOnboard && !hasEnvWrite:
+		return "ssm-diagnostics"
+	}
+	return ""
+}
+
+// extractSSMScriptFromArgs extracts the flattened shell script from
+// ssm send-command --parameters {"commands":[...]}.
+func extractSSMScriptFromArgs(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := strings.TrimSpace(args[i])
+		var params string
+		if a == "--parameters" && i+1 < len(args) {
+			params = args[i+1]
+		} else if strings.HasPrefix(a, "--parameters=") {
+			params = strings.TrimPrefix(a, "--parameters=")
+		} else {
+			continue
+		}
+		var parsed struct {
+			Commands []string `json:"commands"`
+		}
+		if err := json.Unmarshal([]byte(params), &parsed); err != nil || len(parsed.Commands) == 0 {
+			return ""
+		}
+		return strings.Join(parsed.Commands, "\n")
+	}
+	return ""
 }
