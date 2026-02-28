@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 
 	// AWS SDK imports - commented out but kept for future use
 	// "github.com/aws/aws-sdk-go-v2/aws"
@@ -63,6 +65,95 @@ type Client struct {
 	// AWS SDK fields - commented out but kept for future use
 	// bedrockClient *bedrockruntime.Client
 	// awsConfig     aws.Config
+}
+
+const (
+	aiRetryMaxAttempts = 5
+	aiRetryBaseDelay   = 1 * time.Second
+	aiRetryMaxDelay    = 16 * time.Second
+)
+
+func aiRetryDelay(retryIndex int) time.Duration {
+	if retryIndex < 0 {
+		retryIndex = 0
+	}
+	d := aiRetryBaseDelay << retryIndex
+	if d > aiRetryMaxDelay {
+		return aiRetryMaxDelay
+	}
+	return d
+}
+
+func waitForAIRetry(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+func isRetryableHTTPStatus(code int) bool {
+	switch code {
+	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, 529:
+		return true
+	default:
+		return false
+	}
+}
+
+func isRetryableProviderErrorText(s string) bool {
+	text := strings.ToLower(strings.TrimSpace(s))
+	if text == "" {
+		return false
+	}
+	markers := []string{
+		"overloaded",
+		"overload",
+		"rate limit",
+		"rate_limit",
+		"throttl",
+		"timeout",
+		"temporar",
+		"try again",
+		"unavailable",
+	}
+	for _, marker := range markers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func retryAfterDelay(h http.Header) (time.Duration, bool) {
+	raw := strings.TrimSpace(h.Get("Retry-After"))
+	if raw == "" {
+		return 0, false
+	}
+	if secs, err := strconv.Atoi(raw); err == nil {
+		if secs <= 0 {
+			return 0, false
+		}
+		d := time.Duration(secs) * time.Second
+		if d > aiRetryMaxDelay {
+			d = aiRetryMaxDelay
+		}
+		return d, true
+	}
+	if ts, err := http.ParseTime(raw); err == nil {
+		d := time.Until(ts)
+		if d <= 0 {
+			return 0, false
+		}
+		if d > aiRetryMaxDelay {
+			d = aiRetryMaxDelay
+		}
+		return d, true
+	}
+	return 0, false
 }
 
 // Tool definitions for function calling
@@ -685,9 +776,25 @@ func (c *Client) askBedrock(ctx context.Context, prompt string) (string, error) 
 
 	cmd.Env = append(os.Environ(), fmt.Sprintf("AWS_PROFILE=%s", profileLLMCall.AWSProfile))
 
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("AWS CLI call failed: %w, output: %s", err, string(output))
+	var output []byte
+	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
+		output, err = cmd.CombinedOutput()
+		if err == nil {
+			break
+		}
+		if attempt == aiRetryMaxAttempts || !isRetryableProviderErrorText(string(output)+" "+err.Error()) {
+			return "", fmt.Errorf("AWS CLI call failed: %w, output: %s", err, string(output))
+		}
+		if wErr := waitForAIRetry(ctx, aiRetryDelay(attempt-1)); wErr != nil {
+			return "", wErr
+		}
+		cmd = exec.CommandContext(ctx, "aws", "bedrock-runtime", "invoke-model",
+			"--model-id", profileLLMCall.Model,
+			"--body", "fileb://"+bodyFilePath,
+			"--profile", profileLLMCall.AWSProfile,
+			"--region", profileLLMCall.Region,
+			tmpFilePath)
+		cmd.Env = append(os.Environ(), fmt.Sprintf("AWS_PROFILE=%s", profileLLMCall.AWSProfile))
 	}
 
 	// Read the response file
@@ -724,9 +831,18 @@ func (c *Client) askGemini(ctx context.Context, prompt string) (string, error) {
 	content := genai.NewContentFromText(sanitizeASCII(prompt), genai.RoleUser)
 
 	// Generate content using the configured model
-	resp, err := c.geminiClient.Models.GenerateContent(ctx, profileLLMCall.Model, []*genai.Content{content}, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to generate content with Gemini: %w", err)
+	var resp *genai.GenerateContentResponse
+	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
+		resp, err = c.geminiClient.Models.GenerateContent(ctx, profileLLMCall.Model, []*genai.Content{content}, nil)
+		if err == nil {
+			break
+		}
+		if attempt == aiRetryMaxAttempts || !isRetryableProviderErrorText(err.Error()) {
+			return "", fmt.Errorf("failed to generate content with Gemini: %w", err)
+		}
+		if wErr := waitForAIRetry(ctx, aiRetryDelay(attempt-1)); wErr != nil {
+			return "", wErr
+		}
 	}
 
 	if len(resp.Candidates) == 0 {
@@ -816,19 +932,53 @@ func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 
 	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
+	var body []byte
+	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
+		resp, doErr := client.Do(req)
+		if doErr != nil {
+			if attempt == aiRetryMaxAttempts || !isRetryableProviderErrorText(doErr.Error()) {
+				return "", fmt.Errorf("failed to send request: %w", doErr)
+			}
+			if wErr := waitForAIRetry(ctx, aiRetryDelay(attempt-1)); wErr != nil {
+				return "", wErr
+			}
+			req, err = http.NewRequestWithContext(ctx, "POST", c.baseURL+"/chat/completions", bytes.NewBuffer(jsonData))
+			if err != nil {
+				return "", fmt.Errorf("failed to create request: %w", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+c.apiKey)
+			continue
+		}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response: %w", err)
-	}
+		body, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return "", fmt.Errorf("failed to read response: %w", err)
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+
+		if attempt == aiRetryMaxAttempts || !(isRetryableHTTPStatus(resp.StatusCode) || isRetryableProviderErrorText(string(body))) {
+			return "", fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+		}
+
+		delay := aiRetryDelay(attempt - 1)
+		if ra, ok := retryAfterDelay(resp.Header); ok {
+			delay = ra
+		}
+		if wErr := waitForAIRetry(ctx, delay); wErr != nil {
+			return "", wErr
+		}
+
+		req, err = http.NewRequestWithContext(ctx, "POST", c.baseURL+"/chat/completions", bytes.NewBuffer(jsonData))
+		if err != nil {
+			return "", fmt.Errorf("failed to create request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
 
 	var response OpenAIResponse
@@ -861,6 +1011,12 @@ func (c *Client) askAnthropic(ctx context.Context, prompt string) (string, error
 	}
 
 	model := strings.TrimSpace(profileLLMCall.Model)
+	if strings.EqualFold(model, "claude-3-sonnet-20240229") {
+		latest, lErr := c.getLatestAnthropicModelID(ctx)
+		if lErr == nil && strings.TrimSpace(latest) != "" {
+			model = strings.TrimSpace(latest)
+		}
+	}
 	if model == "" {
 		latest, lErr := c.getLatestAnthropicModelID(ctx)
 		if lErr != nil {
@@ -888,29 +1044,64 @@ func (c *Client) askAnthropic(ctx context.Context, prompt string) (string, error
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.baseURL, "/")+"/messages", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-api-key", strings.TrimSpace(c.apiKey))
-	httpReq.Header.Set("anthropic-version", "2023-06-01")
-
 	client := &http.Client{}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
+	var body []byte
+	triedModelFallback := false
+	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
+		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.baseURL, "/")+"/messages", bytes.NewBuffer(jsonData))
+		if reqErr != nil {
+			return "", fmt.Errorf("failed to create request: %w", reqErr)
+		}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read response: %w", err)
-	}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("x-api-key", strings.TrimSpace(c.apiKey))
+		httpReq.Header.Set("anthropic-version", "2023-06-01")
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("Anthropic API request failed with status %d (keyLen=%d keyHash=%s): %s", resp.StatusCode, keyLen, keyHash, string(body))
+		resp, doErr := client.Do(httpReq)
+		if doErr != nil {
+			if attempt == aiRetryMaxAttempts || !isRetryableProviderErrorText(doErr.Error()) {
+				return "", fmt.Errorf("failed to send request: %w", doErr)
+			}
+			if wErr := waitForAIRetry(ctx, aiRetryDelay(attempt-1)); wErr != nil {
+				return "", wErr
+			}
+			continue
+		}
+
+		body, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return "", fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+
+		if !triedModelFallback && anthropicModelNotFound(resp.StatusCode, body) {
+			latest, lErr := c.getLatestAnthropicModelID(ctx)
+			if lErr == nil && strings.TrimSpace(latest) != "" {
+				reqBody.Model = strings.TrimSpace(latest)
+				jsonData, err = json.Marshal(reqBody)
+				if err != nil {
+					return "", fmt.Errorf("failed to marshal anthropic fallback request: %w", err)
+				}
+				triedModelFallback = true
+				continue
+			}
+		}
+
+		if attempt == aiRetryMaxAttempts || !(isRetryableHTTPStatus(resp.StatusCode) || isRetryableProviderErrorText(string(body))) {
+			return "", fmt.Errorf("Anthropic API request failed with status %d (keyLen=%d keyHash=%s): %s", resp.StatusCode, keyLen, keyHash, string(body))
+		}
+
+		delay := aiRetryDelay(attempt - 1)
+		if ra, ok := retryAfterDelay(resp.Header); ok {
+			delay = ra
+		}
+		if wErr := waitForAIRetry(ctx, delay); wErr != nil {
+			return "", wErr
+		}
 	}
 
 	var parsed anthropicResponse
@@ -925,6 +1116,17 @@ func (c *Client) askAnthropic(ctx context.Context, prompt string) (string, error
 	}
 
 	return "", fmt.Errorf("no response content from Anthropic")
+}
+
+func anthropicModelNotFound(statusCode int, body []byte) bool {
+	if statusCode != http.StatusNotFound {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(string(body)))
+	if text == "" {
+		return false
+	}
+	return strings.Contains(text, "not_found_error") && strings.Contains(text, "model")
 }
 
 func (c *Client) getLatestAnthropicModelID(ctx context.Context) (string, error) {

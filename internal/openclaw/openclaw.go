@@ -10,6 +10,29 @@ import (
 
 const DefaultPort = 18789
 
+// ConfigJSON returns the openclaw.json config with proper origin allowlist.
+// Always includes localhost; if cfDomain is non-empty, adds the HTTPS origin.
+func ConfigJSON(cfDomain string, port int) string {
+	origins := fmt.Sprintf(`"http://127.0.0.1:%d"`, port)
+	if d := strings.TrimSpace(cfDomain); d != "" {
+		d = strings.TrimPrefix(d, "https://")
+		d = strings.TrimPrefix(d, "http://")
+		origins += fmt.Sprintf(`,"https://%s"`, d)
+	}
+	return fmt.Sprintf(`{"gateway":{"mode":"local","controlUi":{"allowedOrigins":[%s]}}}`, origins)
+}
+
+// ConfigWriteShellCmd returns a shell command that writes openclaw.json via an alpine init container.
+func ConfigWriteShellCmd(cfDomain string, port int) string {
+	json := ConfigJSON(cfDomain, port)
+	// Single-quote the JSON for shell safety; escape inner single quotes.
+	escaped := strings.ReplaceAll(json, "'", "'\\''")
+	return fmt.Sprintf(
+		`docker run --rm -v openclaw_data:/home/node/.openclaw alpine:3.20 sh -lc 'mkdir -p /home/node/.openclaw/workspace /home/node/.openclaw/devices; printf "%%s\n" '"'"'%s'"'"' > /home/node/.openclaw/openclaw.json; chown -R 1000:1000 /home/node/.openclaw' || true`,
+		escaped,
+	)
+}
+
 func Detect(question string, repoURL string) bool {
 	lq := strings.ToLower(strings.TrimSpace(question))
 	lr := strings.ToLower(strings.TrimSpace(repoURL))
@@ -65,6 +88,7 @@ func MaybePrintPostDeployInstructions(bindings map[string]string, profile, regio
 	_, _ = fmt.Fprintf(w, "[openclaw] post-deploy connect + pairing\n")
 	if httpsURL != "" {
 		_, _ = fmt.Fprintf(w, "[openclaw] Control UI (HTTPS): %s\n", httpsURL)
+		_, _ = fmt.Fprintf(w, "[openclaw] Pairing URL: %s\n", httpsURL)
 	}
 	if albDNS != "" {
 		_, _ = fmt.Fprintf(w, "[openclaw] ALB origin (HTTP): http://%s\n", albDNS)
@@ -77,7 +101,7 @@ func MaybePrintPostDeployInstructions(bindings map[string]string, profile, regio
 	} else if albDNS != "" {
 		_, _ = fmt.Fprintf(w, "[openclaw]  1) Open http://%s (note: some browsers require HTTPS for the Control UI)\n", albDNS)
 	} else {
-		_, _ = fmt.Fprintf(w, "[openclaw]  1) Open the HTTPS CloudFront URL (if created)\n")
+		_, _ = fmt.Fprintf(w, "[openclaw]  1) Open the HTTPS URL printed above\n")
 	}
 	_, _ = fmt.Fprintf(w, "[openclaw]  2) When prompted, enter your gateway token (env var OPENCLAW_GATEWAY_TOKEN)\n")
 	_, _ = fmt.Fprintf(w, "[openclaw]  3) Click Connect\n")
@@ -118,6 +142,9 @@ func SSMRestartCommands(prelude []string, port int, image string, startCmd strin
 
 	containerName := ContainerName(bindings)
 
+	// Use CloudFront domain for allowedOrigins if available.
+	cfDomain := strings.TrimSpace(bindings["CLOUDFRONT_DOMAIN"])
+
 	cmds = append(cmds,
 		"PORT="+p,
 		"IMAGE=\""+strings.ReplaceAll(img, "\"", "\\\"")+"\"",
@@ -126,7 +153,8 @@ func SSMRestartCommands(prelude []string, port int, image string, startCmd strin
 		"if [ -n \"${CID:-}\" ]; then docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \"$CID\" | grep -vE '^(HOST|BIND|PORT)=' > /tmp/clanker.env || true; fi",
 		"if [ -n \"${CID:-}\" ]; then docker rm -f \"$CID\" || true; fi",
 		"docker volume create openclaw_data || true",
-		"docker run --rm -v openclaw_data:/home/node/.openclaw alpine:3.20 sh -lc 'chown -R 1000:1000 /home/node/.openclaw' || true",
+		// Write openclaw.json with allowedOrigins (localhost + CloudFront if known).
+		ConfigWriteShellCmd(cfDomain, port),
 		"docker rm -f openclaw || true",
 		"docker rm -f \""+containerName+"\" || true",
 		"touch /tmp/clanker.env || true",

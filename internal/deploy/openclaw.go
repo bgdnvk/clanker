@@ -219,7 +219,40 @@ func AppendOpenClawDeploymentRequirements(b *strings.Builder, p *RepoProfile, de
 	b.WriteString("- Persist OpenClaw state and workspace directories\n")
 	b.WriteString("- Configure gateway token via environment variable\n")
 	b.WriteString("- Expose gateway port (default 18789) intentionally and securely\n")
+	b.WriteString("- For AWS EC2+ALB deployments, ALWAYS create CloudFront in front of ALB and set HTTPS as the primary endpoint\n")
+	b.WriteString("- Plan output must include HTTPS URL (CloudFront domain) used for pairing; ALB HTTP URL is fallback/debug only\n")
 	b.WriteString("- Use environment variables for channel/provider secrets; avoid committing tokens\n")
+	b.WriteString("- IMPORTANT: The gateway's openclaw.json config MUST include gateway.controlUi.allowedOrigins with the CloudFront HTTPS domain and localhost. The exec engine handles this automatically.\n")
+	b.WriteString("- IMPORTANT: You MUST run the onboarding step (`./docker-setup.sh` or `openclaw-cli onboard`) BEFORE starting the gateway container.\n")
+
+	// IAM + Secrets Manager ordering: EC2 user-data fetches secrets at boot,
+	// so IAM permissions and the secrets themselves must exist first.
+	b.WriteString("\n### Deployment Ordering (CRITICAL — race-condition prevention)\n")
+	b.WriteString("- The EC2 user-data script runs at first boot and fetches secrets from Secrets Manager immediately.\n")
+	b.WriteString("- If the IAM role lacks SecretsManagerReadWrite or the secrets don't exist yet, user-data crashes and the container never starts.\n")
+	b.WriteString("- Therefore you MUST order the plan so that ALL of these happen BEFORE `ec2 run-instances`:\n")
+	b.WriteString("  1. Create IAM role\n")
+	b.WriteString("  2. Attach SecretsManagerReadWrite policy (`arn:aws:iam::aws:policy/SecretsManagerReadWrite`) to the IAM role\n")
+	b.WriteString("  3. Create instance profile and add role\n")
+	b.WriteString("  4. Create ALL Secrets Manager secrets the app needs\n")
+	b.WriteString("  5. `iam get-instance-profile` wait/readiness check\n")
+	b.WriteString("  6. ONLY THEN launch `ec2 run-instances`\n")
+	b.WriteString("- If you place secretsmanager create-secret or iam attach-role-policy AFTER ec2 run-instances, the deployment WILL fail.\n")
+
+	// .env file instead of export for docker compose
+	b.WriteString("\n### Environment Variables in user-data (CRITICAL)\n")
+	b.WriteString("- `docker compose` does NOT inherit host shell `export` variables into containers.\n")
+	b.WriteString("- You MUST write env vars to a `.env` file in the project directory, which docker compose reads automatically.\n")
+	b.WriteString("- In the user-data script, write a .env file like this:\n")
+	b.WriteString("  ```\n")
+	b.WriteString("  cat > /opt/openclaw/.env << 'ENVEOF'\n")
+	b.WriteString("  OPENCLAW_CONFIG_DIR=/opt/openclaw/data\n")
+	b.WriteString("  OPENCLAW_WORKSPACE_DIR=/opt/openclaw/workspace\n")
+	b.WriteString("  ENVEOF\n")
+	b.WriteString("  ```\n")
+	b.WriteString("- Do NOT use `export VAR=VALUE` and expect docker compose to pick it up — it won't.\n")
+	b.WriteString("- For secrets fetched from Secrets Manager at boot, write them into the same .env file after retrieval.\n")
+
 	if p != nil && len(p.BootstrapScripts) > 0 {
 		b.WriteString("- This repo has bootstrap scripts; for first-run, run docker onboarding/setup before starting the gateway\n")
 	}
@@ -235,23 +268,33 @@ func applyOpenClawUserDataValidation(out *deterministicValidation, script string
 	}
 
 	lower := strings.ToLower(script)
-	if usesCompose {
-		// Expect either docker-setup.sh or onboard.
-		if !strings.Contains(lower, "docker-setup.sh") && !strings.Contains(lower, "openclaw-cli") && !strings.Contains(lower, " onboar") {
-			out.Issues = append(out.Issues, "[HARD] OpenClaw compose deploy missing onboarding step (docker-setup.sh / openclaw-cli onboard)")
-			out.Fixes = append(out.Fixes, "Run ./docker-setup.sh (or docker compose run --rm openclaw-cli onboard) before docker compose up -d openclaw-gateway")
-		}
 
+	// Expect either docker-setup.sh or onboard, regardless of compose vs run.
+	if !strings.Contains(lower, "docker-setup.sh") && !strings.Contains(lower, "openclaw-cli") && !strings.Contains(lower, " onboar") {
+		out.Issues = append(out.Issues, "[HARD] OpenClaw deploy missing onboarding step (docker-setup.sh / openclaw-cli onboard)")
+		out.Fixes = append(out.Fixes, "Run ./docker-setup.sh (or docker run/compose openclaw-cli onboard) before starting openclaw-gateway")
+	}
+
+	if usesCompose {
 		// OpenClaw compose expects config/workspace host dirs.
 		missing := missingEnvVarsInScript(script, OpenClawComposeHardEnvVars())
 		if len(missing) > 0 {
 			out.Issues = append(out.Issues, "[HARD] OpenClaw compose deploy missing required mount env vars: "+strings.Join(missing, ", "))
-			out.Fixes = append(out.Fixes, "Set OPENCLAW_CONFIG_DIR and OPENCLAW_WORKSPACE_DIR to real host paths before docker compose up")
+			out.Fixes = append(out.Fixes, "Write OPENCLAW_CONFIG_DIR and OPENCLAW_WORKSPACE_DIR into a .env file (cat > .env << 'EOF' ...) in the project directory before docker compose up; docker compose does NOT inherit host shell exports")
+		}
+	}
+
+	if usesDockerRun {
+		hasECRRef := strings.Contains(lower, ".dkr.ecr.") || strings.Contains(lower, "<image_uri>") || strings.Contains(lower, "<ecr_uri>")
+		if !hasECRRef {
+			out.Issues = append(out.Issues, "[HARD] OpenClaw docker-run deploy missing explicit ECR image reference")
+			out.Fixes = append(out.Fixes, "Use ECR image-based runtime in user-data (docker pull <ECR_URI>:<tag> then docker run)")
 		}
 	}
 
 	// If neither compose nor docker run shows up, still probably broken.
 	if !usesCompose && !usesDockerRun {
-		out.Warnings = append(out.Warnings, "OpenClaw repo detected but user-data does not appear to start the gateway")
+		out.Issues = append(out.Issues, "[HARD] OpenClaw user-data does not appear to start the gateway runtime")
+		out.Fixes = append(out.Fixes, "Start OpenClaw via docker compose up -d openclaw-gateway or docker run with an explicit ECR image")
 	}
 }

@@ -3,9 +3,12 @@ package maker
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
+
+var dollarPlaceholderRe = regexp.MustCompile(`\$\{([A-Z0-9_]+)\}`)
 
 const CurrentPlanVersion = 1
 
@@ -33,7 +36,24 @@ func ParsePlan(raw string) (*Plan, error) {
 
 	var p Plan
 	if err := json.Unmarshal([]byte(trimmed), &p); err != nil {
-		return nil, err
+		// Try accepting alternative shapes the LLM sometimes returns.
+		// 1) A single command object
+		// 2) An array of command objects
+		wrapped, wrapErr := parsePlanFromAlternativeShapes(trimmed)
+		if wrapErr == nil {
+			p = *wrapped
+		} else {
+			return nil, err
+		}
+	}
+
+	// If JSON unmarshalling succeeded but commands are missing, we still might have received a
+	// command-shaped object (unknown fields ignored by json.Unmarshal into Plan).
+	if len(p.Commands) == 0 {
+		wrapped, wrapErr := parsePlanFromAlternativeShapes(trimmed)
+		if wrapErr == nil {
+			p = *wrapped
+		}
 	}
 
 	if p.Version == 0 {
@@ -61,6 +81,58 @@ func ParsePlan(raw string) (*Plan, error) {
 	return &p, nil
 }
 
+func parsePlanFromAlternativeShapes(trimmed string) (*Plan, error) {
+	// 1) Single command object
+	{
+		var cmd Command
+		if err := json.Unmarshal([]byte(trimmed), &cmd); err == nil {
+			cmd.Args = normalizeArgs(cmd.Args)
+			if len(cmd.Args) > 0 {
+				out := &Plan{
+					Version:   CurrentPlanVersion,
+					CreatedAt: time.Now().UTC(),
+					Provider:  "aws",
+					Question:  "",
+					Summary:   "generated plan",
+					Commands:  []Command{cmd},
+				}
+				return out, nil
+			}
+		}
+	}
+
+	// 2) Array of command objects
+	{
+		var cmds []Command
+		if err := json.Unmarshal([]byte(trimmed), &cmds); err == nil {
+			filtered := make([]Command, 0, len(cmds))
+			for i := range cmds {
+				cmds[i].Args = normalizeArgs(cmds[i].Args)
+				if len(cmds[i].Args) == 0 {
+					continue
+				}
+				if len(cmds[i].Produces) == 0 {
+					cmds[i].Produces = nil
+				}
+				filtered = append(filtered, cmds[i])
+			}
+			if len(filtered) > 0 {
+				out := &Plan{
+					Version:   CurrentPlanVersion,
+					CreatedAt: time.Now().UTC(),
+					Provider:  "aws",
+					Question:  "",
+					Summary:   "generated plan",
+					Commands:  filtered,
+				}
+				return out, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("unrecognized plan shape")
+}
+
 func normalizeArgs(args []string) []string {
 	out := make([]string, 0, len(args))
 	for _, a := range args {
@@ -68,6 +140,7 @@ func normalizeArgs(args []string) []string {
 		if a == "" {
 			continue
 		}
+		a = normalizePlaceholderSyntaxArg(a)
 		out = append(out, a)
 	}
 
@@ -83,4 +156,18 @@ func normalizeArgs(args []string) []string {
 	}
 
 	return out
+}
+
+func normalizePlaceholderSyntaxArg(arg string) string {
+	v := strings.TrimSpace(arg)
+	if v == "" {
+		return v
+	}
+	if strings.Contains(v, "\n") || strings.HasPrefix(v, "#!") || strings.HasPrefix(strings.ToLower(v), "#cloud-config") {
+		return v
+	}
+	if !strings.Contains(v, "${") {
+		return v
+	}
+	return dollarPlaceholderRe.ReplaceAllString(v, "<$1>")
 }

@@ -451,9 +451,19 @@ func ValidatePlan(ctx context.Context, planJSON string, profile *RepoProfile, de
 
 	v, err := parseValidation(clean(resp))
 	if err != nil {
-		logf("[intelligence] warning: validation parse failed (%v), assuming plan is ok", err)
-		return &PlanValidation{IsValid: true}, "", nil
+		logf("[intelligence] warning: validation parse failed (%v)", err)
+		v := &PlanValidation{
+			IsValid: false,
+			Issues: []string{
+				"Validator returned an unparseable response (must be a single JSON object with keys: isValid/issues/fixes/warnings)",
+			},
+			Fixes: []string{
+				"Re-run validation and respond with JSON ONLY (top-level object, not an array, no markdown/code fences)",
+			},
+		}
+		return v, buildFixPrompt(v), nil
 	}
+	v = normalizeValidation(v)
 
 	if !v.IsValid && len(v.Fixes) > 0 {
 		// build a fix prompt that the caller can feed back into plan generation
@@ -471,6 +481,49 @@ func ValidatePlan(ctx context.Context, planJSON string, profile *RepoProfile, de
 		v.Warnings = uniqueStrings(v.Warnings)
 	}
 	return v, "", nil
+}
+
+func normalizeValidation(v *PlanValidation) *PlanValidation {
+	if v == nil {
+		return v
+	}
+	keepIssue := func(s string) bool {
+		l := strings.ToLower(strings.TrimSpace(s))
+		if l == "" {
+			return false
+		}
+		if strings.Contains(l, "disregard") {
+			return false
+		}
+		if strings.Contains(l, "cloudfront does not") && strings.Contains(l, "websocket") {
+			return false
+		}
+		if strings.Contains(l, "iam policy arn is malformed") && strings.Contains(l, "arn:aws:iam::aws:policy/") {
+			return false
+		}
+		return true
+	}
+
+	issues := make([]string, 0, len(v.Issues))
+	for _, item := range v.Issues {
+		if keepIssue(item) {
+			issues = append(issues, strings.TrimSpace(item))
+		}
+	}
+	warnings := make([]string, 0, len(v.Warnings))
+	for _, item := range v.Warnings {
+		if keepIssue(item) {
+			warnings = append(warnings, strings.TrimSpace(item))
+		}
+	}
+
+	v.Issues = uniqueStrings(issues)
+	v.Warnings = uniqueStrings(warnings)
+	if len(v.Issues) == 0 {
+		v.IsValid = true
+		v.Fixes = nil
+	}
+	return v
 }
 
 // --- Phase 1: Deep Understanding ---
@@ -978,6 +1031,36 @@ func parseValidation(raw string) (*PlanValidation, error) {
 
 	var v PlanValidation
 	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		// Common failure mode: model returns an array (often a list of issues).
+		var issues []string
+		if err2 := json.Unmarshal([]byte(raw), &issues); err2 == nil {
+			return &PlanValidation{IsValid: false, Issues: uniqueStrings(issues)}, nil
+		}
+
+		// Another failure mode: array of objects (each an issue/fix/warning item).
+		var items []map[string]any
+		if err3 := json.Unmarshal([]byte(raw), &items); err3 == nil {
+			var out PlanValidation
+			out.IsValid = false
+			for _, it := range items {
+				if s, ok := it["issue"].(string); ok && strings.TrimSpace(s) != "" {
+					out.Issues = append(out.Issues, strings.TrimSpace(s))
+				}
+				if s, ok := it["fix"].(string); ok && strings.TrimSpace(s) != "" {
+					out.Fixes = append(out.Fixes, strings.TrimSpace(s))
+				}
+				if s, ok := it["warning"].(string); ok && strings.TrimSpace(s) != "" {
+					out.Warnings = append(out.Warnings, strings.TrimSpace(s))
+				}
+			}
+			out.Issues = uniqueStrings(out.Issues)
+			out.Fixes = uniqueStrings(out.Fixes)
+			out.Warnings = uniqueStrings(out.Warnings)
+			if len(out.Issues) > 0 || len(out.Fixes) > 0 || len(out.Warnings) > 0 {
+				return &out, nil
+			}
+		}
+
 		return nil, fmt.Errorf("failed to parse validation: %w", err)
 	}
 	return &v, nil
@@ -1765,11 +1848,30 @@ func ec2Prompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis, opts
 	b.WriteString("5. Wait for target to be healthy:\n")
 	b.WriteString("   aws elbv2 wait target-in-service --target-group-arn <TG_ARN> --targets Id=<INSTANCE_ID>\n\n")
 
+	if IsOpenClawRepo(p, deep) {
+		b.WriteString("## OpenClaw HTTPS Requirement (CloudFront)")
+		b.WriteString("\nFor OpenClaw pairing, HTTPS is required. Create CloudFront in front of ALB:\n")
+		b.WriteString("6. Create CloudFront distribution with ALB DNS as origin:\n")
+		b.WriteString("   aws cloudfront create-distribution --distribution-config '{...}'\n")
+		b.WriteString("   - Origin DomainName: <ALB_DNS>\n")
+		b.WriteString("   - ViewerProtocolPolicy: redirect-to-https\n")
+		b.WriteString("   Save CloudFront DomainName as <CLOUDFRONT_DOMAIN>.\n\n")
+		b.WriteString("7. Wait for distribution deployment:\n")
+		b.WriteString("   aws cloudfront wait distribution-deployed --id <CLOUDFRONT_ID>\n\n")
+		b.WriteString("8. Output HTTPS pairing URL:\n")
+		b.WriteString("   https://<CLOUDFRONT_DOMAIN>\n\n")
+	}
+
 	b.WriteString("## Output\n")
-	b.WriteString("The application will be accessible at the ALB DNS name (from step 1).\n")
-	b.WriteString("URLs for this app:\n")
-	b.WriteString("- Settings: http://<ALB_DNS>/settings\n")
-	b.WriteString("- Chat: http://<ALB_DNS>/chat\n")
+	if IsOpenClawRepo(p, deep) {
+		b.WriteString("Primary URL (required for pairing): https://<CLOUDFRONT_DOMAIN>\n")
+		b.WriteString("Fallback debug URL: http://<ALB_DNS>\n")
+	} else {
+		b.WriteString("The application will be accessible at the ALB DNS name (from step 1).\n")
+		b.WriteString("URLs for this app:\n")
+		b.WriteString("- Settings: http://<ALB_DNS>/settings\n")
+		b.WriteString("- Chat: http://<ALB_DNS>/chat\n")
+	}
 	b.WriteString("DO NOT create any Lambda or CloudWatch Lambda alarms - this is an EC2 deployment.\n")
 
 	return b.String()

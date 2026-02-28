@@ -34,10 +34,18 @@ type ArchitectDecision struct {
 // ArchitectPrompt builds the prompt for the architect LLM call
 func ArchitectPrompt(p *RepoProfile) string {
 	profileJSON, _ := json.MarshalIndent(p, "", "  ")
+	openClawRules := ""
+	if IsOpenClawRepo(p, nil) {
+		openClawRules = "\n## OpenClaw-Specific Rules\n" +
+			"- When method is AWS EC2, you MUST include ALB + CloudFront in front of ALB for HTTPS.\n" +
+			"- The final access URL for users/pairing MUST be the CloudFront HTTPS URL, not ALB HTTP.\n" +
+			"- Keep ALB DNS as optional fallback/debug endpoint only.\n"
+	}
 
 	return fmt.Sprintf(`You are an expert cloud architect. Given this repo analysis, decide the simplest and cheapest way to deploy and run this application on AWS.
 
 ## Repo Analysis
+%s
 %s
 
 ## Your Task
@@ -69,7 +77,7 @@ func ArchitectPrompt(p *RepoProfile) string {
   "needsAlb": true,
   "needsDb": false,
   "dbService": ""
-}`, string(profileJSON))
+}`, string(profileJSON), openClawRules)
 }
 
 // ParseArchitectDecision parses the LLM response into an ArchitectDecision

@@ -54,7 +54,7 @@ ai:
   providers:
     bedrock:
       aws_profile: your-aws-profile  # AWS profile for Bedrock API calls
-      model: us.anthropic.claude-sonnet-4-20250514-v1:0
+			model: anthropic.claude-opus-4-6-v1
       region: us-west-1
     
     openai:
@@ -62,7 +62,7 @@ ai:
       api_key_env: OPENAI_API_KEY
     
     anthropic:
-      model: claude-3-sonnet-20240229
+			model: claude-opus-4-6
       api_key_env: ANTHROPIC_API_KEY
     
     gemini:

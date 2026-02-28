@@ -238,7 +238,7 @@ func maybeLLMAfterGenericExhausted(
 	}
 	augmentedOut += fmt.Sprintf("[maker] note: generic glue exhausted retries (reason=%s). propose minimal aws cli prerequisites to make the failing command succeed. then we will retry the original.", reason)
 
-	rp, err := maybeRemediateWithAI(ctx, opts, failedAWSArgs, augmentedOut)
+	rp, err := maybeRemediateWithAI(ctx, opts, "", failedAWSArgs, augmentedOut)
 	if err != nil {
 		return err
 	}

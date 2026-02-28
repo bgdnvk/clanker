@@ -260,6 +260,12 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		if strings.TrimSpace(bindings["PLAN_QUESTION"]) == "" {
 			bindings["PLAN_QUESTION"] = plan.Question
 		}
+		if openclaw.Detect(strings.TrimSpace(plan.Question), extractRepoURLFromQuestion(plan.Question)) {
+			if strings.TrimSpace(bindings["FORCE_IMAGE_DEPLOY"]) == "" {
+				bindings["FORCE_IMAGE_DEPLOY"] = "true"
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] openclaw detected: forcing image deploy workflow\n")
+			}
+		}
 	}
 
 	// Initialize bindings from OutputBindings if provided (for multi-phase execution)
@@ -351,8 +357,8 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 			isOpenClaw := openclaw.Detect(question, repoURL)
 			isWordPress := wordpress.Detect(question, repoURL)
 			if isOpenClaw {
-				if p := strings.TrimSpace(flagValue(args, "--health-check-path")); p == "" || p == "/" {
-					args = setFlagValue(args, "--health-check-path", "/health")
+				if p := strings.TrimSpace(flagValue(args, "--health-check-path")); p == "" || p == "/health" {
+					args = setFlagValue(args, "--health-check-path", "/")
 				}
 				if m := strings.TrimSpace(flagValue(args, "--matcher")); m == "" || strings.Contains(m, "HttpCode=200-399") {
 					args = setFlagValue(args, "--matcher", "HttpCode=200-499")
@@ -518,8 +524,50 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	if question == "" {
 		question = strings.TrimSpace(bindings["QUESTION"])
 	}
-	openclaw.MaybePrintPostDeployInstructions(bindings, opts.Profile, opts.Region, opts.Writer, question, extractRepoURLFromQuestion(question))
-	wordpress.MaybePrintPostDeployInstructions(bindings, opts.Writer, question, extractRepoURLFromQuestion(question))
+	repoURL := extractRepoURLFromQuestion(question)
+	if openclaw.Detect(question, repoURL) {
+		httpsURL := strings.TrimSpace(bindings["HTTPS_URL"])
+		if httpsURL == "" {
+			if cf := strings.TrimSpace(bindings["CLOUDFRONT_DOMAIN"]); cf != "" {
+				httpsURL = "https://" + cf
+				bindings["HTTPS_URL"] = httpsURL
+			}
+		}
+		if strings.TrimSpace(httpsURL) == "" {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: openclaw HTTPS pairing URL is missing (CloudFront output not available yet); continuing\n")
+		}
+
+		// Patch openclaw.json with CloudFront allowedOrigins now that we know the domain.
+		if cfDomain := strings.TrimSpace(bindings["CLOUDFRONT_DOMAIN"]); cfDomain != "" {
+			instanceID := strings.TrimSpace(bindings["INSTANCE_ID"])
+			appPortStr := strings.TrimSpace(bindings["APP_PORT"])
+			portNum, _ := strconv.Atoi(appPortStr)
+			if portNum == 0 {
+				portNum = openclaw.DefaultPort
+			}
+			if instanceID != "" {
+				_, _ = fmt.Fprintf(opts.Writer, "[openclaw] patching allowedOrigins with CloudFront domain %s\n", cfDomain)
+				cName := openclaw.ContainerName(bindings)
+				patchCmds := []string{
+					openclaw.ConfigWriteShellCmd(cfDomain, portNum),
+					fmt.Sprintf("docker restart %s 2>/dev/null || true", cName),
+					"sleep 3",
+					"docker ps --format '{{.ID}} {{.Image}} {{.Ports}} {{.Names}}' | sed 's/^/[ps] /' || true",
+				}
+				patchOut, patchErr := runSSMShellScript(ctx, instanceID, opts.Profile, opts.Region, patchCmds, opts.Writer)
+				if patchErr != nil {
+					_, _ = fmt.Fprintf(opts.Writer, "[openclaw] warning: failed to patch allowedOrigins: %v\n", patchErr)
+				} else {
+					_, _ = fmt.Fprintf(opts.Writer, "[openclaw] allowedOrigins patched successfully\n")
+					if patchOut != "" {
+						_, _ = io.WriteString(opts.Writer, patchOut+"\n")
+					}
+				}
+			}
+		}
+	}
+	openclaw.MaybePrintPostDeployInstructions(bindings, opts.Profile, opts.Region, opts.Writer, question, repoURL)
+	wordpress.MaybePrintPostDeployInstructions(bindings, opts.Writer, question, repoURL)
 
 	// Populate output bindings for the caller
 	if opts.OutputBindings != nil {
@@ -612,6 +660,16 @@ func shouldAutoPrepareImage(args []string, question string, bindings map[string]
 	if len(args) < 2 || args[0] != "ec2" || args[1] != "run-instances" {
 		return false
 	}
+	forceImageDeploy := false
+	if bindings != nil {
+		switch strings.ToLower(strings.TrimSpace(bindings["FORCE_IMAGE_DEPLOY"])) {
+		case "1", "true", "yes", "on":
+			forceImageDeploy = true
+		}
+	}
+	if openclaw.Detect(strings.TrimSpace(question), extractRepoURLFromQuestion(question)) {
+		forceImageDeploy = true
+	}
 	// WordPress one-click uses Docker Hub images (no ECR build/push).
 	q := strings.TrimSpace(question)
 	if wordpress.Detect(q, extractRepoURLFromQuestion(q)) {
@@ -619,6 +677,16 @@ func shouldAutoPrepareImage(args []string, question string, bindings map[string]
 	}
 	if strings.TrimSpace(opts.Profile) == "" || strings.TrimSpace(opts.Region) == "" {
 		return false
+	}
+	userData := strings.TrimSpace(flagValue(args, "--user-data"))
+	if userData != "" {
+		if decoded, ok := decodeLikelyBase64UserData(userData); ok {
+			userData = decoded
+		}
+		lowerUserData := strings.ToLower(userData)
+		if strings.Contains(lowerUserData, "docker build") && strings.Contains(lowerUserData, "docker run") && !strings.Contains(lowerUserData, ".dkr.ecr.") && !forceImageDeploy {
+			return false
+		}
 	}
 	if strings.TrimSpace(bindings["ECR_URI"]) == "" {
 		if ref, ok := extractECRImageRefFromRunInstances(args); ok {
@@ -761,6 +829,13 @@ func inferRequiredDockerPlatformsForEC2RunInstances(ctx context.Context, args []
 	if amiID == "" {
 		return nil, nil
 	}
+	if strings.HasPrefix(strings.ToLower(amiID), "resolve:ssm:") {
+		resolved, rErr := awsResolveSSMAmiReference(ctx, amiID, opts)
+		if rErr != nil || strings.TrimSpace(resolved) == "" {
+			return nil, nil
+		}
+		amiID = strings.TrimSpace(resolved)
+	}
 
 	amiArch, err := awsDescribeAMIArchitecture(ctx, amiID, opts)
 	if err != nil {
@@ -817,6 +892,36 @@ func awsDescribeAMIArchitecture(ctx context.Context, amiID string, opts ExecOpti
 		return "", fmt.Errorf("describe-images failed for %s: %w (%s)", amiID, err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func awsResolveSSMAmiReference(ctx context.Context, amiRef string, opts ExecOptions) (string, error) {
+	ref := strings.TrimSpace(amiRef)
+	if !strings.HasPrefix(strings.ToLower(ref), "resolve:ssm:") {
+		return ref, nil
+	}
+	paramName := strings.TrimSpace(ref[len("resolve:ssm:"):])
+	if paramName == "" {
+		return "", fmt.Errorf("missing ssm parameter name in image-id reference")
+	}
+	args := []string{
+		"ssm", "get-parameter",
+		"--name", paramName,
+		"--query", "Parameter.Value",
+		"--output", "text",
+		"--profile", opts.Profile,
+		"--region", opts.Region,
+		"--no-cli-pager",
+	}
+	cmd := exec.CommandContext(ctx, "aws", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("resolve ssm ami failed for %s: %w (%s)", paramName, err, strings.TrimSpace(string(out)))
+	}
+	resolved := strings.TrimSpace(string(out))
+	if resolved == "" || !strings.HasPrefix(strings.ToLower(resolved), "ami-") {
+		return "", fmt.Errorf("ssm parameter %s did not resolve to AMI id (got %q)", paramName, resolved)
+	}
+	return resolved, nil
 }
 
 func awsDescribeInstanceTypeArchitectures(ctx context.Context, instanceType string, opts ExecOptions) ([]string, error) {
@@ -1852,7 +1957,7 @@ func handleAWSFailure(
 	}
 
 	if policy.consumeAttempt(runtime) {
-		if remediated, remErr := maybeAutoRemediateAndRetry(ctx, plan, opts, idx, args, awsArgs, stdinBytes, out, failure); remErr == nil && remediated {
+		if remediated, remErr := maybeAutoRemediateAndRetry(ctx, plan, opts, idx, args, awsArgs, stdinBytes, out, failure, bindings); remErr == nil && remediated {
 			remediationAttempted[idx] = true
 			return true, nil
 		}
@@ -2387,9 +2492,13 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 	// Check if we have a specific start command that includes the port
 	// This handles apps that need --port flag instead of PORT env var
 	startCmd := bindings["START_COMMAND"]
-	if startCmd == "" && isOpenClaw {
-		// OpenClaw defaults to loopback binding; force LAN binding for ALB health checks.
-		startCmd = fmt.Sprintf("node openclaw.mjs gateway --allow-unconfigured --bind lan --port %s", appPort)
+	if isOpenClaw {
+		s := strings.ToLower(strings.TrimSpace(startCmd))
+		if s == "" || strings.Contains(s, "docker compose") || strings.Contains(s, "docker-compose") || strings.Contains(s, "docker run") {
+			startCmd = fmt.Sprintf("node openclaw.mjs gateway --allow-unconfigured --bind lan --port %s", appPort)
+		}
+		// Strip legacy dangerous flag if present in existing start command.
+		startCmd = strings.ReplaceAll(startCmd, " --dangerously-allow-host-header-origin-fallback", "")
 	}
 
 	var dockerRunCmd string
@@ -2409,8 +2518,14 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 		if strings.TrimSpace(containerName) == "" {
 			containerName = "openclaw"
 		}
+		// Initial boot: allowedOrigins with localhost only (CF domain not known yet).
+		// Post-deploy SSM step will add the CloudFront origin once it's created.
+		appPortInt, _ := strconv.Atoi(appPort)
+		if appPortInt == 0 {
+			appPortInt = openclaw.DefaultPort
+		}
 		preRun = "docker volume create openclaw_data || true\n" +
-			"docker run --rm -v openclaw_data:/home/node/.openclaw alpine:3.20 sh -lc 'mkdir -p /home/node/.openclaw/workspace; if [ ! -f /home/node/.openclaw/openclaw.json ]; then printf \"%s\\n\" \"{ gateway: { mode: \\\"local\\\" } }\" > /home/node/.openclaw/openclaw.json; fi; chown -R 1000:1000 /home/node/.openclaw' || true\n" +
+			openclaw.ConfigWriteShellCmd("", appPortInt) + "\n" +
 			"docker rm -f openclaw || true\n" +
 			fmt.Sprintf("docker rm -f %s || true\n", containerName)
 		// Ensure the persistent volume is mounted.
@@ -2455,7 +2570,7 @@ const requestIds = Object.keys(pending || {});
 const pairedCount = Object.keys(paired || {}).length;
 
 if (requestIds.length === 0) {
-	console.log("CLANKER_PAIR_NONE PAIRED=" + pairedCount);
+	console.log("DEPLOY_PAIR_NONE PAIRED=" + pairedCount);
 	process.exit(0);
 }
 
@@ -2471,11 +2586,11 @@ for (const rid of requestIds) {
 fs.mkdirSync(path.dirname(pendingPath), { recursive: true });
 fs.writeFileSync(pairedPath, JSON.stringify(paired, null, 2));
 fs.writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
-console.log("CLANKER_PAIR_APPROVED=" + approved + " PAIRED=" + Object.keys(paired || {}).length);
+console.log("DEPLOY_PAIR_APPROVED=" + approved + " PAIRED=" + Object.keys(paired || {}).length);
 JS
 )
 		OUT=$(docker exec "$OC_CONTAINER" node -e "$JS" 2>/dev/null)
-		APPROVED=$(echo "$OUT" | sed -n 's/^.*CLANKER_PAIR_APPROVED=\([0-9][0-9]*\).*$/\1/p')
+		APPROVED=$(echo "$OUT" | sed -n 's/^.*DEPLOY_PAIR_APPROVED=\([0-9][0-9]*\).*$/\1/p')
 		PAIRED=$(echo "$OUT" | sed -n 's/^.*PAIRED=\([0-9][0-9]*\).*$/\1/p')
 		if [ -n "$APPROVED" ] && [ "$APPROVED" -gt 0 ] 2>/dev/null; then
 			echo "[openclaw] $OUT"
@@ -2506,8 +2621,41 @@ JS
 	}
 
 	loginLine := "echo '[bootstrap] skipping ECR login'"
+	pullLine := fmt.Sprintf("docker pull %s", imageRef)
 	if needsECRLogin && region != "" {
-		loginLine = fmt.Sprintf("aws ecr get-login-password --region %s | docker login --username AWS --password-stdin %s", region, registryHost)
+		loginLine = fmt.Sprintf(`
+echo "[bootstrap] ecr login retry loop enabled (max=5)"
+ECR_LOGIN_OK=0
+for i in 1 2 3 4 5; do
+	if aws ecr get-login-password --region %s | docker login --username AWS --password-stdin %s; then
+		ECR_LOGIN_OK=1
+		echo "[bootstrap] ecr login succeeded (attempt=$i)"
+		break
+	fi
+	echo "[bootstrap] ecr login attempt $i failed; retrying..."
+	sleep $((i*3))
+done
+if [ "$ECR_LOGIN_OK" -ne 1 ]; then
+	echo "[bootstrap] ecr login failed after retries"
+	exit 1
+fi`, region, registryHost)
+
+		pullLine = fmt.Sprintf(`
+echo "[bootstrap] docker pull retry loop enabled (max=5)"
+IMAGE_PULL_OK=0
+for i in 1 2 3 4 5; do
+	if docker pull %s; then
+		IMAGE_PULL_OK=1
+		echo "[bootstrap] docker pull succeeded (attempt=$i)"
+		break
+	fi
+	echo "[bootstrap] docker pull attempt $i failed; retrying..."
+	sleep $((i*3))
+done
+if [ "$IMAGE_PULL_OK" -ne 1 ]; then
+	echo "[bootstrap] docker pull failed after retries"
+	exit 1
+fi`, imageRef)
 	}
 
 	// Generate the startup script (NO -x; user-data can contain secrets)
@@ -2548,14 +2696,14 @@ systemctl start docker || true
 
 echo '[bootstrap] login/pull'
 %s
-docker pull %s
+%s
 
 %s
 %s
 	%s
 
 echo 'Deployment complete!'
-`, loginLine, imageRef, preRun, dockerRunCmd, postRun)
+`, loginLine, pullLine, preRun, dockerRunCmd, postRun)
 
 	// Base64 encode the script
 	encoded := base64.StdEncoding.EncodeToString([]byte(script))
