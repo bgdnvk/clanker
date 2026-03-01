@@ -1240,7 +1240,12 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAn
 	b.WriteString("\n## Deployment Instructions\n")
 	switch strat.Method {
 	case "ec2":
-		b.WriteString(ec2Prompt(p, arch, deep, opts))
+		// WordPress uses Docker Hub images directly (no ECR build)
+		if IsWordPressRepo(p, deep) {
+			b.WriteString(WordPressEC2Prompt(p, opts))
+		} else {
+			b.WriteString(ec2Prompt(p, arch, deep, opts))
+		}
 	case "eks":
 		b.WriteString(eksPrompt(p, arch, deep, opts))
 	case "ecs-fargate":

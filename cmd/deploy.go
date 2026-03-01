@@ -186,7 +186,85 @@ Examples:
 			userConfig = deploy.DefaultUserConfig(intel.DeepAnalysis, rp)
 		}
 
+		// Non-interactive mode (plan-only from cloud backend): scan process env
+		// for secret-like vars the backend injected (DISCORD_BOT_TOKEN, etc.)
+		// so they appear in the planning prompt and get Secrets Manager entries.
+		if !applyMode || len(userConfig.EnvVars) == 0 {
+			for _, kv := range os.Environ() {
+				k, v, ok := strings.Cut(kv, "=")
+				if !ok {
+					continue
+				}
+				key := strings.TrimSpace(strings.ToUpper(k))
+				val := strings.TrimSpace(v)
+				if key == "" || val == "" {
+					continue
+				}
+				// Skip cloud-provider creds and non-secret vars
+				if strings.HasPrefix(key, "AWS_") || strings.HasPrefix(key, "GOOGLE_") ||
+					strings.HasPrefix(key, "GCP_") || strings.HasPrefix(key, "AZURE_") ||
+					strings.HasPrefix(key, "CLOUDFLARE_") {
+					continue
+				}
+				if !strings.Contains(key, "_") {
+					continue
+				}
+				if !(strings.Contains(key, "TOKEN") || strings.Contains(key, "KEY") ||
+					strings.Contains(key, "PASSWORD") || strings.Contains(key, "SECRET")) {
+					continue
+				}
+				if _, exists := userConfig.EnvVars[key]; !exists {
+					userConfig.EnvVars[key] = val
+				}
+			}
+		}
+
+		// Merge user-provided env var keys into rp.EnvVars so the planning
+		// context tells the LLM to create Secrets Manager entries for ALL of
+		// them (not just the ones found in the repo's .env.example).
+		if len(userConfig.EnvVars) > 0 {
+			seen := make(map[string]struct{}, len(rp.EnvVars))
+			for _, k := range rp.EnvVars {
+				seen[strings.TrimSpace(k)] = struct{}{}
+			}
+			for k := range userConfig.EnvVars {
+				k = strings.TrimSpace(k)
+				if k == "" {
+					continue
+				}
+				if _, ok := seen[k]; !ok {
+					rp.EnvVars = append(rp.EnvVars, k)
+					seen[k] = struct{}{}
+				}
+			}
+		}
+
 		baseQuestion := intel.EnrichedPrompt
+
+		// If user provided env vars that weren't in the original enriched
+		// prompt, append a Secrets Manager section so the LLM creates
+		// create-secret commands for every user-provided key.
+		if len(userConfig.EnvVars) > 0 {
+			var extraEnv []string
+			for k := range userConfig.EnvVars {
+				k = strings.TrimSpace(k)
+				if k != "" {
+					extraEnv = append(extraEnv, k)
+				}
+			}
+			sort.Strings(extraEnv)
+			if len(extraEnv) > 0 {
+				var envSection strings.Builder
+				envSection.WriteString("\n## User-Provided Secrets (ALL must be stored in Secrets Manager)\n")
+				envSection.WriteString("The user provided values for the following env vars. You MUST create a\n")
+				envSection.WriteString("secretsmanager create-secret command for EACH of them BEFORE ec2 run-instances:\n")
+				for _, k := range extraEnv {
+					envSection.WriteString(fmt.Sprintf("- %s\n", k))
+				}
+				baseQuestion += envSection.String()
+			}
+		}
+
 		if debug {
 			fmt.Fprintf(os.Stderr, "[deploy] enriched prompt:\n%s\n", baseQuestion)
 		}
@@ -388,6 +466,11 @@ Examples:
 				if patched := deploy.ApplyOpenClawPlanAutofix(plan, rp, intel.DeepAnalysis, logf); patched != nil {
 					plan = patched
 				}
+			}
+
+			// Generic dedup: collapse redundant launch cycles for any project.
+			if patched := deploy.ApplyGenericPlanAutofix(plan, logf); patched != nil {
+				plan = patched
 			}
 
 			// Deterministic checkpoint validation (AWS only).
@@ -857,6 +940,12 @@ Examples:
 			plan = deploy.ApplyStaticInfraBindings(plan, intel.InfraSnap)
 		}
 
+		// Deterministically resolve env-var placeholders (e.g. <DISCORD_BOT_TOKEN>)
+		// BEFORE the LLM resolution loop so secrets get real values even if the API times out.
+		if userConfig != nil && len(userConfig.EnvVars) > 0 {
+			plan = deploy.ApplyEnvVarBindings(plan, userConfig.EnvVars)
+		}
+
 		// Full placeholder resolution (AWS only, skip --new-vpc since those use 'produces' chaining)
 		if strings.EqualFold(strings.TrimSpace(targetProvider), "aws") && !newVPC {
 			const maxPlaceholderRounds = 5
@@ -916,6 +1005,11 @@ Examples:
 	skipIntegrityApply:
 
 		if patched := deploy.ApplyOpenClawPlanAutofix(plan, rp, intel.DeepAnalysis, logf); patched != nil {
+			plan = patched
+		}
+
+		// Generic dedup: collapse redundant launch cycles for any project.
+		if patched := deploy.ApplyGenericPlanAutofix(plan, logf); patched != nil {
 			plan = patched
 		}
 
@@ -1398,6 +1492,10 @@ func enforceStrictPlanRetention(baseline *maker.Plan, candidate *maker.Plan, req
 			return fmt.Errorf("candidate shrank command count from %d to %d without explicit removal intent in issues/fixes", len(baseline.Commands), len(candidate.Commands))
 		}
 		maxAllowedRemoval := len(baseline.Commands) / 4
+		// large OpenClaw plans often have duplicate SSM blocks; allow wider pruning
+		if len(baseline.Commands) >= 40 {
+			maxAllowedRemoval = len(baseline.Commands) / 2
+		}
 		if maxAllowedRemoval < 2 {
 			maxAllowedRemoval = 2
 		}
@@ -1431,6 +1529,7 @@ func issuesAllowCommandRemoval(issueTexts []string) bool {
 		if line == "" {
 			continue
 		}
+		// explicit removal intent
 		if strings.Contains(line, "remove") ||
 			strings.Contains(line, "delete") ||
 			strings.Contains(line, "drop") ||
@@ -1439,6 +1538,17 @@ func issuesAllowCommandRemoval(issueTexts []string) bool {
 			strings.Contains(line, "redundant") ||
 			strings.Contains(line, "duplicate") ||
 			strings.Contains(line, "not used") {
+			return true
+		}
+		// repair-driven consolidation: fixing missing steps often means
+		// replacing N broken attempts with 1 correct one
+		if strings.Contains(line, "missing") ||
+			strings.Contains(line, "does not appear") ||
+			strings.Contains(line, "should") ||
+			strings.Contains(line, "consolidat") ||
+			strings.Contains(line, "replace") ||
+			strings.Contains(line, "relaunch") ||
+			strings.Contains(line, "corrected") {
 			return true
 		}
 	}
