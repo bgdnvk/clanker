@@ -186,7 +186,52 @@ Examples:
 			userConfig = deploy.DefaultUserConfig(intel.DeepAnalysis, rp)
 		}
 
+		// Merge user-provided env var keys into rp.EnvVars so the planning
+		// context tells the LLM to create Secrets Manager entries for ALL of
+		// them (not just the ones found in the repo's .env.example).
+		if len(userConfig.EnvVars) > 0 {
+			seen := make(map[string]struct{}, len(rp.EnvVars))
+			for _, k := range rp.EnvVars {
+				seen[strings.TrimSpace(k)] = struct{}{}
+			}
+			for k := range userConfig.EnvVars {
+				k = strings.TrimSpace(k)
+				if k == "" {
+					continue
+				}
+				if _, ok := seen[k]; !ok {
+					rp.EnvVars = append(rp.EnvVars, k)
+					seen[k] = struct{}{}
+				}
+			}
+		}
+
 		baseQuestion := intel.EnrichedPrompt
+
+		// If user provided env vars that weren't in the original enriched
+		// prompt, append a Secrets Manager section so the LLM creates
+		// create-secret commands for every user-provided key.
+		if len(userConfig.EnvVars) > 0 {
+			var extraEnv []string
+			for k := range userConfig.EnvVars {
+				k = strings.TrimSpace(k)
+				if k != "" {
+					extraEnv = append(extraEnv, k)
+				}
+			}
+			sort.Strings(extraEnv)
+			if len(extraEnv) > 0 {
+				var envSection strings.Builder
+				envSection.WriteString("\n## User-Provided Secrets (ALL must be stored in Secrets Manager)\n")
+				envSection.WriteString("The user provided values for the following env vars. You MUST create a\n")
+				envSection.WriteString("secretsmanager create-secret command for EACH of them BEFORE ec2 run-instances:\n")
+				for _, k := range extraEnv {
+					envSection.WriteString(fmt.Sprintf("- %s\n", k))
+				}
+				baseQuestion += envSection.String()
+			}
+		}
+
 		if debug {
 			fmt.Fprintf(os.Stderr, "[deploy] enriched prompt:\n%s\n", baseQuestion)
 		}
