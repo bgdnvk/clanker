@@ -648,11 +648,15 @@ func importSecretLikeEnvVarsIntoBindings(bindings map[string]string) {
 			continue
 		}
 
+		// Store with ENV_ prefix for user-data docker run -e injection
 		bindingKey := "ENV_" + key
-		if strings.TrimSpace(bindings[bindingKey]) != "" {
-			continue
+		if strings.TrimSpace(bindings[bindingKey]) == "" {
+			bindings[bindingKey] = val
 		}
-		bindings[bindingKey] = val
+		// Also store unprefixed so <DISCORD_BOT_TOKEN> in secretsmanager commands resolves
+		if strings.TrimSpace(bindings[key]) == "" {
+			bindings[key] = val
+		}
 	}
 }
 

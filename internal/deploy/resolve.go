@@ -460,6 +460,27 @@ func ApplyStaticInfraBindings(plan *maker.Plan, infraSnap *InfraSnapshot) *maker
 	return applyBindingsToPlan(plan, bindings)
 }
 
+// ApplyEnvVarBindings deterministically resolves env-var placeholders like
+// <DISCORD_BOT_TOKEN> using the actual values the user provided. This avoids
+// relying on the LLM to map them (which fails when the API times out).
+func ApplyEnvVarBindings(plan *maker.Plan, envVars map[string]string) *maker.Plan {
+	if plan == nil || len(envVars) == 0 {
+		return plan
+	}
+	bindings := make(map[string]string, len(envVars))
+	for k, v := range envVars {
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if k != "" && v != "" {
+			bindings[k] = v
+		}
+	}
+	if len(bindings) == 0 {
+		return plan
+	}
+	return applyBindingsToPlan(plan, bindings)
+}
+
 // GetUnresolvedPlaceholders returns the list of unresolved placeholder tokens in a plan.
 func GetUnresolvedPlaceholders(plan *maker.Plan) []string {
 	return extractPlaceholdersFromPlan(plan)
