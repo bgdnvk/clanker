@@ -2540,14 +2540,24 @@ echo '[openclaw] starting auto-pair approval loop (30m or until 2 new devices ar
 OC_CONTAINER=%q
 (
 	set +e
+	# Wait for container to be running before entering the loop
+	echo '[openclaw] waiting for container to start...'
+	for _w in 1 2 3 4 5 6; do
+		if docker ps --format '{{.Names}}' | grep -qx "$OC_CONTAINER"; then
+			echo '[openclaw] container is running'
+			break
+		fi
+		sleep 5
+	done
 	END=$(( $(date +%%s) + 1800 ))
 	TARGET_NEW=2
 	BASE_PAIRED=$(docker exec "$OC_CONTAINER" node -e 'try{const fs=require("fs"); const p="/home/node/.openclaw/devices/paired.json"; const s=fs.readFileSync(p,"utf8").trim(); const o=s?JSON.parse(s):{}; console.log(Object.keys(o||{}).length)}catch(e){console.log(0)}' 2>/dev/null)
 	if [ -z "$BASE_PAIRED" ]; then BASE_PAIRED=0; fi
 	while [ $(date +%%s) -lt $END ]; do
 		if ! docker ps --format '{{.Names}}' | grep -qx "$OC_CONTAINER"; then
-			echo '[openclaw] container not running; skipping auto-pair'
-			break
+			echo '[openclaw] container stopped; waiting 10s before retry'
+			sleep 10
+			continue
 		fi
 		JS=$(cat <<'JS'
 const fs = require("fs");
