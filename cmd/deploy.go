@@ -325,209 +325,125 @@ Examples:
 		// 4. Generate the maker plan via LLM
 		fmt.Fprintf(os.Stderr, "[deploy] phase 3: generating execution plan with %s ...\n", provider)
 
-		// Generate a plan incrementally in small pages to avoid LLM truncation.
-		const maxPlanPages = 20
-		const maxCommandsPerPage = 8
-		const maxConsecutivePageFailures = 5
-		const earlyRepairAfterFailures = 3
-		const openClawSoftPlanCommands = 35
-		const openClawHardPlanCommands = 50
 		var plan *maker.Plan
 		var mustFixIssues []string
 		var lastDetValidation *deploy.PlanValidation
-		stuckPages := 0
-		consecutivePageFailures := 0
-		pageFormatHint := ""
+		usedSkeletonPath := false
 
-		plan = &maker.Plan{
-			Version:   maker.CurrentPlanVersion,
-			CreatedAt: time.Now().UTC(),
-			Provider:  planProvider,
-			Question:  fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, planProvider, intel.Architecture.Method),
-			Summary:   "",
-			Commands:  nil,
-		}
-		if strings.TrimSpace(intel.Architecture.Provider) != "" {
-			plan.Provider = strings.TrimSpace(intel.Architecture.Provider)
-		}
-
-		for pageRound := 1; pageRound <= maxPlanPages; pageRound++ {
-			prompt := deploy.BuildPlanPagePrompt(planProvider, planningContext, plan, requiredLaunchOps, mustFixIssues, maxCommandsPerPage, pageFormatHint)
-			resp, err := aiClient.AskPrompt(ctx, prompt)
-			if err != nil {
-				if !applyMode && len(plan.Commands) > 0 && (errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "deadline exceeded")) {
-					logf("[deploy] warning: planner request timed out after %d page(s); continuing with partial plan (%d command(s))", pageRound-1, len(plan.Commands))
-					break
-				}
-				return fmt.Errorf("plan generation failed: %w", err)
-			}
-
-			cleaned := aiClient.CleanJSONResponse(resp)
-			page, err := deploy.ParsePlanPage(cleaned)
-			if err != nil {
-				repairedPage, repairedRaw, rErr := deploy.RepairPlanPageWithLLM(ctx, aiClient.AskPrompt, aiClient.CleanJSONResponse, planProvider, planningContext, projectSummaryForLLM, cleaned, pageFormatHint, logf)
-				if rErr == nil && repairedPage != nil {
-					logf("[deploy] plan page parse auto-repaired via LLM (root=%s)", jsonRootKind(repairedRaw))
-					page = repairedPage
-					cleaned = repairedRaw
-					err = nil
-				}
-			}
-			if err != nil {
-				consecutivePageFailures++
-				pageFormatHint = "Last response was invalid JSON for this schema (often an array of prose strings). Return ONLY one JSON object with keys: done, commands, optional summary, optional notes. Do not return arrays of explanations."
-				logf("[deploy] warning: plan page parse failed (%v, root=%s, sample=%q), retrying (page %d/%d)...", err, jsonRootKind(cleaned), compactOneLine(cleaned, 180), pageRound, maxPlanPages)
-				if consecutivePageFailures >= earlyRepairAfterFailures && len(plan.Commands) > 0 {
-					logf("[deploy] warning: switching early to deterministic repair after %d consecutive page failures", consecutivePageFailures)
-					break
-				}
-				if consecutivePageFailures >= maxConsecutivePageFailures {
-					if !applyMode && len(plan.Commands) > 0 {
-						logf("[deploy] warning: stopping after %d consecutive page failures; continuing with partial plan (%d command(s))", consecutivePageFailures, len(plan.Commands))
-						break
-					}
-					return fmt.Errorf("plan generation failed: too many consecutive page parse failures (%d)", consecutivePageFailures)
-				}
-				continue
-			}
-
-			if len(page.Commands) > 0 {
-				// Normalize args and validate command shapes via maker.ParsePlan.
-				tmp := &maker.Plan{Provider: planProvider, Question: "", Summary: "", Commands: page.Commands}
-				tmpJSON, _ := json.Marshal(tmp)
+		// --- Skeleton-first plan generation ---
+		// Phase 3a: generate a lightweight skeleton (service+operation pairs only)
+		// Phase 3b: hydrate each step with exact CLI args in focused per-batch calls
+		// Falls back to legacy paged generation if skeleton fails
+		logf("[deploy] phase 3a: generating plan skeleton...")
+		skeleton, skelErr := deploy.GeneratePlanSkeleton(
+			ctx,
+			aiClient.AskPrompt,
+			aiClient.CleanJSONResponse,
+			planProvider,
+			planningContext,
+			requiredLaunchOps,
+			logf,
+		)
+		if skelErr != nil {
+			logf("[deploy] skeleton generation failed (%v); falling back to paged plan", skelErr)
+		} else {
+			logf("[deploy] phase 3b: hydrating %d skeleton steps...", len(skeleton.Steps))
+			hydratedPlan, hydErr := deploy.HydrateSkeleton(
+				ctx,
+				aiClient.AskPrompt,
+				aiClient.CleanJSONResponse,
+				planProvider,
+				planningContext,
+				skeleton,
+				logf,
+			)
+			if hydErr != nil {
+				logf("[deploy] skeleton hydration failed (%v); falling back to paged plan", hydErr)
+			} else {
+				// Normalize via maker.ParsePlan
+				tmpJSON, _ := json.Marshal(hydratedPlan)
 				normalized, nErr := maker.ParsePlan(string(tmpJSON))
 				if nErr != nil {
-					repairedPage, repairedRaw, rErr := deploy.RepairPlanPageWithLLM(
-						ctx,
-						aiClient.AskPrompt,
-						aiClient.CleanJSONResponse,
-						planProvider,
-						planningContext,
-						projectSummaryForLLM,
-						cleaned,
-						"Last response included command args that failed normalization. Return command args arrays only and keep the same deployment intent.",
-						logf,
-					)
-					if rErr == nil && repairedPage != nil && len(repairedPage.Commands) > 0 {
-						tmp = &maker.Plan{Provider: planProvider, Question: "", Summary: "", Commands: repairedPage.Commands}
-						tmpJSON, _ = json.Marshal(tmp)
-						normalized, nErr = maker.ParsePlan(string(tmpJSON))
-						if nErr == nil {
-							logf("[deploy] plan page command normalization auto-repaired via LLM")
-							page.Commands = normalized.Commands
-							consecutivePageFailures = 0
-							pageFormatHint = ""
-							goto pageNormalized
-						}
-						logf("[deploy] warning: auto-repaired page still invalid (%v, sample=%q)", nErr, compactOneLine(repairedRaw, 180))
-					}
-					consecutivePageFailures++
-					pageFormatHint = "Last response included commands that failed normalization. Return CLI argument arrays only, with no prose fields beyond reason/produces."
-					logf("[deploy] warning: plan page had invalid commands (%v), retrying (page %d/%d)...", nErr, pageRound, maxPlanPages)
-					if consecutivePageFailures >= earlyRepairAfterFailures && len(plan.Commands) > 0 {
-						logf("[deploy] warning: switching early to deterministic repair after %d consecutive page failures", consecutivePageFailures)
-						break
-					}
-					if consecutivePageFailures >= maxConsecutivePageFailures {
-						if !applyMode && len(plan.Commands) > 0 {
-							logf("[deploy] warning: stopping after %d consecutive page failures; continuing with partial plan (%d command(s))", consecutivePageFailures, len(plan.Commands))
-							break
-						}
-						return fmt.Errorf("plan generation failed: too many consecutive invalid plan pages (%d)", consecutivePageFailures)
-					}
-					continue
-				}
-				page.Commands = normalized.Commands
-				if len(page.Commands) > maxCommandsPerPage {
-					logf("[deploy] warning: page returned %d commands; clamping to %d", len(page.Commands), maxCommandsPerPage)
-					page.Commands = page.Commands[:maxCommandsPerPage]
-				}
-			}
-		pageNormalized:
-			consecutivePageFailures = 0
-			pageFormatHint = ""
-
-			added := deploy.AppendPlanPage(plan, page)
-			logf("[deploy] plan page %d/%d: added %d command(s) (total=%d)", pageRound, maxPlanPages, added, len(plan.Commands))
-
-			// Ensure plan metadata is consistent.
-			if strings.TrimSpace(intel.Architecture.Provider) != "" {
-				plan.Provider = strings.TrimSpace(intel.Architecture.Provider)
-			}
-			plan.Question = fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, strings.ToLower(strings.TrimSpace(plan.Provider)), intel.Architecture.Method)
-			if plan.CreatedAt.IsZero() {
-				plan.CreatedAt = time.Now().UTC()
-			}
-			if plan.Version == 0 {
-				plan.Version = maker.CurrentPlanVersion
-			}
-
-			if isOpenClawDeploy {
-				if patched := deploy.ApplyOpenClawPlanAutofix(plan, rp, intel.DeepAnalysis, logf); patched != nil {
-					plan = patched
-				}
-			}
-
-			// Generic dedup: collapse redundant launch cycles for any project.
-			if patched := deploy.ApplyGenericPlanAutofix(plan, logf); patched != nil {
-				plan = patched
-			}
-
-			// Deterministic checkpoint validation (AWS only).
-			if strings.EqualFold(strings.TrimSpace(planProvider), "aws") {
-				planJSON, _ := json.MarshalIndent(plan, "", "  ")
-				lastDetValidation = deploy.DeterministicValidatePlan(string(planJSON), rp, intel.DeepAnalysis, intel.Docker)
-				if lastDetValidation != nil && !lastDetValidation.IsValid {
-					mustFixIssues = lastDetValidation.Issues
+					logf("[deploy] skeleton plan normalization failed (%v); falling back to paged plan", nErr)
 				} else {
-					mustFixIssues = nil
-				}
-			}
-			if added == 0 {
-				stuckPages++
-			} else {
-				stuckPages = 0
-			}
-			if stuckPages >= 3 && len(mustFixIssues) > 0 {
-				logf("[deploy] error: planning is stuck (no new commands added for %d pages) while %d hard issue(s) remain", stuckPages, len(mustFixIssues))
-				for i, issue := range mustFixIssues {
-					if i >= 12 {
-						break
+					plan = normalized
+					plan.Question = fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, planProvider, intel.Architecture.Method)
+					plan.Summary = "Generated via skeleton+hydrate pipeline"
+					plan.CreatedAt = time.Now().UTC()
+					if strings.TrimSpace(intel.Architecture.Provider) != "" {
+						plan.Provider = strings.TrimSpace(intel.Architecture.Provider)
 					}
-					logf("[deploy]   hard issue: %s", strings.TrimSpace(issue))
-				}
-				if applyMode {
-					logf("[deploy] warning: planning is stuck with hard issues=%d; continuing so execution/self-heal can proceed", len(mustFixIssues))
-				} else {
-					logf("[deploy] warning: planning is stuck but continuing in plan-only mode")
-				}
-				break
-			}
-
-			if page.Done {
-				// Ignore done=true if deterministic hard issues remain; force another page.
-				if len(mustFixIssues) == 0 {
-					break
-				}
-				logf("[deploy] warning: model returned done=true but deterministic issues remain; continuing")
-			}
-
-			if isOpenClawDeploy {
-				if len(plan.Commands) >= openClawHardPlanCommands {
-					logf("[deploy] warning: openclaw plan exceeded hard command ceiling (%d); moving to validation/repair", openClawHardPlanCommands)
-					break
-				}
-				if len(plan.Commands) >= openClawSoftPlanCommands && len(mustFixIssues) == 0 && added <= 1 {
-					logf("[deploy] info: openclaw plan reached soft ceiling (%d) with low incremental progress; moving to validation/repair", openClawSoftPlanCommands)
-					break
+					usedSkeletonPath = true
+					logf("[deploy] skeleton plan: %d commands", len(plan.Commands))
 				}
 			}
 		}
 
-		if len(plan.Commands) == 0 {
+		// --- Fallback: legacy paged plan generation ---
+		if plan == nil {
+			logf("[deploy] using legacy paged plan generation")
+			plan = generatePagedPlan(ctx, aiClient, planProvider, planningContext, rp, intel, requiredLaunchOps, isOpenClawDeploy, applyMode, logf)
+		}
+
+		if plan == nil || len(plan.Commands) == 0 {
 			return fmt.Errorf("failed to generate a plan (no commands produced)")
 		}
-		plan = deploy.SanitizePlanConservative(plan, rp, intel.DeepAnalysis, intel.Docker, logf)
+
+		// Apply project-specific and generic autofixes
+		if isOpenClawDeploy {
+			if patched := deploy.ApplyOpenClawPlanAutofix(plan, rp, intel.DeepAnalysis, logf); patched != nil {
+				plan = patched
+			}
+		}
+		if patched := deploy.ApplyGenericPlanAutofix(plan, logf, rp.EnvVars...); patched != nil {
+			plan = patched
+		}
+
+		// Deterministic checkpoint validation (AWS only)
+		if strings.EqualFold(strings.TrimSpace(planProvider), "aws") {
+			pJSON, _ := json.MarshalIndent(plan, "", "  ")
+			lastDetValidation = deploy.DeterministicValidatePlan(string(pJSON), rp, intel.DeepAnalysis, intel.Docker)
+			if lastDetValidation != nil && !lastDetValidation.IsValid {
+				mustFixIssues = lastDetValidation.Issues
+			}
+		}
+
+		// If skeleton path produced a plan with hard issues, try paged fallback
+		if usedSkeletonPath && len(mustFixIssues) > 0 {
+			logf("[deploy] skeleton plan has %d hard issue(s); trying paged fallback", len(mustFixIssues))
+			pagedPlan := generatePagedPlan(ctx, aiClient, planProvider, planningContext, rp, intel, requiredLaunchOps, isOpenClawDeploy, applyMode, logf)
+			if pagedPlan != nil && len(pagedPlan.Commands) > 0 {
+				// Compare: use whichever has fewer issues
+				if isOpenClawDeploy {
+					if patched := deploy.ApplyOpenClawPlanAutofix(pagedPlan, rp, intel.DeepAnalysis, logf); patched != nil {
+						pagedPlan = patched
+					}
+				}
+				if patched := deploy.ApplyGenericPlanAutofix(pagedPlan, logf, rp.EnvVars...); patched != nil {
+					pagedPlan = patched
+				}
+				pJSON2, _ := json.MarshalIndent(pagedPlan, "", "  ")
+				pagedVal := deploy.DeterministicValidatePlan(string(pJSON2), rp, intel.DeepAnalysis, intel.Docker)
+				pagedIssues := 0
+				if pagedVal != nil && !pagedVal.IsValid {
+					pagedIssues = len(pagedVal.Issues)
+				}
+				if pagedIssues < len(mustFixIssues) {
+					logf("[deploy] paged plan is better (%d vs %d issues); using paged", pagedIssues, len(mustFixIssues))
+					plan = pagedPlan
+					lastDetValidation = pagedVal
+					if pagedVal != nil && !pagedVal.IsValid {
+						mustFixIssues = pagedVal.Issues
+					} else {
+						mustFixIssues = nil
+					}
+				} else {
+					logf("[deploy] skeleton plan is equal or better; keeping skeleton (%d issues)", len(mustFixIssues))
+				}
+			}
+		}
+		_ = mustFixIssues // used downstream
+
 		if lastDetValidation != nil {
 			intel.Validation = lastDetValidation
 		}
@@ -675,7 +591,57 @@ Examples:
 			const maxRepairRounds = 3
 			currentValidation := triage.Hard
 			currentPlanJSON := string(planJSON)
+
+			// ── Targeted user-data micro-repair ──────────────────────────
+			// If validation issues are about user-data content (path typos,
+			// corrupted base64, ECR mismatch), fix JUST the script via a
+			// targeted LLM call instead of rewriting the whole plan.
+			udIssues, structuralIssues := deploy.ClassifyUserDataIssues(currentValidation.Issues)
+			if len(udIssues) > 0 {
+				logf("[deploy] user-data micro-repair: %d user-data issue(s) detected, attempting targeted fix", len(udIssues))
+				patchedPlan, udErr := deploy.RepairUserDataWithLLM(
+					ctx, plan,
+					currentValidation.Issues, currentValidation.Fixes,
+					aiClient.AskPrompt, aiClient.CleanJSONResponse, logf,
+				)
+				if udErr != nil {
+					logf("[deploy] user-data micro-repair failed: %v", udErr)
+				} else if patchedPlan != nil {
+					plan = patchedPlan
+					// Run autofix on the patched plan again
+					if patched := deploy.ApplyGenericPlanAutofix(plan, logf, rp.EnvVars...); patched != nil {
+						plan = patched
+					}
+					// Re-validate to see if user-data issues are resolved
+					patchedJSON, _ := json.MarshalIndent(plan, "", "  ")
+					currentPlanJSON = string(patchedJSON)
+					reVal := deploy.DeterministicValidatePlan(currentPlanJSON, rp, intel.DeepAnalysis, intel.Docker)
+					if reVal != nil && len(reVal.Issues) == 0 {
+						logf("[deploy] user-data micro-repair resolved all deterministic issues")
+						currentValidation = &deploy.PlanValidation{IsValid: true}
+					} else if reVal != nil {
+						// Update: some issues may remain but user-data ones should be fewer
+						reTriage := deploy.TriageValidationForRepair(reVal)
+						currentValidation = reTriage.Hard
+						logf("[deploy] user-data micro-repair: %d hard issue(s) remain after patch", len(currentValidation.Issues))
+					}
+				}
+			}
+
+			// ── Structural repair loop ───────────────────────────────────
+			// Only run full plan repair for non-user-data structural issues.
+			// If all issues were user-data (and micro-repair resolved them), skip.
+			if currentValidation != nil && len(currentValidation.Issues) > 0 {
+				// Filter out already-handled user-data issues from the repair context
+				// so the repair LLM focuses on structural problems only.
+				if len(structuralIssues) > 0 && len(structuralIssues) < len(currentValidation.Issues) {
+					logf("[deploy] repair: focusing on %d structural issue(s), %d user-data issue(s) handled separately", len(structuralIssues), len(udIssues))
+				}
+			}
 			for r := 1; r <= maxRepairRounds; r++ {
+				if currentValidation == nil || len(currentValidation.Issues) == 0 {
+					break // all issues resolved (e.g. by micro-repair)
+				}
 				baselinePlan := plan
 				logf("[deploy] attempting plan repair (round %d/%d)...", r, maxRepairRounds)
 				repairedRaw, rErr := repairAgent.Repair(ctx, currentPlanJSON, currentValidation, repairCtx)
@@ -1009,7 +975,7 @@ Examples:
 		}
 
 		// Generic dedup: collapse redundant launch cycles for any project.
-		if patched := deploy.ApplyGenericPlanAutofix(plan, logf); patched != nil {
+		if patched := deploy.ApplyGenericPlanAutofix(plan, logf, rp.EnvVars...); patched != nil {
 			plan = patched
 		}
 
@@ -1382,6 +1348,233 @@ func inferEnvVarNamesFromText(text string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// generatePagedPlan runs the legacy incremental paged plan generation loop.
+// Used as fallback when skeleton+hydrate fails or produces a plan with too many issues.
+func generatePagedPlan(
+	ctx context.Context,
+	aiClient *ai.Client,
+	planProvider string,
+	planningContext string,
+	rp *deploy.RepoProfile,
+	intel *deploy.IntelligenceResult,
+	requiredLaunchOps []string,
+	isOpenClawDeploy bool,
+	applyMode bool,
+	logf func(string, ...interface{}),
+) *maker.Plan {
+	const maxPlanPages = 20
+	const maxCommandsPerPage = 8
+	const maxConsecutivePageFailures = 5
+	const earlyRepairAfterFailures = 3
+	const openClawSoftPlanCommands = 30
+	const openClawHardPlanCommands = 40
+
+	plan := &maker.Plan{
+		Version:   maker.CurrentPlanVersion,
+		CreatedAt: time.Now().UTC(),
+		Provider:  planProvider,
+		Question:  fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, planProvider, intel.Architecture.Method),
+		Summary:   "",
+		Commands:  nil,
+	}
+	if strings.TrimSpace(intel.Architecture.Provider) != "" {
+		plan.Provider = strings.TrimSpace(intel.Architecture.Provider)
+	}
+
+	var mustFixIssues []string
+	stuckPages := 0
+	consecutivePageFailures := 0
+	pageFormatHint := ""
+
+	projectSummaryForLLM := strings.TrimSpace(rp.Summary)
+	if intel.DeepAnalysis != nil && strings.TrimSpace(intel.DeepAnalysis.AppDescription) != "" {
+		projectSummaryForLLM = strings.TrimSpace(intel.DeepAnalysis.AppDescription)
+	}
+
+	for pageRound := 1; pageRound <= maxPlanPages; pageRound++ {
+		prompt := deploy.BuildPlanPagePrompt(planProvider, planningContext, plan, requiredLaunchOps, mustFixIssues, maxCommandsPerPage, pageFormatHint)
+		resp, err := aiClient.AskPrompt(ctx, prompt)
+		if err != nil {
+			if !applyMode && len(plan.Commands) > 0 && (errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "deadline exceeded")) {
+				logf("[deploy] warning: planner request timed out after %d page(s); continuing with partial plan (%d command(s))", pageRound-1, len(plan.Commands))
+				break
+			}
+			logf("[deploy] paged plan generation failed: %v", err)
+			return nil
+		}
+
+		cleaned := aiClient.CleanJSONResponse(resp)
+		page, pErr := deploy.ParsePlanPage(cleaned)
+		if pErr != nil {
+			repairedPage, repairedRaw, rErr := deploy.RepairPlanPageWithLLM(ctx, aiClient.AskPrompt, aiClient.CleanJSONResponse, planProvider, planningContext, projectSummaryForLLM, cleaned, pageFormatHint, logf)
+			if rErr == nil && repairedPage != nil {
+				logf("[deploy] plan page parse auto-repaired via LLM (root=%s)", jsonRootKind(repairedRaw))
+				page = repairedPage
+				cleaned = repairedRaw
+				pErr = nil
+			}
+		}
+		if pErr != nil {
+			consecutivePageFailures++
+			pageFormatHint = "Last response was invalid JSON for this schema (often an array of prose strings). Return ONLY one JSON object with keys: done, commands, optional summary, optional notes. Do not return arrays of explanations."
+			logf("[deploy] warning: plan page parse failed (%v, root=%s, sample=%q), retrying (page %d/%d)...", pErr, jsonRootKind(cleaned), compactOneLine(cleaned, 180), pageRound, maxPlanPages)
+			if consecutivePageFailures >= earlyRepairAfterFailures && len(plan.Commands) > 0 {
+				logf("[deploy] warning: switching early to deterministic repair after %d consecutive page failures", consecutivePageFailures)
+				break
+			}
+			if consecutivePageFailures >= maxConsecutivePageFailures {
+				if !applyMode && len(plan.Commands) > 0 {
+					logf("[deploy] warning: stopping after %d consecutive page failures; continuing with partial plan (%d command(s))", consecutivePageFailures, len(plan.Commands))
+					break
+				}
+				logf("[deploy] paged plan generation failed: too many consecutive page parse failures (%d)", consecutivePageFailures)
+				return nil
+			}
+			continue
+		}
+
+		if len(page.Commands) > 0 {
+			// Normalize args and validate command shapes via maker.ParsePlan.
+			tmp := &maker.Plan{Provider: planProvider, Question: "", Summary: "", Commands: page.Commands}
+			tmpJSON, _ := json.Marshal(tmp)
+			normalized, nErr := maker.ParsePlan(string(tmpJSON))
+			if nErr != nil {
+				repairedPage, repairedRaw, rErr := deploy.RepairPlanPageWithLLM(
+					ctx,
+					aiClient.AskPrompt,
+					aiClient.CleanJSONResponse,
+					planProvider,
+					planningContext,
+					projectSummaryForLLM,
+					cleaned,
+					"Last response included command args that failed normalization. Return command args arrays only and keep the same deployment intent.",
+					logf,
+				)
+				if rErr == nil && repairedPage != nil && len(repairedPage.Commands) > 0 {
+					tmp = &maker.Plan{Provider: planProvider, Question: "", Summary: "", Commands: repairedPage.Commands}
+					tmpJSON, _ = json.Marshal(tmp)
+					normalized, nErr = maker.ParsePlan(string(tmpJSON))
+					if nErr == nil {
+						logf("[deploy] plan page command normalization auto-repaired via LLM")
+						page.Commands = normalized.Commands
+						consecutivePageFailures = 0
+						pageFormatHint = ""
+						goto pageNormalized
+					}
+					logf("[deploy] warning: auto-repaired page still invalid (%v, sample=%q)", nErr, compactOneLine(repairedRaw, 180))
+				}
+				consecutivePageFailures++
+				pageFormatHint = "Last response included commands that failed normalization. Return CLI argument arrays only, with no prose fields beyond reason/produces."
+				logf("[deploy] warning: plan page had invalid commands (%v), retrying (page %d/%d)...", nErr, pageRound, maxPlanPages)
+				if consecutivePageFailures >= earlyRepairAfterFailures && len(plan.Commands) > 0 {
+					logf("[deploy] warning: switching early to deterministic repair after %d consecutive page failures", consecutivePageFailures)
+					break
+				}
+				if consecutivePageFailures >= maxConsecutivePageFailures {
+					if !applyMode && len(plan.Commands) > 0 {
+						logf("[deploy] warning: stopping after %d consecutive page failures; continuing with partial plan (%d command(s))", consecutivePageFailures, len(plan.Commands))
+						break
+					}
+					logf("[deploy] paged plan generation failed: too many consecutive invalid plan pages (%d)", consecutivePageFailures)
+					return nil
+				}
+				continue
+			}
+			page.Commands = normalized.Commands
+			if len(page.Commands) > maxCommandsPerPage {
+				logf("[deploy] warning: page returned %d commands; clamping to %d", len(page.Commands), maxCommandsPerPage)
+				page.Commands = page.Commands[:maxCommandsPerPage]
+			}
+		}
+	pageNormalized:
+		consecutivePageFailures = 0
+		pageFormatHint = ""
+
+		added := deploy.AppendPlanPage(plan, page)
+		logf("[deploy] plan page %d/%d: added %d command(s) (total=%d)", pageRound, maxPlanPages, added, len(plan.Commands))
+
+		// Ensure plan metadata is consistent.
+		if strings.TrimSpace(intel.Architecture.Provider) != "" {
+			plan.Provider = strings.TrimSpace(intel.Architecture.Provider)
+		}
+		plan.Question = fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, strings.ToLower(strings.TrimSpace(plan.Provider)), intel.Architecture.Method)
+		if plan.CreatedAt.IsZero() {
+			plan.CreatedAt = time.Now().UTC()
+		}
+		if plan.Version == 0 {
+			plan.Version = maker.CurrentPlanVersion
+		}
+
+		if isOpenClawDeploy {
+			if patched := deploy.ApplyOpenClawPlanAutofix(plan, rp, intel.DeepAnalysis, logf); patched != nil {
+				plan = patched
+			}
+		}
+
+		// Generic dedup: collapse redundant launch cycles for any project.
+		if patched := deploy.ApplyGenericPlanAutofix(plan, logf, rp.EnvVars...); patched != nil {
+			plan = patched
+		}
+
+		// Deterministic checkpoint validation (AWS only).
+		if strings.EqualFold(strings.TrimSpace(planProvider), "aws") {
+			planJSON, _ := json.MarshalIndent(plan, "", "  ")
+			lastDetValidation := deploy.DeterministicValidatePlan(string(planJSON), rp, intel.DeepAnalysis, intel.Docker)
+			if lastDetValidation != nil && !lastDetValidation.IsValid {
+				mustFixIssues = lastDetValidation.Issues
+			} else {
+				mustFixIssues = nil
+			}
+		}
+		if added == 0 {
+			stuckPages++
+		} else {
+			stuckPages = 0
+		}
+		if stuckPages >= 3 && len(mustFixIssues) > 0 {
+			logf("[deploy] error: planning is stuck (no new commands added for %d pages) while %d hard issue(s) remain", stuckPages, len(mustFixIssues))
+			for i, issue := range mustFixIssues {
+				if i >= 12 {
+					break
+				}
+				logf("[deploy]   hard issue: %s", strings.TrimSpace(issue))
+			}
+			if applyMode {
+				logf("[deploy] warning: planning is stuck with hard issues=%d; continuing so execution/self-heal can proceed", len(mustFixIssues))
+			} else {
+				logf("[deploy] warning: planning is stuck but continuing in plan-only mode")
+			}
+			break
+		}
+
+		if page.Done {
+			// Ignore done=true if deterministic hard issues remain; force another page.
+			if len(mustFixIssues) == 0 {
+				break
+			}
+			logf("[deploy] warning: model returned done=true but deterministic issues remain; continuing")
+		}
+
+		if isOpenClawDeploy {
+			if len(plan.Commands) >= openClawHardPlanCommands {
+				logf("[deploy] warning: openclaw plan exceeded hard command ceiling (%d); moving to validation/repair", openClawHardPlanCommands)
+				break
+			}
+			if len(plan.Commands) >= openClawSoftPlanCommands && len(mustFixIssues) == 0 && added <= 1 {
+				logf("[deploy] info: openclaw plan reached soft ceiling (%d) with low incremental progress; moving to validation/repair", openClawSoftPlanCommands)
+				break
+			}
+		}
+	}
+
+	if len(plan.Commands) == 0 {
+		logf("[deploy] paged plan generation produced zero commands")
+		return nil
+	}
+
+	return plan
 }
 
 func jsonRootKind(raw string) string {

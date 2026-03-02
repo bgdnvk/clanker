@@ -102,6 +102,8 @@ func (a *PlanRepairAgent) buildPrompt(planJSON string, v *PlanValidation, c Plan
 	b.WriteString("- Preserve intent but fix missing steps, ordering, and placeholder binding.\n")
 	b.WriteString("- Placeholders must use angle syntax: <NAME>. Never emit ${NAME} or $NAME.\n")
 	b.WriteString("- If you use any placeholder token like <X>, an earlier command MUST have produces { \"X\": \"$.path\" }.\n")
+	b.WriteString("- CRITICAL: The output plan MUST have the same number of commands as the input (±3). Do NOT regenerate from scratch.\n")
+	b.WriteString("- If an issue mentions user-data/base64 content, edit ONLY the --user-data arg of the relevant ec2 run-instances command.\n")
 	switch prov {
 	case "cloudflare":
 		b.WriteString("- Commands must be Cloudflare-only: args start with 'wrangler' or 'cloudflared', OR API calls as [METHOD, /endpoint, optional-json-body].\n")
