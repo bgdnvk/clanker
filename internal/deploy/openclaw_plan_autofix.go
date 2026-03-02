@@ -29,6 +29,12 @@ func ApplyOpenClawPlanAutofix(plan *maker.Plan, profile *RepoProfile, deep *Deep
 		logf("[deploy] openclaw autofix: removed %d redundant SSM command(s)", ssmRemoved)
 	}
 
+	// Prune SSM document cycles (create-doc→send→wait→delete→create-doc-v2...).
+	docCycleRemoved := pruneSSMDocumentCycles(plan)
+	if docCycleRemoved > 0 {
+		logf("[deploy] openclaw autofix: removed %d SSM document-cycle command(s)", docCycleRemoved)
+	}
+
 	hasCloudFrontCreate := false
 	hasCloudFrontWait := false
 	hasCloudFrontIDProduce := false
@@ -211,49 +217,39 @@ func classifySSMIntent(args []string) string {
 	if svc != "ssm" || op != "send-command" {
 		return ""
 	}
-
-	// Grab the --parameters value and flatten commands array.
 	script := extractSSMScriptFromArgs(args)
+	return classifySSMScript(script)
+}
+
+// classifySSMScript returns a semantic category for a shell script
+// embedded in an SSM command or document. OpenClaw-specific patterns first,
+// then delegates to classifySSMScriptGeneric for project-agnostic fallback.
+func classifySSMScript(script string) string {
 	if script == "" {
 		return ""
 	}
 	l := strings.ToLower(script)
 
-	// Classify by dominant intent.
+	// OpenClaw-specific patterns
 	hasOnboard := strings.Contains(l, "docker-setup.sh") || strings.Contains(l, "openclaw-cli onboard") || strings.Contains(l, "openclaw-cli\" onboard")
 	hasStart := strings.Contains(l, "docker compose up") || strings.Contains(l, "docker-compose up") || (strings.Contains(l, "docker run") && strings.Contains(l, "openclaw"))
-	hasStop := (strings.Contains(l, "docker compose down") || strings.Contains(l, "docker compose stop") || strings.Contains(l, "docker-compose down")) && !hasStart
-	hasEnvWrite := strings.Contains(l, "> /opt/openclaw/.env") || strings.Contains(l, ">> /opt/openclaw/.env") || strings.Contains(l, "> .env") || strings.Contains(l, "cat > /opt/openclaw/.env")
-	hasECRPull := strings.Contains(l, "ecr get-login-password") || (strings.Contains(l, "docker pull") && strings.Contains(l, ".dkr.ecr."))
-	hasDiag := strings.Contains(l, "docker logs") || strings.Contains(l, "docker ps") || strings.Contains(l, "curl -s") || strings.Contains(l, "health")
-	hasClone := strings.Contains(l, "git clone")
 	hasConfigOrigins := strings.Contains(l, "openclaw.json") && strings.Contains(l, "allowedorigins")
 	hasListInvocations := strings.Contains(l, "list-command-invocations")
 
-	// Priority order: a command may match multiple; pick the most specific.
+	// OpenClaw onboard/start combos take highest priority
 	switch {
 	case hasOnboard && !hasStart:
 		return "ssm-onboard"
-	case hasStart && !hasOnboard:
-		return "ssm-gateway-start"
 	case hasOnboard && hasStart:
 		return "ssm-onboard-and-start"
-	case hasStop:
-		return "ssm-compose-stop"
 	case hasConfigOrigins && !hasStart && !hasOnboard:
 		return "ssm-config-origins"
-	case hasEnvWrite && !hasStart && !hasOnboard:
-		return "ssm-env-setup"
-	case hasECRPull && !hasStart:
-		return "ssm-ecr-pull"
-	case hasClone && !hasStart && !hasOnboard:
-		return "ssm-clone"
 	case hasListInvocations:
 		return "ssm-list-invocations"
-	case hasDiag && !hasStart && !hasOnboard && !hasEnvWrite:
-		return "ssm-diagnostics"
 	}
-	return ""
+
+	// Fallback to generic classifier (handles clone, start, stop, env, ecr, diag)
+	return classifySSMScriptGeneric(script)
 }
 
 // extractSSMScriptFromArgs extracts the flattened shell script from
@@ -383,4 +379,178 @@ func singleToDoubleQuotes(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// ---------------------------------------------------------------------------
+// SSM document-cycle dedup
+// ---------------------------------------------------------------------------
+
+// pruneSSMDocumentCycles collapses repeated SSM document-based execution
+// cycles where the LLM creates, runs, then recreates numbered versions
+// of the same document (onboard→delete→onboard-v2→delete→start-v3...).
+// We classify each doc's content by intent and keep only the LAST cycle.
+func pruneSSMDocumentCycles(plan *maker.Plan) int {
+	if plan == nil || len(plan.Commands) < 2 {
+		return 0
+	}
+
+	// Phase 1: index all ssm create-document commands
+	type docEntry struct {
+		createIdx int
+		name      string
+		intent    string
+	}
+	docs := map[string]*docEntry{}
+	var docOrder []string
+	for i, cmd := range plan.Commands {
+		if !isSSMOp(cmd.Args, "create-document") {
+			continue
+		}
+		name := getSSMArgValue(cmd.Args, "--name")
+		if name == "" {
+			continue
+		}
+		content := getSSMArgValue(cmd.Args, "--content")
+		script := extractScriptFromDocContent(content)
+		intent := classifySSMScript(script)
+		docs[name] = &docEntry{createIdx: i, name: name, intent: intent}
+		docOrder = append(docOrder, name)
+	}
+	if len(docs) < 2 {
+		return 0
+	}
+
+	// Phase 2: find last doc name for each intent category
+	intentLast := map[string]string{}
+	for _, name := range docOrder {
+		d := docs[name]
+		if d.intent != "" {
+			intentLast[d.intent] = name
+		}
+	}
+
+	// Phase 3: mark earlier cycles for removal
+	removedDocNames := map[string]bool{}
+	for _, name := range docOrder {
+		d := docs[name]
+		if d.intent != "" && intentLast[d.intent] != name {
+			removedDocNames[name] = true
+		}
+	}
+	if len(removedDocNames) == 0 {
+		return 0
+	}
+
+	// Track produced placeholder keys from removed send-commands
+	removedProducedKeys := map[string]bool{}
+	drop := map[int]bool{}
+
+	for i, cmd := range plan.Commands {
+		if len(cmd.Args) < 2 {
+			continue
+		}
+		svc := strings.ToLower(strings.TrimSpace(cmd.Args[0]))
+		op := strings.ToLower(strings.TrimSpace(cmd.Args[1]))
+		if svc != "ssm" {
+			continue
+		}
+
+		switch op {
+		case "create-document":
+			name := getSSMArgValue(cmd.Args, "--name")
+			if removedDocNames[name] {
+				drop[i] = true
+			}
+		case "send-command":
+			name := getSSMArgValue(cmd.Args, "--document-name")
+			if removedDocNames[name] {
+				drop[i] = true
+				for k := range cmd.Produces {
+					removedProducedKeys[k] = true
+				}
+			}
+		case "delete-document":
+			name := getSSMArgValue(cmd.Args, "--name")
+			if removedDocNames[name] {
+				drop[i] = true
+			}
+		case "wait":
+			// ssm wait command-executed --command-id <PLACEHOLDER>
+			if referencesRemovedKey(cmd.Args, removedProducedKeys) {
+				drop[i] = true
+			}
+		case "get-command-invocation":
+			if referencesRemovedKey(cmd.Args, removedProducedKeys) {
+				drop[i] = true
+			}
+		}
+	}
+
+	if len(drop) == 0 {
+		return 0
+	}
+
+	filtered := make([]maker.Command, 0, len(plan.Commands)-len(drop))
+	for i, cmd := range plan.Commands {
+		if !drop[i] {
+			filtered = append(filtered, cmd)
+		}
+	}
+	plan.Commands = filtered
+	return len(drop)
+}
+
+// isSSMOp checks if a command is ssm <operation>.
+func isSSMOp(args []string, operation string) bool {
+	if len(args) < 2 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(args[0]), "ssm") &&
+		strings.EqualFold(strings.TrimSpace(args[1]), operation)
+}
+
+// getSSMArgValue returns the value following a CLI flag (--name, --content, etc.).
+func getSSMArgValue(args []string, flag string) string {
+	for i := 0; i < len(args)-1; i++ {
+		if strings.TrimSpace(args[i]) == flag {
+			return strings.TrimSpace(args[i+1])
+		}
+	}
+	return ""
+}
+
+// extractScriptFromDocContent parses an SSM document JSON and returns
+// the flattened runCommand array from the first aws:runShellScript step.
+func extractScriptFromDocContent(content string) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+	var doc struct {
+		MainSteps []struct {
+			Inputs struct {
+				RunCommand []string `json:"runCommand"`
+			} `json:"inputs"`
+		} `json:"mainSteps"`
+	}
+	if json.Unmarshal([]byte(content), &doc) == nil {
+		for _, step := range doc.MainSteps {
+			if len(step.Inputs.RunCommand) > 0 {
+				return strings.Join(step.Inputs.RunCommand, "\n")
+			}
+		}
+	}
+	return ""
+}
+
+// referencesRemovedKey checks if any arg contains a <PLACEHOLDER> for a removed key.
+func referencesRemovedKey(args []string, removedKeys map[string]bool) bool {
+	for _, a := range args {
+		for k := range removedKeys {
+			if strings.Contains(a, "<"+k+">") {
+				return true
+			}
+		}
+	}
+	return false
 }

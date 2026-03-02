@@ -13,6 +13,71 @@ import (
 // placeholderRe matches placeholder tokens like <VPC_ID>, <SUBNET_1A_ID>, etc.
 var placeholderRe = regexp.MustCompile(`<([A-Z0-9_]+)>`)
 
+// variantPlaceholderRes matches LLM-hallucinated placeholder formats we normalize to <KEY>
+var variantPlaceholderRes = []*regexp.Regexp{
+	regexp.MustCompile(`\{\{([A-Z][A-Z0-9_]{2,})\}\}`),      // {{KEY}} — Mustache/Jinja
+	regexp.MustCompile(`\$\{([A-Z][A-Z0-9_]{2,})\}`),        // ${KEY} — shell variable
+	regexp.MustCompile(`<<([A-Z][A-Z0-9_]{2,})>>`),          // <<KEY>> — double angle
+	regexp.MustCompile(`%([A-Z][A-Z0-9_]{2,})%`),            // %KEY% — Windows batch
+	regexp.MustCompile(`\$([A-Z][A-Z0-9_]{2,})(?:\b|[^(])`), // $KEY — bare shell var (3+ uppercase chars)
+}
+
+// normalizePlaceholderFormats rewrites all variant placeholder patterns to canonical <KEY>
+func normalizePlaceholderFormats(plan *maker.Plan) *maker.Plan {
+	if plan == nil {
+		return plan
+	}
+	changed := false
+	newPlan := &maker.Plan{
+		Version:   plan.Version,
+		CreatedAt: plan.CreatedAt,
+		Provider:  plan.Provider,
+		Question:  plan.Question,
+		Summary:   plan.Summary,
+		Notes:     plan.Notes,
+		Commands:  make([]maker.Command, len(plan.Commands)),
+	}
+	for i, cmd := range plan.Commands {
+		newCmd := maker.Command{
+			Reason:   cmd.Reason,
+			Produces: cmd.Produces,
+			Args:     make([]string, len(cmd.Args)),
+		}
+		for j, arg := range cmd.Args {
+			normalized := normalizeArg(arg)
+			if normalized != arg {
+				changed = true
+			}
+			newCmd.Args[j] = normalized
+		}
+		newPlan.Commands[i] = newCmd
+	}
+	if !changed {
+		return plan
+	}
+	return newPlan
+}
+
+// normalizeArg rewrites variant placeholder patterns to <KEY> in a single arg
+func normalizeArg(arg string) string {
+	for _, re := range variantPlaceholderRes {
+		arg = re.ReplaceAllStringFunc(arg, func(match string) string {
+			sub := re.FindStringSubmatch(match)
+			if len(sub) < 2 {
+				return match
+			}
+			key := sub[1]
+			// bare $KEY regex may capture trailing char — reconstruct cleanly
+			if strings.HasPrefix(match, "$") && !strings.HasPrefix(match, "${") {
+				trailing := strings.TrimPrefix(match, "$"+key)
+				return "<" + key + ">" + trailing
+			}
+			return "<" + key + ">"
+		})
+	}
+	return arg
+}
+
 // ResolvePlanPlaceholders attempts to replace placeholder tokens in the plan with actual values.
 // It first tries to map from the InfraSnapshot, then calls the LLM for any remaining placeholders.
 // Returns the modified plan and a list of any placeholders that could not be resolved.
@@ -27,6 +92,9 @@ func ResolvePlanPlaceholders(
 	if plan == nil {
 		return nil, nil, fmt.Errorf("nil plan")
 	}
+
+	// normalize variant placeholder formats ({{KEY}}, ${KEY}, etc.) to canonical <KEY>
+	plan = normalizePlaceholderFormats(plan)
 
 	// Build initial bindings from infrastructure snapshot
 	bindings := buildInfraBindings(infraSnap)
@@ -467,6 +535,9 @@ func ApplyEnvVarBindings(plan *maker.Plan, envVars map[string]string) *maker.Pla
 	if plan == nil || len(envVars) == 0 {
 		return plan
 	}
+	// normalize {{KEY}}, ${KEY}, etc. to <KEY> before matching
+	plan = normalizePlaceholderFormats(plan)
+
 	bindings := make(map[string]string, len(envVars))
 	for k, v := range envVars {
 		k = strings.TrimSpace(k)

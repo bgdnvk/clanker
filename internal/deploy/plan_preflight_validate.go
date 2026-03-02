@@ -3,6 +3,8 @@ package deploy
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/bgdnvk/clanker/internal/maker"
@@ -198,6 +200,13 @@ func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepA
 			}
 		}
 	}
+
+	// Cross-reference: verify user-data ECR image references match plan-created repos.
+	// Generic — catches any project where the LLM invents a different repo name.
+	crossRefIssues := crossCheckUserDataVsPlan(&plan)
+	out.Issues = append(out.Issues, crossRefIssues.Issues...)
+	out.Fixes = append(out.Fixes, crossRefIssues.Fixes...)
+	out.Warnings = append(out.Warnings, crossRefIssues.Warnings...)
 
 	out.Issues = uniqueStrings(out.Issues)
 	out.Fixes = uniqueStrings(out.Fixes)
@@ -877,4 +886,93 @@ func validatePackageManagerUsage(script string, expectedPM string, lockFiles []s
 		}
 	}
 	return out
+}
+
+// crossCheckUserDataVsPlan verifies that user-data scripts reference the same
+// resource names that the plan actually creates. Generic — works for any project.
+// Catches: ECR repo name mismatches, security group name typos, etc.
+func crossCheckUserDataVsPlan(plan *maker.Plan) deterministicValidation {
+	var out deterministicValidation
+	if plan == nil || len(plan.Commands) == 0 {
+		return out
+	}
+
+	// Collect ECR repo names from ecr create-repository commands
+	ecrRepoNames := map[string]bool{}
+	for _, cmd := range plan.Commands {
+		if len(cmd.Args) < 3 {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(cmd.Args[0])) != "ecr" ||
+			strings.ToLower(strings.TrimSpace(cmd.Args[1])) != "create-repository" {
+			continue
+		}
+		for i := 2; i < len(cmd.Args)-1; i++ {
+			if strings.TrimSpace(cmd.Args[i]) == "--repository-name" {
+				ecrRepoNames[strings.TrimSpace(cmd.Args[i+1])] = true
+			}
+		}
+	}
+
+	if len(ecrRepoNames) == 0 {
+		return out // no ECR repos in plan, nothing to check
+	}
+
+	// Check user-data scripts for ECR image references that don't match
+	ecrImageRe := regexp.MustCompile(`(?:dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com)/([a-z0-9][-a-z0-9_.]*):`)
+
+	for ci, cmd := range plan.Commands {
+		if len(cmd.Args) < 2 {
+			continue
+		}
+		if strings.ToLower(cmd.Args[0]) != "ec2" || strings.ToLower(cmd.Args[1]) != "run-instances" {
+			continue
+		}
+		script := extractEC2UserDataScript(cmd.Args)
+		if script == "" {
+			continue
+		}
+
+		// Find explicit ECR image refs in the script
+		matches := ecrImageRe.FindAllStringSubmatch(script, -1)
+		for _, m := range matches {
+			repoRef := strings.TrimSpace(m[1])
+			if repoRef == "" || strings.HasPrefix(repoRef, "$") || strings.Contains(repoRef, "${") {
+				continue
+			}
+			if !ecrRepoNames[repoRef] {
+				out.Issues = append(out.Issues, fmt.Sprintf(
+					"[HARD] user-data in command %d references ECR repo '%s' but plan only creates: %s",
+					ci+1, repoRef, joinMapKeys(ecrRepoNames)))
+				out.Fixes = append(out.Fixes, fmt.Sprintf(
+					"Update user-data to pull from the correct ECR repository name (%s) or derive it dynamically from ECR_REPOSITORY_URI",
+					joinMapKeys(ecrRepoNames)))
+			}
+		}
+
+		// Flag hardcoded ECR image URIs that use wrong repo name
+		hardcodedEcrRe := regexp.MustCompile(`[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/([a-z0-9][-a-z0-9_.]*):`)
+		hardcoded := hardcodedEcrRe.FindAllStringSubmatch(script, -1)
+		for _, m := range hardcoded {
+			repoRef := strings.TrimSpace(m[1])
+			if repoRef != "" && !ecrRepoNames[repoRef] {
+				out.Issues = append(out.Issues, fmt.Sprintf(
+					"[HARD] user-data hardcodes ECR image with repo '%s' but plan creates '%s'",
+					repoRef, joinMapKeys(ecrRepoNames)))
+				out.Fixes = append(out.Fixes,
+					"Derive ECR registry URL dynamically and use the correct repo name from the plan")
+			}
+		}
+	}
+
+	return out
+}
+
+// joinMapKeys concatenates map keys as comma-separated string.
+func joinMapKeys(m map[string]bool) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return strings.Join(keys, ", ")
 }
