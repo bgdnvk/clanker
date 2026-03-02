@@ -16,83 +16,75 @@ This package powers the `clanker deploy` intelligence flow from user query to pl
     - **Phase 2: Architecture decision** (`intelligence.go`) — method/provider recommendation (e.g. EC2 for OpenClaw).
     - Produces `EnrichedPrompt` for planning.
 
-3. **Paged plan generation (`paged_plan.go`)**
+3. **Skeleton + hydrate plan generation (`skeleton_plan.go`) — primary path**
+    - **Phase 3a: Skeleton** — single LLM call produces a lightweight `PlanSkeleton` (service, operation, reason, produces, dependsOn per step). No real CLI args yet.
+    - Skeleton is validated (`validateSkeleton`): checks required launch ops are present, flags duplicates using a composite key of `(service, operation, produces, dependsOn)`.
+    - **Phase 3b: Hydrate** — skeleton steps are batched (max 5 consecutive independent steps per batch) and each batch is hydrated into real `maker.Command` structs via separate LLM calls.
+    - Hydrate prompts enforce resource name consistency across steps (e.g. ECR repo names in user-data must match earlier `ecr create-repository` commands).
+    - If skeleton or hydration fails, falls back to the **paged plan generation** path.
+
+    3b. **Paged plan generation (`paged_plan.go`) — fallback path**
     - Plan is generated in **small command pages** instead of one large response.
     - Each page is parsed (`ParsePlanPage`), normalized via `maker.ParsePlan`, and appended with dedupe (`AppendPlanPage`).
-
-- Parser tolerates either a page object or a plain command array (`[]commands`) from the LLM.
+    - Parser tolerates either a page object or a plain command array (`[]commands`) from the LLM.
     - Page prompts include current command tail + produced bindings + required launch operations + unresolved hard issues.
+    - When both skeleton and paged plans exist, the one with fewer deterministic issues wins.
 
-4. **Deterministic guardrails (`plan_preflight_validate.go`)**
-    - After each page (AWS path), deterministic checks run for hard failures:
+4. **Generic plan autofix (`plan_autofix.go`)**
+    - Runs after plan generation (both skeleton and paged paths).
+    - **SSM semantic dedup** — deduplicates SSM `send-command` / `put-parameter` steps that do the same thing.
+    - **Launch cycle dedup** — removes redundant `run-instances` cycles within the same project.
+    - **Read-only dedup** — collapses repeated read-only commands (describe/get/list).
+    - **Orphan placeholder pruning** — removes commands that reference `<PLACEHOLDER>` values never produced by any earlier command. Accepts `externalBindings` (user-provided env var names) so user env vars are treated as "produced" and not orphan-pruned.
+    - **User-data placeholder normalization** — rewrites `<USER_DATA_*>` variants to canonical `<USER_DATA>`.
+    - **Critical command protection** — `run-instances`, `create-load-balancer`, `create-distribution` are never removed by autofix.
+
+5. **Deterministic guardrails (`plan_preflight_validate.go`)**
+    - Deterministic checks run for hard failures:
         - launch step missing,
         - OpenClaw onboarding/compose requirements,
         - missing compose-required env vars,
         - secret inlining,
         - AWS wiring sanity checks.
-    - waiter/order sanity for AWS runtime wiring (`ec2 wait instance-running` before target registration, `elbv2 wait load-balancer-available` before listener creation).
+    - Waiter/order sanity for AWS runtime wiring (`ec2 wait instance-running` before target registration, `elbv2 wait load-balancer-available` before listener creation).
     - CloudFront command-shape sanity (`create-distribution` must not carry `--tags`) and OpenClaw output contract (`CLOUDFRONT_DOMAIN` + full `HTTPS_URL` with `https://`).
-    - If hard issues remain, planner is forced to continue (`done=true` is ignored while issues remain).
+    - **User-data vs plan cross-check** (`crossCheckUserDataVsPlan`) — decodes base64 user-data from `run-instances` commands, extracts ECR image references, and verifies they match ECR repositories created in the plan. Catches hallucinated repo name mismatches.
+    - **Bulk invariant checks:**
+        - non-empty command list, no unresolved placeholders,
+        - IAM instance-profile readiness before EC2 launch,
+        - user-data quote sanity (detects unterminated quote breakages).
+    - **Project overlay invariants:**
+        - OpenClaw: HTTPS pairing URL via CloudFront, onboarding before gateway start.
     - Stuck detection fails fast in `--apply`; in plan-only mode it logs warnings and returns best-effort output.
 
-5. **Deterministic repair pass (`plan_repair_agent.go`)**
-    - If paged planning ends with deterministic issues, repair rounds are run to patch the plan JSON.
-    - Re-validated deterministically each round before continuing.
+6. **Deterministic repair + triage**
+    - If planning ends with deterministic issues, repair rounds (`plan_repair_agent.go`) patch the plan JSON and re-validate.
+    - Findings are triaged (`plan_issue_triage.go`) into `hard-fixable`, `likely-noise`, and `context-needed`.
+    - Repair prompts enforce strict contract: preserve valid commands, minimal diff, fix only listed issues.
+    - **User-data micro-repair** — targeted LLM fix for user-data script issues without touching the rest of the plan.
 
-- Validation findings are triaged (`plan_issue_triage.go`) into:
-    - `hard-fixable` (sent to repair prompts),
-    - `likely-noise` (excluded from repair loop),
-    - `context-needed` (logged for operator follow-up).
-- Repair prompts enforce a strict contract: preserve valid commands, minimal diff, fix only listed issues, avoid architecture changes unless required.
+7. **Conservative sanitizer (`plan_sanitize.go`)**
+    - Sanitization is **fail-open**: original vs sanitized plans are compared via deterministic issue count.
+    - Sanitized plan is used only when it is not worse than original.
+    - Includes generic arg normalization and safe command cleanup across providers.
 
-    5.5 **Bulk invariant pass (`plan_preflight_validate.go`)**
-
-- After each bulk repair round, invariants are checked before moving on.
-- **Generic baseline invariants (all repos):**
-    - non-empty command list,
-    - no unresolved placeholders,
-    - IAM instance-profile readiness (`get-instance-profile`) before EC2 launch when role/profile wiring exists,
-    - user-data quote sanity (detects common unterminated quote breakages).
-- **Project overlay invariants:**
-    - OpenClaw: HTTPS pairing URL shipped via CloudFront (create + wait + output), onboarding before gateway start.
-- Overlay model keeps baseline checks generic while allowing targeted rules for known one-click projects.
-
-6. **Conservative sanitizer (`plan_sanitize.go`)**
-
-- Sanitization is **fail-open**: original vs sanitized plans are compared via deterministic issue count.
-- Sanitized plan is used only when it is not worse than original.
-- Includes generic arg normalization and safe command cleanup across providers, with targeted AWS managed-policy ARN normalization.
-
-7. **LLM validation + repair (`ValidatePlan`)**
+8. **LLM validation + repair (`ValidatePlan`)**
     - Once deterministic checks pass, the LLM validator reviews ordering/missing steps/port/env/IAM chaining.
     - If invalid, repair rounds rewrite plan JSON and re-validate.
-    - Validation parsing is hardened against malformed model output.
+    - Repair/review parsing uses LLM JSON-repair helpers (`llm_plan_integrity.go`) before giving up on a candidate.
+    - Retention guard is issue-driven: allows focused removals when issues/fixes justify them, blocks broad command collapse.
 
-- Repair/review parsing now uses LLM JSON-repair helpers (`llm_plan_integrity.go`) before giving up on a candidate.
-- Retention guard is issue-driven: allows focused removals when issues/fixes justify them, blocks broad command collapse.
-- In `--apply`, unresolved validation/repair issues are warning-first and flow continues to execution where runtime self-heal checks can remediate command-time failures.
+9. **Final review + integrity passes**
+    - **Review agent** (`plan_review_agent.go`) — non-blocking pass that can append missing commands.
+    - **Generic integrity pass** (`llm_plan_integrity.go`) — provider-agnostic minimal-diff fixes (tokenization, waiter usage, `run-instances` flag/script boundary, CloudFront config shape) without architecture drift.
 
-8. **Final review pass (`plan_review_agent.go`)**
-
-- A final reviewer agent reads the latest plan JSON and can append missing requirement commands.
-- OpenClaw-on-AWS guidance is reinforced here (EC2 + CloudFront HTTPS pairing flow).
-- This pass is **non-blocking**: parse/call failures keep the current plan and continue.
-
-    8.5 **Generic integrity pass (`llm_plan_integrity.go`)**
-
-- A provider-agnostic LLM integrity pass runs before final output/apply.
-- Goal: minimal-diff command integrity fixes (tokenization, malformed waiter usage, `run-instances` flag/script boundary, CloudFront config arg shape), without architecture drift.
-- Prompt policy is **balanced**: allows small safety corrections while preserving command order and intent.
-- Includes explicit acceptance checks for recurring defects (for example merged `--tag-specifications` into user-data, missing ALB chain when ALB SG intent exists, and OpenClaw+ALB CloudFront HTTPS chain completeness).
-
-9. **Plan finalize + apply orchestration**
+10. **Plan finalize + apply orchestration**
     - Placeholder/binding resolution and provider-specific enrichment.
-    - In `--apply`, execution is staged (infra → build/push when needed → workload launch → verification).
-
-- OpenClaw apply path now seeds runtime env bindings from collected config and process env for key vars (gateway token/password, model API key, channel tokens, config/workspace dirs) so container startup receives complete runtime config.
-- Optional CLI flag `--enforce-image-deploy` forces image-based deploy semantics (ECR image build/push + pull/run) and avoids relying on build-on-EC2 user-data paths.
-- SSH safety rule: plans with SSH ingress on port 22 must use an explicit CIDR (not unresolved `<ADMIN_CIDR>` at apply time) or remove SSH ingress and rely on SSM-only access.
-- Auto-remediation AI prompts now include deployment intent (plan question/context) so self-heal fixes stay aligned with the original deploy objective.
+    - In `--apply`, execution is staged (infra → build/push → workload launch → verification).
+    - OpenClaw apply path seeds runtime env bindings from collected config and process env.
+    - `--enforce-image-deploy` forces ECR image-based deploy (build/push + pull/run).
+    - SSH safety rule: plans with SSH ingress on port 22 need explicit CIDR or fall back to SSM-only.
+    - Auto-remediation prompts include deployment intent so self-heal stays aligned.
 
 ## Compact Sequence Diagram
 
@@ -102,11 +94,12 @@ sequenceDiagram
     participant U as User
     participant C as cmd/deploy.go
     participant I as RunIntelligence
-    participant P as Paged Planner
+    participant S as Skeleton+Hydrate
+    participant P as Paged Planner (fallback)
+    participant A as Generic Autofix
     participant D as Deterministic Validator
     participant R as Plan Repair Agent
     participant V as LLM Validator
-    participant W as Plan Reviewer
     participant E as Maker Executor
 
     U->>C: clanker deploy <repo>
@@ -114,58 +107,59 @@ sequenceDiagram
     C->>I: RunIntelligence(profile, provider)
     I-->>C: enriched prompt + architecture + infra hints
 
-    loop page 1..N
-      C->>P: BuildPlanPagePrompt(current state)
-      P-->>C: {done, commands[]}
-      C->>C: ApplyOpenClawPlanAutofix (if OpenClaw)
-      C->>D: deterministic validate(current plan)
-      D-->>C: hard issues / pass
-      alt hard issues remain
-        C->>C: continue paging (ignore done=true)
+    C->>S: GeneratePlanSkeleton (1 LLM call)
+    S-->>C: PlanSkeleton (steps + placeholders)
+    C->>S: HydrateSkeleton (batched LLM calls)
+    S-->>C: hydrated plan commands
+
+    alt skeleton/hydrate failed
+      loop page 1..N
+        C->>P: BuildPlanPagePrompt(current state)
+        P-->>C: {done, commands[]}
       end
     end
 
-    alt deterministic issues still present
-      loop repair rounds
-        C->>R: repair(plan, deterministic issues)
-        R-->>C: repaired plan JSON
-        C->>D: deterministic validate(repaired)
-      end
+    C->>A: ApplyGenericPlanAutofix(plan, externalBindings)
+    A-->>C: deduped + pruned plan
+
+    C->>D: deterministic validate (+ crossCheckUserDataVsPlan)
+    D-->>C: hard issues / pass
+
+    alt deterministic issues
+      C->>R: user-data micro-repair / full repair
+      R-->>C: patched plan
+      C->>D: re-validate
     end
 
-    C->>C: SanitizePlanConservative(original vs sanitized)
+    C->>C: SanitizePlanConservative
 
-    C->>V: LLM validate plan
-    alt invalid
-      loop repair rounds
-        C->>R: repair(plan, LLM issues)
-        R-->>C: repaired plan JSON
-        C->>V: re-validate
-      end
-    end
-
-    C->>W: final non-blocking review(plan)
-    W-->>C: reviewed plan JSON (or keep current on failure)
+    C->>V: LLM validate + repair loop
+    V-->>C: validated plan
 
     alt --apply
       C->>E: execute staged plan
       E-->>U: deploy result + outputs
     else plan-only
-      C-->>U: best-effort plan JSON + warnings
+      C-->>U: plan JSON + warnings
     end
 ```
 
 ## Key Files
 
-- `intelligence.go` — main multi-phase intelligence + LLM validation
-- `explorer.go` — agentic file exploration
-- `docker_agent.go` — Docker/Compose understanding
-- `infra_scan.go` / `cf_infra_scan.go` — cloud inventory snapshots
-- `paged_plan.go` — paginated planning protocol + prompt builder
-- `plan_preflight_validate.go` — deterministic hard checks
+- `skeleton_plan.go` — two-phase skeleton+hydrate plan generation (primary path)
+- `paged_plan.go` — paginated planning protocol (fallback path)
+- `plan_autofix.go` — generic plan autofix (dedup, orphan pruning, critical command protection)
+- `plan_preflight_validate.go` — deterministic hard checks + user-data vs plan cross-check
 - `plan_repair_agent.go` — plan rewrite/repair agent
 - `plan_issue_triage.go` — triage for hard-fixable vs noise/context findings
 - `plan_sanitize.go` — conservative fail-open plan sanitizer
 - `plan_review_agent.go` — final non-blocking plan reviewer pass
 - `llm_plan_integrity.go` — LLM JSON repair + generic integrity pass
-- `resolve.go` / `userdata_fixups.go` / `nodejs_userdata.go` — placeholder and user-data fixups
+- `intelligence.go` — multi-phase intelligence + LLM validation
+- `explorer.go` — agentic file exploration
+- `docker_agent.go` — Docker/Compose understanding
+- `infra_scan.go` / `cf_infra_scan.go` — cloud inventory snapshots
+- `openclaw_plan_autofix.go` — OpenClaw-specific autofix (HTTPS_URL, compose hints)
+- `userdata_autofix.go` / `userdata_fixups.go` / `userdata_repair.go` — user-data fixups
+- `resolve.go` — placeholder/binding resolution
+- `nodejs_userdata.go` — Node.js user-data generation
