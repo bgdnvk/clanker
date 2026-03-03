@@ -8,8 +8,8 @@ import (
 	"github.com/bgdnvk/clanker/internal/azure"
 	"github.com/bgdnvk/clanker/internal/cloudflare"
 	"github.com/bgdnvk/clanker/internal/digitalocean"
-	"github.com/bgdnvk/clanker/internal/hetzner"
 	"github.com/bgdnvk/clanker/internal/gcp"
+	"github.com/bgdnvk/clanker/internal/hetzner"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
