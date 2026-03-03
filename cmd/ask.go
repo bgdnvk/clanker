@@ -20,8 +20,10 @@ import (
 	cfwaf "github.com/bgdnvk/clanker/internal/cloudflare/waf"
 	cfworkers "github.com/bgdnvk/clanker/internal/cloudflare/workers"
 	cfzerotrust "github.com/bgdnvk/clanker/internal/cloudflare/zerotrust"
+	"github.com/bgdnvk/clanker/internal/digitalocean"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	ghclient "github.com/bgdnvk/clanker/internal/github"
+	"github.com/bgdnvk/clanker/internal/hetzner"
 	iamclient "github.com/bgdnvk/clanker/internal/iam"
 	"github.com/bgdnvk/clanker/internal/k8s"
 	"github.com/bgdnvk/clanker/internal/k8s/plan"
@@ -69,6 +71,8 @@ Examples:
 		includeGCP, _ := cmd.Flags().GetBool("gcp")
 		includeAzure, _ := cmd.Flags().GetBool("azure")
 		includeCloudflare, _ := cmd.Flags().GetBool("cloudflare")
+		includeDigitalOcean, _ := cmd.Flags().GetBool("digitalocean")
+		includeHetzner, _ := cmd.Flags().GetBool("hetzner")
 		includeTerraform, _ := cmd.Flags().GetBool("terraform")
 		includeIAM, _ := cmd.Flags().GetBool("iam")
 		iamRoleARN, _ := cmd.Flags().GetString("role-arn")
@@ -177,6 +181,32 @@ Examples:
 					Writer:              os.Stdout,
 					Destroyer:           destroyer,
 					Debug:               debug,
+				})
+			}
+
+			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "digitalocean") {
+				doToken := digitalocean.ResolveAPIToken()
+				if doToken == "" {
+					return fmt.Errorf("digitalocean api_token is required (set digitalocean.api_token, DO_API_TOKEN, or DIGITALOCEAN_ACCESS_TOKEN)")
+				}
+				return maker.ExecuteDigitalOceanPlan(ctx, makerPlan, maker.ExecOptions{
+					DigitalOceanAPIToken: doToken,
+					Writer:               os.Stdout,
+					Destroyer:            destroyer,
+					Debug:                debug,
+				})
+			}
+
+			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "hetzner") {
+				hetznerToken := hetzner.ResolveAPIToken()
+				if hetznerToken == "" {
+					return fmt.Errorf("hetzner api_token is required (set hetzner.api_token or HCLOUD_TOKEN)")
+				}
+				return maker.ExecuteHetznerPlan(ctx, makerPlan, maker.ExecOptions{
+					HetznerAPIToken: hetznerToken,
+					Writer:          os.Stdout,
+					Destroyer:       destroyer,
+					Debug:           debug,
 				})
 			}
 
@@ -306,6 +336,8 @@ Examples:
 			explicitGCP := cmd.Flags().Changed("gcp") && includeGCP
 			explicitAWS := cmd.Flags().Changed("aws") && includeAWS
 			explicitCloudflare := cmd.Flags().Changed("cloudflare") && includeCloudflare
+			explicitDigitalOcean := cmd.Flags().Changed("digitalocean") && includeDigitalOcean
+			explicitHetzner := cmd.Flags().Changed("hetzner") && includeHetzner
 			explicitAzure := cmd.Flags().Changed("azure") && includeAzure
 			explicitCount := 0
 			if explicitGCP {
@@ -317,15 +349,27 @@ Examples:
 			if explicitCloudflare {
 				explicitCount++
 			}
+			if explicitDigitalOcean {
+				explicitCount++
+			}
+			if explicitHetzner {
+				explicitCount++
+			}
 			if explicitAzure {
 				explicitCount++
 			}
 			if explicitCount > 1 {
-				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --azure, --cloudflare) together with --maker")
+				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --azure, --cloudflare, --digitalocean, --hetzner) together with --maker")
 			}
 			switch {
+			case explicitHetzner:
+				makerProvider = "hetzner"
+				makerProviderReason = "explicit"
 			case explicitCloudflare:
 				makerProvider = "cloudflare"
+				makerProviderReason = "explicit"
+			case explicitDigitalOcean:
+				makerProvider = "digitalocean"
 				makerProviderReason = "explicit"
 			case explicitAzure:
 				makerProvider = "azure"
@@ -340,6 +384,12 @@ Examples:
 				svcCtx := routing.InferContext(questionForRouting(question))
 				if svcCtx.Cloudflare {
 					makerProvider = "cloudflare"
+					makerProviderReason = "inferred"
+				} else if svcCtx.DigitalOcean {
+					makerProvider = "digitalocean"
+					makerProviderReason = "inferred"
+				} else if svcCtx.Hetzner {
+					makerProvider = "hetzner"
 					makerProviderReason = "inferred"
 				} else if svcCtx.Azure {
 					makerProvider = "azure"
@@ -358,6 +408,10 @@ Examples:
 			switch makerProvider {
 			case "cloudflare":
 				prompt = maker.CloudflarePlanPromptWithMode(question, destroyer)
+			case "digitalocean":
+				prompt = maker.DigitalOceanPlanPromptWithMode(question, destroyer)
+			case "hetzner":
+				prompt = maker.HetznerPlanPromptWithMode(question, destroyer)
 			case "azure":
 				prompt = maker.AzurePlanPromptWithMode(question, destroyer)
 			case "gcp":
@@ -422,9 +476,9 @@ Examples:
 
 			plan.Provider = makerProvider
 
-			// Handle GCP, Azure, and Cloudflare plans (output directly, no enrichment)
+			// Handle GCP, Azure, Cloudflare, and Digital Ocean plans (output directly, no enrichment)
 			providerLower := strings.ToLower(strings.TrimSpace(plan.Provider))
-			if providerLower == "gcp" || providerLower == "azure" || providerLower == "cloudflare" {
+			if providerLower == "gcp" || providerLower == "azure" || providerLower == "cloudflare" || providerLower == "digitalocean" || providerLower == "hetzner" {
 				if plan.CreatedAt.IsZero() {
 					plan.CreatedAt = time.Now().UTC()
 				}
@@ -544,7 +598,17 @@ Format as a professional compliance table suitable for government security docum
 			return handleCloudflareQuery(context.Background(), question, debug)
 		}
 
-		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare {
+		// Handle explicit --digitalocean flag
+		if includeDigitalOcean {
+			return handleDigitalOceanQuery(context.Background(), question, debug)
+		}
+
+		// Handle explicit --hetzner flag
+		if includeHetzner {
+			return handleHetznerQuery(context.Background(), question, debug)
+		}
+
+		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare && !includeDigitalOcean && !includeHetzner {
 			routingQuestion := questionForRouting(question)
 
 			// First, do quick keyword check for explicit terms
@@ -603,6 +667,16 @@ Format as a professional compliance table suitable for government security docum
 			// Handle Cloudflare queries by delegating to Cloudflare agent
 			if svcCtx.Cloudflare {
 				return handleCloudflareQuery(context.Background(), routingQuestion, debug)
+			}
+
+			// Handle Digital Ocean queries
+			if svcCtx.DigitalOcean {
+				return handleDigitalOceanQuery(context.Background(), routingQuestion, debug)
+			}
+
+			// Handle Hetzner queries
+			if svcCtx.Hetzner {
+				return handleHetznerQuery(context.Background(), routingQuestion, debug)
 			}
 
 			// Handle IAM queries by delegating to IAM agent
@@ -1075,6 +1149,8 @@ func init() {
 	askCmd.Flags().Bool("gcp", false, "Include GCP infrastructure context")
 	askCmd.Flags().Bool("azure", false, "Include Azure infrastructure context")
 	askCmd.Flags().Bool("cloudflare", false, "Include Cloudflare infrastructure context")
+	askCmd.Flags().Bool("digitalocean", false, "Include Digital Ocean infrastructure context")
+	askCmd.Flags().Bool("hetzner", false, "Include Hetzner Cloud infrastructure context")
 	askCmd.Flags().Bool("github", false, "Include GitHub repository context")
 	askCmd.Flags().Bool("terraform", false, "Include Terraform workspace context")
 	askCmd.Flags().Bool("iam", false, "Route query to IAM agent for security analysis")
@@ -1098,7 +1174,7 @@ func init() {
 	askCmd.Flags().String("deepseek-model", "", "DeepSeek model to use (overrides config)")
 	askCmd.Flags().String("minimax-model", "", "MiniMax model to use (overrides config)")
 	askCmd.Flags().Bool("agent-trace", false, "Show detailed coordinator agent lifecycle logs (overrides config)")
-	askCmd.Flags().Bool("maker", false, "Generate an AWS, GCP, Azure, or Cloudflare CLI plan (JSON) for infrastructure changes")
+	askCmd.Flags().Bool("maker", false, "Generate an AWS, GCP, Azure, Cloudflare, Digital Ocean, or Hetzner CLI plan (JSON) for infrastructure changes")
 	askCmd.Flags().Bool("destroyer", false, "Allow destructive operations when using --maker (requires explicit confirmation in UI/workflow)")
 	askCmd.Flags().Bool("apply", false, "Apply an approved maker plan (reads from stdin unless --plan-file is provided)")
 	askCmd.Flags().String("plan-file", "", "Optional path to maker plan JSON file for --apply")
@@ -1662,6 +1738,140 @@ func handleIAMQuery(ctx context.Context, question string, debug bool, roleARN, p
 		return response.Error
 	}
 
+	return nil
+}
+
+// handleDigitalOceanQuery delegates a Digital Ocean query to the DO client
+func handleDigitalOceanQuery(ctx context.Context, question string, debug bool) error {
+	if debug {
+		fmt.Println("Delegating query to Digital Ocean agent...")
+	}
+
+	apiToken := digitalocean.ResolveAPIToken()
+	if apiToken == "" {
+		return fmt.Errorf("digitalocean api_token is required (set digitalocean.api_token, DO_API_TOKEN, or DIGITALOCEAN_ACCESS_TOKEN)")
+	}
+
+	client, err := digitalocean.NewClient(apiToken, debug)
+	if err != nil {
+		return fmt.Errorf("failed to create Digital Ocean client: %w", err)
+	}
+
+	doContext, err := client.GetRelevantContext(ctx, question)
+	if err != nil {
+		return fmt.Errorf("failed to get Digital Ocean context: %w", err)
+	}
+
+	// Get AI client
+	var provider string
+	aiProfile := viper.GetString("ai.default_provider")
+	if aiProfile == "" {
+		aiProfile = "openai"
+	}
+	provider = aiProfile
+
+	var apiKey string
+	switch provider {
+	case "gemini":
+		apiKey = ""
+	case "gemini-api":
+		apiKey = resolveGeminiAPIKey("")
+	case "openai":
+		apiKey = resolveOpenAIKey("")
+	case "anthropic":
+		apiKey = resolveAnthropicKey("")
+	case "deepseek":
+		apiKey = resolveDeepSeekKey("")
+	case "minimax":
+		apiKey = resolveMiniMaxKey("")
+	default:
+		apiKey = viper.GetString("ai.api_key")
+	}
+
+	aiClient := ai.NewClient(provider, apiKey, debug, "")
+
+	prompt := fmt.Sprintf(`You are a Digital Ocean infrastructure expert. Answer the user's question based on the following Digital Ocean context data.
+
+Digital Ocean Context:
+%s
+
+User Question: %s
+
+Provide a clear, concise answer based on the data above. If the data doesn't contain enough information to fully answer the question, say so and suggest what additional information might be needed.`, doContext, question)
+
+	response, err := aiClient.AskPrompt(ctx, prompt)
+	if err != nil {
+		return fmt.Errorf("failed to get AI response: %w", err)
+	}
+
+	fmt.Println(response)
+	return nil
+}
+
+// handleHetznerQuery delegates a Hetzner Cloud query to the Hetzner client
+func handleHetznerQuery(ctx context.Context, question string, debug bool) error {
+	if debug {
+		fmt.Println("Delegating query to Hetzner Cloud agent...")
+	}
+
+	apiToken := hetzner.ResolveAPIToken()
+	if apiToken == "" {
+		return fmt.Errorf("hetzner api_token is required (set hetzner.api_token or HCLOUD_TOKEN)")
+	}
+
+	client, err := hetzner.NewClient(apiToken, debug)
+	if err != nil {
+		return fmt.Errorf("failed to create Hetzner client: %w", err)
+	}
+
+	hetznerContext, err := client.GetRelevantContext(ctx, question)
+	if err != nil {
+		return fmt.Errorf("failed to get Hetzner context: %w", err)
+	}
+
+	// Get AI client
+	var provider string
+	aiProfile := viper.GetString("ai.default_provider")
+	if aiProfile == "" {
+		aiProfile = "openai"
+	}
+	provider = aiProfile
+
+	var apiKey string
+	switch provider {
+	case "gemini":
+		apiKey = ""
+	case "gemini-api":
+		apiKey = resolveGeminiAPIKey("")
+	case "openai":
+		apiKey = resolveOpenAIKey("")
+	case "anthropic":
+		apiKey = resolveAnthropicKey("")
+	case "deepseek":
+		apiKey = resolveDeepSeekKey("")
+	case "minimax":
+		apiKey = resolveMiniMaxKey("")
+	default:
+		apiKey = viper.GetString("ai.api_key")
+	}
+
+	aiClient := ai.NewClient(provider, apiKey, debug, "")
+
+	prompt := fmt.Sprintf(`You are a Hetzner Cloud infrastructure expert. Answer the user's question based on the following Hetzner Cloud context data.
+
+Hetzner Cloud Context:
+%s
+
+User Question: %s
+
+Provide a clear, concise answer based on the data above. If the data doesn't contain enough information to fully answer the question, say so and suggest what additional information might be needed.`, hetznerContext, question)
+
+	response, err := aiClient.AskPrompt(ctx, prompt)
+	if err != nil {
+		return fmt.Errorf("failed to get AI response: %w", err)
+	}
+
+	fmt.Println(response)
 	return nil
 }
 

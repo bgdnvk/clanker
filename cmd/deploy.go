@@ -1094,13 +1094,15 @@ Examples:
 			if doToken == "" {
 				doToken = strings.TrimSpace(os.Getenv("DO_API_TOKEN"))
 			}
-			// doctl can auth via its own config, so token is optional
+			if doToken == "" {
+				return fmt.Errorf("digitalocean API token is required (use --do-token or set DIGITALOCEAN_ACCESS_TOKEN)")
+			}
 			fmt.Fprintf(os.Stderr, "[deploy] applying DigitalOcean plan (%d commands)...\n", len(plan.Commands))
 			return maker.ExecuteDigitalOceanPlan(ctx, plan, maker.ExecOptions{
-				DOToken:   doToken,
-				Writer:    os.Stdout,
-				Destroyer: false,
-				Debug:     debug,
+				DigitalOceanAPIToken: doToken,
+				Writer:               os.Stdout,
+				Destroyer:            false,
+				Debug:                debug,
 			})
 		}
 

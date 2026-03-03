@@ -10,22 +10,22 @@ import (
 	"strings"
 )
 
-// ExecuteDigitalOceanPlan executes a Digital Ocean infrastructure plan
-func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
+// ExecuteHetznerPlan executes a Hetzner Cloud infrastructure plan
+func ExecuteHetznerPlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	if plan == nil {
 		return fmt.Errorf("nil plan")
 	}
 	if opts.Writer == nil {
 		return fmt.Errorf("missing output writer")
 	}
-	if opts.DigitalOceanAPIToken == "" {
-		return fmt.Errorf("missing digitalocean API token")
+	if opts.HetznerAPIToken == "" {
+		return fmt.Errorf("missing hetzner API token")
 	}
 
 	bindings := make(map[string]string)
 
 	for idx, cmdSpec := range plan.Commands {
-		if err := validateDoctlCommand(cmdSpec.Args, opts.Destroyer); err != nil {
+		if err := validateHcloudCommand(cmdSpec.Args, opts.Destroyer); err != nil {
 			return fmt.Errorf("command %d rejected: %w", idx+1, err)
 		}
 
@@ -37,11 +37,11 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 			return fmt.Errorf("command %d has unresolved placeholders after substitutions", idx+1)
 		}
 
-		_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: doctl %s\n", idx+1, len(plan.Commands), strings.Join(args[1:], " "))
+		_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: hcloud %s\n", idx+1, len(plan.Commands), strings.Join(args[1:], " "))
 
-		out, runErr := runDoctlCommandStreaming(ctx, args, opts, opts.Writer)
+		out, runErr := runHcloudCommandStreaming(ctx, args, opts, opts.Writer)
 		if runErr != nil {
-			return fmt.Errorf("digitalocean command %d failed: %w", idx+1, runErr)
+			return fmt.Errorf("hetzner command %d failed: %w", idx+1, runErr)
 		}
 
 		learnPlanBindingsFromProduces(cmdSpec.Produces, out, bindings)
@@ -50,33 +50,30 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 	return nil
 }
 
-// validateDoctlCommand validates a doctl command
-func validateDoctlCommand(args []string, allowDestructive bool) error {
+// validateHcloudCommand validates an hcloud command
+func validateHcloudCommand(args []string, allowDestructive bool) error {
 	if len(args) == 0 {
 		return fmt.Errorf("empty args")
 	}
 
 	first := strings.ToLower(strings.TrimSpace(args[0]))
 
-	// Only allow doctl commands
-	if first != "doctl" {
-		// Reject non-doctl commands
+	// Only allow hcloud commands
+	if first != "hcloud" {
 		blockedCommands := []string{
 			"aws", "gcloud", "az", "kubectl", "helm", "eksctl", "kubeadm",
 			"python", "node", "npm", "npx",
 			"bash", "sh", "zsh", "fish",
 			"terraform", "tofu", "make",
 			"wrangler", "cloudflared", "curl",
+			"doctl",
 		}
 
 		for _, blocked := range blockedCommands {
 			if first == blocked || strings.HasPrefix(first, blocked) {
-				return fmt.Errorf("non-doctl command is not allowed: %q", args[0])
+				return fmt.Errorf("non-hcloud command is not allowed: %q", args[0])
 			}
 		}
-
-		// If it doesn't start with "doctl" but isn't a blocked command,
-		// treat it as a doctl subcommand (normalize)
 	}
 
 	// Check for shell operators
@@ -100,24 +97,21 @@ func validateDoctlCommand(args []string, allowDestructive bool) error {
 	return nil
 }
 
-// runDoctlCommandStreaming executes a doctl command with streaming output
-func runDoctlCommandStreaming(ctx context.Context, args []string, opts ExecOptions, w io.Writer) (string, error) {
-	bin, err := exec.LookPath("doctl")
+// runHcloudCommandStreaming executes an hcloud command with streaming output
+func runHcloudCommandStreaming(ctx context.Context, args []string, opts ExecOptions, w io.Writer) (string, error) {
+	bin, err := exec.LookPath("hcloud")
 	if err != nil {
-		return "", fmt.Errorf("doctl not found in PATH: %w", err)
+		return "", fmt.Errorf("hcloud not found in PATH: %w", err)
 	}
 
-	// Strip "doctl" from args if present
+	// Strip "hcloud" from args if present
 	cmdArgs := args
-	if len(args) > 0 && strings.ToLower(strings.TrimSpace(args[0])) == "doctl" {
+	if len(args) > 0 && strings.ToLower(strings.TrimSpace(args[0])) == "hcloud" {
 		cmdArgs = args[1:]
 	}
 
-	// Inject access token
-	fullArgs := append([]string{"--access-token", opts.DigitalOceanAPIToken}, cmdArgs...)
-
-	cmd := exec.CommandContext(ctx, bin, fullArgs...)
-	cmd.Env = os.Environ()
+	cmd := exec.CommandContext(ctx, bin, cmdArgs...)
+	cmd.Env = append(os.Environ(), "HCLOUD_TOKEN="+opts.HetznerAPIToken)
 
 	var buf bytes.Buffer
 	mw := io.MultiWriter(w, &buf)

@@ -37,15 +37,27 @@ type AzureCredentials struct {
 	ClientSecret   string `json:"client_secret,omitempty"`
 }
 
+// DigitalOceanCredentials represents Digital Ocean credentials stored in the backend
+type DigitalOceanCredentials struct {
+	APIToken string `json:"api_token"`
+}
+
+// HetznerCredentials represents Hetzner Cloud credentials stored in the backend
+type HetznerCredentials struct {
+	APIToken string `json:"api_token"`
+}
+
 // CredentialProvider represents supported credential providers
 type CredentialProvider string
 
 const (
-	ProviderAWS        CredentialProvider = "aws"
-	ProviderGCP        CredentialProvider = "gcp"
-	ProviderAzure      CredentialProvider = "azure"
-	ProviderCloudflare CredentialProvider = "cloudflare"
-	ProviderKubernetes CredentialProvider = "kubernetes"
+	ProviderAWS          CredentialProvider = "aws"
+	ProviderGCP          CredentialProvider = "gcp"
+	ProviderAzure        CredentialProvider = "azure"
+	ProviderCloudflare   CredentialProvider = "cloudflare"
+	ProviderDigitalOcean CredentialProvider = "digitalocean"
+	ProviderHetzner      CredentialProvider = "hetzner"
+	ProviderKubernetes   CredentialProvider = "kubernetes"
 )
 
 // CredentialEntry represents a stored credential in the backend
