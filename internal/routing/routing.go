@@ -15,15 +15,16 @@ import (
 
 // ServiceContext represents which services were detected in a query
 type ServiceContext struct {
-	AWS        bool
-	GitHub     bool
-	Terraform  bool
-	K8s        bool
-	GCP        bool
-	Azure      bool
-	Cloudflare bool
-	IAM        bool
-	Code       bool
+	AWS          bool
+	GitHub       bool
+	Terraform    bool
+	K8s          bool
+	GCP          bool
+	Azure        bool
+	Cloudflare   bool
+	DigitalOcean bool
+	IAM          bool
+	Code         bool
 }
 
 // Classification represents the result of LLM-based query classification
@@ -169,6 +170,17 @@ func InferContext(question string) ServiceContext {
 		"cloudflared",
 	}
 
+	digitalOceanKeywords := []string{
+		"digitalocean",
+		"digital ocean",
+		"doctl",
+		"droplet",
+		"droplets",
+		"doks",
+		"spaces bucket",
+		"app platform",
+	}
+
 	iamKeywords := []string{
 		// IAM specific queries
 		"iam role", "iam roles", "iam policy", "iam policies",
@@ -229,6 +241,13 @@ func InferContext(question string) ServiceContext {
 		}
 	}
 
+	for _, keyword := range digitalOceanKeywords {
+		if contains(questionLower, keyword) {
+			ctx.DigitalOcean = true
+			break
+		}
+	}
+
 	// Check for IAM-specific queries (takes precedence over general AWS)
 	for _, keyword := range iamKeywords {
 		if contains(questionLower, keyword) {
@@ -238,7 +257,7 @@ func InferContext(question string) ServiceContext {
 	}
 
 	// Default to AWS and GitHub context if nothing is detected
-	if !ctx.AWS && !ctx.GitHub && !ctx.Terraform && !ctx.K8s && !ctx.GCP && !ctx.Azure && !ctx.Cloudflare && !ctx.IAM {
+	if !ctx.AWS && !ctx.GitHub && !ctx.Terraform && !ctx.K8s && !ctx.GCP && !ctx.Azure && !ctx.Cloudflare && !ctx.DigitalOcean && !ctx.IAM {
 		ctx.AWS = true
 		ctx.GitHub = true
 	}
@@ -259,6 +278,7 @@ Available services:
 - k8s: Kubernetes clusters, pods, deployments, services, helm, kubectl
 - gcp: Google Cloud Platform (Cloud Run, GKE, Cloud SQL, BigQuery, etc.)
 - azure: Microsoft Azure (VMs, AKS, App Service, Storage, Key Vault, Cosmos DB, VNets, etc.)
+- digitalocean: Digital Ocean (Droplets, DOKS, Managed Databases, Spaces, App Platform, Load Balancers, VPCs, etc.)
 - github: GitHub repositories, PRs, issues, actions, workflows
 - terraform: Infrastructure as code, Terraform plans, state, modules
 - general: General questions not specific to any cloud platform
@@ -268,11 +288,12 @@ IMPORTANT RULES:
 2. Generic terms like "cdn", "cache", "dns", "worker", "waf", "rate limit", "tunnel" should default to AWS unless Cloudflare is explicitly mentioned
 3. If the query is specifically about IAM roles, policies, permissions, access keys, trust policies, or security analysis, classify as "iam"
 4. If the query mentions AWS services (EC2, Lambda, S3, CloudFront, Route53, etc.) but NOT IAM-specific topics, classify as "aws"
-5. If uncertain, classify as "aws" (the default cloud provider)
+5. Only classify as "digitalocean" if the query EXPLICITLY mentions Digital Ocean, doctl, droplets, DOKS, or Digital Ocean-specific products
+6. If uncertain, classify as "aws" (the default cloud provider)
 
 Respond with ONLY a JSON object:
 {
-	"service": "cloudflare|aws|iam|k8s|gcp|azure|github|terraform|general",
+	"service": "cloudflare|aws|iam|k8s|gcp|azure|digitalocean|github|terraform|general",
     "confidence": "high|medium|low",
     "reason": "brief explanation of why this classification"
 }`, question)
@@ -355,6 +376,9 @@ func NeedsLLMClassification(ctx ServiceContext) bool {
 	if ctx.Cloudflare {
 		count++
 	}
+	if ctx.DigitalOcean {
+		count++
+	}
 	if ctx.IAM {
 		count++
 	}
@@ -362,8 +386,9 @@ func NeedsLLMClassification(ctx ServiceContext) bool {
 	// Use LLM classification if:
 	// 1. Multiple services inferred (ambiguous)
 	// 2. Cloudflare was inferred (verify it's actually Cloudflare-related)
-	// 3. IAM was inferred (verify it's actually IAM-related for disambiguation)
-	return count > 1 || ctx.Cloudflare || ctx.IAM
+	// 3. Digital Ocean was inferred (verify it's actually DO-related)
+	// 4. IAM was inferred (verify it's actually IAM-related for disambiguation)
+	return count > 1 || ctx.Cloudflare || ctx.DigitalOcean || ctx.IAM
 }
 
 // ApplyLLMClassification updates the ServiceContext based on LLM classification result

@@ -7,6 +7,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/aws"
 	"github.com/bgdnvk/clanker/internal/azure"
 	"github.com/bgdnvk/clanker/internal/cloudflare"
+	"github.com/bgdnvk/clanker/internal/digitalocean"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -70,6 +71,10 @@ func init() {
 	AddCfAskCommand(cfCmd)
 	AddCfDeployCommands(cfCmd)
 	rootCmd.AddCommand(cfCmd)
+
+	// Register Digital Ocean static commands
+	doCmd := digitalocean.CreateDigitalOceanCommands()
+	rootCmd.AddCommand(doCmd)
 }
 
 // initConfig reads in config file and ENV variables if set.
