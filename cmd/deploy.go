@@ -61,6 +61,7 @@ Examples:
 		newVPC, _ := cmd.Flags().GetBool("new-vpc")
 		gcpProject, _ := cmd.Flags().GetString("gcp-project")
 		azureSubscription, _ := cmd.Flags().GetString("azure-subscription")
+		doAccessToken, _ := cmd.Flags().GetString("do-token")
 		enforceImageDeploy, _ := cmd.Flags().GetBool("enforce-image-deploy")
 
 		// 1. Clone + analyze
@@ -320,6 +321,12 @@ Examples:
 			requiredLaunchOps = []string{"containerapp create"}
 		case "aks":
 			requiredLaunchOps = []string{"aks create"}
+		case "do-droplet":
+			requiredLaunchOps = []string{"compute droplet create"}
+		case "do-app-platform":
+			requiredLaunchOps = []string{"apps create"}
+		case "do-k8s":
+			requiredLaunchOps = []string{"kubernetes cluster create"}
 		}
 
 		// 4. Generate the maker plan via LLM
@@ -1078,6 +1085,22 @@ Examples:
 				Writer:              os.Stdout,
 				Destroyer:           false,
 				Debug:               debug,
+			})
+		case "digitalocean":
+			doToken := strings.TrimSpace(doAccessToken)
+			if doToken == "" {
+				doToken = strings.TrimSpace(os.Getenv("DIGITALOCEAN_ACCESS_TOKEN"))
+			}
+			if doToken == "" {
+				doToken = strings.TrimSpace(os.Getenv("DO_API_TOKEN"))
+			}
+			// doctl can auth via its own config, so token is optional
+			fmt.Fprintf(os.Stderr, "[deploy] applying DigitalOcean plan (%d commands)...\n", len(plan.Commands))
+			return maker.ExecuteDigitalOceanPlan(ctx, plan, maker.ExecOptions{
+				DOToken:   doToken,
+				Writer:    os.Stdout,
+				Destroyer: false,
+				Debug:     debug,
 			})
 		}
 
@@ -1977,13 +2000,14 @@ func init() {
 	deployCmd.Flags().String("deepseek-model", "", "DeepSeek model to use (overrides config)")
 	deployCmd.Flags().String("minimax-model", "", "MiniMax model to use (overrides config)")
 	deployCmd.Flags().Bool("apply", false, "Apply the plan immediately after generation")
-	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws, gcp, azure, or cloudflare")
+	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws, gcp, azure, cloudflare, or digitalocean")
 	deployCmd.Flags().String("target", "fargate", "Deployment target: fargate (default), ec2, or eks")
 	deployCmd.Flags().String("instance-type", "t3.small", "EC2 instance type (only used with --target ec2)")
 	deployCmd.Flags().Bool("new-vpc", false, "Create a new VPC instead of using default")
 	deployCmd.Flags().Bool("enforce-image-deploy", false, "Force ECR image-based deploy path (avoid docker build-on-EC2 user-data)")
 	deployCmd.Flags().String("gcp-project", "", "GCP project ID (required for --provider gcp apply)")
 	deployCmd.Flags().String("azure-subscription", "", "Azure subscription ID (required for --provider azure apply)")
+	deployCmd.Flags().String("do-token", "", "DigitalOcean access token (or set DIGITALOCEAN_ACCESS_TOKEN)")
 }
 
 // splitPlanAtDockerBuild separates infrastructure setup from app deployment.
