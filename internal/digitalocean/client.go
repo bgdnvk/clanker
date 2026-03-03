@@ -131,17 +131,17 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 	}
 
 	sections := []section{
-		{name: "Account", args: []string{"account", "get", "--format", "json"}, keys: nil},
-		{name: "Droplets", args: []string{"compute", "droplet", "list", "--format", "json"}, keys: []string{"droplet", "vm", "server", "instance", "compute"}},
-		{name: "Kubernetes Clusters", args: []string{"kubernetes", "cluster", "list", "--format", "json"}, keys: []string{"kubernetes", "k8s", "cluster", "doks"}},
-		{name: "Databases", args: []string{"databases", "list", "--format", "json"}, keys: []string{"database", "db", "postgres", "mysql", "redis", "mongo"}},
-		{name: "Spaces", args: []string{"compute", "cdn", "list", "--format", "json"}, keys: []string{"space", "spaces", "storage", "cdn", "object"}},
-		{name: "Apps", args: []string{"apps", "list", "--format", "json"}, keys: []string{"app", "apps", "platform"}},
-		{name: "Load Balancers", args: []string{"compute", "load-balancer", "list", "--format", "json"}, keys: []string{"load balancer", "lb"}},
-		{name: "Volumes", args: []string{"compute", "volume", "list", "--format", "json"}, keys: []string{"volume", "block storage", "disk"}},
-		{name: "VPCs", args: []string{"vpcs", "list", "--format", "json"}, keys: []string{"vpc", "network"}},
-		{name: "Domains", args: []string{"compute", "domain", "list", "--format", "json"}, keys: []string{"domain", "dns"}},
-		{name: "Firewalls", args: []string{"compute", "firewall", "list", "--format", "json"}, keys: []string{"firewall", "security"}},
+		{name: "Account", args: []string{"account", "get", "--output", "json"}, keys: nil},
+		{name: "Droplets", args: []string{"compute", "droplet", "list", "--output", "json"}, keys: []string{"droplet", "vm", "server", "instance", "compute"}},
+		{name: "Kubernetes Clusters", args: []string{"kubernetes", "cluster", "list", "--output", "json"}, keys: []string{"kubernetes", "k8s", "cluster", "doks"}},
+		{name: "Databases", args: []string{"databases", "list", "--output", "json"}, keys: []string{"database", "db", "postgres", "mysql", "redis", "mongo"}},
+		{name: "Spaces", args: []string{"compute", "cdn", "list", "--output", "json"}, keys: []string{"space", "spaces", "storage", "cdn", "object"}},
+		{name: "Apps", args: []string{"apps", "list", "--output", "json"}, keys: []string{"app", "apps", "platform"}},
+		{name: "Load Balancers", args: []string{"compute", "load-balancer", "list", "--output", "json"}, keys: []string{"load balancer", "lb"}},
+		{name: "Volumes", args: []string{"compute", "volume", "list", "--output", "json"}, keys: []string{"volume", "block storage", "disk"}},
+		{name: "VPCs", args: []string{"vpcs", "list", "--output", "json"}, keys: []string{"vpc", "network"}},
+		{name: "Domains", args: []string{"compute", "domain", "list", "--output", "json"}, keys: []string{"domain", "dns"}},
+		{name: "Firewalls", args: []string{"compute", "firewall", "list", "--output", "json"}, keys: []string{"firewall", "security"}},
 	}
 
 	defaultSections := map[string]bool{
