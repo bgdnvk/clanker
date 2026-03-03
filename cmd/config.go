@@ -159,6 +159,10 @@ codebase:
   max_file_size: 1048576  # Max file size to analyze (1MB)
   max_files: 100          # Max number of files to analyze per query
 
+# Digital Ocean (for 'clanker do ...' and 'clanker ask --digitalocean ...'):
+# digitalocean:
+#   api_token: ""           # Digital Ocean API token (or set DO_API_TOKEN / DIGITALOCEAN_ACCESS_TOKEN)
+
 # General settings
 timeout: 30  # Timeout for AI requests in seconds
 `
@@ -232,11 +236,12 @@ type CustomScanConfig struct {
 
 // ScanResult holds all detected credentials
 type ScanResult struct {
-	AWS        AWSCredentialsScan        `json:"aws"`
-	GCP        GCPCredentialsScan        `json:"gcp"`
-	Azure      AzureCredentialsScan      `json:"azure"`
-	Cloudflare CloudflareCredentialsScan `json:"cloudflare"`
-	LLM        LLMCredentialsScan        `json:"llm"`
+	AWS          AWSCredentialsScan          `json:"aws"`
+	GCP          GCPCredentialsScan          `json:"gcp"`
+	Azure        AzureCredentialsScan        `json:"azure"`
+	Cloudflare   CloudflareCredentialsScan   `json:"cloudflare"`
+	DigitalOcean DigitalOceanCredentialsScan `json:"digitalocean"`
+	LLM          LLMCredentialsScan          `json:"llm"`
 }
 
 // AWSCredentialsScan holds detected AWS profiles
@@ -285,6 +290,13 @@ type CloudflareCredentialsScan struct {
 	Error         string   `json:"error,omitempty"`
 }
 
+// DigitalOceanCredentialsScan holds detected Digital Ocean credentials
+type DigitalOceanCredentialsScan struct {
+	HasToken     bool   `json:"hasToken"`
+	CLIAvailable bool   `json:"cliAvailable"`
+	Error        string `json:"error,omitempty"`
+}
+
 // LLMCredentialsScan holds detected LLM API keys
 type LLMCredentialsScan struct {
 	OpenAI        LLMKeyStatus `json:"openai"`
@@ -316,11 +328,12 @@ func runConfigScan(cmd *cobra.Command, args []string) error {
 	}
 
 	result := ScanResult{
-		AWS:        scanAWSProfiles(customConfig),
-		GCP:        scanGCPCredentials(customConfig),
-		Azure:      scanAzureSubscriptions(),
-		Cloudflare: scanCloudflareCredentials(customConfig),
-		LLM:        scanLLMKeys(customConfig),
+		AWS:          scanAWSProfiles(customConfig),
+		GCP:          scanGCPCredentials(customConfig),
+		Azure:        scanAzureSubscriptions(),
+		Cloudflare:   scanCloudflareCredentials(customConfig),
+		DigitalOcean: scanDigitalOceanCredentials(),
+		LLM:          scanLLMKeys(customConfig),
 	}
 
 	if outputFormat == "json" {
@@ -402,6 +415,15 @@ func printScanResult(result ScanResult) {
 	fmt.Printf("  Account ID (env): %v\n", result.Cloudflare.HasAccountID)
 	if len(result.Cloudflare.CustomEnvKeys) > 0 {
 		fmt.Printf("  Custom env keys found: %s\n", strings.Join(result.Cloudflare.CustomEnvKeys, ", "))
+	}
+	fmt.Println()
+
+	// Digital Ocean
+	fmt.Println("Digital Ocean:")
+	fmt.Printf("  API Token (env): %v\n", result.DigitalOcean.HasToken)
+	fmt.Printf("  doctl CLI: %v\n", result.DigitalOcean.CLIAvailable)
+	if result.DigitalOcean.Error != "" {
+		fmt.Printf("  Error: %s\n", result.DigitalOcean.Error)
 	}
 	fmt.Println()
 
@@ -791,6 +813,18 @@ func scanCloudflareCredentials(customConfig CustomScanConfig) CloudflareCredenti
 		if os.Getenv(envKey) != "" {
 			result.CustomEnvKeys = append(result.CustomEnvKeys, envKey)
 		}
+	}
+
+	return result
+}
+
+func scanDigitalOceanCredentials() DigitalOceanCredentialsScan {
+	result := DigitalOceanCredentialsScan{
+		HasToken: os.Getenv("DO_API_TOKEN") != "" || os.Getenv("DIGITALOCEAN_ACCESS_TOKEN") != "",
+	}
+
+	if _, err := exec.LookPath("doctl"); err == nil {
+		result.CLIAvailable = true
 	}
 
 	return result

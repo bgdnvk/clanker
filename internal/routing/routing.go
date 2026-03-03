@@ -400,18 +400,21 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.GCP = false
 		ctx.Azure = false
 		ctx.AWS = false
+		ctx.DigitalOcean = false
 		ctx.IAM = false
 	case "k8s":
 		ctx.K8s = true
 		ctx.Cloudflare = false
 		ctx.GCP = false
 		ctx.Azure = false
+		ctx.DigitalOcean = false
 		ctx.IAM = false
 	case "gcp":
 		ctx.GCP = true
 		ctx.Cloudflare = false
 		ctx.K8s = false
 		ctx.Azure = false
+		ctx.DigitalOcean = false
 		ctx.IAM = false
 	case "azure":
 		ctx.Azure = true
@@ -419,6 +422,15 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Cloudflare = false
 		ctx.K8s = false
 		ctx.AWS = false
+		ctx.DigitalOcean = false
+		ctx.IAM = false
+	case "digitalocean":
+		ctx.DigitalOcean = true
+		ctx.AWS = false
+		ctx.GCP = false
+		ctx.Cloudflare = false
+		ctx.K8s = false
+		ctx.Azure = false
 		ctx.IAM = false
 	case "aws":
 		ctx.AWS = true
@@ -426,6 +438,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.K8s = false
 		ctx.GCP = false
 		ctx.Azure = false
+		ctx.DigitalOcean = false
 		ctx.IAM = false
 	case "iam":
 		ctx.IAM = true
@@ -434,18 +447,22 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.K8s = false
 		ctx.GCP = false
 		ctx.Azure = false
+		ctx.DigitalOcean = false
 	case "terraform":
 		ctx.Terraform = true
 		ctx.Cloudflare = false
+		ctx.DigitalOcean = false
 	case "github":
 		ctx.GitHub = true
 		ctx.Cloudflare = false
+		ctx.DigitalOcean = false
 	default:
 		// "general" - default to AWS
 		ctx.AWS = true
 		ctx.Cloudflare = false
 		ctx.K8s = false
 		ctx.Azure = false
+		ctx.DigitalOcean = false
 		ctx.IAM = false
 	}
 }
