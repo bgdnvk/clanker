@@ -32,6 +32,7 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 		args := make([]string, 0, len(cmdSpec.Args)+4)
 		args = append(args, cmdSpec.Args...)
 		args = applyPlanBindings(args, bindings)
+		args = normalizeDoctlOutputFlags(args)
 
 		if hasUnresolvedPlaceholders(args) {
 			return fmt.Errorf("command %d has unresolved placeholders after substitutions", idx+1)
@@ -98,6 +99,19 @@ func validateDoctlCommand(args []string, allowDestructive bool) error {
 	}
 
 	return nil
+}
+
+// normalizeDoctlOutputFlags rewrites --format json → --output json.
+// doctl uses --format for column selection (e.g. --format ID,Name) and
+// --output for format type (json/text). LLMs sometimes mix them up.
+func normalizeDoctlOutputFlags(args []string) []string {
+	for i := 0; i < len(args)-1; i++ {
+		if strings.EqualFold(strings.TrimSpace(args[i]), "--format") &&
+			strings.EqualFold(strings.TrimSpace(args[i+1]), "json") {
+			args[i] = "--output"
+		}
+	}
+	return args
 }
 
 // runDoctlCommandStreaming executes a doctl command with streaming output
