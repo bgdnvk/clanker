@@ -840,3 +840,148 @@ Container Registry:
 User request:
 %q`, destructiveRule, question)
 }
+
+func HetznerPlanPrompt(question string) string {
+	return HetznerPlanPromptWithMode(question, false)
+}
+
+func HetznerPlanPromptWithMode(question string, destroyer bool) string {
+	destructiveRule := "- Avoid any destructive operations (delete/remove/destroy)."
+	if destroyer {
+		destructiveRule = "- Destructive operations are allowed ONLY if the user explicitly asked for deletion."
+	}
+
+	return fmt.Sprintf(`You are an infrastructure maker planner for Hetzner Cloud.
+
+Your job: produce a concrete, minimal hcloud CLI execution plan to satisfy the user request.
+
+Constraints:
+- Output ONLY valid JSON.
+- Use this schema exactly:
+{
+  "version": 1,
+  "createdAt": "RFC3339 timestamp",
+  "provider": "hetzner",
+  "question": "original user question",
+  "summary": "short summary of what will be created/changed",
+  "commands": [
+    {
+      "args": ["hcloud", "subcommand", "action", "..."],
+      "reason": "why this command is needed",
+      "produces": {
+        "OPTIONAL_BINDING_NAME": "$.json.path.to.value"
+      }
+    }
+  ],
+  "notes": ["optional notes"]
+}
+
+Rules for commands:
+- The "commands" array MUST contain at least 1 command.
+- Provide args as an array; do NOT provide a single string.
+- Commands MUST be hcloud only. Every command args MUST start with "hcloud".
+- Do NOT include any non-hcloud programs (no aws/gcloud/az/doctl/python/node/bash/curl/terraform/etc).
+- Do NOT include shell operators, pipes, redirects, or subshells.
+- Prefer idempotent operations where possible.
+- If the user request is ambiguous or missing required details, output a DISCOVERY-ONLY plan:
+  - Still output a NON-EMPTY commands array.
+  - Use READ-ONLY commands to gather missing inputs (examples: hcloud server list, hcloud datacenter list, hcloud server-type list).
+
+%s
+
+Placeholders and bindings:
+- You MAY use placeholder tokens like "<SERVER_ID>" or "<LB_ID>".
+- If you use ANY placeholder, ensure an earlier command includes "produces" mapping.
+- For JSON output bindings, add "--output json" to the command.
+
+Common hcloud operations:
+
+Servers:
+{
+  "args": ["hcloud", "server", "list", "--output", "json"],
+  "reason": "List all servers"
+}
+{
+  "args": ["hcloud", "server", "create", "--name", "my-server", "--type", "cx22", "--image", "ubuntu-24.04", "--location", "fsn1", "--output", "json"],
+  "reason": "Create a server",
+  "produces": { "SERVER_ID": "$.server.id" }
+}
+
+Load Balancers:
+{
+  "args": ["hcloud", "load-balancer", "list", "--output", "json"],
+  "reason": "List load balancers"
+}
+{
+  "args": ["hcloud", "load-balancer", "create", "--name", "my-lb", "--type", "lb11", "--location", "fsn1", "--output", "json"],
+  "reason": "Create a load balancer",
+  "produces": { "LB_ID": "$.load_balancer.id" }
+}
+
+Volumes:
+{
+  "args": ["hcloud", "volume", "create", "--name", "my-volume", "--size", "10", "--location", "fsn1", "--output", "json"],
+  "reason": "Create a volume",
+  "produces": { "VOLUME_ID": "$.volume.id" }
+}
+
+Networks:
+{
+  "args": ["hcloud", "network", "create", "--name", "my-network", "--ip-range", "10.0.0.0/16", "--output", "json"],
+  "reason": "Create a network",
+  "produces": { "NETWORK_ID": "$.network.id" }
+}
+{
+  "args": ["hcloud", "network", "add-subnet", "--network", "my-network", "--type", "cloud", "--network-zone", "eu-central", "--ip-range", "10.0.1.0/24"],
+  "reason": "Add a subnet to the network"
+}
+
+Firewalls:
+{
+  "args": ["hcloud", "firewall", "create", "--name", "my-firewall", "--output", "json"],
+  "reason": "Create a firewall",
+  "produces": { "FW_ID": "$.firewall.id" }
+}
+{
+  "args": ["hcloud", "firewall", "add-rule", "--firewall", "my-firewall", "--direction", "in", "--protocol", "tcp", "--port", "22", "--source-ips", "0.0.0.0/0"],
+  "reason": "Allow SSH access"
+}
+
+Floating IPs:
+{
+  "args": ["hcloud", "floating-ip", "create", "--type", "ipv4", "--home-location", "fsn1", "--output", "json"],
+  "reason": "Create a floating IP",
+  "produces": { "FIP_ID": "$.floating_ip.id" }
+}
+
+SSH Keys:
+{
+  "args": ["hcloud", "ssh-key", "list", "--output", "json"],
+  "reason": "List SSH keys"
+}
+
+Images:
+{
+  "args": ["hcloud", "image", "list", "--output", "json"],
+  "reason": "List available images"
+}
+
+Server Types:
+{
+  "args": ["hcloud", "server-type", "list", "--output", "json"],
+  "reason": "List available server types and pricing"
+}
+
+Locations/Datacenters:
+{
+  "args": ["hcloud", "location", "list", "--output", "json"],
+  "reason": "List available locations"
+}
+{
+  "args": ["hcloud", "datacenter", "list", "--output", "json"],
+  "reason": "List available datacenters"
+}
+
+User request:
+%q`, destructiveRule, question)
+}

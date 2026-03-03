@@ -163,6 +163,10 @@ codebase:
 # digitalocean:
 #   api_token: ""           # Digital Ocean API token (or set DO_API_TOKEN / DIGITALOCEAN_ACCESS_TOKEN)
 
+# Hetzner Cloud (for 'clanker hetzner ...' and 'clanker ask --hetzner ...'):
+# hetzner:
+#   api_token: ""           # Hetzner Cloud API token (or set HCLOUD_TOKEN)
+
 # General settings
 timeout: 30  # Timeout for AI requests in seconds
 `
@@ -241,6 +245,7 @@ type ScanResult struct {
 	Azure        AzureCredentialsScan        `json:"azure"`
 	Cloudflare   CloudflareCredentialsScan   `json:"cloudflare"`
 	DigitalOcean DigitalOceanCredentialsScan `json:"digitalocean"`
+	Hetzner      HetznerCredentialsScan      `json:"hetzner"`
 	LLM          LLMCredentialsScan          `json:"llm"`
 }
 
@@ -297,6 +302,13 @@ type DigitalOceanCredentialsScan struct {
 	Error        string `json:"error,omitempty"`
 }
 
+// HetznerCredentialsScan holds detected Hetzner Cloud credentials
+type HetznerCredentialsScan struct {
+	HasToken     bool   `json:"hasToken"`
+	CLIAvailable bool   `json:"cliAvailable"`
+	Error        string `json:"error,omitempty"`
+}
+
 // LLMCredentialsScan holds detected LLM API keys
 type LLMCredentialsScan struct {
 	OpenAI        LLMKeyStatus `json:"openai"`
@@ -333,6 +345,7 @@ func runConfigScan(cmd *cobra.Command, args []string) error {
 		Azure:        scanAzureSubscriptions(),
 		Cloudflare:   scanCloudflareCredentials(customConfig),
 		DigitalOcean: scanDigitalOceanCredentials(),
+		Hetzner:      scanHetznerCredentials(),
 		LLM:          scanLLMKeys(customConfig),
 	}
 
@@ -424,6 +437,15 @@ func printScanResult(result ScanResult) {
 	fmt.Printf("  doctl CLI: %v\n", result.DigitalOcean.CLIAvailable)
 	if result.DigitalOcean.Error != "" {
 		fmt.Printf("  Error: %s\n", result.DigitalOcean.Error)
+	}
+	fmt.Println()
+
+	// Hetzner
+	fmt.Println("Hetzner Cloud:")
+	fmt.Printf("  API Token (env): %v\n", result.Hetzner.HasToken)
+	fmt.Printf("  hcloud CLI: %v\n", result.Hetzner.CLIAvailable)
+	if result.Hetzner.Error != "" {
+		fmt.Printf("  Error: %s\n", result.Hetzner.Error)
 	}
 	fmt.Println()
 
@@ -824,6 +846,18 @@ func scanDigitalOceanCredentials() DigitalOceanCredentialsScan {
 	}
 
 	if _, err := exec.LookPath("doctl"); err == nil {
+		result.CLIAvailable = true
+	}
+
+	return result
+}
+
+func scanHetznerCredentials() HetznerCredentialsScan {
+	result := HetznerCredentialsScan{
+		HasToken: os.Getenv("HCLOUD_TOKEN") != "",
+	}
+
+	if _, err := exec.LookPath("hcloud"); err == nil {
 		result.CLIAvailable = true
 	}
 

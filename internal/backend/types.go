@@ -42,6 +42,11 @@ type DigitalOceanCredentials struct {
 	APIToken string `json:"api_token"`
 }
 
+// HetznerCredentials represents Hetzner Cloud credentials stored in the backend
+type HetznerCredentials struct {
+	APIToken string `json:"api_token"`
+}
+
 // CredentialProvider represents supported credential providers
 type CredentialProvider string
 
@@ -51,6 +56,7 @@ const (
 	ProviderAzure        CredentialProvider = "azure"
 	ProviderCloudflare   CredentialProvider = "cloudflare"
 	ProviderDigitalOcean CredentialProvider = "digitalocean"
+	ProviderHetzner      CredentialProvider = "hetzner"
 	ProviderKubernetes   CredentialProvider = "kubernetes"
 )
 

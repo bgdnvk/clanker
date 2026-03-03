@@ -149,6 +149,10 @@ infra:
 # digitalocean:
 #   api_token: ""            # Digital Ocean API token (or set DO_API_TOKEN / DIGITALOCEAN_ACCESS_TOKEN)
 
+# Hetzner Cloud (for `clanker hetzner ...` and `clanker ask --hetzner ...`):
+# hetzner:
+#   api_token: ""            # Hetzner Cloud API token (or set HCLOUD_TOKEN)
+
 # Backend integration (for storing and retrieving credentials across machines):
 # backend:
 #   # API key for clanker backend authentication (or set CLANKER_BACKEND_API_KEY)

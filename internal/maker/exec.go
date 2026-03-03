@@ -225,6 +225,9 @@ type ExecOptions struct {
 	// Digital Ocean options
 	DigitalOceanAPIToken string
 
+	// Hetzner options
+	HetznerAPIToken string
+
 	CheckpointKey            string
 	DisableDurableCheckpoint bool
 

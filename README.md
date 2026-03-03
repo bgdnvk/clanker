@@ -383,6 +383,73 @@ clanker ask --apply --plan-file plan.json | cat
 clanker ask --digitalocean --maker --destroyer "delete the test droplet" | cat
 ```
 
+## Hetzner Cloud
+
+Clanker supports Hetzner Cloud infrastructure queries via the `hcloud` CLI.
+
+### Setup
+
+Install the hcloud CLI:
+
+```bash
+# macOS
+brew install hcloud
+
+# Linux
+# Download from https://github.com/hetznercloud/cli/releases
+```
+
+Set your API token:
+
+```bash
+export HCLOUD_TOKEN="your-token-here"
+```
+
+Or configure in `~/.clanker.yaml`:
+
+```yaml
+hetzner:
+  api_token: "your-token-here"
+```
+
+### Static Commands
+
+```bash
+# List resources directly (no AI)
+clanker hetzner list servers
+clanker hetzner list load-balancers
+clanker hetzner list volumes
+clanker hetzner list networks
+clanker hetzner list firewalls
+clanker hetzner list floating-ips
+clanker hetzner list primary-ips
+clanker hetzner list ssh-keys
+clanker hetzner list images
+clanker hetzner list certificates
+```
+
+### AI Queries
+
+```bash
+# Ask questions about your Hetzner Cloud infrastructure
+clanker ask --hetzner "what servers are running?"
+clanker ask --hetzner "show me my load balancers"
+clanker ask --hetzner "list all volumes"
+```
+
+### Maker (Plan + Apply)
+
+```bash
+# Generate a plan
+clanker ask --hetzner --maker "create a cx22 server in fsn1" | cat
+
+# Apply an approved plan
+clanker ask --apply --plan-file plan.json | cat
+
+# Allow destructive operations
+clanker ask --hetzner --maker --destroyer "delete the test server" | cat
+```
+
 ## Troubleshooting
 
 AWS auth:
