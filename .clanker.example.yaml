@@ -145,6 +145,10 @@ infra:
 #   account_id: ""           # Cloudflare account ID (or set CLOUDFLARE_ACCOUNT_ID / CF_ACCOUNT_ID)
 #   default_zone: ""         # Default zone name for DNS operations
 
+# Digital Ocean (for `clanker do ...` and `clanker ask --digitalocean ...`):
+# digitalocean:
+#   api_token: ""            # Digital Ocean API token (or set DO_API_TOKEN / DIGITALOCEAN_ACCESS_TOKEN)
+
 # Backend integration (for storing and retrieving credentials across machines):
 # backend:
 #   # API key for clanker backend authentication (or set CLANKER_BACKEND_API_KEY)

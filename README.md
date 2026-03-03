@@ -313,6 +313,76 @@ clanker ask "list all pods in kube-system namespace"
 clanker ask "why is pod nginx failing"
 ```
 
+## Digital Ocean
+
+Clanker supports Digital Ocean infrastructure queries via the `doctl` CLI.
+
+### Setup
+
+Install the doctl CLI:
+
+```bash
+# macOS
+brew install doctl
+
+# Linux (snap)
+sudo snap install doctl
+```
+
+Set your API token:
+
+```bash
+export DO_API_TOKEN="your-token-here"
+# or
+export DIGITALOCEAN_ACCESS_TOKEN="your-token-here"
+```
+
+Or configure in `~/.clanker.yaml`:
+
+```yaml
+digitalocean:
+  api_token: "your-token-here"
+```
+
+### Static Commands
+
+```bash
+# List resources directly (no AI)
+clanker do list droplets
+clanker do list kubernetes
+clanker do list databases
+clanker do list apps
+clanker do list load-balancers
+clanker do list volumes
+clanker do list vpcs
+clanker do list domains
+clanker do list firewalls
+clanker do list registries
+clanker do list spaces
+```
+
+### AI Queries
+
+```bash
+# Ask questions about your Digital Ocean infrastructure
+clanker ask --digitalocean "what droplets are running?"
+clanker ask --digitalocean "show me my kubernetes clusters"
+clanker ask --digitalocean "list all managed databases"
+```
+
+### Maker (Plan + Apply)
+
+```bash
+# Generate a plan
+clanker ask --digitalocean --maker "create a small droplet in nyc1" | cat
+
+# Apply an approved plan
+clanker ask --apply --plan-file plan.json | cat
+
+# Allow destructive operations
+clanker ask --digitalocean --maker --destroyer "delete the test droplet" | cat
+```
+
 ## Troubleshooting
 
 AWS auth:

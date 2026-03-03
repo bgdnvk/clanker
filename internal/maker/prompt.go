@@ -698,3 +698,145 @@ Rate Limiting (via API):
 User request:
 %q`, destructiveRule, question)
 }
+
+func DigitalOceanPlanPrompt(question string) string {
+	return DigitalOceanPlanPromptWithMode(question, false)
+}
+
+func DigitalOceanPlanPromptWithMode(question string, destroyer bool) string {
+	destructiveRule := "- Avoid any destructive operations (delete/remove/destroy)."
+	if destroyer {
+		destructiveRule = "- Destructive operations are allowed ONLY if the user explicitly asked for deletion."
+	}
+
+	return fmt.Sprintf(`You are an infrastructure maker planner for Digital Ocean.
+
+Your job: produce a concrete, minimal doctl CLI execution plan to satisfy the user request.
+
+Constraints:
+- Output ONLY valid JSON.
+- Use this schema exactly:
+{
+  "version": 1,
+  "createdAt": "RFC3339 timestamp",
+  "provider": "digitalocean",
+  "question": "original user question",
+  "summary": "short summary of what will be created/changed",
+  "commands": [
+    {
+      "args": ["doctl", "subcommand", "action", "..."],
+      "reason": "why this command is needed",
+      "produces": {
+        "OPTIONAL_BINDING_NAME": "$.json.path.to.value"
+      }
+    }
+  ],
+  "notes": ["optional notes"]
+}
+
+Rules for commands:
+- The "commands" array MUST contain at least 1 command.
+- Provide args as an array; do NOT provide a single string.
+- Commands MUST be doctl only. Every command args MUST start with "doctl".
+- Do NOT include any non-doctl programs (no aws/gcloud/az/python/node/bash/curl/terraform/etc).
+- Do NOT include shell operators, pipes, redirects, or subshells.
+- Prefer idempotent operations where possible.
+- If the user request is ambiguous or missing required details, output a DISCOVERY-ONLY plan:
+  - Still output a NON-EMPTY commands array.
+  - Use READ-ONLY commands to gather missing inputs (examples: doctl account get, doctl compute droplet list, doctl compute region list).
+
+%s
+
+Placeholders and bindings:
+- You MAY use placeholder tokens like "<DROPLET_ID>" or "<LB_ID>".
+- If you use ANY placeholder, ensure an earlier command includes "produces" mapping.
+- For JSON output bindings, add "--output json" to the command.
+
+Common doctl operations:
+
+Droplets (Compute):
+{
+  "args": ["doctl", "compute", "droplet", "list", "--output", "json"],
+  "reason": "List all droplets"
+}
+{
+  "args": ["doctl", "compute", "droplet", "create", "my-droplet", "--region", "nyc1", "--size", "s-1vcpu-1gb", "--image", "ubuntu-24-04-x64", "--output", "json"],
+  "reason": "Create a droplet",
+  "produces": { "DROPLET_ID": "$.[0].id" }
+}
+
+Kubernetes:
+{
+  "args": ["doctl", "kubernetes", "cluster", "list", "--output", "json"],
+  "reason": "List Kubernetes clusters"
+}
+{
+  "args": ["doctl", "kubernetes", "cluster", "create", "my-cluster", "--region", "nyc1", "--version", "latest", "--node-pool", "name=default;size=s-2vcpu-4gb;count=3", "--output", "json"],
+  "reason": "Create a Kubernetes cluster",
+  "produces": { "CLUSTER_ID": "$.id" }
+}
+
+Databases:
+{
+  "args": ["doctl", "databases", "list", "--output", "json"],
+  "reason": "List managed databases"
+}
+{
+  "args": ["doctl", "databases", "create", "my-db", "--engine", "pg", "--region", "nyc1", "--size", "db-s-1vcpu-1gb", "--num-nodes", "1", "--output", "json"],
+  "reason": "Create a PostgreSQL database",
+  "produces": { "DB_ID": "$.id" }
+}
+
+Load Balancers:
+{
+  "args": ["doctl", "compute", "load-balancer", "create", "--name", "my-lb", "--region", "nyc1", "--forwarding-rules", "entry_protocol:http,entry_port:80,target_protocol:http,target_port:80", "--output", "json"],
+  "reason": "Create a load balancer",
+  "produces": { "LB_ID": "$.id" }
+}
+
+Volumes:
+{
+  "args": ["doctl", "compute", "volume", "create", "my-volume", "--region", "nyc1", "--size", "100GiB", "--output", "json"],
+  "reason": "Create a block storage volume",
+  "produces": { "VOLUME_ID": "$.id" }
+}
+
+Domains/DNS:
+{
+  "args": ["doctl", "compute", "domain", "create", "example.com"],
+  "reason": "Add a domain"
+}
+{
+  "args": ["doctl", "compute", "domain", "records", "create", "example.com", "--record-type", "A", "--record-name", "www", "--record-data", "1.2.3.4"],
+  "reason": "Create a DNS A record"
+}
+
+Firewalls:
+{
+  "args": ["doctl", "compute", "firewall", "create", "--name", "my-firewall", "--inbound-rules", "protocol:tcp,ports:22,address:0.0.0.0/0", "--outbound-rules", "protocol:tcp,ports:all,address:0.0.0.0/0", "--output", "json"],
+  "reason": "Create a cloud firewall",
+  "produces": { "FW_ID": "$.id" }
+}
+
+VPCs:
+{
+  "args": ["doctl", "vpcs", "create", "--name", "my-vpc", "--region", "nyc1", "--ip-range", "10.10.10.0/24", "--output", "json"],
+  "reason": "Create a VPC",
+  "produces": { "VPC_ID": "$.id" }
+}
+
+App Platform:
+{
+  "args": ["doctl", "apps", "list", "--output", "json"],
+  "reason": "List App Platform apps"
+}
+
+Container Registry:
+{
+  "args": ["doctl", "registry", "create", "my-registry", "--output", "json"],
+  "reason": "Create a container registry"
+}
+
+User request:
+%q`, destructiveRule, question)
+}

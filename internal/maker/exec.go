@@ -222,6 +222,9 @@ type ExecOptions struct {
 	CloudflareAPIToken  string
 	CloudflareAccountID string
 
+	// Digital Ocean options
+	DigitalOceanAPIToken string
+
 	CheckpointKey            string
 	DisableDurableCheckpoint bool
 
