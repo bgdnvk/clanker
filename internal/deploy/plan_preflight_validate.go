@@ -140,6 +140,14 @@ func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepA
 		out.Warnings = append(out.Warnings, openClawChecks.Warnings...)
 	}
 
+	// DO-specific plan checks.
+	if provider == "digitalocean" {
+		doChecks := validateDigitalOceanPlanCommands(&plan, appPorts, isOpenClaw)
+		out.Issues = append(out.Issues, doChecks.Issues...)
+		out.Fixes = append(out.Fixes, doChecks.Fixes...)
+		out.Warnings = append(out.Warnings, doChecks.Warnings...)
+	}
+
 	// EC2 user-data lint — only for AWS plans.
 	if isAWS {
 		for _, cmd := range plan.Commands {
@@ -670,6 +678,162 @@ func validateOpenClawPlanCommands(plan *maker.Plan) awsPlanChecks {
 	}
 
 	return out
+}
+
+// validateDigitalOceanPlanCommands checks DO-specific plan quality.
+func validateDigitalOceanPlanCommands(plan *maker.Plan, appPorts []int, isOpenClaw bool) awsPlanChecks {
+	var out awsPlanChecks
+	if plan == nil || len(plan.Commands) == 0 {
+		return out
+	}
+
+	hasDropletCreate := false
+	hasFirewallCreate := false
+	hasFirewallAttach := false
+	hasSSHKeyList := false
+	hasReservedIP := false
+	producesDropletID := false
+
+	for _, cmd := range plan.Commands {
+		args := cmd.Args
+		if len(args) < 3 {
+			continue
+		}
+		s0 := strings.ToLower(strings.TrimSpace(args[0]))
+		s1 := strings.ToLower(strings.TrimSpace(args[1]))
+		s2 := strings.ToLower(strings.TrimSpace(args[2]))
+
+		if s0 == "compute" && s1 == "droplet" && s2 == "create" {
+			hasDropletCreate = true
+			for k := range cmd.Produces {
+				ku := strings.ToUpper(strings.TrimSpace(k))
+				if strings.Contains(ku, "DROPLET_ID") {
+					producesDropletID = true
+				}
+			}
+		}
+		if s0 == "compute" && s1 == "firewall" && s2 == "create" {
+			hasFirewallCreate = true
+		}
+		if s0 == "compute" && s1 == "firewall" && s2 == "add-droplets" {
+			hasFirewallAttach = true
+		}
+		if s0 == "compute" && s1 == "ssh-key" && s2 == "list" {
+			hasSSHKeyList = true
+		}
+		if s0 == "compute" && s1 == "reserved-ip" && s2 == "create" {
+			hasReservedIP = true
+		}
+	}
+
+	if !hasDropletCreate {
+		out.Issues = append(out.Issues, "[HARD] DigitalOcean plan missing compute droplet create")
+		out.Fixes = append(out.Fixes, "Add compute droplet create with --image docker-20-04 --user-data boot script")
+	}
+
+	if !hasFirewallCreate {
+		portStr := "22"
+		for _, p := range appPorts {
+			portStr += fmt.Sprintf(", %d", p)
+		}
+		out.Issues = append(out.Issues, fmt.Sprintf("[HARD] DigitalOcean plan missing firewall — ports %s will be unreachable", portStr))
+		out.Fixes = append(out.Fixes, "Add compute firewall create allowing inbound TCP on required ports, then compute firewall add-droplets to attach")
+	}
+
+	if hasFirewallCreate && !hasFirewallAttach {
+		out.Warnings = append(out.Warnings, "Firewall created but not attached to droplet — add compute firewall add-droplets <FIREWALL_ID> --droplet-ids <DROPLET_ID>")
+	}
+
+	if !hasSSHKeyList {
+		out.Warnings = append(out.Warnings, "No ssh-key list step — <SSH_KEY_ID> placeholder will be unresolved unless hardcoded")
+	}
+
+	if !hasReservedIP {
+		out.Warnings = append(out.Warnings, "No reserved IP — Droplet public IP may change on reboot; consider compute reserved-ip create")
+	}
+
+	if hasDropletCreate && !producesDropletID {
+		out.Warnings = append(out.Warnings, "compute droplet create does not produce DROPLET_ID — downstream steps (firewall attach, reserved IP) need it")
+	}
+
+	// Catch invalid doctl subcommands (LLM hallucinations)
+	for i, cmd := range plan.Commands {
+		args := cmd.Args
+		if len(args) < 3 {
+			continue
+		}
+		s0 := strings.ToLower(strings.TrimSpace(args[0]))
+		s1 := strings.ToLower(strings.TrimSpace(args[1]))
+		if s0 == "registry" && (s1 == "docker" || strings.HasPrefix(s1, "docker-")) {
+			out.Issues = append(out.Issues, fmt.Sprintf("[HARD] Step %d uses invalid doctl subcommand 'registry %s' — use plain 'docker build'/'docker push' instead", i+1, strings.Join(args[1:], " ")))
+			out.Fixes = append(out.Fixes, fmt.Sprintf("Change step %d to use docker CLI: args=['docker','build','-t','<tag>','.'] or args=['docker','push','<tag>']", i+1))
+		}
+	}
+
+	// Check for broken DOCR auth in user-data (doctl not pre-installed on Droplets)
+	for _, cmd := range plan.Commands {
+		args := cmd.Args
+		if len(args) < 3 {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(args[0])) != "compute" ||
+			strings.ToLower(strings.TrimSpace(args[1])) != "droplet" ||
+			strings.ToLower(strings.TrimSpace(args[2])) != "create" {
+			continue
+		}
+		script := extractDoctlUserDataScript(args)
+		if script == "" {
+			continue
+		}
+		if strings.Contains(script, "/root/.config/doctl/config.yaml") || strings.Contains(script, "cat /root/.config/doctl") {
+			out.Issues = append(out.Issues, "[HARD] user-data reads /root/.config/doctl/config.yaml — doctl is NOT pre-installed on Droplets")
+			out.Fixes = append(out.Fixes, "Install doctl in user-data, then 'doctl auth init -t $TOKEN && doctl registry login'")
+		}
+	}
+
+	// Validate user-data in droplet create
+	for _, cmd := range plan.Commands {
+		args := cmd.Args
+		if len(args) < 3 {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(args[0])) != "compute" ||
+			strings.ToLower(strings.TrimSpace(args[1])) != "droplet" ||
+			strings.ToLower(strings.TrimSpace(args[2])) != "create" {
+			continue
+		}
+		script := extractDoctlUserDataScript(args)
+		if strings.TrimSpace(script) == "" {
+			out.Warnings = append(out.Warnings, "compute droplet create has no --user-data; workload likely will not start")
+			continue
+		}
+		lower := strings.ToLower(script)
+		// Check OpenClaw-specific user-data requirements
+		if isOpenClaw {
+			if !strings.Contains(lower, "docker compose up") && !strings.Contains(lower, "docker-compose up") && !strings.Contains(lower, "docker run") {
+				out.Issues = append(out.Issues, "[HARD] DigitalOcean droplet user-data does not start OpenClaw (missing docker compose up or docker run)")
+				out.Fixes = append(out.Fixes, "Add 'docker compose up -d openclaw-gateway' to user-data script")
+			}
+			if !strings.Contains(lower, "openclaw_gateway_token") && !strings.Contains(lower, "openclaw_gateway_password") {
+				out.Warnings = append(out.Warnings, "user-data .env missing OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_PASSWORD")
+			}
+			if !strings.Contains(lower, "openclaw_gateway_bind") {
+				out.Warnings = append(out.Warnings, "user-data .env missing OPENCLAW_GATEWAY_BIND=lan — gateway may not accept external connections")
+			}
+		}
+	}
+
+	return out
+}
+
+// extractDoctlUserDataScript extracts the --user-data value from doctl args.
+func extractDoctlUserDataScript(args []string) string {
+	for i, a := range args {
+		if strings.EqualFold(strings.TrimSpace(a), "--user-data") && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 // hasOpenClawSSMRuntimePath checks if SSM send-command steps collectively

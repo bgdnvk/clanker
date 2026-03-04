@@ -161,6 +161,12 @@ func buildSkeletonPrompt(provider, enrichedPrompt string, requiredLaunchOps []st
 		b.WriteString("Provider: GCP (gcloud commands)\n")
 	case "azure":
 		b.WriteString("Provider: Azure (az commands)\n")
+	case "digitalocean":
+		b.WriteString("Provider: DigitalOcean (doctl commands, WITHOUT leading 'doctl' prefix)\n")
+		b.WriteString("Services: registry, compute (droplet/firewall/ssh-key/reserved-ip), databases\n")
+		b.WriteString("Operations: registry create, registry login, compute droplet create, compute firewall create, compute ssh-key list, compute firewall add-droplets, compute reserved-ip create\n")
+	case "hetzner":
+		b.WriteString("Provider: Hetzner Cloud (hcloud commands)\n")
 	default:
 		b.WriteString("Provider: AWS (aws CLI commands, WITHOUT leading 'aws' prefix)\n")
 	}
@@ -185,7 +191,16 @@ func buildSkeletonPrompt(provider, enrichedPrompt string, requiredLaunchOps []st
 	b.WriteString("- Placeholder names must be UPPERCASE_WITH_UNDERSCORES (e.g. INSTANCE_ID, ALB_SG_ID).\n")
 	b.WriteString("- Keep the plan minimal — fewest steps that get the job done.\n")
 	b.WriteString("- Do NOT add redundant diagnostic/verification steps unless essential for correctness.\n")
-	b.WriteString("- For user-data on EC2: use ONE 'ssm send-command' or embed in run-instances user-data. Do NOT repeat.\n\n")
+	if provider == "digitalocean" {
+		b.WriteString("- For user-data on Droplet: embed the boot script in compute droplet create --user-data.\n")
+		b.WriteString("- A typical Droplet deploy needs: ssh-key list, registry create, registry login, docker build, docker push, firewall create, droplet create, firewall add-droplets, reserved-ip create.\n")
+		b.WriteString("- IMPORTANT: generate ALL infrastructure steps as separate skeleton entries. Do NOT collapse everything into a single droplet create step.\n")
+		b.WriteString("- 'docker build' and 'docker push' use the plain docker CLI (service='docker'). Do NOT use 'registry docker build' or 'registry docker-push' — those are NOT valid doctl commands.\n")
+		b.WriteString("- For DOCR auth on the Droplet user-data: install doctl, run 'doctl auth init -t $TOKEN && doctl registry login'. Do NOT read /root/.config/doctl/config.yaml.\n")
+	} else {
+		b.WriteString("- For user-data on EC2: use ONE 'ssm send-command' or embed in run-instances user-data. Do NOT repeat.\n")
+	}
+	b.WriteString("\n")
 
 	if len(requiredLaunchOps) > 0 {
 		b.WriteString("REQUIRED: The plan MUST include at least one of:\n")
@@ -195,19 +210,50 @@ func buildSkeletonPrompt(provider, enrichedPrompt string, requiredLaunchOps []st
 		b.WriteString("\n")
 	}
 
-	b.WriteString("Output format (JSON only, no markdown):\n")
-	b.WriteString("{\n")
-	b.WriteString("  \"steps\": [\n")
-	b.WriteString("    {\n")
-	b.WriteString("      \"service\": \"iam\",\n")
-	b.WriteString("      \"operation\": \"create-role\",\n")
-	b.WriteString("      \"reason\": \"IAM role for EC2 to access ECR and Secrets Manager\",\n")
-	b.WriteString("      \"produces\": [\"ROLE_ARN\"],\n")
-	b.WriteString("      \"depends_on\": []\n")
-	b.WriteString("    }\n")
-	b.WriteString("  ],\n")
-	b.WriteString("  \"notes\": [\"optional notes\"]\n")
-	b.WriteString("}\n\n")
+	// Provider-specific example
+	switch provider {
+	case "digitalocean":
+		b.WriteString("Output format (JSON only, no markdown):\n")
+		b.WriteString("{\n")
+		b.WriteString("  \"steps\": [\n")
+		b.WriteString("    {\n")
+		b.WriteString("      \"service\": \"compute\",\n")
+		b.WriteString("      \"operation\": \"ssh-key list\",\n")
+		b.WriteString("      \"reason\": \"Retrieve SSH key ID for Droplet authentication\",\n")
+		b.WriteString("      \"produces\": [\"SSH_KEY_ID\"],\n")
+		b.WriteString("      \"depends_on\": []\n")
+		b.WriteString("    },\n")
+		b.WriteString("    {\n")
+		b.WriteString("      \"service\": \"compute\",\n")
+		b.WriteString("      \"operation\": \"firewall create\",\n")
+		b.WriteString("      \"reason\": \"Cloud Firewall for inbound traffic\",\n")
+		b.WriteString("      \"produces\": [\"FIREWALL_ID\"],\n")
+		b.WriteString("      \"depends_on\": []\n")
+		b.WriteString("    },\n")
+		b.WriteString("    {\n")
+		b.WriteString("      \"service\": \"compute\",\n")
+		b.WriteString("      \"operation\": \"droplet create\",\n")
+		b.WriteString("      \"reason\": \"Create Droplet with Docker pre-installed\",\n")
+		b.WriteString("      \"produces\": [\"DROPLET_ID\", \"DROPLET_IP\"],\n")
+		b.WriteString("      \"depends_on\": [\"SSH_KEY_ID\"]\n")
+		b.WriteString("    }\n")
+		b.WriteString("  ]\n")
+		b.WriteString("}\n\n")
+	default:
+		b.WriteString("Output format (JSON only, no markdown):\n")
+		b.WriteString("{\n")
+		b.WriteString("  \"steps\": [\n")
+		b.WriteString("    {\n")
+		b.WriteString("      \"service\": \"iam\",\n")
+		b.WriteString("      \"operation\": \"create-role\",\n")
+		b.WriteString("      \"reason\": \"IAM role for EC2 to access ECR and Secrets Manager\",\n")
+		b.WriteString("      \"produces\": [\"ROLE_ARN\"],\n")
+		b.WriteString("      \"depends_on\": []\n")
+		b.WriteString("    }\n")
+		b.WriteString("  ],\n")
+		b.WriteString("  \"notes\": [\"optional notes\"]\n")
+		b.WriteString("}\n\n")
+	}
 
 	b.WriteString("Deployment context:\n")
 	b.WriteString(strings.TrimSpace(enrichedPrompt))
@@ -252,6 +298,13 @@ func buildHydratePrompt(provider, enrichedPrompt, skeletonSummary string, batch 
 		b.WriteString("Provider: GCP. Commands start with the gcloud group (e.g. 'run', 'compute').\n")
 	case "azure":
 		b.WriteString("Provider: Azure. Commands start with the az group (e.g. 'vm', 'containerapp').\n")
+	case "digitalocean":
+		b.WriteString("Provider: DigitalOcean. Args start with the doctl group (e.g. 'compute', 'registry'), NOT 'doctl'.\n")
+		b.WriteString("Use --output json for JSON output (NOT --format json). Use --format for column selection only (e.g. --format ID).\n")
+		b.WriteString("IMPORTANT: 'docker build' and 'docker push' are plain docker CLI commands. Args start with 'docker' (e.g. ['docker','build','-t','<tag>','.']).\n")
+		b.WriteString("Do NOT use 'registry docker build' or 'registry docker-push' — those are NOT valid doctl commands.\n")
+	case "hetzner":
+		b.WriteString("Provider: Hetzner Cloud. Commands use hcloud (e.g. 'server', 'firewall', 'network').\n")
 	default:
 		b.WriteString("Provider: AWS. Args start with the service name (e.g. 'ec2', 'iam'), NOT 'aws'.\n")
 	}
@@ -263,9 +316,17 @@ func buildHydratePrompt(provider, enrichedPrompt, skeletonSummary string, batch 
 	b.WriteString("- produces values are JMESPath queries on the CLI JSON output.\n")
 	b.WriteString("- For user-data: provide the actual bash script (it will be base64-encoded automatically).\n")
 	b.WriteString("- CONSISTENCY: resource names in user-data scripts MUST match the names used in earlier commands.\n")
-	b.WriteString("  For example, if 'ecr create-repository --repository-name my-app-abc123' was generated,\n")
-	b.WriteString("  the user-data MUST pull from 'my-app-abc123', NOT a different name.\n")
-	b.WriteString("  Prefer deriving ECR registry URLs dynamically from instance metadata rather than hardcoding.\n\n")
+	if provider == "digitalocean" {
+		b.WriteString("  For example, if 'registry create my-app-abc123' was generated,\n")
+		b.WriteString("  the user-data MUST pull from 'registry.digitalocean.com/my-app-abc123/...', NOT a different name.\n")
+		b.WriteString("  Use --output json for JSON output (NOT --format json). Use --format for column selection (e.g. --format ID,Name).\n")
+		b.WriteString("  For docker build/push: args=['docker','build','-t','<tag>','.'] and args=['docker','push','<tag>'] — plain docker CLI, NOT doctl subcommands.\n")
+		b.WriteString("  For DOCR auth in user-data: install doctl via snap/wget, then 'doctl auth init -t $TOKEN && doctl registry login'. Do NOT cat /root/.config/doctl/config.yaml.\n\n")
+	} else {
+		b.WriteString("  For example, if 'ecr create-repository --repository-name my-app-abc123' was generated,\n")
+		b.WriteString("  the user-data MUST pull from 'my-app-abc123', NOT a different name.\n")
+		b.WriteString("  Prefer deriving ECR registry URLs dynamically from instance metadata rather than hardcoding.\n\n")
+	}
 
 	b.WriteString(skeletonSummary)
 	b.WriteString("\n")

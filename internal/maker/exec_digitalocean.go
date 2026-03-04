@@ -32,12 +32,23 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 		args := make([]string, 0, len(cmdSpec.Args)+4)
 		args = append(args, cmdSpec.Args...)
 		args = applyPlanBindings(args, bindings)
-		args = normalizeDoctlOutputFlags(args)
 
 		if hasUnresolvedPlaceholders(args) {
 			return fmt.Errorf("command %d has unresolved placeholders after substitutions", idx+1)
 		}
 
+		// Docker commands run via docker CLI, not doctl
+		if isDockerCommand(args) {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: docker %s\n", idx+1, len(plan.Commands), strings.Join(dockerArgs(args), " "))
+			out, runErr := runDockerCommandStreaming(ctx, args, opts, opts.Writer)
+			if runErr != nil {
+				return fmt.Errorf("docker command %d failed: %w", idx+1, runErr)
+			}
+			learnPlanBindingsFromProduces(cmdSpec.Produces, out, bindings)
+			continue
+		}
+
+		args = normalizeDoctlOutputFlags(args)
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: doctl %s\n", idx+1, len(plan.Commands), strings.Join(args[1:], " "))
 
 		out, runErr := runDoctlCommandStreaming(ctx, args, opts, opts.Writer)
@@ -51,7 +62,7 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 	return nil
 }
 
-// validateDoctlCommand validates a doctl command
+// validateDoctlCommand validates a doctl or docker command
 func validateDoctlCommand(args []string, allowDestructive bool) error {
 	if len(args) == 0 {
 		return fmt.Errorf("empty args")
@@ -59,9 +70,21 @@ func validateDoctlCommand(args []string, allowDestructive bool) error {
 
 	first := strings.ToLower(strings.TrimSpace(args[0]))
 
+	// Allow docker build/push alongside doctl
+	if first == "docker" {
+		if len(args) < 2 {
+			return fmt.Errorf("docker command missing subcommand")
+		}
+		sub := strings.ToLower(strings.TrimSpace(args[1]))
+		allowed := map[string]bool{"build": true, "push": true, "tag": true, "login": true}
+		if !allowed[sub] {
+			return fmt.Errorf("docker subcommand %q is not allowed (only build/push/tag/login)", sub)
+		}
+		return nil
+	}
+
 	// Only allow doctl commands
 	if first != "doctl" {
-		// Reject non-doctl commands
 		blockedCommands := []string{
 			"aws", "gcloud", "az", "kubectl", "helm", "eksctl", "kubeadm",
 			"python", "node", "npm", "npx",
@@ -87,7 +110,6 @@ func validateDoctlCommand(args []string, allowDestructive bool) error {
 			return fmt.Errorf("shell operators are not allowed")
 		}
 
-		// Block destructive operations unless destroyer mode is enabled
 		if !allowDestructive {
 			destructiveVerbs := []string{"delete", "remove", "destroy"}
 			for _, verb := range destructiveVerbs {
@@ -99,6 +121,46 @@ func validateDoctlCommand(args []string, allowDestructive bool) error {
 	}
 
 	return nil
+}
+
+// isDockerCommand returns true if args represent a docker CLI command
+func isDockerCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	return strings.ToLower(strings.TrimSpace(args[0])) == "docker"
+}
+
+// dockerArgs strips the leading "docker" from args
+func dockerArgs(args []string) []string {
+	if len(args) > 1 && strings.ToLower(strings.TrimSpace(args[0])) == "docker" {
+		return args[1:]
+	}
+	return args
+}
+
+// runDockerCommandStreaming executes a docker CLI command with streaming output
+func runDockerCommandStreaming(ctx context.Context, args []string, opts ExecOptions, w io.Writer) (string, error) {
+	bin, err := exec.LookPath("docker")
+	if err != nil {
+		return "", fmt.Errorf("docker not found in PATH: %w", err)
+	}
+
+	cmdArgs := dockerArgs(args)
+	cmd := exec.CommandContext(ctx, bin, cmdArgs...)
+	cmd.Env = os.Environ()
+
+	var buf bytes.Buffer
+	mw := io.MultiWriter(w, &buf)
+	cmd.Stdout = mw
+	cmd.Stderr = mw
+
+	err = cmd.Run()
+	out := buf.String()
+	if err != nil {
+		return out, err
+	}
+	return out, nil
 }
 
 // normalizeDoctlOutputFlags rewrites --format json → --output json.

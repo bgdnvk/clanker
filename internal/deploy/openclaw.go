@@ -201,6 +201,10 @@ func OpenClawDigitalOceanDropletPrompt(p *RepoProfile, deep *DeepAnalysis, opts 
 	b.WriteString("7. Create persistent directories for OpenClaw config/workspace on disk\n")
 	b.WriteString("8. Build and start with: docker compose build && docker compose up -d openclaw-gateway\n")
 	b.WriteString("9. Verify gateway health and endpoint readiness\n")
+	b.WriteString("\nDigitalOcean-specific notes:\n")
+	b.WriteString("- Steps 2 (build) and 2 (push) use plain 'docker build' / 'docker push' CLI, NOT doctl subcommands.\n")
+	b.WriteString("- User-data DOCR auth: install doctl, then 'doctl auth init -t $DIGITALOCEAN_ACCESS_TOKEN && doctl registry login'. Do NOT read /root/.config/doctl/config.yaml.\n")
+	b.WriteString("- .env MUST include OPENCLAW_GATEWAY_BIND=lan (required for gateway to accept external connections).\n")
 	return b.String()
 }
 
