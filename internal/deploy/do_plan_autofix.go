@@ -28,6 +28,11 @@ func ApplyDigitalOceanPlanAutofix(plan *maker.Plan, logf func(string, ...any)) *
 		logf("[deploy] do autofix: replaced %d 'registry docker ...' → 'docker ...'", dockerFixed)
 	}
 
+	// Fix docker push tag to use <IMAGE_TAG> from docker build
+	if fixDODockerTagConsistency(plan) {
+		logf("[deploy] do autofix: rewrote docker push to use <IMAGE_TAG> from build step")
+	}
+
 	return plan
 }
 
@@ -103,4 +108,73 @@ func findProducedPlaceholder(plan *maker.Plan, name string) string {
 		}
 	}
 	return ""
+}
+
+// fixDODockerTagConsistency ensures docker push uses <IMAGE_TAG> from docker build.
+// The LLM often constructs an independent tag for the push step instead of
+// referencing the placeholder produced by the build step.
+func fixDODockerTagConsistency(plan *maker.Plan) bool {
+	// Find the docker build step that produces IMAGE_TAG
+	buildIdx := -1
+	for i, cmd := range plan.Commands {
+		if !isDockerSubcommand(cmd.Args, "build") {
+			continue
+		}
+		for k := range cmd.Produces {
+			if strings.EqualFold(k, "IMAGE_TAG") {
+				buildIdx = i
+				break
+			}
+		}
+		if buildIdx >= 0 {
+			break
+		}
+	}
+	if buildIdx < 0 {
+		return false // no docker build step producing IMAGE_TAG
+	}
+
+	// Find the docker push step(s) after the build
+	fixed := false
+	for i := buildIdx + 1; i < len(plan.Commands); i++ {
+		cmd := &plan.Commands[i]
+		if !isDockerSubcommand(cmd.Args, "push") {
+			continue
+		}
+		// Check if it already references <IMAGE_TAG>
+		already := false
+		for _, a := range cmd.Args {
+			if strings.Contains(strings.ToUpper(a), "<IMAGE_TAG>") {
+				already = true
+				break
+			}
+		}
+		if already {
+			continue
+		}
+		// Rewrite: the push target is typically the last non-flag arg.
+		// docker push <image> — just replace the image arg with <IMAGE_TAG>
+		for j := len(cmd.Args) - 1; j >= 0; j-- {
+			arg := cmd.Args[j]
+			if strings.HasPrefix(arg, "-") {
+				continue
+			}
+			if strings.EqualFold(arg, "docker") || strings.EqualFold(arg, "push") {
+				continue
+			}
+			// This is the image ref — replace it
+			cmd.Args[j] = "<IMAGE_TAG>"
+			fixed = true
+			break
+		}
+	}
+	return fixed
+}
+
+// isDockerSubcommand checks if args represent "docker <sub>" (e.g. "docker build", "docker push").
+func isDockerSubcommand(args []string, sub string) bool {
+	if len(args) < 2 {
+		return false
+	}
+	return strings.EqualFold(args[0], "docker") && strings.EqualFold(args[1], sub)
 }
