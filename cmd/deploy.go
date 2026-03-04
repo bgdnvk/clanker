@@ -402,6 +402,11 @@ Examples:
 				plan = patched
 			}
 		}
+		if strings.EqualFold(strings.TrimSpace(planProvider), "digitalocean") {
+			if patched := deploy.ApplyDigitalOceanPlanAutofix(plan, logf); patched != nil {
+				plan = patched
+			}
+		}
 		if patched := deploy.ApplyGenericPlanAutofix(plan, logf, rp.EnvVars...); patched != nil {
 			plan = patched
 		}

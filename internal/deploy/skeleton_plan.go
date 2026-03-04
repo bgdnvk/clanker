@@ -321,6 +321,7 @@ func buildHydratePrompt(provider, enrichedPrompt, skeletonSummary string, batch 
 		b.WriteString("  the user-data MUST pull from 'registry.digitalocean.com/my-app-abc123/...', NOT a different name.\n")
 		b.WriteString("  Use --output json for JSON output (NOT --format json). Use --format for column selection (e.g. --format ID,Name).\n")
 		b.WriteString("  For docker build/push: args=['docker','build','-t','<tag>','.'] and args=['docker','push','<tag>'] — plain docker CLI, NOT doctl subcommands.\n")
+		b.WriteString("  CRITICAL: docker build and docker push MUST use the EXACT SAME image tag. If build tags 'registry.digitalocean.com/myapp/img:latest', push MUST push that exact tag.\n")
 		b.WriteString("  For DOCR auth in user-data: install doctl via snap/wget, then 'doctl auth init -t $TOKEN && doctl registry login'. Do NOT cat /root/.config/doctl/config.yaml.\n\n")
 	} else {
 		b.WriteString("  For example, if 'ecr create-repository --repository-name my-app-abc123' was generated,\n")
