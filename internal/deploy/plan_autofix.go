@@ -407,16 +407,54 @@ func isCriticalCommand(args []string) bool {
 	}
 	svc := strings.ToLower(strings.TrimSpace(args[0]))
 	op := strings.ToLower(strings.TrimSpace(args[1]))
-	// ec2 run-instances is the most critical — it creates the instance
+
+	// AWS: ec2 run-instances
 	if svc == "ec2" && op == "run-instances" {
 		return true
 	}
-	// elbv2 create-load-balancer, create-target-group, create-listener
+	// AWS: elbv2 create-load-balancer, create-target-group, create-listener
 	if svc == "elbv2" && strings.HasPrefix(op, "create-") {
 		return true
 	}
-	// cloudfront create-distribution
+	// AWS: cloudfront create-distribution
 	if svc == "cloudfront" && op == "create-distribution" {
+		return true
+	}
+	// DO: compute droplet/reserved-ip/firewall create
+	if svc == "compute" && (op == "droplet" || op == "firewall" || op == "reserved-ip") {
+		if len(args) >= 3 && strings.ToLower(strings.TrimSpace(args[2])) == "create" {
+			return true
+		}
+	}
+	// DO: registry create, apps create, kubernetes cluster create
+	if svc == "registry" && op == "create" {
+		return true
+	}
+	if svc == "apps" && op == "create" {
+		return true
+	}
+	if svc == "kubernetes" && op == "cluster" {
+		if len(args) >= 3 && strings.ToLower(strings.TrimSpace(args[2])) == "create" {
+			return true
+		}
+	}
+	// Docker build/push are critical for image-based deploys
+	if svc == "docker" && (op == "build" || op == "push") {
+		return true
+	}
+	// GCP: compute instances create, run deploy
+	if svc == "compute" && op == "instances" {
+		return true
+	}
+	if svc == "run" && op == "deploy" {
+		return true
+	}
+	// Azure: vm create, containerapp create
+	if (svc == "vm" || svc == "containerapp" || svc == "aks") && op == "create" {
+		return true
+	}
+	// Hetzner: server create
+	if svc == "server" && op == "create" {
 		return true
 	}
 	return false

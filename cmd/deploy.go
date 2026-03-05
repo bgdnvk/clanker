@@ -1824,6 +1824,14 @@ func commandPair(args []string) string {
 	if second == "" {
 		return first
 	}
+	// DO/GCP commands use 3-token patterns: compute droplet create, compute firewall create, etc.
+	// Check if the third token is an operation verb (create/delete/list/update/get)
+	if len(args) >= 3 {
+		third := strings.ToLower(strings.TrimSpace(args[2]))
+		if third == "create" || third == "delete" || third == "list" || third == "update" || third == "get" || third == "add-droplets" {
+			return first + " " + second + " " + third
+		}
+	}
 	return first + " " + second
 }
 
@@ -1852,13 +1860,12 @@ func hasRequiredLaunchOp(plan *maker.Plan, requiredLaunchOps []string) bool {
 	if plan == nil || len(plan.Commands) == 0 || len(requiredLaunchOps) == 0 {
 		return len(requiredLaunchOps) == 0
 	}
-	required := make(map[string]struct{}, len(requiredLaunchOps))
+	required := make([]string, 0, len(requiredLaunchOps))
 	for _, op := range requiredLaunchOps {
 		tok := strings.ToLower(strings.TrimSpace(op))
-		if tok == "" {
-			continue
+		if tok != "" {
+			required = append(required, tok)
 		}
-		required[tok] = struct{}{}
 	}
 	if len(required) == 0 {
 		return true
@@ -1868,8 +1875,12 @@ func hasRequiredLaunchOp(plan *maker.Plan, requiredLaunchOps []string) bool {
 		if pair == "" {
 			continue
 		}
-		if _, ok := required[pair]; ok {
-			return true
+		// Prefix match: "compute instances" matches "compute instances create"
+		// and exact: "ec2 run-instances" matches "ec2 run-instances"
+		for _, req := range required {
+			if pair == req || strings.HasPrefix(pair, req+" ") || strings.HasPrefix(req, pair+" ") {
+				return true
+			}
 		}
 	}
 	return false

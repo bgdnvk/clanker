@@ -64,6 +64,12 @@ func ApplyDigitalOceanPlanAutofix(plan *maker.Plan, logf func(string, ...any)) *
 		logf("[deploy] do autofix: stripped --region from %d reserved-ip create with --droplet-id", ripFixed)
 	}
 
+	// Fix firewall rules with empty address field
+	fwAddrFixed := fixDOFirewallEmptyAddress(plan)
+	if fwAddrFixed > 0 {
+		logf("[deploy] do autofix: filled %d empty firewall address field(s) with 0.0.0.0/0", fwAddrFixed)
+	}
+
 	return plan
 }
 
@@ -488,3 +494,39 @@ func FilterDOValidationNoise(v *PlanValidation, logf func(string, ...any)) *Plan
 	}
 	return v
 }
+
+// fixDOFirewallEmptyAddress fixes firewall inbound-rules where the LLM
+// leaves the address: field empty (e.g. "protocol:tcp,ports:22,address:").
+// doctl requires a CIDR — default to 0.0.0.0/0.
+func fixDOFirewallEmptyAddress(plan *maker.Plan) int {
+	if plan == nil {
+		return 0
+	}
+	count := 0
+	for ci := range plan.Commands {
+		args := plan.Commands[ci].Args
+		if len(args) < 4 {
+			continue
+		}
+		s0 := strings.ToLower(strings.TrimSpace(args[0]))
+		s1 := strings.ToLower(strings.TrimSpace(args[1]))
+		if s0 != "compute" || s1 != "firewall" {
+			continue
+		}
+		for ai, arg := range args {
+			if !strings.Contains(arg, "address:") {
+				continue
+			}
+			// Fix empty address fields: "address:" followed by space or end
+			fixed := emptyFWAddrRe.ReplaceAllString(arg, "address:0.0.0.0/0")
+			if fixed != arg {
+				plan.Commands[ci].Args[ai] = fixed
+				count++
+			}
+		}
+	}
+	return count
+}
+
+// emptyFWAddrRe matches "address:" followed by whitespace or end-of-string
+var emptyFWAddrRe = regexp.MustCompile(`address:(\s|$)`)
