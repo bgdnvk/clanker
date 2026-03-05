@@ -126,28 +126,28 @@ type CleanFunc func(response string) string
 
 // IntelligenceResult is the final output of the multi-phase reasoning pipeline
 type IntelligenceResult struct {
-	Exploration  *ExplorationResult `json:"exploration,omitempty"`
-	DeepAnalysis *DeepAnalysis      `json:"deepAnalysis"`
-	Docker       *DockerAnalysis    `json:"docker,omitempty"`
-	Preflight    *PreflightReport   `json:"preflight,omitempty"`
+	Exploration      *ExplorationResult    `json:"exploration,omitempty"`
+	DeepAnalysis     *DeepAnalysis         `json:"deepAnalysis"`
+	Docker           *DockerAnalysis       `json:"docker,omitempty"`
+	Preflight        *PreflightReport      `json:"preflight,omitempty"`
 	InfraSnap        *InfraSnapshot        `json:"infraSnapshot,omitempty"`
 	CFInfraSnap      *CFInfraSnapshot      `json:"cfInfraSnapshot,omitempty"`
 	DOInfraSnap      *DOInfraSnapshot      `json:"doInfraSnapshot,omitempty"`
 	HetznerInfraSnap *HetznerInfraSnapshot `json:"hetznerInfraSnapshot,omitempty"`
 	Architecture     *ArchitectDecision    `json:"architecture"`
-	Validation   *PlanValidation    `json:"validation,omitempty"`
+	Validation       *PlanValidation       `json:"validation,omitempty"`
 	// final enriched prompt for maker pipeline
 	EnrichedPrompt string `json:"enrichedPrompt"`
 }
 
 // DeployOptions contains user-specified deployment preferences
 type DeployOptions struct {
-	Target        string // fargate, ec2, eks
-	InstanceType  string // for ec2: t3.small, t3.medium, etc.
-	NewVPC        bool   // create new VPC instead of using default
-	DeployID      string // run-specific id for unique resource naming
-	DOToken       string // DigitalOcean API token for infra scan
-	HetznerToken  string // Hetzner Cloud API token for infra scan
+	Target       string // fargate, ec2, eks
+	InstanceType string // for ec2: t3.small, t3.medium, etc.
+	NewVPC       bool   // create new VPC instead of using default
+	DeployID     string // run-specific id for unique resource naming
+	DOToken      string // DigitalOcean API token for infra scan
+	HetznerToken string // Hetzner Cloud API token for infra scan
 }
 
 // shouldUseAPIGateway determines whether to use API Gateway or ALB based on app characteristics.

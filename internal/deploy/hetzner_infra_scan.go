@@ -80,9 +80,9 @@ func ScanHetznerInfra(ctx context.Context, apiToken string, logf func(string, ..
 	// Servers
 	if out := hcloudCLI(ctx, apiToken, "server", "list", "-o", "json"); out != "" {
 		var servers []struct {
-			ID     int    `json:"id"`
-			Name   string `json:"name"`
-			Status string `json:"status"`
+			ID         int    `json:"id"`
+			Name       string `json:"name"`
+			Status     string `json:"status"`
 			Datacenter struct {
 				Name     string `json:"name"`
 				Location struct {
