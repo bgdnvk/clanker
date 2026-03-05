@@ -62,6 +62,7 @@ Examples:
 		gcpProject, _ := cmd.Flags().GetString("gcp-project")
 		azureSubscription, _ := cmd.Flags().GetString("azure-subscription")
 		doAccessToken, _ := cmd.Flags().GetString("do-token")
+		hetznerToken, _ := cmd.Flags().GetString("hetzner-token")
 		enforceImageDeploy, _ := cmd.Flags().GetBool("enforce-image-deploy")
 
 		// 1. Clone + analyze
@@ -138,6 +139,18 @@ Examples:
 				tok = strings.TrimSpace(os.Getenv("DO_API_TOKEN"))
 			}
 			deployOpts.DOToken = tok
+		}
+
+		// Pass Hetzner token for infra scan if targeting Hetzner
+		if strings.EqualFold(strings.TrimSpace(targetProvider), "hetzner") {
+			tok := strings.TrimSpace(hetznerToken)
+			if tok == "" {
+				tok = strings.TrimSpace(os.Getenv("HCLOUD_TOKEN"))
+			}
+			if tok == "" {
+				tok = strings.TrimSpace(os.Getenv("HETZNER_API_TOKEN"))
+			}
+			deployOpts.HetznerToken = tok
 		}
 
 		// 4. Run multi-phase intelligence pipeline (explore → deep analysis → infra scan → architecture)
@@ -2023,7 +2036,7 @@ func init() {
 	deployCmd.Flags().String("deepseek-model", "", "DeepSeek model to use (overrides config)")
 	deployCmd.Flags().String("minimax-model", "", "MiniMax model to use (overrides config)")
 	deployCmd.Flags().Bool("apply", false, "Apply the plan immediately after generation")
-	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws, gcp, azure, cloudflare, or digitalocean")
+	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws, gcp, azure, cloudflare, digitalocean, or hetzner")
 	deployCmd.Flags().String("target", "fargate", "Deployment target: fargate (default), ec2, or eks")
 	deployCmd.Flags().String("instance-type", "t3.small", "EC2 instance type (only used with --target ec2)")
 	deployCmd.Flags().Bool("new-vpc", false, "Create a new VPC instead of using default")
@@ -2031,6 +2044,7 @@ func init() {
 	deployCmd.Flags().String("gcp-project", "", "GCP project ID (required for --provider gcp apply)")
 	deployCmd.Flags().String("azure-subscription", "", "Azure subscription ID (required for --provider azure apply)")
 	deployCmd.Flags().String("do-token", "", "DigitalOcean access token (or set DIGITALOCEAN_ACCESS_TOKEN)")
+	deployCmd.Flags().String("hetzner-token", "", "Hetzner Cloud API token (or set HCLOUD_TOKEN)")
 }
 
 // splitPlanAtDockerBuild separates infrastructure setup from app deployment.

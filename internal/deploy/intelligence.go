@@ -130,10 +130,11 @@ type IntelligenceResult struct {
 	DeepAnalysis *DeepAnalysis      `json:"deepAnalysis"`
 	Docker       *DockerAnalysis    `json:"docker,omitempty"`
 	Preflight    *PreflightReport   `json:"preflight,omitempty"`
-	InfraSnap    *InfraSnapshot     `json:"infraSnapshot,omitempty"`
-	CFInfraSnap  *CFInfraSnapshot   `json:"cfInfraSnapshot,omitempty"`
-	DOInfraSnap  *DOInfraSnapshot   `json:"doInfraSnapshot,omitempty"`
-	Architecture *ArchitectDecision `json:"architecture"`
+	InfraSnap        *InfraSnapshot        `json:"infraSnapshot,omitempty"`
+	CFInfraSnap      *CFInfraSnapshot      `json:"cfInfraSnapshot,omitempty"`
+	DOInfraSnap      *DOInfraSnapshot      `json:"doInfraSnapshot,omitempty"`
+	HetznerInfraSnap *HetznerInfraSnapshot `json:"hetznerInfraSnapshot,omitempty"`
+	Architecture     *ArchitectDecision    `json:"architecture"`
 	Validation   *PlanValidation    `json:"validation,omitempty"`
 	// final enriched prompt for maker pipeline
 	EnrichedPrompt string `json:"enrichedPrompt"`
@@ -141,11 +142,12 @@ type IntelligenceResult struct {
 
 // DeployOptions contains user-specified deployment preferences
 type DeployOptions struct {
-	Target       string // fargate, ec2, eks
-	InstanceType string // for ec2: t3.small, t3.medium, etc.
-	NewVPC       bool   // create new VPC instead of using default
-	DeployID     string // run-specific id for unique resource naming
-	DOToken      string // DigitalOcean API token for infra scan
+	Target        string // fargate, ec2, eks
+	InstanceType  string // for ec2: t3.small, t3.medium, etc.
+	NewVPC        bool   // create new VPC instead of using default
+	DeployID      string // run-specific id for unique resource naming
+	DOToken       string // DigitalOcean API token for infra scan
+	HetznerToken  string // Hetzner Cloud API token for infra scan
 }
 
 // shouldUseAPIGateway determines whether to use API Gateway or ALB based on app characteristics.
@@ -293,6 +295,7 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 	var infraSnap *InfraSnapshot
 	var cfInfraSnap *CFInfraSnapshot
 	var doInfraSnap *DOInfraSnapshot
+	var hetznerInfraSnap *HetznerInfraSnapshot
 	var deepErr error
 
 	var wg sync.WaitGroup
@@ -345,6 +348,13 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 			} else {
 				logf("[intelligence] phase 1.5: skipping DO scan (no token)")
 			}
+		case "hetzner":
+			if opts != nil && opts.HetznerToken != "" {
+				logf("[intelligence] phase 1.5: scanning Hetzner Cloud infrastructure...")
+				hetznerInfraSnap = ScanHetznerInfra(ctx, opts.HetznerToken, logf)
+			} else {
+				logf("[intelligence] phase 1.5: skipping Hetzner scan (no token)")
+			}
 		case "aws", "":
 			logf("[intelligence] phase 1.5: scanning AWS infrastructure...")
 			infraSnap = ScanInfra(ctx, awsProfile, awsRegion, logf)
@@ -374,6 +384,7 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 	result.InfraSnap = infraSnap
 	result.CFInfraSnap = cfInfraSnap
 	result.DOInfraSnap = doInfraSnap
+	result.HetznerInfraSnap = hetznerInfraSnap
 
 	// Phase 2: Architecture Decision + Cost Estimation
 	logf("[intelligence] phase 2: architecture + cost estimation (target: %s)...", opts.Target)
@@ -435,7 +446,7 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 
 	// build the final enriched prompt with all intelligence + infra context
 	strat := StrategyFromArchitect(arch)
-	result.EnrichedPrompt = buildIntelligentPrompt(profile, deep, result.Docker, arch, strat, infraSnap, cfInfraSnap, doInfraSnap, opts)
+	result.EnrichedPrompt = buildIntelligentPrompt(profile, deep, result.Docker, arch, strat, infraSnap, cfInfraSnap, doInfraSnap, hetznerInfraSnap, opts)
 
 	return result, nil
 }
@@ -951,6 +962,48 @@ Estimate the MONTHLY cost in USD.
 	"estMonthly": "$12-18",
 	"costBreakdown": ["Droplet", "Container Registry basic", "Reserved IP"]
 }`)
+	case "hetzner":
+		b.WriteString(`
+## Hetzner Cloud Options to Consider
+1. **hetzner-server** — Cloud Server VM + Docker Compose (best for stateful or always-on services) (~$4-20/mo)
+2. **hetzner-k8s** — Kubernetes (overkill unless explicitly requested)
+
+## Hetzner Cloud Services
+- Cloud Server (CX/CPX series) for always-on runtime
+- Volume for persistent block storage (optional)
+- Firewall for port restrictions
+- Floating IP for stable public endpoint
+- Private Network for internal communication
+
+## Deployment CLI
+All commands must use hcloud CLI only.
+
+## Cost Estimation
+Estimate the MONTHLY cost in USD.
+
+## Response Format (JSON only, no markdown fences)
+{
+	"provider": "hetzner",
+	"method": "hetzner-server",
+	"reasoning": "A Cloud Server with Docker Compose is the simplest and cheapest option for this app.",
+	"alternatives": [
+		{"method": "hetzner-k8s", "why_not": "Unnecessary complexity for this workload"}
+	],
+	"buildSteps": [
+		"Create Firewall for required ports",
+		"Create Cloud Server with cloud-init (install Docker, clone repo, compose up)",
+		"Verify service health"
+	],
+	"runCmd": "docker compose up -d",
+	"notes": ["Expose only required ports via Firewall", "Use volume for persistent state if needed"],
+	"cpuMemory": "cx22",
+	"needsAlb": false,
+	"useApiGateway": false,
+	"needsDb": false,
+	"dbService": "",
+	"estMonthly": "$4-12",
+	"costBreakdown": ["Cloud Server", "Volume (optional)", "Floating IP (optional)"]
+}`)
 	default:
 		// Add user's deployment target preference
 		if opts != nil && opts.Target != "" && opts.Target != "fargate" {
@@ -1147,7 +1200,7 @@ func buildFixPrompt(v *PlanValidation) string {
 // --- Intelligent Prompt Builder ---
 
 // buildIntelligentPrompt creates the final enriched prompt using all intelligence phases
-func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis, arch *ArchitectDecision, strat DeployStrategy, infraSnap *InfraSnapshot, cfInfraSnap *CFInfraSnapshot, doInfraSnap *DOInfraSnapshot, opts *DeployOptions) string {
+func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis, arch *ArchitectDecision, strat DeployStrategy, infraSnap *InfraSnapshot, cfInfraSnap *CFInfraSnapshot, doInfraSnap *DOInfraSnapshot, hetznerInfraSnap *HetznerInfraSnapshot, opts *DeployOptions) string {
 	var b strings.Builder
 	resourcePrefix := repoResourcePrefix(p.RepoURL, opts.DeployID)
 
@@ -1161,6 +1214,8 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAn
 		providerLabel = "Azure"
 	case "digitalocean":
 		providerLabel = "DigitalOcean"
+	case "hetzner":
+		providerLabel = "Hetzner Cloud"
 	}
 	b.WriteString(fmt.Sprintf("Deploy the application from %s to %s.\n\n", p.RepoURL, providerLabel))
 
@@ -1186,6 +1241,14 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAn
 		if doCtx != "" {
 			b.WriteString("## Existing DigitalOcean Infrastructure\n")
 			b.WriteString(doCtx)
+			b.WriteString("\n\n")
+		}
+	}
+	if hetznerInfraSnap != nil {
+		hzCtx := hetznerInfraSnap.FormatForPrompt()
+		if hzCtx != "" {
+			b.WriteString("## Existing Hetzner Cloud Infrastructure\n")
+			b.WriteString(hzCtx)
 			b.WriteString("\n\n")
 		}
 	}
