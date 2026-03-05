@@ -128,6 +128,18 @@ Examples:
 		// Run-specific id so resource names get a fresh short-hash suffix each deploy.
 		deployOpts.DeployID = time.Now().UTC().Format(time.RFC3339Nano)
 
+		// Pass DO token for infra scan if targeting DigitalOcean
+		if strings.EqualFold(strings.TrimSpace(targetProvider), "digitalocean") {
+			tok := strings.TrimSpace(doAccessToken)
+			if tok == "" {
+				tok = strings.TrimSpace(os.Getenv("DIGITALOCEAN_ACCESS_TOKEN"))
+			}
+			if tok == "" {
+				tok = strings.TrimSpace(os.Getenv("DO_API_TOKEN"))
+			}
+			deployOpts.DOToken = tok
+		}
+
 		// 4. Run multi-phase intelligence pipeline (explore → deep analysis → infra scan → architecture)
 		intel, err := deploy.RunIntelligence(ctx, rp,
 			aiClient.AskPrompt,
@@ -494,6 +506,10 @@ Examples:
 		)
 		if err != nil {
 			return fmt.Errorf("plan validation failed: %w", err)
+		}
+		// DO-only: filter LLM validator false positives that don't apply to digitalocean
+		if validation != nil && !validation.IsValid && strings.EqualFold(strings.TrimSpace(planProvider), "digitalocean") {
+			validation = deploy.FilterDOValidationNoise(validation, logf)
 		}
 		intel.Validation = validation
 		if validation != nil && !validation.IsValid {

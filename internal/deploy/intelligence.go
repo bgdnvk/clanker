@@ -132,6 +132,7 @@ type IntelligenceResult struct {
 	Preflight    *PreflightReport   `json:"preflight,omitempty"`
 	InfraSnap    *InfraSnapshot     `json:"infraSnapshot,omitempty"`
 	CFInfraSnap  *CFInfraSnapshot   `json:"cfInfraSnapshot,omitempty"`
+	DOInfraSnap  *DOInfraSnapshot   `json:"doInfraSnapshot,omitempty"`
 	Architecture *ArchitectDecision `json:"architecture"`
 	Validation   *PlanValidation    `json:"validation,omitempty"`
 	// final enriched prompt for maker pipeline
@@ -144,6 +145,7 @@ type DeployOptions struct {
 	InstanceType string // for ec2: t3.small, t3.medium, etc.
 	NewVPC       bool   // create new VPC instead of using default
 	DeployID     string // run-specific id for unique resource naming
+	DOToken      string // DigitalOcean API token for infra scan
 }
 
 // shouldUseAPIGateway determines whether to use API Gateway or ALB based on app characteristics.
@@ -290,6 +292,7 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 	var deep *DeepAnalysis
 	var infraSnap *InfraSnapshot
 	var cfInfraSnap *CFInfraSnapshot
+	var doInfraSnap *DOInfraSnapshot
 	var deepErr error
 
 	var wg sync.WaitGroup
@@ -335,6 +338,13 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 		case "cloudflare":
 			logf("[intelligence] phase 1.5: scanning Cloudflare infrastructure...")
 			cfInfraSnap = ScanCFInfra(ctx, logf)
+		case "digitalocean":
+			if opts != nil && opts.DOToken != "" {
+				logf("[intelligence] phase 1.5: scanning DigitalOcean infrastructure...")
+				doInfraSnap = ScanDOInfra(ctx, opts.DOToken, logf)
+			} else {
+				logf("[intelligence] phase 1.5: skipping DO scan (no token)")
+			}
 		case "aws", "":
 			logf("[intelligence] phase 1.5: scanning AWS infrastructure...")
 			infraSnap = ScanInfra(ctx, awsProfile, awsRegion, logf)
@@ -363,6 +373,7 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 
 	result.InfraSnap = infraSnap
 	result.CFInfraSnap = cfInfraSnap
+	result.DOInfraSnap = doInfraSnap
 
 	// Phase 2: Architecture Decision + Cost Estimation
 	logf("[intelligence] phase 2: architecture + cost estimation (target: %s)...", opts.Target)
@@ -424,7 +435,7 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 
 	// build the final enriched prompt with all intelligence + infra context
 	strat := StrategyFromArchitect(arch)
-	result.EnrichedPrompt = buildIntelligentPrompt(profile, deep, result.Docker, arch, strat, infraSnap, cfInfraSnap, opts)
+	result.EnrichedPrompt = buildIntelligentPrompt(profile, deep, result.Docker, arch, strat, infraSnap, cfInfraSnap, doInfraSnap, opts)
 
 	return result, nil
 }
@@ -1136,7 +1147,7 @@ func buildFixPrompt(v *PlanValidation) string {
 // --- Intelligent Prompt Builder ---
 
 // buildIntelligentPrompt creates the final enriched prompt using all intelligence phases
-func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis, arch *ArchitectDecision, strat DeployStrategy, infraSnap *InfraSnapshot, cfInfraSnap *CFInfraSnapshot, opts *DeployOptions) string {
+func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis, arch *ArchitectDecision, strat DeployStrategy, infraSnap *InfraSnapshot, cfInfraSnap *CFInfraSnapshot, doInfraSnap *DOInfraSnapshot, opts *DeployOptions) string {
 	var b strings.Builder
 	resourcePrefix := repoResourcePrefix(p.RepoURL, opts.DeployID)
 
@@ -1167,6 +1178,14 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAn
 		if cfCtx != "" {
 			b.WriteString("## Existing Cloudflare Infrastructure\n")
 			b.WriteString(cfCtx)
+			b.WriteString("\n\n")
+		}
+	}
+	if doInfraSnap != nil {
+		doCtx := doInfraSnap.FormatForPrompt()
+		if doCtx != "" {
+			b.WriteString("## Existing DigitalOcean Infrastructure\n")
+			b.WriteString(doCtx)
 			b.WriteString("\n\n")
 		}
 	}

@@ -22,6 +22,21 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 		return fmt.Errorf("missing digitalocean API token")
 	}
 
+	// Clone the repo if any step is a docker build — docker needs a build context
+	var cloneDir string
+	if planHasDockerBuild(plan) {
+		repoURL := extractRepoURLFromQuestion(plan.Question)
+		if repoURL != "" {
+			path, cleanup, err := cloneRepoForImageBuild(ctx, repoURL)
+			if err != nil {
+				return fmt.Errorf("clone for docker build: %w", err)
+			}
+			defer cleanup()
+			cloneDir = path
+			fmt.Fprintf(opts.Writer, "[maker] cloned %s for docker build context\n", repoURL)
+		}
+	}
+
 	bindings := make(map[string]string)
 
 	for idx, cmdSpec := range plan.Commands {
@@ -40,7 +55,7 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 		// Docker commands run via docker CLI, not doctl
 		if isDockerCommand(args) {
 			_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: docker %s\n", idx+1, len(plan.Commands), strings.Join(dockerArgs(args), " "))
-			out, runErr := runDockerCommandStreaming(ctx, args, opts, opts.Writer)
+			out, runErr := runDockerCommandStreaming(ctx, args, opts, cloneDir, opts.Writer)
 			if runErr != nil {
 				return fmt.Errorf("docker command %d failed: %w", idx+1, runErr)
 			}
@@ -139,8 +154,9 @@ func dockerArgs(args []string) []string {
 	return args
 }
 
-// runDockerCommandStreaming executes a docker CLI command with streaming output
-func runDockerCommandStreaming(ctx context.Context, args []string, opts ExecOptions, w io.Writer) (string, error) {
+// runDockerCommandStreaming executes a docker CLI command with streaming output.
+// workDir is set as cmd.Dir for build commands so the "." context resolves to the cloned repo.
+func runDockerCommandStreaming(ctx context.Context, args []string, opts ExecOptions, workDir string, w io.Writer) (string, error) {
 	bin, err := exec.LookPath("docker")
 	if err != nil {
 		return "", fmt.Errorf("docker not found in PATH: %w", err)
@@ -149,6 +165,17 @@ func runDockerCommandStreaming(ctx context.Context, args []string, opts ExecOpti
 	cmdArgs := dockerArgs(args)
 	cmd := exec.CommandContext(ctx, bin, cmdArgs...)
 	cmd.Env = os.Environ()
+
+	// Set working dir for build/tag — the "." build context needs to point at the repo
+	if workDir != "" && isDockerCommand(args) {
+		dArgs := dockerArgs(args)
+		if len(dArgs) > 0 {
+			sub := strings.ToLower(strings.TrimSpace(dArgs[0]))
+			if sub == "build" || sub == "tag" {
+				cmd.Dir = workDir
+			}
+		}
+	}
 
 	var buf bytes.Buffer
 	mw := io.MultiWriter(w, &buf)
@@ -161,6 +188,19 @@ func runDockerCommandStreaming(ctx context.Context, args []string, opts ExecOpti
 		return out, err
 	}
 	return out, nil
+}
+
+// planHasDockerBuild returns true if any command in the plan is a docker build
+func planHasDockerBuild(plan *Plan) bool {
+	for _, cmd := range plan.Commands {
+		if isDockerCommand(cmd.Args) {
+			dArgs := dockerArgs(cmd.Args)
+			if len(dArgs) > 0 && strings.EqualFold(dArgs[0], "build") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // normalizeDoctlOutputFlags rewrites --format json → --output json.
