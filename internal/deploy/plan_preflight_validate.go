@@ -34,6 +34,10 @@ func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepA
 
 	// Generic sanity check: a deploy plan should actually launch *something*.
 	// This is intentionally conservative and only triggers when no obvious launch op is present.
+	// Detect provider from plan JSON for provider-gated checks.
+	provider := strings.ToLower(strings.TrimSpace(plan.Provider))
+	isAWS := provider == "" || provider == "aws" // default to AWS when unset
+
 	hasLaunch := false
 	for _, cmd := range plan.Commands {
 		args := cmd.Args
@@ -42,7 +46,7 @@ func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepA
 		}
 		service := strings.ToLower(strings.TrimSpace(args[0]))
 		op := strings.ToLower(strings.TrimSpace(args[1]))
-		// Common launch operations across AWS deployment targets.
+		// Launch operations across all providers.
 		switch service {
 		case "ec2":
 			if op == "run-instances" {
@@ -62,6 +66,33 @@ func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepA
 			}
 		case "lightsail":
 			if op == "create-container-service" || op == "create-instances" {
+				hasLaunch = true
+			}
+		// DigitalOcean
+		case "compute":
+			if op == "droplet" && len(args) >= 3 && strings.ToLower(strings.TrimSpace(args[2])) == "create" {
+				hasLaunch = true
+			}
+		// GCP
+		case "run":
+			if op == "deploy" {
+				hasLaunch = true
+			}
+		// Azure
+		case "vm":
+			if op == "create" {
+				hasLaunch = true
+			}
+		case "containerapp":
+			if op == "create" {
+				hasLaunch = true
+			}
+		// Cloudflare (wrangler)
+		case "pages", "deploy", "containers":
+			hasLaunch = true
+		// Hetzner
+		case "server":
+			if op == "create" {
 				hasLaunch = true
 			}
 		}
@@ -94,112 +125,125 @@ func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepA
 	}
 	appPorts = uniqueInts(appPorts)
 
-	// Plan-wide AWS checks (ports/health checks) for ALB-based EC2 deploys.
-	awsChecks := validateAWSPlanCommands(&plan, appPorts, deep)
-	out.Issues = append(out.Issues, awsChecks.Issues...)
-	out.Fixes = append(out.Fixes, awsChecks.Fixes...)
-	out.Warnings = append(out.Warnings, awsChecks.Warnings...)
+	// Plan-wide AWS checks (ports/health checks) for ALB-based EC2 deploys — only for AWS.
+	if isAWS {
+		awsChecks := validateAWSPlanCommands(&plan, appPorts, deep)
+		out.Issues = append(out.Issues, awsChecks.Issues...)
+		out.Fixes = append(out.Fixes, awsChecks.Fixes...)
+		out.Warnings = append(out.Warnings, awsChecks.Warnings...)
+	}
 
-	if isOpenClaw {
+	if isOpenClaw && isAWS {
 		openClawChecks := validateOpenClawPlanCommands(&plan)
 		out.Issues = append(out.Issues, openClawChecks.Issues...)
 		out.Fixes = append(out.Fixes, openClawChecks.Fixes...)
 		out.Warnings = append(out.Warnings, openClawChecks.Warnings...)
 	}
 
-	for _, cmd := range plan.Commands {
-		args := cmd.Args
-		if len(args) < 2 {
-			continue
-		}
-		if strings.TrimSpace(args[0]) != "ec2" || strings.TrimSpace(args[1]) != "run-instances" {
-			continue
-		}
-
-		script := extractEC2UserDataScript(args)
-		if strings.TrimSpace(script) == "" {
-			out.Warnings = append(out.Warnings, "ec2 run-instances has no user-data; workload likely will not start")
-			continue
-		}
-
-		if containsSecretLikeText(script) {
-			out.Issues = append(out.Issues, "[HARD] user-data script appears to inline secrets")
-			out.Fixes = append(out.Fixes, "Do not inline secrets in user-data; fetch them from Secrets Manager/SSM at boot")
-		}
-		if hasLikelyBrokenSingleQuoteLine(script) {
-			out.Issues = append(out.Issues, "[HARD] user-data script appears to contain an unterminated single-quoted string")
-			out.Fixes = append(out.Fixes, "Fix user-data quoting (e.g., close trailing single quotes such as echo '...') before execution")
-		}
-
-		lower := strings.ToLower(script)
-		usesCompose := strings.Contains(lower, "docker compose") || strings.Contains(lower, "docker-compose")
-		usesDockerRun := strings.Contains(lower, "docker run")
-		usesDockerBuild := strings.Contains(lower, "docker build")
-		usesPkgBuild := strings.Contains(lower, "npm run build") || strings.Contains(lower, "pnpm build") || strings.Contains(lower, "yarn build") || strings.Contains(lower, "bun run build")
-
-		// SSM/bootstrap lint: common breakages on AL2023.
-		if strings.Contains(lower, "amazon-linux-extras") && strings.Contains(lower, "docker") {
-			out.Issues = append(out.Issues, "[HARD] user-data uses amazon-linux-extras to install docker (breaks on AL2023)")
-			out.Fixes = append(out.Fixes, "Use dnf/yum install docker on AL2023, then systemctl enable/start docker")
-		}
-		if strings.Contains(lower, "docker") {
-			if !strings.Contains(lower, "systemctl start docker") && !strings.Contains(lower, "service docker start") {
-				out.Warnings = append(out.Warnings, "user-data uses docker but does not explicitly start the docker daemon")
-			}
-		}
-		// ECR pull requires login.
-		if strings.Contains(lower, ".dkr.ecr.") && strings.Contains(lower, "docker pull") {
-			if !strings.Contains(lower, "aws ecr get-login-password") || !strings.Contains(lower, "docker login") {
-				out.Issues = append(out.Issues, "[HARD] user-data pulls from ECR but does not perform ECR docker login")
-				out.Fixes = append(out.Fixes, "Add: aws ecr get-login-password | docker login ... before docker pull")
-			}
-		}
-
-		// Build-on-EC2 risk: avoid building large images/apps on small instances.
-		if (usesDockerBuild || usesPkgBuild) && strings.Contains(strings.ToLower(findInstanceTypeInPlan(&plan)), "t3.") {
-			out.Warnings = append(out.Warnings, "user-data builds artifacts on a small t3 instance; prefer building locally/CI and pushing to ECR")
-		}
-
-		// Compose hard-required env vars must be set or generated.
-		if usesCompose && preflight != nil && len(preflight.ComposeHardEnvVars) > 0 {
-			missing := missingEnvVarsInScript(script, preflight.ComposeHardEnvVars)
-			if len(missing) > 0 {
-				out.Issues = append(out.Issues, "[HARD] docker compose uses required env vars that are not set in user-data: "+strings.Join(missing, ", "))
-				out.Fixes = append(out.Fixes, "Ensure user-data exports these env vars or writes a .env file with values before running docker compose")
-			}
-		}
-
-		// OpenClaw special cases: if compose is used, onboarding/bootstrap must happen.
-		// Skip user-data validation when SSM commands handle the runtime path
-		// (the exec engine does onboarding + gateway start via SSM after boot).
-		if isOpenClaw && !hasOpenClawSSMRuntimePath(&plan) {
-			applyOpenClawUserDataValidation(&out, script, usesCompose, usesDockerRun)
-		}
-
-		// Package manager correctness (only if we see installs happening in user-data).
-		if preflight != nil && preflight.PackageManager != "" {
-			if scriptRunsNodeInstall(script) {
-				pmIssues := validatePackageManagerUsage(script, preflight.PackageManager, preflight.LockFiles)
-				out.Issues = append(out.Issues, pmIssues.Issues...)
-				out.Fixes = append(out.Fixes, pmIssues.Fixes...)
-				out.Warnings = append(out.Warnings, pmIssues.Warnings...)
-			}
-		}
-
-		// Corepack/pnpm ordering lint.
-		if preflight != nil && strings.EqualFold(preflight.PackageManager, "pnpm") {
-			if strings.Contains(lower, "pnpm install") && !strings.Contains(lower, "corepack enable") {
-				out.Warnings = append(out.Warnings, "pnpm detected without corepack enable; fresh VM may not have pnpm available")
-			}
-		}
-
-		// Migrations warning: if repo suggests migrations and script doesn't mention migrate.
-		if preflight != nil && len(preflight.MigrationHints) > 0 {
-			if !strings.Contains(lower, "migrate") && !strings.Contains(lower, "prisma") && !strings.Contains(lower, "alembic") && !strings.Contains(lower, "goose") {
-				out.Warnings = append(out.Warnings, "migration tooling detected but user-data does not mention migrations; first boot may fail")
-			}
-		}
+	// DO-specific plan checks.
+	if provider == "digitalocean" {
+		doChecks := validateDigitalOceanPlanCommands(&plan, appPorts, isOpenClaw)
+		out.Issues = append(out.Issues, doChecks.Issues...)
+		out.Fixes = append(out.Fixes, doChecks.Fixes...)
+		out.Warnings = append(out.Warnings, doChecks.Warnings...)
 	}
+
+	// EC2 user-data lint — only for AWS plans.
+	if isAWS {
+		for _, cmd := range plan.Commands {
+			args := cmd.Args
+			if len(args) < 2 {
+				continue
+			}
+			if strings.TrimSpace(args[0]) != "ec2" || strings.TrimSpace(args[1]) != "run-instances" {
+				continue
+			}
+
+			script := extractEC2UserDataScript(args)
+			if strings.TrimSpace(script) == "" {
+				out.Warnings = append(out.Warnings, "ec2 run-instances has no user-data; workload likely will not start")
+				continue
+			}
+
+			if containsSecretLikeText(script) {
+				out.Issues = append(out.Issues, "[HARD] user-data script appears to inline secrets")
+				out.Fixes = append(out.Fixes, "Do not inline secrets in user-data; fetch them from Secrets Manager/SSM at boot")
+			}
+			if hasLikelyBrokenSingleQuoteLine(script) {
+				out.Issues = append(out.Issues, "[HARD] user-data script appears to contain an unterminated single-quoted string")
+				out.Fixes = append(out.Fixes, "Fix user-data quoting (e.g., close trailing single quotes such as echo '...') before execution")
+			}
+
+			lower := strings.ToLower(script)
+			usesCompose := strings.Contains(lower, "docker compose") || strings.Contains(lower, "docker-compose")
+			usesDockerRun := strings.Contains(lower, "docker run")
+			usesDockerBuild := strings.Contains(lower, "docker build")
+			usesPkgBuild := strings.Contains(lower, "npm run build") || strings.Contains(lower, "pnpm build") || strings.Contains(lower, "yarn build") || strings.Contains(lower, "bun run build")
+
+			// SSM/bootstrap lint: common breakages on AL2023.
+			if strings.Contains(lower, "amazon-linux-extras") && strings.Contains(lower, "docker") {
+				out.Issues = append(out.Issues, "[HARD] user-data uses amazon-linux-extras to install docker (breaks on AL2023)")
+				out.Fixes = append(out.Fixes, "Use dnf/yum install docker on AL2023, then systemctl enable/start docker")
+			}
+			if strings.Contains(lower, "docker") {
+				if !strings.Contains(lower, "systemctl start docker") && !strings.Contains(lower, "service docker start") {
+					out.Warnings = append(out.Warnings, "user-data uses docker but does not explicitly start the docker daemon")
+				}
+			}
+			// ECR pull requires login.
+			if strings.Contains(lower, ".dkr.ecr.") && strings.Contains(lower, "docker pull") {
+				if !strings.Contains(lower, "aws ecr get-login-password") || !strings.Contains(lower, "docker login") {
+					out.Issues = append(out.Issues, "[HARD] user-data pulls from ECR but does not perform ECR docker login")
+					out.Fixes = append(out.Fixes, "Add: aws ecr get-login-password | docker login ... before docker pull")
+				}
+			}
+
+			// Build-on-EC2 risk: avoid building large images/apps on small instances.
+			if (usesDockerBuild || usesPkgBuild) && strings.Contains(strings.ToLower(findInstanceTypeInPlan(&plan)), "t3.") {
+				out.Warnings = append(out.Warnings, "user-data builds artifacts on a small t3 instance; prefer building locally/CI and pushing to ECR")
+			}
+
+			// Compose hard-required env vars must be set or generated.
+			if usesCompose && preflight != nil && len(preflight.ComposeHardEnvVars) > 0 {
+				missing := missingEnvVarsInScript(script, preflight.ComposeHardEnvVars)
+				if len(missing) > 0 {
+					out.Issues = append(out.Issues, "[HARD] docker compose uses required env vars that are not set in user-data: "+strings.Join(missing, ", "))
+					out.Fixes = append(out.Fixes, "Ensure user-data exports these env vars or writes a .env file with values before running docker compose")
+				}
+			}
+
+			// OpenClaw special cases: if compose is used, onboarding/bootstrap must happen.
+			// Skip user-data validation when SSM commands handle the runtime path
+			// (the exec engine does onboarding + gateway start via SSM after boot).
+			if isOpenClaw && !hasOpenClawSSMRuntimePath(&plan) {
+				applyOpenClawUserDataValidation(&out, script, usesCompose, usesDockerRun)
+			}
+
+			// Package manager correctness (only if we see installs happening in user-data).
+			if preflight != nil && preflight.PackageManager != "" {
+				if scriptRunsNodeInstall(script) {
+					pmIssues := validatePackageManagerUsage(script, preflight.PackageManager, preflight.LockFiles)
+					out.Issues = append(out.Issues, pmIssues.Issues...)
+					out.Fixes = append(out.Fixes, pmIssues.Fixes...)
+					out.Warnings = append(out.Warnings, pmIssues.Warnings...)
+				}
+			}
+
+			// Corepack/pnpm ordering lint.
+			if preflight != nil && strings.EqualFold(preflight.PackageManager, "pnpm") {
+				if strings.Contains(lower, "pnpm install") && !strings.Contains(lower, "corepack enable") {
+					out.Warnings = append(out.Warnings, "pnpm detected without corepack enable; fresh VM may not have pnpm available")
+				}
+			}
+
+			// Migrations warning: if repo suggests migrations and script doesn't mention migrate.
+			if preflight != nil && len(preflight.MigrationHints) > 0 {
+				if !strings.Contains(lower, "migrate") && !strings.Contains(lower, "prisma") && !strings.Contains(lower, "alembic") && !strings.Contains(lower, "goose") {
+					out.Warnings = append(out.Warnings, "migration tooling detected but user-data does not mention migrations; first boot may fail")
+				}
+			}
+		}
+	} // end isAWS EC2 user-data lint
 
 	// Cross-reference: verify user-data ECR image references match plan-created repos.
 	// Generic — catches any project where the LLM invents a different repo name.
@@ -634,6 +678,162 @@ func validateOpenClawPlanCommands(plan *maker.Plan) awsPlanChecks {
 	}
 
 	return out
+}
+
+// validateDigitalOceanPlanCommands checks DO-specific plan quality.
+func validateDigitalOceanPlanCommands(plan *maker.Plan, appPorts []int, isOpenClaw bool) awsPlanChecks {
+	var out awsPlanChecks
+	if plan == nil || len(plan.Commands) == 0 {
+		return out
+	}
+
+	hasDropletCreate := false
+	hasFirewallCreate := false
+	hasFirewallAttach := false
+	hasSSHKeyList := false
+	hasReservedIP := false
+	producesDropletID := false
+
+	for _, cmd := range plan.Commands {
+		args := cmd.Args
+		if len(args) < 3 {
+			continue
+		}
+		s0 := strings.ToLower(strings.TrimSpace(args[0]))
+		s1 := strings.ToLower(strings.TrimSpace(args[1]))
+		s2 := strings.ToLower(strings.TrimSpace(args[2]))
+
+		if s0 == "compute" && s1 == "droplet" && s2 == "create" {
+			hasDropletCreate = true
+			for k := range cmd.Produces {
+				ku := strings.ToUpper(strings.TrimSpace(k))
+				if strings.Contains(ku, "DROPLET_ID") {
+					producesDropletID = true
+				}
+			}
+		}
+		if s0 == "compute" && s1 == "firewall" && s2 == "create" {
+			hasFirewallCreate = true
+		}
+		if s0 == "compute" && s1 == "firewall" && s2 == "add-droplets" {
+			hasFirewallAttach = true
+		}
+		if s0 == "compute" && s1 == "ssh-key" && s2 == "list" {
+			hasSSHKeyList = true
+		}
+		if s0 == "compute" && s1 == "reserved-ip" && s2 == "create" {
+			hasReservedIP = true
+		}
+	}
+
+	if !hasDropletCreate {
+		out.Issues = append(out.Issues, "[HARD] DigitalOcean plan missing compute droplet create")
+		out.Fixes = append(out.Fixes, "Add compute droplet create with --image docker-20-04 --user-data boot script")
+	}
+
+	if !hasFirewallCreate {
+		portStr := "22"
+		for _, p := range appPorts {
+			portStr += fmt.Sprintf(", %d", p)
+		}
+		out.Issues = append(out.Issues, fmt.Sprintf("[HARD] DigitalOcean plan missing firewall — ports %s will be unreachable", portStr))
+		out.Fixes = append(out.Fixes, "Add compute firewall create allowing inbound TCP on required ports, then compute firewall add-droplets to attach")
+	}
+
+	if hasFirewallCreate && !hasFirewallAttach {
+		out.Warnings = append(out.Warnings, "Firewall created but not attached to droplet — add compute firewall add-droplets <FIREWALL_ID> --droplet-ids <DROPLET_ID>")
+	}
+
+	if !hasSSHKeyList {
+		out.Warnings = append(out.Warnings, "No ssh-key list step — <SSH_KEY_ID> placeholder will be unresolved unless hardcoded")
+	}
+
+	if !hasReservedIP {
+		out.Warnings = append(out.Warnings, "No reserved IP — Droplet public IP may change on reboot; consider compute reserved-ip create")
+	}
+
+	if hasDropletCreate && !producesDropletID {
+		out.Warnings = append(out.Warnings, "compute droplet create does not produce DROPLET_ID — downstream steps (firewall attach, reserved IP) need it")
+	}
+
+	// Catch invalid doctl subcommands (LLM hallucinations)
+	for i, cmd := range plan.Commands {
+		args := cmd.Args
+		if len(args) < 3 {
+			continue
+		}
+		s0 := strings.ToLower(strings.TrimSpace(args[0]))
+		s1 := strings.ToLower(strings.TrimSpace(args[1]))
+		if s0 == "registry" && (s1 == "docker" || strings.HasPrefix(s1, "docker-")) {
+			out.Issues = append(out.Issues, fmt.Sprintf("[HARD] Step %d uses invalid doctl subcommand 'registry %s' — use plain 'docker build'/'docker push' instead", i+1, strings.Join(args[1:], " ")))
+			out.Fixes = append(out.Fixes, fmt.Sprintf("Change step %d to use docker CLI: args=['docker','build','-t','<tag>','.'] or args=['docker','push','<tag>']", i+1))
+		}
+	}
+
+	// Check for broken DOCR auth in user-data (doctl not pre-installed on Droplets)
+	for _, cmd := range plan.Commands {
+		args := cmd.Args
+		if len(args) < 3 {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(args[0])) != "compute" ||
+			strings.ToLower(strings.TrimSpace(args[1])) != "droplet" ||
+			strings.ToLower(strings.TrimSpace(args[2])) != "create" {
+			continue
+		}
+		script := extractDoctlUserDataScript(args)
+		if script == "" {
+			continue
+		}
+		if strings.Contains(script, "/root/.config/doctl/config.yaml") || strings.Contains(script, "cat /root/.config/doctl") {
+			out.Issues = append(out.Issues, "[HARD] user-data reads /root/.config/doctl/config.yaml — doctl is NOT pre-installed on Droplets")
+			out.Fixes = append(out.Fixes, "Install doctl in user-data, then 'doctl auth init -t $TOKEN && doctl registry login'")
+		}
+	}
+
+	// Validate user-data in droplet create
+	for _, cmd := range plan.Commands {
+		args := cmd.Args
+		if len(args) < 3 {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(args[0])) != "compute" ||
+			strings.ToLower(strings.TrimSpace(args[1])) != "droplet" ||
+			strings.ToLower(strings.TrimSpace(args[2])) != "create" {
+			continue
+		}
+		script := extractDoctlUserDataScript(args)
+		if strings.TrimSpace(script) == "" {
+			out.Warnings = append(out.Warnings, "compute droplet create has no --user-data; workload likely will not start")
+			continue
+		}
+		lower := strings.ToLower(script)
+		// Check OpenClaw-specific user-data requirements
+		if isOpenClaw {
+			if !strings.Contains(lower, "docker compose up") && !strings.Contains(lower, "docker-compose up") && !strings.Contains(lower, "docker run") {
+				out.Issues = append(out.Issues, "[HARD] DigitalOcean droplet user-data does not start OpenClaw (missing docker compose up or docker run)")
+				out.Fixes = append(out.Fixes, "Add 'docker compose up -d openclaw-gateway' to user-data script")
+			}
+			if !strings.Contains(lower, "openclaw_gateway_token") && !strings.Contains(lower, "openclaw_gateway_password") {
+				out.Warnings = append(out.Warnings, "user-data .env missing OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_PASSWORD")
+			}
+			if !strings.Contains(lower, "openclaw_gateway_bind") {
+				out.Warnings = append(out.Warnings, "user-data .env missing OPENCLAW_GATEWAY_BIND=lan — gateway may not accept external connections")
+			}
+		}
+	}
+
+	return out
+}
+
+// extractDoctlUserDataScript extracts the --user-data value from doctl args.
+func extractDoctlUserDataScript(args []string) string {
+	for i, a := range args {
+		if strings.EqualFold(strings.TrimSpace(a), "--user-data") && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 // hasOpenClawSSMRuntimePath checks if SSM send-command steps collectively

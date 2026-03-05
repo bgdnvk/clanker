@@ -16,8 +16,8 @@ type DeployStrategy struct {
 
 // ArchitectDecision is the structured JSON response from the architect LLM call
 type ArchitectDecision struct {
-	Provider      string   `json:"provider"`                // aws, cloudflare
-	Method        string   `json:"method"`                  // ecs-fargate, ec2, eks, lambda, s3-cloudfront, cf-pages, cf-workers, cf-containers
+	Provider      string   `json:"provider"`                // aws, cloudflare, gcp, azure, digitalocean
+	Method        string   `json:"method"`                  // ecs-fargate, ec2, eks, lambda, s3-cloudfront, cf-pages, cf-workers, cf-containers, do-droplet, do-app-platform
 	Reasoning     string   `json:"reasoning"`               // why this architecture
 	BuildSteps    []string `json:"buildSteps"`              // how to build it
 	RunCmd        string   `json:"runCmd"`                  // simplest way to start it locally
@@ -102,6 +102,8 @@ func ParseArchitectDecision(raw string) (*ArchitectDecision, error) {
 		// infer provider from method prefix
 		if strings.HasPrefix(d.Method, "cf-") {
 			d.Provider = "cloudflare"
+		} else if strings.HasPrefix(d.Method, "do-") {
+			d.Provider = "digitalocean"
 		} else {
 			d.Provider = "aws"
 		}

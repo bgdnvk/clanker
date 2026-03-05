@@ -136,6 +136,78 @@ Estimate the MONTHLY cost in USD.
 }`
 }
 
+func OpenClawArchitectPromptDigitalOcean() string {
+	return `
+## DigitalOcean Options to Consider
+1. **do-droplet** — Droplet VM + Docker Compose (best for long-running gateway services) (~$6-24/mo)
+2. **do-app-platform** — managed containers (good for stateless HTTP apps, no persistent disk)
+3. **do-k8s** — Kubernetes (overkill unless explicitly requested)
+
+## DigitalOcean Services
+- Droplet for always-on gateway runtime
+- Block storage volume for persistent OpenClaw state/workspace
+- Reserved IP for stable public endpoint
+- Cloud Firewall for port restrictions
+
+## Deployment CLI
+All commands must use doctl CLI only.
+
+## Cost Estimation
+Estimate the MONTHLY cost in USD.
+
+## Response Format (JSON only, no markdown fences)
+{
+	"provider": "digitalocean",
+	"method": "do-droplet",
+	"reasoning": "OpenClaw is a long-running gateway with persistent state and channel credentials. A Droplet with Docker Compose is the simplest, cheapest, and most reliable path on DigitalOcean.",
+	"alternatives": [
+		{"method": "do-app-platform", "why_not": "No persistent local disk; OpenClaw needs file-based config/workspace"},
+		{"method": "do-k8s", "why_not": "Operationally complex for this use case"}
+	],
+	"buildSteps": [
+		"Create DigitalOcean Container Registry",
+		"Build and push Docker image to DOCR",
+		"Create Cloud Firewall for required ports",
+		"Create Droplet with user-data (install Docker, pull image, compose up)",
+		"Verify gateway health"
+	],
+	"runCmd": "docker compose up -d openclaw-gateway",
+	"notes": ["Expose only required ports via Cloud Firewall", "Persist OpenClaw config/workspace on disk or volume"],
+	"cpuMemory": "s-1vcpu-2gb",
+	"needsAlb": false,
+	"useApiGateway": false,
+	"needsDb": false,
+	"dbService": "",
+	"estMonthly": "$12-18",
+	"costBreakdown": ["Droplet s-1vcpu-2gb", "Container Registry basic", "Reserved IP"]
+}`
+}
+
+func OpenClawDigitalOceanDropletPrompt(p *RepoProfile, deep *DeepAnalysis, opts *DeployOptions) string {
+	var b strings.Builder
+	deployID := ""
+	if opts != nil {
+		deployID = opts.DeployID
+	}
+	resourcePrefix := repoResourcePrefix(p.RepoURL, deployID)
+	b.WriteString("Deploy OpenClaw using DigitalOcean Droplet (VM + Docker Compose):\n")
+	b.WriteString(fmt.Sprintf("Naming: use prefix %s for droplet/firewall/registry resources\n", resourcePrefix))
+	b.WriteString("1. Create a DigitalOcean Container Registry (doctl registry create)\n")
+	b.WriteString("2. Build Docker image locally and push to DOCR\n")
+	b.WriteString("3. Create a Cloud Firewall allowing inbound on required ports (18789, 443, 80, 22)\n")
+	b.WriteString("4. Create a Droplet (Ubuntu 22.04 Docker image, s-1vcpu-2gb) with user-data script\n")
+	b.WriteString("5. User-data must: install Docker Compose, login to DOCR, pull image, write .env, run onboarding, compose up\n")
+	b.WriteString(fmt.Sprintf("6. Clone repository: %s\n", p.RepoURL))
+	b.WriteString("7. Create persistent directories for OpenClaw config/workspace on disk\n")
+	b.WriteString("8. Build and start with: docker compose build && docker compose up -d openclaw-gateway\n")
+	b.WriteString("9. Verify gateway health and endpoint readiness\n")
+	b.WriteString("\nDigitalOcean-specific notes:\n")
+	b.WriteString("- Steps 2 (build) and 2 (push) use plain 'docker build' / 'docker push' CLI, NOT doctl subcommands.\n")
+	b.WriteString("- User-data DOCR auth: install doctl, then 'doctl auth init -t $DIGITALOCEAN_ACCESS_TOKEN && doctl registry login'. Do NOT read /root/.config/doctl/config.yaml.\n")
+	b.WriteString("- .env MUST include OPENCLAW_GATEWAY_BIND=lan (required for gateway to accept external connections).\n")
+	return b.String()
+}
+
 func OpenClawGCPComputeEnginePrompt(p *RepoProfile, deep *DeepAnalysis, opts *DeployOptions) string {
 	var b strings.Builder
 	deployID := ""
@@ -181,15 +253,23 @@ func ApplyOpenClawArchitectureDefaults(targetProvider string, opts *DeployOption
 		return false
 	}
 	provider := strings.ToLower(strings.TrimSpace(targetProvider))
-	if provider != "" && provider != "aws" {
-		return false
-	}
 	if !IsOpenClawRepo(p, deep) {
 		return false
 	}
 
-	// Only override when the user didn't explicitly request a different target.
-	// (Historically, opts.Target defaulted to "fargate" when unspecified.)
+	// DigitalOcean: force do-droplet for OpenClaw (stateful + websocket)
+	if provider == "digitalocean" {
+		arch.Provider = "digitalocean"
+		arch.Method = "do-droplet"
+		arch.Reasoning = "OpenClaw is a stateful, long-running gateway; a Droplet with Docker Compose is the simplest path on DigitalOcean"
+		return true
+	}
+
+	// Only override AWS when the user didn't explicitly request a different target.
+	if provider != "" && provider != "aws" {
+		return false
+	}
+
 	if opts == nil {
 		arch.Provider = "aws"
 		arch.Method = "ec2"
@@ -206,7 +286,7 @@ func ApplyOpenClawArchitectureDefaults(targetProvider string, opts *DeployOption
 	return false
 }
 
-func AppendOpenClawDeploymentRequirements(b *strings.Builder, p *RepoProfile, deep *DeepAnalysis) bool {
+func AppendOpenClawDeploymentRequirements(b *strings.Builder, p *RepoProfile, deep *DeepAnalysis, provider string) bool {
 	if b == nil {
 		return false
 	}
@@ -219,27 +299,40 @@ func AppendOpenClawDeploymentRequirements(b *strings.Builder, p *RepoProfile, de
 	b.WriteString("- Persist OpenClaw state and workspace directories\n")
 	b.WriteString("- Configure gateway token via environment variable\n")
 	b.WriteString("- Expose gateway port (default 18789) intentionally and securely\n")
-	b.WriteString("- For AWS EC2+ALB deployments, ALWAYS create CloudFront in front of ALB and set HTTPS as the primary endpoint\n")
-	b.WriteString("- Plan output must include HTTPS URL (CloudFront domain) used for pairing; ALB HTTP URL is fallback/debug only\n")
 	b.WriteString("- Use environment variables for channel/provider secrets; avoid committing tokens\n")
-	b.WriteString("- IMPORTANT: The gateway's openclaw.json config MUST include gateway.controlUi.allowedOrigins with the CloudFront HTTPS domain and localhost. The exec engine handles this automatically.\n")
 	b.WriteString("- IMPORTANT: You MUST run the onboarding step (`./docker-setup.sh` or `openclaw-cli onboard`) BEFORE starting the gateway container.\n")
 
-	// IAM + Secrets Manager ordering: EC2 user-data fetches secrets at boot,
-	// so IAM permissions and the secrets themselves must exist first.
-	b.WriteString("\n### Deployment Ordering (CRITICAL — race-condition prevention)\n")
-	b.WriteString("- The EC2 user-data script runs at first boot and fetches secrets from Secrets Manager immediately.\n")
-	b.WriteString("- If the IAM role lacks SecretsManagerReadWrite or the secrets don't exist yet, user-data crashes and the container never starts.\n")
-	b.WriteString("- Therefore you MUST order the plan so that ALL of these happen BEFORE `ec2 run-instances`:\n")
-	b.WriteString("  1. Create IAM role\n")
-	b.WriteString("  2. Attach SecretsManagerReadWrite policy (`arn:aws:iam::aws:policy/SecretsManagerReadWrite`) to the IAM role\n")
-	b.WriteString("  3. Create instance profile and add role\n")
-	b.WriteString("  4. Create ALL Secrets Manager secrets the app needs\n")
-	b.WriteString("  5. `iam get-instance-profile` wait/readiness check\n")
-	b.WriteString("  6. ONLY THEN launch `ec2 run-instances`\n")
-	b.WriteString("- If you place secretsmanager create-secret or iam attach-role-policy AFTER ec2 run-instances, the deployment WILL fail.\n")
+	prov := strings.ToLower(strings.TrimSpace(provider))
 
-	// .env file instead of export for docker compose
+	// Provider-specific deployment ordering
+	switch prov {
+	case "digitalocean":
+		b.WriteString("\n### DigitalOcean Deployment Ordering\n")
+		b.WriteString("- Create Container Registry BEFORE building/pushing the Docker image.\n")
+		b.WriteString("- Create Cloud Firewall BEFORE OR AFTER creating the Droplet (both work, but before is cleaner).\n")
+		b.WriteString("- The Droplet user-data script runs at first boot — it must login to DOCR, pull the image, write .env, and docker compose up.\n")
+		b.WriteString("- DO does NOT have IAM roles; use doctl auth or access tokens for registry login.\n")
+		b.WriteString("- Secrets go directly into the .env file written by user-data (no Secrets Manager equivalent needed for basic deploys).\n")
+	default:
+		// AWS-specific ordering
+		b.WriteString("- For AWS EC2+ALB deployments, ALWAYS create CloudFront in front of ALB and set HTTPS as the primary endpoint\n")
+		b.WriteString("- Plan output must include HTTPS URL (CloudFront domain) used for pairing; ALB HTTP URL is fallback/debug only\n")
+		b.WriteString("- IMPORTANT: The gateway's openclaw.json config MUST include gateway.controlUi.allowedOrigins with the CloudFront HTTPS domain and localhost. The exec engine handles this automatically.\n")
+
+		b.WriteString("\n### Deployment Ordering (CRITICAL — race-condition prevention)\n")
+		b.WriteString("- The EC2 user-data script runs at first boot and fetches secrets from Secrets Manager immediately.\n")
+		b.WriteString("- If the IAM role lacks SecretsManagerReadWrite or the secrets don't exist yet, user-data crashes and the container never starts.\n")
+		b.WriteString("- Therefore you MUST order the plan so that ALL of these happen BEFORE `ec2 run-instances`:\n")
+		b.WriteString("  1. Create IAM role\n")
+		b.WriteString("  2. Attach SecretsManagerReadWrite policy (`arn:aws:iam::aws:policy/SecretsManagerReadWrite`) to the IAM role\n")
+		b.WriteString("  3. Create instance profile and add role\n")
+		b.WriteString("  4. Create ALL Secrets Manager secrets the app needs\n")
+		b.WriteString("  5. `iam get-instance-profile` wait/readiness check\n")
+		b.WriteString("  6. ONLY THEN launch `ec2 run-instances`\n")
+		b.WriteString("- If you place secretsmanager create-secret or iam attach-role-policy AFTER ec2 run-instances, the deployment WILL fail.\n")
+	}
+
+	// .env file instead of export for docker compose (applies to all providers)
 	b.WriteString("\n### Environment Variables in user-data (CRITICAL)\n")
 	b.WriteString("- `docker compose` does NOT inherit host shell `export` variables into containers.\n")
 	b.WriteString("- You MUST write env vars to a `.env` file in the project directory, which docker compose reads automatically.\n")
@@ -251,7 +344,9 @@ func AppendOpenClawDeploymentRequirements(b *strings.Builder, p *RepoProfile, de
 	b.WriteString("  ENVEOF\n")
 	b.WriteString("  ```\n")
 	b.WriteString("- Do NOT use `export VAR=VALUE` and expect docker compose to pick it up — it won't.\n")
-	b.WriteString("- For secrets fetched from Secrets Manager at boot, write them into the same .env file after retrieval.\n")
+	if prov != "digitalocean" {
+		b.WriteString("- For secrets fetched from Secrets Manager at boot, write them into the same .env file after retrieval.\n")
+	}
 
 	if p != nil && len(p.BootstrapScripts) > 0 {
 		b.WriteString("- This repo has bootstrap scripts; for first-run, run docker onboarding/setup before starting the gateway\n")
