@@ -61,6 +61,7 @@ Examples:
 		newVPC, _ := cmd.Flags().GetBool("new-vpc")
 		gcpProject, _ := cmd.Flags().GetString("gcp-project")
 		azureSubscription, _ := cmd.Flags().GetString("azure-subscription")
+		doAccessToken, _ := cmd.Flags().GetString("do-token")
 		enforceImageDeploy, _ := cmd.Flags().GetBool("enforce-image-deploy")
 
 		// 1. Clone + analyze
@@ -126,6 +127,18 @@ Examples:
 		}
 		// Run-specific id so resource names get a fresh short-hash suffix each deploy.
 		deployOpts.DeployID = time.Now().UTC().Format(time.RFC3339Nano)
+
+		// Pass DO token for infra scan if targeting DigitalOcean
+		if strings.EqualFold(strings.TrimSpace(targetProvider), "digitalocean") {
+			tok := strings.TrimSpace(doAccessToken)
+			if tok == "" {
+				tok = strings.TrimSpace(os.Getenv("DIGITALOCEAN_ACCESS_TOKEN"))
+			}
+			if tok == "" {
+				tok = strings.TrimSpace(os.Getenv("DO_API_TOKEN"))
+			}
+			deployOpts.DOToken = tok
+		}
 
 		// 4. Run multi-phase intelligence pipeline (explore → deep analysis → infra scan → architecture)
 		intel, err := deploy.RunIntelligence(ctx, rp,
@@ -320,6 +333,12 @@ Examples:
 			requiredLaunchOps = []string{"containerapp create"}
 		case "aks":
 			requiredLaunchOps = []string{"aks create"}
+		case "do-droplet":
+			requiredLaunchOps = []string{"compute droplet create"}
+		case "do-app-platform":
+			requiredLaunchOps = []string{"apps create"}
+		case "do-k8s":
+			requiredLaunchOps = []string{"kubernetes cluster create"}
 		}
 
 		// 4. Generate the maker plan via LLM
@@ -392,6 +411,11 @@ Examples:
 		// Apply project-specific and generic autofixes
 		if isOpenClawDeploy {
 			if patched := deploy.ApplyOpenClawPlanAutofix(plan, rp, intel.DeepAnalysis, logf); patched != nil {
+				plan = patched
+			}
+		}
+		if strings.EqualFold(strings.TrimSpace(planProvider), "digitalocean") {
+			if patched := deploy.ApplyDigitalOceanPlanAutofix(plan, logf); patched != nil {
 				plan = patched
 			}
 		}
@@ -482,6 +506,10 @@ Examples:
 		)
 		if err != nil {
 			return fmt.Errorf("plan validation failed: %w", err)
+		}
+		// DO-only: filter LLM validator false positives that don't apply to digitalocean
+		if validation != nil && !validation.IsValid && strings.EqualFold(strings.TrimSpace(planProvider), "digitalocean") {
+			validation = deploy.FilterDOValidationNoise(validation, logf)
 		}
 		intel.Validation = validation
 		if validation != nil && !validation.IsValid {
@@ -973,6 +1001,12 @@ Examples:
 		if patched := deploy.ApplyOpenClawPlanAutofix(plan, rp, intel.DeepAnalysis, logf); patched != nil {
 			plan = patched
 		}
+		// Re-run DO autofix — repair/integrity can reintroduce hallucinated args
+		if strings.EqualFold(strings.TrimSpace(planProvider), "digitalocean") {
+			if patched := deploy.ApplyDigitalOceanPlanAutofix(plan, logf); patched != nil {
+				plan = patched
+			}
+		}
 
 		// Generic dedup: collapse redundant launch cycles for any project.
 		if patched := deploy.ApplyGenericPlanAutofix(plan, logf, rp.EnvVars...); patched != nil {
@@ -1078,6 +1112,24 @@ Examples:
 				Writer:              os.Stdout,
 				Destroyer:           false,
 				Debug:               debug,
+			})
+		case "digitalocean":
+			doToken := strings.TrimSpace(doAccessToken)
+			if doToken == "" {
+				doToken = strings.TrimSpace(os.Getenv("DIGITALOCEAN_ACCESS_TOKEN"))
+			}
+			if doToken == "" {
+				doToken = strings.TrimSpace(os.Getenv("DO_API_TOKEN"))
+			}
+			if doToken == "" {
+				return fmt.Errorf("digitalocean API token is required (use --do-token or set DIGITALOCEAN_ACCESS_TOKEN)")
+			}
+			fmt.Fprintf(os.Stderr, "[deploy] applying DigitalOcean plan (%d commands)...\n", len(plan.Commands))
+			return maker.ExecuteDigitalOceanPlan(ctx, plan, maker.ExecOptions{
+				DigitalOceanAPIToken: doToken,
+				Writer:               os.Stdout,
+				Destroyer:            false,
+				Debug:                debug,
 			})
 		}
 
@@ -1778,6 +1830,14 @@ func commandPair(args []string) string {
 	if second == "" {
 		return first
 	}
+	// DO/GCP commands use 3-token patterns: compute droplet create, compute firewall create, etc.
+	// Check if the third token is an operation verb (create/delete/list/update/get)
+	if len(args) >= 3 {
+		third := strings.ToLower(strings.TrimSpace(args[2]))
+		if third == "create" || third == "delete" || third == "list" || third == "update" || third == "get" || third == "add-droplets" {
+			return first + " " + second + " " + third
+		}
+	}
 	return first + " " + second
 }
 
@@ -1806,13 +1866,12 @@ func hasRequiredLaunchOp(plan *maker.Plan, requiredLaunchOps []string) bool {
 	if plan == nil || len(plan.Commands) == 0 || len(requiredLaunchOps) == 0 {
 		return len(requiredLaunchOps) == 0
 	}
-	required := make(map[string]struct{}, len(requiredLaunchOps))
+	required := make([]string, 0, len(requiredLaunchOps))
 	for _, op := range requiredLaunchOps {
 		tok := strings.ToLower(strings.TrimSpace(op))
-		if tok == "" {
-			continue
+		if tok != "" {
+			required = append(required, tok)
 		}
-		required[tok] = struct{}{}
 	}
 	if len(required) == 0 {
 		return true
@@ -1822,8 +1881,12 @@ func hasRequiredLaunchOp(plan *maker.Plan, requiredLaunchOps []string) bool {
 		if pair == "" {
 			continue
 		}
-		if _, ok := required[pair]; ok {
-			return true
+		// Prefix match: "compute instances" matches "compute instances create"
+		// and exact: "ec2 run-instances" matches "ec2 run-instances"
+		for _, req := range required {
+			if pair == req || strings.HasPrefix(pair, req+" ") || strings.HasPrefix(req, pair+" ") {
+				return true
+			}
 		}
 	}
 	return false
@@ -1977,13 +2040,14 @@ func init() {
 	deployCmd.Flags().String("deepseek-model", "", "DeepSeek model to use (overrides config)")
 	deployCmd.Flags().String("minimax-model", "", "MiniMax model to use (overrides config)")
 	deployCmd.Flags().Bool("apply", false, "Apply the plan immediately after generation")
-	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws, gcp, azure, or cloudflare")
+	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws, gcp, azure, cloudflare, or digitalocean")
 	deployCmd.Flags().String("target", "fargate", "Deployment target: fargate (default), ec2, or eks")
 	deployCmd.Flags().String("instance-type", "t3.small", "EC2 instance type (only used with --target ec2)")
 	deployCmd.Flags().Bool("new-vpc", false, "Create a new VPC instead of using default")
 	deployCmd.Flags().Bool("enforce-image-deploy", false, "Force ECR image-based deploy path (avoid docker build-on-EC2 user-data)")
 	deployCmd.Flags().String("gcp-project", "", "GCP project ID (required for --provider gcp apply)")
 	deployCmd.Flags().String("azure-subscription", "", "Azure subscription ID (required for --provider azure apply)")
+	deployCmd.Flags().String("do-token", "", "DigitalOcean access token (or set DIGITALOCEAN_ACCESS_TOKEN)")
 }
 
 // splitPlanAtDockerBuild separates infrastructure setup from app deployment.
