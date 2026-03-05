@@ -207,26 +207,57 @@ func ensureDockerBuildxReady(ctx context.Context, w io.Writer) error {
 	// The Docker Desktop 'docker' driver can hang during export/unpack; docker-container avoids that.
 	name := "clanker-builder"
 
-	// Inspect existing builder (if any) and check driver.
+	// Helper to select an existing builder
+	selectBuilder := func() error {
+		use := exec.CommandContext(ctx, "docker", "buildx", "use", name)
+		return use.Run()
+	}
+
+	// Helper to create and select builder using separate commands for compatibility with all Docker versions.
+	// The --use flag combined with create is not supported in older Docker buildx versions.
+	createAndSelectBuilder := func() error {
+		// First, clean up any existing broken builder
+		_ = exec.CommandContext(ctx, "docker", "buildx", "rm", "-f", name).Run()
+
+		// Create builder WITHOUT --use flag (compatible with all Docker versions)
+		create := exec.CommandContext(ctx, "docker", "buildx", "create", "--name", name, "--driver", "docker-container")
+		out, err := create.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("failed to create builder: %w\nOutput: %s", err, strings.TrimSpace(string(out)))
+		}
+
+		// Select the builder in a separate command (compatible with all Docker versions)
+		use := exec.CommandContext(ctx, "docker", "buildx", "use", name)
+		if useOut, useErr := use.CombinedOutput(); useErr != nil {
+			return fmt.Errorf("failed to select builder: %w\nOutput: %s", useErr, strings.TrimSpace(string(useOut)))
+		}
+
+		return nil
+	}
+
+	// Check if builder already exists and is valid
 	inspect := exec.CommandContext(ctx, "docker", "buildx", "inspect", name)
 	out, err := inspect.CombinedOutput()
 	if err == nil {
 		driver := parseBuildxDriver(string(out))
 		if driver == "docker-container" {
-			use := exec.CommandContext(ctx, "docker", "buildx", "use", name)
-			_ = use.Run()
-			return nil
+			// Builder exists with correct driver, just select it
+			if selectErr := selectBuilder(); selectErr == nil {
+				return nil
+			}
+			// Selection failed, recreate
+			fmt.Fprintf(w, "[docker] existing builder invalid, recreating...\n")
+		} else if driver != "" {
+			// Wrong driver type, need to recreate
+			fmt.Fprintf(w, "[docker] builder has wrong driver (%s), recreating...\n", driver)
 		}
-
-		// If it's the wrong driver, recreate.
-		_ = exec.CommandContext(ctx, "docker", "buildx", "rm", "-f", name).Run()
 	}
 
-	create := exec.CommandContext(ctx, "docker", "buildx", "create", "--use", "--name", name, "--driver", "docker-container")
-	out, err = create.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("docker buildx is not ready (failed to create docker-container builder): %w\nOutput: %s", err, strings.TrimSpace(string(out)))
+	// Create new builder
+	if createErr := createAndSelectBuilder(); createErr != nil {
+		return fmt.Errorf("docker buildx is not ready (failed to create docker-container builder): %w", createErr)
 	}
+
 	fmt.Fprintf(w, "[docker] buildx builder ready: %s (driver=docker-container)\n", name)
 	return nil
 }
