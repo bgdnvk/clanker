@@ -1163,7 +1163,13 @@ func jsonPathString(obj any, path string) (string, bool) {
 		if name != "" {
 			m, ok := cur.(map[string]any)
 			if !ok {
-				return "", false
+				// Auto-unwrap single-element arrays (doctl wraps results in [...])
+				if arr, isArr := cur.([]any); isArr && len(arr) == 1 {
+					m, ok = arr[0].(map[string]any)
+				}
+				if !ok {
+					return "", false
+				}
 			}
 			cur, ok = m[name]
 			if !ok {

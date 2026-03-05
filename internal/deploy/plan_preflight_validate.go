@@ -808,6 +808,31 @@ func validateDigitalOceanPlanCommands(plan *maker.Plan, appPorts []int, isOpenCl
 			continue
 		}
 		lower := strings.ToLower(script)
+
+		// Unterminated single-quote check (shared with AWS)
+		if hasLikelyBrokenSingleQuoteLine(script) {
+			out.Issues = append(out.Issues, "[HARD] user-data script contains an unterminated single-quoted string")
+			out.Fixes = append(out.Fixes, "Fix quoting in user-data (close trailing single quotes)")
+		}
+
+		// Docker daemon check — docker-20-04 image has docker pre-started
+		if strings.Contains(lower, "docker") {
+			// Check --image flag in command args for docker-ready image
+			usesDockerImage := false
+			for _, a := range args {
+				al := strings.ToLower(strings.TrimSpace(a))
+				if strings.Contains(al, "docker-") {
+					usesDockerImage = true
+					break
+				}
+			}
+			if !usesDockerImage &&
+				!strings.Contains(lower, "systemctl start docker") &&
+				!strings.Contains(lower, "service docker start") {
+				out.Warnings = append(out.Warnings, "user-data uses docker but does not explicitly start the docker daemon")
+			}
+		}
+
 		// Check OpenClaw-specific user-data requirements
 		if isOpenClaw {
 			if !strings.Contains(lower, "docker compose up") && !strings.Contains(lower, "docker-compose up") && !strings.Contains(lower, "docker run") {

@@ -77,6 +77,12 @@ func ApplyGenericPlanAutofix(plan *maker.Plan, logf func(string, ...any), extern
 		logf("[deploy] generic autofix: removed %d redundant SSM command(s)", ssmRemoved)
 	}
 
+	// Strip flags with empty string values (LLM hallucination like --ssh-keys "")
+	emptyFlagRemoved := stripEmptyValueFlags(plan)
+	if emptyFlagRemoved > 0 {
+		logf("[deploy] generic autofix: stripped %d flag(s) with empty values", emptyFlagRemoved)
+	}
+
 	// Remove commands referencing placeholders that no command produces.
 	orphanRemoved := pruneOrphanedPlaceholderRefs(plan, externalBindings...)
 	if orphanRemoved > 0 {
@@ -563,7 +569,44 @@ func pruneOrphanedPlaceholderRefs(plan *maker.Plan, externalBindings ...string) 
 	return len(drop)
 }
 
-// ---------------------------------------------------------------------------
+// stripEmptyValueFlags removes --flag "" pairs where the LLM hallucinated
+// a flag but left the value empty. Catches --ssh-keys "", --vpc-uuid "",
+// etc. across any provider.
+func stripEmptyValueFlags(plan *maker.Plan) int {
+	if plan == nil {
+		return 0
+	}
+	count := 0
+	for ci := range plan.Commands {
+		args := plan.Commands[ci].Args
+		cleaned := make([]string, 0, len(args))
+		skip := false
+		for i := 0; i < len(args); i++ {
+			if skip {
+				skip = false
+				continue
+			}
+			a := args[i]
+			// flag with empty value as next arg
+			if strings.HasPrefix(a, "--") && i+1 < len(args) {
+				next := strings.TrimSpace(args[i+1])
+				if next == "" {
+					count++
+					skip = true // skip the empty next arg too
+					continue
+				}
+			}
+			// flag=<empty> (--key=)
+			if strings.HasPrefix(a, "--") && strings.HasSuffix(a, "=") {
+				count++
+				continue
+			}
+			cleaned = append(cleaned, a)
+		}
+		plan.Commands[ci].Args = cleaned
+	}
+	return count
+} // ---------------------------------------------------------------------------
 // Read-only command dedup
 // ---------------------------------------------------------------------------
 

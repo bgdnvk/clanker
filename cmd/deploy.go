@@ -1001,6 +1001,12 @@ Examples:
 		if patched := deploy.ApplyOpenClawPlanAutofix(plan, rp, intel.DeepAnalysis, logf); patched != nil {
 			plan = patched
 		}
+		// Re-run DO autofix — repair/integrity can reintroduce hallucinated args
+		if strings.EqualFold(strings.TrimSpace(planProvider), "digitalocean") {
+			if patched := deploy.ApplyDigitalOceanPlanAutofix(plan, logf); patched != nil {
+				plan = patched
+			}
+		}
 
 		// Generic dedup: collapse redundant launch cycles for any project.
 		if patched := deploy.ApplyGenericPlanAutofix(plan, logf, rp.EnvVars...); patched != nil {

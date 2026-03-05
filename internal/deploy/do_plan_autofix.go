@@ -1,6 +1,8 @@
 package deploy
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -68,6 +70,30 @@ func ApplyDigitalOceanPlanAutofix(plan *maker.Plan, logf func(string, ...any)) *
 	fwAddrFixed := fixDOFirewallEmptyAddress(plan)
 	if fwAddrFixed > 0 {
 		logf("[deploy] do autofix: filled %d empty firewall address field(s) with 0.0.0.0/0", fwAddrFixed)
+	}
+
+	// Sanitize inline user-data: remove broken compose, empty volumes/env
+	udFixed := fixDOUserDataScript(plan)
+	if udFixed > 0 {
+		logf("[deploy] do autofix: fixed %d user-data compose issue(s)", udFixed)
+	}
+
+	// Fix ssh-key import pointing at nonexistent local key file
+	sshFixed := fixDOSSHKeyPath(plan)
+	if sshFixed > 0 {
+		logf("[deploy] do autofix: corrected %d ssh-key import path(s)", sshFixed)
+	}
+
+	// Strip git clone steps — executor already handles cloning for docker build context
+	gitFixed := fixDOStripGitClone(plan)
+	if gitFixed > 0 {
+		logf("[deploy] do autofix: stripped %d git clone step(s) (executor handles clone)", gitFixed)
+	}
+
+	// Fix registry create produce paths (doctl output doesn't have 'endpoint' field)
+	regProdFixed := fixDORegistryProducePaths(plan)
+	if regProdFixed > 0 {
+		logf("[deploy] do autofix: fixed %d registry produce path(s)", regProdFixed)
 	}
 
 	return plan
@@ -267,6 +293,12 @@ var jsonPathAtFilterRe = regexp.MustCompile(`\?\(@\.([^)]+)\)`)
 
 // fixDOProducesJMESPath sanitizes all produces expressions across every command.
 // LLMs often emit JSONPath ($[0].id, $[0].networks...) instead of JMESPath.
+// jmesFilterRe matches JMESPath filter expressions [?field==`value`] etc.
+var jmesFilterRe = regexp.MustCompile(`\[\?[^\]]+\]`)
+
+// jmesPipeRe matches JMESPath pipe " | [0]" suffix.
+var jmesPipeRe = regexp.MustCompile(`\s*\|\s*\[0\]\s*$`)
+
 func fixDOProducesJMESPath(plan *maker.Plan) int {
 	count := 0
 	for ci := range plan.Commands {
@@ -284,8 +316,13 @@ func fixDOProducesJMESPath(plan *maker.Plan) int {
 			v = jsonPathAtFilterRe.ReplaceAllString(v, "?$1")
 
 			// Fix backtick-less string comparisons: =='value' → ==`value`
-			// JMESPath uses backticks for literal strings in filters
 			v = fixJMESPathStringLiterals(v)
+
+			// Normalize JMESPath filter [?...] → [0] since our parser does simple indexing
+			v = jmesFilterRe.ReplaceAllString(v, "[0]")
+
+			// Strip trailing pipe " | [0]" — redundant after filter→[0] rewrite
+			v = jmesPipeRe.ReplaceAllString(v, "")
 
 			if v != orig {
 				plan.Commands[ci].Produces[k] = v
@@ -518,7 +555,8 @@ func fixDOFirewallEmptyAddress(plan *maker.Plan) int {
 				continue
 			}
 			// Fix empty address fields: "address:" followed by space or end
-			fixed := emptyFWAddrRe.ReplaceAllString(arg, "address:0.0.0.0/0")
+			// $1 preserves the space separator between rules
+			fixed := emptyFWAddrRe.ReplaceAllString(arg, "address:0.0.0.0/0${1}")
 			if fixed != arg {
 				plan.Commands[ci].Args[ai] = fixed
 				count++
@@ -530,3 +568,256 @@ func fixDOFirewallEmptyAddress(plan *maker.Plan) int {
 
 // emptyFWAddrRe matches "address:" followed by whitespace or end-of-string
 var emptyFWAddrRe = regexp.MustCompile(`address:(\s|$)`)
+
+// ---------------------------------------------------------------------------
+// User-data compose sanitizer
+// ---------------------------------------------------------------------------
+
+// fixDOUserDataScript sanitizes inline --user-data on compute droplet create.
+// Reuses the generic fixUserDataScript (path typos, shebang) then applies
+// compose-specific fixes (empty volumes, empty env, redundant heredoc).
+func fixDOUserDataScript(plan *maker.Plan) int {
+	count := 0
+	for ci := range plan.Commands {
+		args := plan.Commands[ci].Args
+		if !isDODropletCreate(args) {
+			continue
+		}
+		for ai, arg := range args {
+			if arg == "--user-data" && ai+1 < len(args) {
+				script := args[ai+1]
+				// Generic path typos + shebang (shared with AWS)
+				script, n := fixUserDataScript(script)
+				count += n
+				// Compose-specific sanitize
+				script, n2 := sanitizeInlineUserData(script)
+				count += n2
+				if count > 0 {
+					plan.Commands[ci].Args[ai+1] = script
+				}
+			}
+		}
+	}
+	return count
+}
+
+func isDODropletCreate(args []string) bool {
+	if len(args) < 3 {
+		return false
+	}
+	return strings.EqualFold(args[0], "compute") &&
+		strings.EqualFold(args[1], "droplet") &&
+		strings.EqualFold(args[2], "create")
+}
+
+// Regex for user-data compose sanitization
+var (
+	// "      - :/container/path" — volume mount with no host path
+	udEmptyVolSrcRe = regexp.MustCompile(`^\s*-\s*:/\S+`)
+	// "      MY_VAR: " — CAPS env key with empty value in compose environment
+	udEmptyCapsEnvRe = regexp.MustCompile(`^\s+[A-Z][A-Z0-9_]*:\s*$`)
+	// "cat > /path/docker-compose.yml << 'MARKER'"
+	udComposeHeredocRe = regexp.MustCompile(`cat\s*>\s*\S*docker-compose[.\w]*\s*<<\s*['"]?(\w+)['"]?`)
+)
+
+// sanitizeInlineUserData fixes common LLM hallucinations in user-data scripts:
+// 1. Removes inline compose heredoc when repo compose is already cloned+copied
+// 2. Strips empty volume sources (- :/path)
+// 3. Strips empty CAPS env values (KEY: ) in compose blocks
+func sanitizeInlineUserData(script string) (string, int) {
+	lines := strings.Split(script, "\n")
+	count := 0
+
+	// Pre-scan: repo clone + compose copy → prefer repo's compose
+	hasClone, hasCpCompose := false, false
+	for _, l := range lines {
+		if strings.Contains(l, "git clone") {
+			hasClone = true
+		}
+		if strings.Contains(l, "cp") && strings.Contains(l, "docker-compose") {
+			hasCpCompose = true
+		}
+	}
+	preferRepo := hasClone && hasCpCompose
+
+	var out []string
+	inHeredoc := false
+	heredocEnd := ""
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		if inHeredoc {
+			if trimmed == heredocEnd {
+				inHeredoc = false
+				if preferRepo {
+					count++
+					continue // drop heredoc end marker
+				}
+			}
+			if preferRepo {
+				continue // drop inline compose lines
+			}
+			// Keeping heredoc — fix broken lines inside it
+			if udEmptyVolSrcRe.MatchString(line) {
+				count++
+				continue
+			}
+			if udEmptyCapsEnvRe.MatchString(line) {
+				count++
+				continue
+			}
+			out = append(out, line)
+			continue
+		}
+
+		// Detect compose heredoc start
+		m := udComposeHeredocRe.FindStringSubmatch(line)
+		if m != nil {
+			heredocEnd = m[1]
+			inHeredoc = true
+			if preferRepo {
+				// Remove preceding comment about compose if present
+				if len(out) > 0 {
+					prev := strings.ToLower(strings.TrimSpace(out[len(out)-1]))
+					if strings.HasPrefix(prev, "#") && strings.Contains(prev, "compose") {
+						out = out[:len(out)-1]
+					}
+				}
+				continue // skip the cat > line
+			}
+		}
+
+		out = append(out, line)
+	}
+
+	result := strings.Join(out, "\n")
+	// Collapse triple+ blank lines from removals
+	for strings.Contains(result, "\n\n\n") {
+		result = strings.ReplaceAll(result, "\n\n\n", "\n\n")
+	}
+
+	return result, count
+}
+
+// ---------------------------------------------------------------------------
+// SSH key path autofix
+// ---------------------------------------------------------------------------
+
+// fixDOSSHKeyPath expands ~ in --public-key-file and swaps to a valid
+// key if the specified file doesn't exist.
+func fixDOSSHKeyPath(plan *maker.Plan) int {
+	count := 0
+	for ci := range plan.Commands {
+		args := plan.Commands[ci].Args
+		if len(args) < 3 {
+			continue
+		}
+		if !strings.EqualFold(args[0], "compute") ||
+			!strings.EqualFold(args[1], "ssh-key") ||
+			!strings.EqualFold(args[2], "import") {
+			continue
+		}
+		for ai, arg := range args {
+			if arg != "--public-key-file" || ai+1 >= len(args) {
+				continue
+			}
+			keyPath := args[ai+1]
+			// Always expand ~ — doctl doesn't do shell expansion
+			expanded := expandHome(keyPath)
+			if _, err := os.Stat(expanded); err == nil {
+				// File exists, just ensure absolute path (no tilde)
+				if expanded != keyPath {
+					args[ai+1] = expanded
+					count++
+				}
+				continue
+			}
+			// File doesn't exist — find an alternative
+			alt := findBestLocalPubKey()
+			if alt == "" {
+				continue
+			}
+			args[ai+1] = alt
+			count++
+		}
+	}
+	return count
+}
+
+// expandHome replaces leading ~ with the user home directory.
+func expandHome(p string) string {
+	if !strings.HasPrefix(p, "~/") {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	return filepath.Join(home, p[2:])
+}
+
+// findBestLocalPubKey returns the first ~/.ssh/*.pub absolute path.
+func findBestLocalPubKey() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	matches, _ := filepath.Glob(filepath.Join(home, ".ssh", "*.pub"))
+	if len(matches) > 0 {
+		return matches[0] // absolute path — doctl won't expand ~
+	}
+	return ""
+}
+
+// fixDOStripGitClone removes git clone commands from the plan.
+// The executor already handles cloning for docker build context.
+func fixDOStripGitClone(plan *maker.Plan) int {
+	count := 0
+	var kept []maker.Command
+	for _, cmd := range plan.Commands {
+		if len(cmd.Args) >= 2 && strings.EqualFold(cmd.Args[0], "git") && strings.EqualFold(cmd.Args[1], "clone") {
+			count++
+			continue
+		}
+		kept = append(kept, cmd)
+	}
+	if count > 0 {
+		plan.Commands = kept
+	}
+	return count
+}
+
+// fixDORegistryProducePaths fixes hallucinated produce paths on registry create.
+// doctl returns {"name":"..."} (no "endpoint" field); LLMs often emit "registry.name"
+// or "registry.endpoint" which don't match the flat JSON structure.
+func fixDORegistryProducePaths(plan *maker.Plan) int {
+	count := 0
+	for ci := range plan.Commands {
+		args := plan.Commands[ci].Args
+		if len(args) < 2 {
+			continue
+		}
+		if !strings.EqualFold(args[0], "registry") || !strings.EqualFold(args[1], "create") {
+			continue
+		}
+		for k, v := range plan.Commands[ci].Produces {
+			upper := strings.ToUpper(k)
+			// REGISTRY_NAME: "registry.name" → "name"
+			if strings.Contains(upper, "NAME") {
+				cleaned := strings.TrimPrefix(v, "registry.")
+				if cleaned != v {
+					plan.Commands[ci].Produces[k] = cleaned
+					count++
+				}
+			}
+			// REGISTRY_ENDPOINT: no such field in doctl output — remove
+			// (computed at runtime from REGISTRY_NAME)
+			if strings.Contains(upper, "ENDPOINT") {
+				delete(plan.Commands[ci].Produces, k)
+				count++
+			}
+		}
+	}
+	return count
+}
