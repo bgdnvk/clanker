@@ -16,10 +16,14 @@ import (
 
 var cfgFile string
 
+// Version is set at build time via ldflags
+var Version = "dev"
+
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "clanker",
-	Short: "AI-powered terminal for Cloud queries",
+	Use:     "clanker",
+	Short:   "AI-powered terminal for Cloud queries",
+	Version: Version,
 	Long: `Clanker is an AI-powered CLI tool that helps you query your cloud infrastructure
 using natural language. Ask questions about your systems,
 get insights, and perform operations through an intelligent interface.`,
@@ -32,6 +36,24 @@ func Execute() error {
 
 func init() {
 	cobra.OnInitialize(initConfig)
+
+	// Add version command
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "version",
+		Short: "Print the version number",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("clanker version %s\n", Version)
+		},
+	})
+
+	// Add --version / -v flags
+	rootCmd.Flags().BoolP("version", "v", false, "Print version information")
+	rootCmd.PreRun = func(cmd *cobra.Command, args []string) {
+		if v, _ := cmd.Flags().GetBool("version"); v {
+			fmt.Printf("clanker version %s\n", Version)
+			os.Exit(0)
+		}
+	}
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.clanker.yaml)")
 	rootCmd.PersistentFlags().Bool("debug", false, "enable debug output (shows progress + internal diagnostics)")
