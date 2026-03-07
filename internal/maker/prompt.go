@@ -144,11 +144,13 @@ Rules for commands:
   - Avoid interleaving unrelated cross-region deletes in alternating steps.
 
 Placeholders and bindings (CRITICAL):
-- You MAY use placeholder tokens inside args like "<SG_RDS_ID>" or "<SUBNET_1>".
+- NEVER use hardcoded resource IDs like sg-xxx, subnet-xxx, vpc-xxx, i-xxx, arn:aws:..., etc.
+- If a resource will be CREATED by the plan, you MUST use a placeholder like "<SG_ID>" or "<SUBNET_1>".
 - If you use ANY placeholder token "<NAME>", you MUST ensure an earlier command includes:
   - "produces": { "NAME": "$.json.path.to.value" }
 - The produces mapping is REQUIRED for EVERY command that creates a resource used later.
 - Without produces, the placeholder will NOT be substituted and the command will fail.
+- Resource IDs from previous runs are STALE and must NOT be reused. Always create new resources or use placeholders.
 
 Common produces mappings (use these exact JSON paths):
 - ec2 create-security-group: { "SG_ID": "$.GroupId" }
