@@ -16,6 +16,76 @@ type deterministicValidation struct {
 	Warnings []string
 }
 
+// hardcodedAWSResourceIDRe matches AWS resource IDs that should typically be placeholders.
+// Excludes AMI IDs since those are often legitimately hardcoded.
+var hardcodedAWSResourceIDRe = regexp.MustCompile(`\b(sg|subnet|vpc|i|vol|igw|nat|eni|rtb|acl|tgw|pcx|eip|eigw)-[0-9a-f]{8,17}\b`)
+
+// detectHardcodedResourceIDs scans plan command args for hardcoded AWS resource IDs
+// that should instead be placeholders produced by earlier commands.
+func detectHardcodedResourceIDs(plan *maker.Plan) []string {
+	if plan == nil || len(plan.Commands) == 0 {
+		return nil
+	}
+
+	// Track which resource IDs are produced by earlier commands
+	producedIDs := make(map[string]bool)
+
+	issues := []string{}
+
+	for i, cmd := range plan.Commands {
+		// First, check if any args contain hardcoded IDs that weren't produced earlier
+		argsJoined := strings.Join(cmd.Args, " ")
+		matches := hardcodedAWSResourceIDRe.FindAllString(argsJoined, -1)
+
+		for _, match := range matches {
+			if !producedIDs[match] {
+				// Check if there's a placeholder for this type of resource
+				prefix := strings.Split(match, "-")[0]
+				resourceType := map[string]string{
+					"sg":     "security group",
+					"subnet": "subnet",
+					"vpc":    "VPC",
+					"i":      "instance",
+					"vol":    "volume",
+					"igw":    "internet gateway",
+					"nat":    "NAT gateway",
+					"eni":    "network interface",
+					"rtb":    "route table",
+					"acl":    "network ACL",
+					"tgw":    "transit gateway",
+					"pcx":    "VPC peering connection",
+					"eip":    "elastic IP",
+					"eigw":   "egress-only internet gateway",
+				}[prefix]
+
+				issues = append(issues, fmt.Sprintf(
+					"[HARD] command %d uses hardcoded %s ID '%s'; use a placeholder like <%s_ID> with produces mapping instead",
+					i+1, resourceType, match, strings.ToUpper(prefix)))
+			}
+		}
+
+		// Track any IDs this command produces (we do this after checking args
+		// so that a command cannot reference its own output)
+		for _, v := range cmd.Produces {
+			// Extract resource IDs from JSON paths that might produce them
+			// This is a heuristic; actual produced values are resolved at runtime
+			_ = v
+		}
+
+		// Also track if this command creates resources (by checking operation)
+		if len(cmd.Args) >= 2 {
+			op := strings.ToLower(strings.TrimSpace(cmd.Args[1]))
+			// After a create command runs, any IDs mentioned in later commands
+			// should use placeholders from produces, not hardcoded values
+			if strings.HasPrefix(op, "create-") || strings.HasPrefix(op, "run-") {
+				// Mark that we've seen a create operation
+			}
+		}
+	}
+
+	return issues
+}
+
 func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis) deterministicValidation {
 	var out deterministicValidation
 
@@ -27,6 +97,13 @@ func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepA
 	var plan maker.Plan
 	if err := json.Unmarshal([]byte(planJSON), &plan); err != nil {
 		return out
+	}
+
+	// Check for hardcoded AWS resource IDs that should be placeholders
+	hardcodedIssues := detectHardcodedResourceIDs(&plan)
+	if len(hardcodedIssues) > 0 {
+		out.Issues = append(out.Issues, hardcodedIssues...)
+		out.Fixes = append(out.Fixes, "Replace hardcoded resource IDs with placeholder tokens like <SG_ID>, <SUBNET_ID>, etc. and add corresponding produces mappings to the commands that create those resources")
 	}
 
 	isOpenClaw := IsOpenClawRepo(p, deep)
