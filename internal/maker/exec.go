@@ -1985,7 +1985,58 @@ func handleAWSFailure(
 		}
 	}
 
+	// Final escalation: full agentic ReAct loop with diagnose -> remediate -> verify phases
+	if policy.canAttempt(runtime) && policy.consumeAttempt(runtime) {
+		failure := classifyAWSFailure(args, out)
+		if shouldUseAgenticRemediation(failure, out, true) {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] escalating to agentic remediation loop...\n")
+
+			// Collect recent execution context for the agent
+			recentLogs := collectRecentLogs(plan, idx, bindings)
+
+			if handled, agentErr := AgenticRemediation(ctx, opts, args, awsArgs, stdinBytes, out+"\n"+recentLogs, bindings); handled {
+				remediationAttempted[idx] = true
+				return true, agentErr
+			}
+		}
+	}
+
 	return false, runErr
+}
+
+// collectRecentLogs gathers context from recent commands for the agentic remediation loop
+func collectRecentLogs(plan *Plan, currentIdx int, bindings map[string]string) string {
+	var sb strings.Builder
+	sb.WriteString("Recent execution context:\n")
+
+	// Include last few commands for context
+	start := currentIdx - 3
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i < currentIdx; i++ {
+		if i < len(plan.Commands) {
+			cmdArgs := plan.Commands[i].Args
+			cmdPreview := ""
+			if len(cmdArgs) >= 2 {
+				cmdPreview = fmt.Sprintf("%s %s", cmdArgs[0], cmdArgs[1])
+			} else if len(cmdArgs) == 1 {
+				cmdPreview = cmdArgs[0]
+			}
+			sb.WriteString(fmt.Sprintf("- Command %d: %s\n", i+1, cmdPreview))
+		}
+	}
+
+	// Include relevant bindings
+	sb.WriteString("\nKey bindings:\n")
+	relevantKeys := []string{"VPC_ID", "SUBNET_ID", "SG_ID", "INSTANCE_ID", "TG_ARN", "ALB_ARN", "ROLE_ARN", "INSTANCE_PROFILE_ARN"}
+	for _, key := range relevantKeys {
+		if v := bindings[key]; v != "" {
+			sb.WriteString(fmt.Sprintf("- %s: %s\n", key, v))
+		}
+	}
+
+	return sb.String()
 }
 
 func maybeRetryTransientFailure(
