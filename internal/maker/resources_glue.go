@@ -1156,6 +1156,43 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 	// IAM eventual consistency: NoSuchEntity on freshly-created resources.
 	if args0(args) == "iam" && (failure.Category == FailureNotFound || failure.Code == "NoSuchEntity") {
 		op := args1(args)
+
+		// Special handling for add-role-to-instance-profile: the instance profile might not exist
+		if op == "add-role-to-instance-profile" {
+			lower := strings.ToLower(output)
+			profileName := strings.TrimSpace(flagValue(args, "--instance-profile-name"))
+
+			// Check if the error is about the instance profile not existing
+			if profileName != "" && strings.Contains(lower, "instance profile") && strings.Contains(lower, "cannot be found") {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: creating missing instance profile %s\n", profileName)
+
+				// Create the instance profile
+				createArgs := []string{
+					"iam", "create-instance-profile",
+					"--instance-profile-name", profileName,
+					"--profile", opts.Profile,
+					"--region", opts.Region,
+					"--no-cli-pager",
+				}
+				if _, createErr := runAWSCommandStreaming(ctx, createArgs, nil, opts.Writer); createErr != nil {
+					// If creation fails with AlreadyExists, that's fine - just continue
+					if !strings.Contains(strings.ToLower(createErr.Error()), "already exists") &&
+						!strings.Contains(strings.ToLower(createErr.Error()), "entityalreadyexists") {
+						_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to create instance profile: %v\n", createErr)
+					}
+				}
+
+				// Wait a moment for IAM propagation then retry
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] waiting for instance profile propagation...\n")
+				if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+					return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+				}); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+		}
+
 		if op == "add-role-to-instance-profile" || op == "attach-role-policy" || op == "put-role-policy" || op == "update-assume-role-policy" {
 			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry IAM operation after propagation\n")
 			if err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
