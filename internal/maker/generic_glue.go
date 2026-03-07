@@ -61,11 +61,32 @@ func maybeGenericGlueAndRetry(
 		}
 	}
 
-	// 3) Generic "describe/get" polling when we have an ARN.
-	// For unknown services, the only universal describe-like mechanism is the tagging API.
-	// If the command references a resource ARN and we hit not-found/conflict during follow-on ops,
-	// wait until the ARN is visible, then retry.
-	if (failure.Category == FailureNotFound || failure.Category == FailureConflict) && looksLikeFollowOnOp(failure.Op) {
+	// 3) AI-powered remediation for NotFound errors on follow-on operations.
+	// Instead of just retrying with backoff (which won't help if the resource doesn't exist),
+	// try AI remediation first to create missing prerequisites.
+	if failure.Category == FailureNotFound && looksLikeFollowOnOp(failure.Op) {
+		// Try AI remediation first - it can create missing prerequisites
+		if ok, err := maybeGenericAIRemediation(ctx, opts, args, awsArgs, stdinBytes, output, ""); ok {
+			return true, err
+		}
+
+		// Fallback: if we have an ARN, try waiting for visibility
+		arn := firstArnInArgsOrJSON(args)
+		if arn != "" {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: wait for arn visible then retry (arn=%s)\n", arn)
+			_ = waitForArnVisibleViaTaggingAPI(ctx, opts, arn, opts.Writer)
+
+			err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+				return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
+			})
+			if err == nil {
+				return true, nil
+			}
+		}
+	}
+
+	// Handle conflicts with ARN visibility wait
+	if failure.Category == FailureConflict && looksLikeFollowOnOp(failure.Op) {
 		arn := firstArnInArgsOrJSON(args)
 		if arn != "" {
 			_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: wait for arn visible then retry (arn=%s)\n", arn)
@@ -99,17 +120,19 @@ func maybeGenericGlueAndRetry(
 	// or a resource still processing, retry with backoff.
 	if shouldGenericRetryAfterPropagation(failure, output) {
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: retry %s %s after generic propagation/in-progress\n", args0(args), args1(args))
-		err := retryWithBackoff(ctx, opts.Writer, 6, func() (string, error) {
+		err := retryWithBackoff(ctx, opts.Writer, 3, func() (string, error) {
 			return runAWSCommandStreaming(ctx, awsArgs, stdinBytes, opts.Writer)
 		})
 		if err == nil {
 			return true, nil
 		}
 
-		if err2 := maybeLLMAfterGenericExhausted(ctx, opts, awsArgs, stdinBytes, output, "generic-propagation"); err2 != nil {
-			return true, err2
+		// If backoff retries failed, try AI remediation before giving up
+		if ok, aiErr := maybeGenericAIRemediation(ctx, opts, args, awsArgs, stdinBytes, output, ""); ok {
+			return true, aiErr
 		}
-		return true, nil
+
+		return false, nil
 	}
 
 	return false, nil
