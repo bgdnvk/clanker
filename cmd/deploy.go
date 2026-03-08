@@ -1017,10 +1017,13 @@ Examples:
 		openClawUnresolvedCritical := make([]string, 0, 12)
 		if isOpenClawDeploy {
 			if unresolved := deploy.GetUnresolvedPlaceholders(plan); len(unresolved) > 0 {
-				if !deploy.AllPlaceholdersAreProduced(plan, unresolved) {
+				// Filter out tokens that are injected at runtime via env vars
+				// (DO executor imports secret-like env vars + DIGITALOCEAN_ACCESS_TOKEN)
+				trueUnresolved := deploy.FilterRuntimeInjectedTokens(unresolved, rp.EnvVars)
+				if len(trueUnresolved) > 0 && !deploy.AllPlaceholdersAreProduced(plan, trueUnresolved) {
 					openClawUnresolvedApplyBlock = true
-					openClawUnresolvedCritical = append(openClawUnresolvedCritical, unresolved...)
-					logf("[deploy] warning: openclaw plan has unresolved non-runtime placeholders (%d): %v", len(unresolved), unresolved)
+					openClawUnresolvedCritical = append(openClawUnresolvedCritical, trueUnresolved...)
+					logf("[deploy] warning: openclaw plan has unresolved non-runtime placeholders (%d): %v", len(trueUnresolved), trueUnresolved)
 				} else {
 					logf("[deploy] openclaw placeholders are runtime-produced; continuing with non-deterministic plan")
 				}

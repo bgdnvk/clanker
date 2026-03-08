@@ -556,3 +556,67 @@ func ApplyEnvVarBindings(plan *maker.Plan, envVars map[string]string) *maker.Pla
 func GetUnresolvedPlaceholders(plan *maker.Plan) []string {
 	return extractPlaceholdersFromPlan(plan)
 }
+
+// FilterRuntimeInjectedTokens removes placeholder tokens that will be resolved
+// at runtime via env var injection (importSecretLikeEnvVarsIntoBindings) or
+// explicit executor bindings (e.g. DIGITALOCEAN_ACCESS_TOKEN).
+// envVars is the list of user-provided env var keys from the deploy request.
+func FilterRuntimeInjectedTokens(placeholders []string, envVars []string) []string {
+	// Build lookup of env var keys the user provided
+	provided := make(map[string]bool, len(envVars))
+	for _, kv := range envVars {
+		k, _, ok := strings.Cut(kv, "=")
+		if ok {
+			provided[strings.ToUpper(strings.TrimSpace(k))] = true
+		}
+	}
+
+	var out []string
+	for _, tok := range placeholders {
+		upper := strings.ToUpper(strings.TrimSpace(tok))
+		if provided[upper] {
+			continue // user-provided env var, resolved at runtime
+		}
+		// Provider credential tokens are always injected by the executor
+		if isProviderCredentialToken(upper) {
+			continue
+		}
+		out = append(out, tok)
+	}
+	return out
+}
+
+// isProviderCredentialToken returns true for tokens that are injected by
+// the executor at runtime (provider API creds). Generic pattern so new
+// providers work without code changes.
+func isProviderCredentialToken(tok string) bool {
+	// Exact known tokens
+	switch tok {
+	case "DIGITALOCEAN_ACCESS_TOKEN", "DO_API_TOKEN":
+		return true
+	case "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN":
+		return true
+	case "HCLOUD_TOKEN", "HETZNER_API_TOKEN":
+		return true
+	}
+	// Generic suffix patterns: *_ACCESS_TOKEN, *_API_TOKEN, *_API_KEY for provider prefixes
+	for _, suffix := range []string{"_ACCESS_TOKEN", "_API_TOKEN"} {
+		if strings.HasSuffix(tok, suffix) {
+			prefix := strings.TrimSuffix(tok, suffix)
+			if isCloudProviderPrefix(prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isCloudProviderPrefix returns true for known cloud provider env var prefixes.
+func isCloudProviderPrefix(prefix string) bool {
+	switch prefix {
+	case "DIGITALOCEAN", "DO", "AWS", "GOOGLE", "GCP", "AZURE",
+		"HCLOUD", "HETZNER", "CLOUDFLARE", "LINODE", "VULTR":
+		return true
+	}
+	return false
+}

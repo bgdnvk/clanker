@@ -267,7 +267,7 @@ func buildGenericPlanIntegrityPrompt(deploymentIntent, projectSummary, candidate
 	b.WriteString("- If producing HTTPS_URL for CloudFront, it must be a full URL (https://...) not just a bare domain.\n")
 	b.WriteString("- If create-load-balancer and create-listener both exist, include elbv2 wait load-balancer-available in between.\n")
 	b.WriteString("- If run-instances and register-targets both exist, include ec2 wait instance-running in between.\n")
-	b.WriteString("- If SSH ingress is 0.0.0.0/0, replace with <ADMIN_CIDR> placeholder in that command (do not keep world-open SSH).\n")
+	b.WriteString("- For AWS security-group SSH ingress 0.0.0.0/0, replace with <ADMIN_CIDR> placeholder (do not keep world-open SSH). Do NOT apply this to DigitalOcean firewall inbound-rules — DO firewalls require a literal CIDR like 0.0.0.0/0, never a placeholder.\n")
 	b.WriteString("- For EC2 bootstrap connectivity, prefer --associate-public-ip-address on run-instances when no explicit NAT/private-network path is present in plan.\n")
 	b.WriteString("- Normalize known docker-compose binary URL typo: use docker-compose-linux-x86_64 (lowercase linux).\n")
 	b.WriteString("- Preserve produced bindings used by downstream commands (do not break placeholder chains).\n")

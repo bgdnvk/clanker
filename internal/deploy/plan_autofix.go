@@ -405,6 +405,10 @@ func extractSSMInstanceIDs(args []string) string {
 // orphanPlaceholderRe matches <UPPER_CASE_KEY> placeholders in command args.
 var orphanPlaceholderRe = regexp.MustCompile(`<([A-Z][A-Z0-9_]+)>`)
 
+// emptyFWAddrAfterStripRe matches "address:" followed by whitespace or end-of-string
+// (result of stripping an orphan placeholder like <ADMIN_CIDR> from a firewall rule).
+var emptyFWAddrAfterStripRe = regexp.MustCompile(`address:(\s|$)`)
+
 // isCriticalCommand returns true for commands that should never be removed
 // by orphan pruning — instead, their bad placeholders are stripped in-place.
 func isCriticalCommand(args []string) bool {
@@ -533,6 +537,11 @@ func pruneOrphanedPlaceholderRefs(plan *maker.Plan, externalBindings ...string) 
 							// Strip the orphan placeholder so downstream resolution can fill it
 							cmd.Args[ai] = strings.ReplaceAll(cmd.Args[ai], "<"+m[1]+">", "")
 						}
+					}
+					// Safety net: stripping a placeholder from a firewall address: field
+					// can leave "address:" empty which doctl rejects. Fill with 0.0.0.0/0.
+					if strings.Contains(cmd.Args[ai], "address:") {
+						cmd.Args[ai] = emptyFWAddrAfterStripRe.ReplaceAllString(cmd.Args[ai], "address:0.0.0.0/0${1}")
 					}
 				}
 				plan.Commands[i] = cmd

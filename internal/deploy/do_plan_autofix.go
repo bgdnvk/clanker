@@ -19,6 +19,13 @@ func ApplyDigitalOceanPlanAutofix(plan *maker.Plan, logf func(string, ...any)) *
 		logf = func(string, ...any) {}
 	}
 
+	// FIRST: strip leading "doctl" from args — LLM sometimes includes it
+	// and all downstream checks expect args[0] to be the subcommand
+	prefixFixed := fixDONormalizeDoctlPrefix(plan)
+	if prefixFixed > 0 {
+		logf("[deploy] do autofix: stripped leading 'doctl' from %d command(s)", prefixFixed)
+	}
+
 	// Fix "registry docker-credential configure" → "registry login <REGISTRY_NAME>"
 	credFixed := fixDORegistryCredentialHallucination(plan)
 	if credFixed > 0 {
@@ -29,6 +36,18 @@ func ApplyDigitalOceanPlanAutofix(plan *maker.Plan, logf func(string, ...any)) *
 	dockerFixed := fixDORegistryDockerHallucination(plan)
 	if dockerFixed > 0 {
 		logf("[deploy] do autofix: replaced %d 'registry docker ...' → 'docker ...'", dockerFixed)
+	}
+
+	// Replace hardcoded DOCR names in user-data with <REGISTRY_NAME> placeholder
+	regUserDataFixed := fixDOHardcodedRegistryInUserData(plan)
+	if regUserDataFixed > 0 {
+		logf("[deploy] do autofix: replaced %d hardcoded registry name(s) in user-data with <REGISTRY_NAME>", regUserDataFixed)
+	}
+
+	// Inject missing docker build + push when user-data references DOCR images
+	dockerInjected := fixDOMissingDockerBuildPush(plan)
+	if dockerInjected > 0 {
+		logf("[deploy] do autofix: injected %d missing docker build/push step(s)", dockerInjected)
 	}
 
 	// Fix docker push tag to use <IMAGE_TAG> from docker build
@@ -97,6 +116,170 @@ func ApplyDigitalOceanPlanAutofix(plan *maker.Plan, logf func(string, ...any)) *
 	}
 
 	return plan
+}
+
+// ---------------------------------------------------------------------------
+// Doctl prefix normalizer — must run FIRST
+// ---------------------------------------------------------------------------
+
+// fixDONormalizeDoctlPrefix strips leading "doctl" from all command args.
+// LLM/self-heal often generates ["doctl","compute","firewall",...] but every
+// autofix expects args[0] to be the subcommand (e.g. "compute").
+func fixDONormalizeDoctlPrefix(plan *maker.Plan) int {
+	count := 0
+	for ci := range plan.Commands {
+		args := plan.Commands[ci].Args
+		if len(args) > 1 && strings.EqualFold(strings.TrimSpace(args[0]), "doctl") {
+			plan.Commands[ci].Args = args[1:]
+			count++
+		}
+	}
+	return count
+}
+
+// ---------------------------------------------------------------------------
+// Hardcoded DOCR registry name → <REGISTRY_NAME> placeholder
+// ---------------------------------------------------------------------------
+
+// docrHardcodedNameRe matches registry.digitalocean.com/<hardcoded-name>/
+// but NOT when the name is already a <PLACEHOLDER>.
+var docrHardcodedNameRe = regexp.MustCompile(`registry\.digitalocean\.com/([^/<>\s]+)/`)
+
+// fixDOHardcodedRegistryInUserData replaces hardcoded DOCR registry names
+// in user-data, docker build/push args, and produces values with <REGISTRY_NAME>.
+func fixDOHardcodedRegistryInUserData(plan *maker.Plan) int {
+	count := 0
+	for ci := range plan.Commands {
+		args := plan.Commands[ci].Args
+
+		// Fix docker build/push -t args and produces
+		if isDockerSubcommand(args, "build") || isDockerSubcommand(args, "push") {
+			for ai, arg := range args {
+				fixed := docrHardcodedNameRe.ReplaceAllString(arg, "registry.digitalocean.com/<REGISTRY_NAME>/")
+				if fixed != arg {
+					plan.Commands[ci].Args[ai] = fixed
+					count++
+				}
+			}
+			for k, v := range plan.Commands[ci].Produces {
+				fixed := docrHardcodedNameRe.ReplaceAllString(v, "registry.digitalocean.com/<REGISTRY_NAME>/")
+				if fixed != v {
+					plan.Commands[ci].Produces[k] = fixed
+					count++
+				}
+			}
+			continue
+		}
+
+		// Fix user-data in droplet create
+		if !isDODropletCreate(args) {
+			continue
+		}
+		for ai, arg := range args {
+			if arg != "--user-data" || ai+1 >= len(args) {
+				continue
+			}
+			script := args[ai+1]
+			fixed := docrHardcodedNameRe.ReplaceAllString(script, "registry.digitalocean.com/<REGISTRY_NAME>/")
+			if fixed != script {
+				plan.Commands[ci].Args[ai+1] = fixed
+				count++
+			}
+		}
+	}
+	return count
+}
+
+// ---------------------------------------------------------------------------
+// Inject missing docker build + push
+// ---------------------------------------------------------------------------
+
+// fixDOMissingDockerBuildPush injects docker build + docker push when the plan
+// references DOCR images (in user-data or notes) but has no docker build/push.
+func fixDOMissingDockerBuildPush(plan *maker.Plan) int {
+	// Already has docker build? Nothing to do.
+	for _, cmd := range plan.Commands {
+		if isDockerSubcommand(cmd.Args, "build") {
+			return 0
+		}
+	}
+
+	// Extract the DOCR image reference from user-data or notes
+	imageTag := extractDOCRImageFromPlan(plan)
+	if imageTag == "" {
+		return 0
+	}
+
+	// Find where to insert: after registry login, before droplet create
+	insertIdx := -1
+	for i, cmd := range plan.Commands {
+		if len(cmd.Args) >= 2 &&
+			strings.EqualFold(cmd.Args[0], "registry") &&
+			strings.EqualFold(cmd.Args[1], "login") {
+			insertIdx = i + 1
+			break
+		}
+	}
+	if insertIdx < 0 {
+		// Fallback: before droplet create
+		for i, cmd := range plan.Commands {
+			if isDODropletCreate(cmd.Args) {
+				insertIdx = i
+				break
+			}
+		}
+	}
+	if insertIdx < 0 {
+		return 0
+	}
+
+	buildCmd := maker.Command{
+		Args:   []string{"docker", "build", "-t", imageTag, "."},
+		Reason: "Build the container image for DOCR",
+		Produces: map[string]string{
+			"IMAGE_TAG": imageTag,
+			"IMAGE_URI": imageTag,
+		},
+	}
+	pushCmd := maker.Command{
+		Args:   []string{"docker", "push", "<IMAGE_URI>"},
+		Reason: "Push the container image to DOCR",
+	}
+
+	newCmds := make([]maker.Command, 0, len(plan.Commands)+2)
+	newCmds = append(newCmds, plan.Commands[:insertIdx]...)
+	newCmds = append(newCmds, buildCmd, pushCmd)
+	newCmds = append(newCmds, plan.Commands[insertIdx:]...)
+	plan.Commands = newCmds
+	return 2
+}
+
+// docrImageRefRe matches DOCR image references in text
+var docrImageRefRe = regexp.MustCompile(`registry\.digitalocean\.com/[^/\s"']+/[^\s"']+`)
+
+// extractDOCRImageFromPlan finds a DOCR image ref in user-data or notes.
+func extractDOCRImageFromPlan(plan *maker.Plan) string {
+	// Check user-data first (most reliable)
+	for _, cmd := range plan.Commands {
+		if !isDODropletCreate(cmd.Args) {
+			continue
+		}
+		for ai, arg := range cmd.Args {
+			if arg == "--user-data" && ai+1 < len(cmd.Args) {
+				if m := docrImageRefRe.FindString(cmd.Args[ai+1]); m != "" {
+					return m
+				}
+			}
+		}
+	}
+	// Fallback: check notes
+	for _, note := range plan.Notes {
+		if m := docrImageRefRe.FindString(note); m != "" {
+			// Normalize hardcoded names in notes too
+			return docrHardcodedNameRe.ReplaceAllString(m, "registry.digitalocean.com/<REGISTRY_NAME>/")
+		}
+	}
+	return ""
 }
 
 // fixDORegistryCredentialHallucination replaces the invalid

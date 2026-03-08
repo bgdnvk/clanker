@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -82,10 +83,15 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 			if runErr != nil {
 				return fmt.Errorf("docker command %d failed: %w", idx+1, runErr)
 			}
+			// Docker build/push output is NOT JSON — learnPlanBindingsFromProduces won't work.
+			// Set produces as literal values (e.g. IMAGE_URI = the -t tag value).
+			learnDockerProducesLiteral(args, cmdSpec.Produces, bindings)
 			learnPlanBindingsFromProduces(cmdSpec.Produces, out, bindings)
 			continue
 		}
 
+		// Safety net: fix firewall empty address right before execution
+		args = fixFirewallEmptyAddressAtExec(args)
 		args = normalizeDoctlOutputFlags(args)
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: doctl %s\n", idx+1, len(plan.Commands), strings.Join(args, " "))
 
@@ -535,4 +541,62 @@ func computeDORuntimeBindings(bindings map[string]string) {
 			bindings["REGISTRY_ENDPOINT"] = "registry.digitalocean.com/" + name
 		}
 	}
+}
+
+// learnDockerProducesLiteral sets produces bindings from docker command args.
+// Docker build/push output is NOT JSON so learnPlanBindingsFromProduces won't work.
+// Instead, we extract the image tag from the -t flag and set it as a literal binding.
+func learnDockerProducesLiteral(args []string, produces map[string]string, bindings map[string]string) {
+	// Find the -t tag value from docker build args
+	tag := ""
+	for i, a := range args {
+		if (a == "-t" || a == "--tag") && i+1 < len(args) {
+			tag = strings.TrimSpace(args[i+1])
+			break
+		}
+	}
+	if tag == "" {
+		return
+	}
+
+	// Set any IMAGE-related produce to the tag value
+	for k := range produces {
+		upper := strings.ToUpper(strings.TrimSpace(k))
+		if strings.Contains(upper, "IMAGE") {
+			if strings.TrimSpace(bindings[k]) == "" {
+				bindings[k] = tag
+			}
+		}
+	}
+
+	// Always set IMAGE_URI and IMAGE_TAG as fallback (even without produces)
+	// so downstream commands referencing these placeholders work
+	if strings.TrimSpace(bindings["IMAGE_URI"]) == "" {
+		bindings["IMAGE_URI"] = tag
+	}
+	if strings.TrimSpace(bindings["IMAGE_TAG"]) == "" {
+		bindings["IMAGE_TAG"] = tag
+	}
+}
+
+// emptyFWAddrExecRe matches "address:" followed by whitespace or end-of-string.
+var emptyFWAddrExecRe = regexp.MustCompile(`address:(\s|$)`)
+
+// fixFirewallEmptyAddressAtExec fixes "address:" with no CIDR right before doctl exec.
+// Belt-and-suspenders: autofix does this during planning, but LLM repair can reintroduce it.
+func fixFirewallEmptyAddressAtExec(args []string) []string {
+	if len(args) < 3 {
+		return args
+	}
+	s0 := strings.ToLower(strings.TrimSpace(args[0]))
+	s1 := strings.ToLower(strings.TrimSpace(args[1]))
+	if s0 != "compute" || s1 != "firewall" {
+		return args
+	}
+	for i, arg := range args {
+		if strings.Contains(arg, "address:") {
+			args[i] = emptyFWAddrExecRe.ReplaceAllString(arg, "address:0.0.0.0/0${1}")
+		}
+	}
+	return args
 }
