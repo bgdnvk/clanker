@@ -91,6 +91,12 @@ func ApplyDigitalOceanPlanAutofix(plan *maker.Plan, logf func(string, ...any)) *
 		logf("[deploy] do autofix: filled %d empty firewall address field(s) with 0.0.0.0/0", fwAddrFixed)
 	}
 
+	// Ensure user-data has export HOME=/root for doctl / cloud-init compat
+	homeFixed := fixDOUserDataMissingHome(plan)
+	if homeFixed > 0 {
+		logf("[deploy] do autofix: injected 'export HOME=/root' in %d user-data script(s)", homeFixed)
+	}
+
 	// Sanitize inline user-data: remove broken compose, empty volumes/env
 	udFixed := fixDOUserDataScript(plan)
 	if udFixed > 0 {
@@ -755,6 +761,43 @@ var emptyFWAddrRe = regexp.MustCompile(`address:(\s|$)`)
 // ---------------------------------------------------------------------------
 // User-data compose sanitizer
 // ---------------------------------------------------------------------------
+
+// fixDOUserDataMissingHome injects "export HOME=/root" into user-data
+// scripts that call doctl. Cloud-init runs without $HOME set, which
+// causes "neither $XDG_CONFIG_HOME nor $HOME are defined" from doctl.
+func fixDOUserDataMissingHome(plan *maker.Plan) int {
+	count := 0
+	for ci := range plan.Commands {
+		args := plan.Commands[ci].Args
+		if !isDODropletCreate(args) {
+			continue
+		}
+		for ai, arg := range args {
+			if arg == "--user-data" && ai+1 < len(args) {
+				script := args[ai+1]
+				// only fix if doctl is referenced and HOME isn't already exported
+				if !strings.Contains(script, "doctl") {
+					continue
+				}
+				if strings.Contains(script, "export HOME=") || strings.Contains(script, "HOME=/root") {
+					continue
+				}
+				// inject after "set -e" or after shebang
+				if idx := strings.Index(script, "set -e\n"); idx >= 0 {
+					insert := idx + len("set -e\n")
+					script = script[:insert] + "export HOME=/root\n" + script[insert:]
+				} else if strings.HasPrefix(script, "#!/bin/bash\n") {
+					script = "#!/bin/bash\nexport HOME=/root\n" + script[len("#!/bin/bash\n"):]
+				} else {
+					script = "export HOME=/root\n" + script
+				}
+				plan.Commands[ci].Args[ai+1] = script
+				count++
+			}
+		}
+	}
+	return count
+}
 
 // fixDOUserDataScript sanitizes inline --user-data on compute droplet create.
 // Reuses the generic fixUserDataScript (path typos, shebang) then applies
