@@ -18,6 +18,17 @@ var dockerPlatformLineRe = regexp.MustCompile(`(?m)^\s*Platform:\s*(linux/(?:amd
 
 var dockerBuildxDriverLineRe = regexp.MustCompile(`(?m)^\s*Driver:\s*([a-zA-Z0-9_-]+)\s*$`)
 
+// hasBuildxAvailable checks if docker buildx plugin is installed and working
+func hasBuildxAvailable(ctx context.Context) bool {
+	cmd := exec.CommandContext(ctx, "docker", "buildx", "version")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+	// Check output contains version info (not just docker help)
+	return strings.Contains(string(out), "buildx") || strings.Contains(string(out), "github.com/docker/buildx")
+}
+
 // BuildAndPushDockerImage builds a Docker image locally and pushes to ECR.
 // It handles ECR authentication, building the image, tagging, and pushing.
 func BuildAndPushDockerImage(ctx context.Context, clonePath, ecrURI, profile, region, imageTag string, w io.Writer) (string, error) {
@@ -62,39 +73,83 @@ func BuildAndPushDockerImageWithTags(ctx context.Context, clonePath, ecrURI, pro
 		tagArgs = append(tagArgs, "-t", ecrURI+":"+t)
 	}
 
-	if err := ensureDockerBuildxReady(ctx, w); err != nil {
-		return "", err
+	// Check if buildx is available, fall back to regular docker build if not
+	useBuildx := hasBuildxAvailable(ctx)
+
+	if useBuildx {
+		if err := ensureDockerBuildxReady(ctx, w); err != nil {
+			fmt.Fprintf(w, "[docker] buildx setup failed, falling back to regular docker build: %v\n", err)
+			useBuildx = false
+		}
 	}
 
-	// 2. Build+push a multi-arch image. This avoids shipping an arm64-only image when the target is amd64 (or vice versa).
-	fmt.Fprintf(w, "[docker] building multi-arch image (linux/amd64, linux/arm64) from %s...\n", clonePath)
 	buildCtx, cancel := context.WithTimeout(ctx, 25*time.Minute)
 	defer cancel()
-	buildArgs := []string{
-		"buildx", "build",
-		"--builder", "clanker-builder",
-		"--platform", "linux/amd64,linux/arm64",
-		"--progress", "plain",
-		"--provenance=false",
-		"--sbom=false",
-		"--no-cache",
-	}
-	buildArgs = append(buildArgs, tagArgs...)
-	buildArgs = append(buildArgs, "--push", clonePath)
-	buildCmd := exec.CommandContext(buildCtx, "docker", buildArgs...)
-	buildCmd.Stdout = w
-	buildCmd.Stderr = w
-	if err := buildCmd.Run(); err != nil {
-		if buildCtx.Err() != nil {
-			return "", fmt.Errorf("docker buildx build --push timed out after 25m")
-		}
-		return "", fmt.Errorf("docker buildx build --push failed: %w", err)
-	}
-	fmt.Fprintf(w, "[docker] push complete\n")
 
-	// 3. Verify the registry has the expected platforms.
-	if err := verifyRemoteImagePlatforms(ctx, primaryRef, []string{"linux/amd64", "linux/arm64"}); err != nil {
-		return "", err
+	if useBuildx {
+		// 2a. Build+push a multi-arch image using buildx
+		fmt.Fprintf(w, "[docker] building multi-arch image (linux/amd64, linux/arm64) from %s...\n", clonePath)
+		buildArgs := []string{
+			"buildx", "build",
+			"--builder", "clanker-builder",
+			"--platform", "linux/amd64,linux/arm64",
+			"--progress", "plain",
+			"--provenance=false",
+			"--sbom=false",
+			"--no-cache",
+		}
+		buildArgs = append(buildArgs, tagArgs...)
+		buildArgs = append(buildArgs, "--push", clonePath)
+		buildCmd := exec.CommandContext(buildCtx, "docker", buildArgs...)
+		buildCmd.Stdout = w
+		buildCmd.Stderr = w
+		if err := buildCmd.Run(); err != nil {
+			if buildCtx.Err() != nil {
+				return "", fmt.Errorf("docker buildx build --push timed out after 25m")
+			}
+			return "", fmt.Errorf("docker buildx build --push failed: %w", err)
+		}
+		fmt.Fprintf(w, "[docker] push complete\n")
+
+		// 3. Verify the registry has the expected platforms.
+		if err := verifyRemoteImagePlatforms(ctx, primaryRef, []string{"linux/amd64", "linux/arm64"}); err != nil {
+			return "", err
+		}
+	} else {
+		// 2b. Fallback: regular docker build + push (single arch, native platform only)
+		fmt.Fprintf(w, "[docker] buildx not available, using regular docker build (single arch)...\n")
+		fmt.Fprintf(w, "[docker] building image from %s...\n", clonePath)
+
+		// Build with all tags
+		buildArgs := []string{"build", "--no-cache"}
+		buildArgs = append(buildArgs, tagArgs...)
+		buildArgs = append(buildArgs, clonePath)
+		buildCmd := exec.CommandContext(buildCtx, "docker", buildArgs...)
+		buildCmd.Stdout = w
+		buildCmd.Stderr = w
+		if err := buildCmd.Run(); err != nil {
+			if buildCtx.Err() != nil {
+				return "", fmt.Errorf("docker build timed out after 25m")
+			}
+			return "", fmt.Errorf("docker build failed: %w", err)
+		}
+		fmt.Fprintf(w, "[docker] build complete, pushing...\n")
+
+		// Push each tag
+		for _, t := range cleanTags {
+			pushRef := ecrURI + ":" + t
+			pushCmd := exec.CommandContext(buildCtx, "docker", "push", pushRef)
+			pushCmd.Stdout = w
+			pushCmd.Stderr = w
+			if err := pushCmd.Run(); err != nil {
+				if buildCtx.Err() != nil {
+					return "", fmt.Errorf("docker push timed out")
+				}
+				return "", fmt.Errorf("docker push %s failed: %w", pushRef, err)
+			}
+			fmt.Fprintf(w, "[docker] pushed %s\n", pushRef)
+		}
+		fmt.Fprintf(w, "[docker] push complete (single arch)\n")
 	}
 
 	return primaryRef, nil
