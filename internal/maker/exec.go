@@ -837,7 +837,13 @@ func autoPrepareImageForOneClickDeploy(ctx context.Context, question string, run
 				return err
 			}
 			if err := ensureDockerBuildxReady(ctx, opts.Writer); err != nil {
-				return err
+				// Use agentic loop for docker buildx issues
+				retryFunc := func() error {
+					return ensureDockerBuildxReady(ctx, opts.Writer)
+				}
+				if handled, _ := ShellAgenticRemediation(ctx, opts, "docker buildx create clanker-builder", err.Error(), retryFunc); !handled {
+					return err
+				}
 			}
 			if err := verifyRemoteImagePlatforms(ctx, imageRef, requiredPlatforms); err != nil {
 				_, _ = fmt.Fprintf(opts.Writer, "[docker] existing image missing required platform (%s); rebuilding multi-arch...\n", strings.Join(requiredPlatforms, ", "))
@@ -868,7 +874,18 @@ func autoPrepareImageForOneClickDeploy(ctx context.Context, question string, run
 
 	imageURI, err := BuildAndPushDockerImageWithTags(ctx, clonePath, ecrURI, opts.Profile, opts.Region, []string{imageTag, "latest"}, opts.Writer)
 	if err != nil {
-		return err
+		// Use agentic loop for docker build/push issues
+		var retryImageURI string
+		retryFunc := func() error {
+			var retryErr error
+			retryImageURI, retryErr = BuildAndPushDockerImageWithTags(ctx, clonePath, ecrURI, opts.Profile, opts.Region, []string{imageTag, "latest"}, opts.Writer)
+			return retryErr
+		}
+		if handled, _ := ShellAgenticRemediation(ctx, opts, "docker buildx build --push", err.Error(), retryFunc); handled {
+			imageURI = retryImageURI
+		} else {
+			return err
+		}
 	}
 	bindings["IMAGE_URI"] = imageURI
 	_, _ = fmt.Fprintf(opts.Writer, "[docker] one-click: image ready %s\n", imageURI)

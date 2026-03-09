@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -494,5 +495,269 @@ func shouldUseAgenticRemediation(failure AWSFailure, output string, simpleFailed
 		}
 	}
 
+	return false
+}
+
+// ShellAgenticRemediation runs the agentic loop for shell command failures (docker, git, etc.)
+func ShellAgenticRemediation(
+	ctx context.Context,
+	opts ExecOptions,
+	failedCommand string, // Full command as string
+	failedOutput string,
+	retryFunc func() error, // Function to retry the original operation
+) (handled bool, err error) {
+	if strings.TrimSpace(opts.AIProvider) == "" || strings.TrimSpace(opts.AIAPIKey) == "" {
+		return false, nil
+	}
+
+	// Parse command into args
+	failedArgs := strings.Fields(failedCommand)
+
+	// Initialize state (reuse AgenticRemediationState)
+	state := &AgenticRemediationState{
+		SessionID:          generateSessionID(),
+		StartedAt:          time.Now(),
+		FailedCommand:      failedArgs,
+		FailedOutput:       failedOutput,
+		CommandType:        CommandTypeShell,
+		History:            make([]ConversationTurn, 0),
+		Phase:              PhaseDiagnose,
+		Iteration:          0,
+		DiagnosticOutput:   make(map[string]string),
+		RemediationActions: make([]RemediationAction, 0),
+		LearnedBindings:    make(map[string]string),
+		Budget: &RemediationBudget{
+			MaxIterations:       DefaultMaxIterations,
+			MaxCommandsPerPhase: 4,
+			MaxAPICallsTotal:    10,
+			MaxDuration:         3 * time.Minute,
+		},
+	}
+
+	_, _ = fmt.Fprintf(opts.Writer, "[agentic] starting shell remediation session %s for: %s\n", state.SessionID, failedCommand)
+	if opts.PlanLogger != nil {
+		opts.PlanLogger.WriteFix("agentic_shell_start", failedCommand, "starting shell remediation loop")
+	}
+
+	client := ai.NewClient(opts.AIProvider, opts.AIAPIKey, opts.Debug, opts.AIProfile)
+	conv := ai.NewConversationContext(agenticDockerSystemPrompt())
+
+	// Main ReAct loop (same structure as AgenticRemediation)
+	for state.Iteration < state.Budget.MaxIterations {
+		state.Iteration++
+
+		if time.Since(state.StartedAt) > state.Budget.MaxDuration {
+			_, _ = fmt.Fprintf(opts.Writer, "[agentic] shell remediation budget exhausted: duration limit\n")
+			break
+		}
+
+		_, _ = fmt.Fprintf(opts.Writer, "[agentic] shell iteration %d/%d, phase: %s\n",
+			state.Iteration, state.Budget.MaxIterations, state.Phase)
+
+		switch state.Phase {
+		case PhaseDiagnose:
+			if err := runShellDiagnosePhase(ctx, client, conv, opts, state); err != nil {
+				_, _ = fmt.Fprintf(opts.Writer, "[agentic] shell diagnose phase error: %v\n", err)
+			}
+			state.Phase = PhaseRemediate
+
+		case PhaseRemediate:
+			if err := runShellRemediatePhase(ctx, client, conv, opts, state); err != nil {
+				_, _ = fmt.Fprintf(opts.Writer, "[agentic] shell remediate phase error: %v\n", err)
+				state.Phase = PhaseFailed
+				continue
+			}
+			state.Phase = PhaseVerify
+
+		case PhaseVerify:
+			// Retry original operation using provided retry function
+			_, _ = fmt.Fprintf(opts.Writer, "[agentic][verify] retrying original operation...\n")
+			if retryErr := retryFunc(); retryErr == nil {
+				state.Phase = PhaseComplete
+			} else {
+				// Update failed output for next iteration
+				state.FailedOutput = retryErr.Error()
+				_, _ = fmt.Fprintf(opts.Writer, "[agentic][verify] retry failed: %v\n", retryErr)
+				state.Phase = PhaseDiagnose
+			}
+
+		case PhaseComplete:
+			_, _ = fmt.Fprintf(opts.Writer, "[agentic] shell remediation successful after %d iteration(s)\n", state.Iteration)
+			if opts.PlanLogger != nil {
+				opts.PlanLogger.WriteFixSuccess("agentic_shell_complete", failedCommand, "shell remediation succeeded")
+			}
+			return true, nil
+
+		case PhaseFailed:
+			_, _ = fmt.Fprintf(opts.Writer, "[agentic] shell remediation failed\n")
+			if opts.PlanLogger != nil {
+				opts.PlanLogger.WriteFix("agentic_shell_failed", failedCommand, "shell remediation failed")
+			}
+			return false, nil
+		}
+	}
+
+	_, _ = fmt.Fprintf(opts.Writer, "[agentic] shell remediation exhausted budget after %d iterations\n", state.Iteration)
+	if opts.PlanLogger != nil {
+		opts.PlanLogger.WriteFix("agentic_shell_exhausted", failedCommand, "budget exhausted")
+	}
+	return false, fmt.Errorf("shell agentic remediation exhausted budget after %d iterations", state.Iteration)
+}
+
+// runShellDiagnosePhase runs diagnostic shell commands
+func runShellDiagnosePhase(ctx context.Context, client *ai.Client, conv *ai.ConversationContext, opts ExecOptions, state *AgenticRemediationState) error {
+	_, _ = fmt.Fprintf(opts.Writer, "[agentic][diagnose] gathering diagnostic information...\n")
+
+	prompt := buildDockerDiagnosePrompt(state)
+
+	state.History = append(state.History, ConversationTurn{
+		Role:      "user",
+		Content:   prompt,
+		Phase:     PhaseDiagnose,
+		Timestamp: time.Now(),
+	})
+
+	state.Budget.APICallsUsed++
+	response, err := client.AskWithContext(ctx, conv, prompt)
+	if err != nil {
+		return fmt.Errorf("LLM call failed: %w", err)
+	}
+
+	state.History = append(state.History, ConversationTurn{
+		Role:      "assistant",
+		Content:   response,
+		Phase:     PhaseDiagnose,
+		Timestamp: time.Now(),
+	})
+
+	var diag DiagnosticResponse
+	cleaned := client.CleanJSONResponse(response)
+	if err := json.Unmarshal([]byte(cleaned), &diag); err != nil {
+		return fmt.Errorf("failed to parse diagnostic response: %w", err)
+	}
+
+	_, _ = fmt.Fprintf(opts.Writer, "[agentic][diagnose] hypothesis: %s\n", diag.Hypothesis)
+	if opts.PlanLogger != nil {
+		opts.PlanLogger.WriteFix("agentic_shell_diagnose", fmt.Sprintf("iteration=%d", state.Iteration), diag.Hypothesis)
+	}
+
+	// Execute diagnostic commands
+	for i, cmd := range diag.Commands {
+		if i >= 3 { // Max 3 diagnostic commands
+			break
+		}
+
+		cmd.Args = normalizeArgs(cmd.Args)
+		if !isShellCommandSafe(cmd.Args) {
+			_, _ = fmt.Fprintf(opts.Writer, "[agentic][diagnose] command blocked: %v\n", cmd.Args)
+			continue
+		}
+
+		cmdStr := strings.Join(cmd.Args, " ")
+		_, _ = fmt.Fprintf(opts.Writer, "[agentic][diagnose] running: %s (%s)\n", cmdStr, cmd.Purpose)
+
+		shellCmd := exec.CommandContext(ctx, cmd.Args[0], cmd.Args[1:]...)
+		out, _ := shellCmd.CombinedOutput()
+		state.DiagnosticOutput[cmdStr] = string(out)
+		state.Budget.CommandsExecuted++
+	}
+
+	return nil
+}
+
+// runShellRemediatePhase runs remediation shell commands
+func runShellRemediatePhase(ctx context.Context, client *ai.Client, conv *ai.ConversationContext, opts ExecOptions, state *AgenticRemediationState) error {
+	_, _ = fmt.Fprintf(opts.Writer, "[agentic][remediate] determining fix based on diagnostics...\n")
+
+	prompt := buildDockerRemediatePrompt(state)
+
+	state.History = append(state.History, ConversationTurn{
+		Role:      "user",
+		Content:   prompt,
+		Phase:     PhaseRemediate,
+		Timestamp: time.Now(),
+	})
+
+	state.Budget.APICallsUsed++
+	response, err := client.AskWithContext(ctx, conv, prompt)
+	if err != nil {
+		return fmt.Errorf("LLM call failed: %w", err)
+	}
+
+	state.History = append(state.History, ConversationTurn{
+		Role:      "assistant",
+		Content:   response,
+		Phase:     PhaseRemediate,
+		Timestamp: time.Now(),
+	})
+
+	var remediation RemediationLLMResponse
+	cleaned := client.CleanJSONResponse(response)
+	if err := json.Unmarshal([]byte(cleaned), &remediation); err != nil {
+		return fmt.Errorf("failed to parse remediation response: %w", err)
+	}
+
+	if remediation.Skip {
+		_, _ = fmt.Fprintf(opts.Writer, "[agentic][remediate] LLM says skip (already fixed)\n")
+		return nil
+	}
+
+	_, _ = fmt.Fprintf(opts.Writer, "[agentic][remediate] root cause: %s\n", remediation.RootCause)
+	_, _ = fmt.Fprintf(opts.Writer, "[agentic][remediate] fix: %s\n", remediation.Fix)
+	if opts.PlanLogger != nil {
+		opts.PlanLogger.WriteFix("agentic_shell_remediate", remediation.RootCause, remediation.Fix)
+	}
+
+	// Execute remediation commands
+	for i, cmd := range remediation.Commands {
+		if i >= 4 { // Max 4 remediation commands
+			break
+		}
+
+		cmd.Args = normalizeArgs(cmd.Args)
+		if !isShellCommandSafe(cmd.Args) {
+			_, _ = fmt.Fprintf(opts.Writer, "[agentic][remediate] command %d blocked: %v\n", i+1, cmd.Args)
+			continue
+		}
+
+		cmdStr := strings.Join(cmd.Args, " ")
+		_, _ = fmt.Fprintf(opts.Writer, "[agentic][remediate] step %d/%d: %s (%s)\n", i+1, len(remediation.Commands), cmdStr, cmd.Reason)
+
+		shellCmd := exec.CommandContext(ctx, cmd.Args[0], cmd.Args[1:]...)
+		out, runErr := shellCmd.CombinedOutput()
+
+		action := RemediationAction{
+			Phase:      PhaseRemediate,
+			Command:    cmd.Args,
+			Reason:     cmd.Reason,
+			Output:     string(out),
+			Success:    runErr == nil,
+			ExecutedAt: time.Now(),
+		}
+		state.RemediationActions = append(state.RemediationActions, action)
+		state.Budget.CommandsExecuted++
+
+		if runErr != nil {
+			_, _ = fmt.Fprintf(opts.Writer, "[agentic][remediate] step %d warning: %v\n", i+1, runErr)
+		}
+	}
+
+	return nil
+}
+
+// isShellCommandSafe validates shell commands for safety
+func isShellCommandSafe(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+
+	// Only allow docker and git commands
+	allowed := []string{"docker", "git", "which", "command"}
+	cmd := strings.ToLower(args[0])
+	for _, a := range allowed {
+		if cmd == a {
+			return true
+		}
+	}
 	return false
 }

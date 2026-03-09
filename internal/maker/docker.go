@@ -219,8 +219,9 @@ func ensureDockerBuildxReady(ctx context.Context, w io.Writer) error {
 		// First, clean up any existing broken builder
 		_ = exec.CommandContext(ctx, "docker", "buildx", "rm", "-f", name).Run()
 
-		// Create builder WITHOUT --use flag (compatible with all Docker versions)
-		create := exec.CommandContext(ctx, "docker", "buildx", "create", "--name", name, "--driver", "docker-container")
+		// Create builder using positional argument (compatible with all Docker versions)
+		// The --name flag is not supported in older Docker buildx versions
+		create := exec.CommandContext(ctx, "docker", "buildx", "create", name, "--driver", "docker-container")
 		out, err := create.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("failed to create builder: %w\nOutput: %s", err, strings.TrimSpace(string(out)))

@@ -13,6 +13,14 @@ const (
 	PhaseFailed    RemediationPhase = "failed"
 )
 
+// CommandType indicates whether remediation is for AWS CLI or shell commands
+type CommandType string
+
+const (
+	CommandTypeAWS   CommandType = "aws"
+	CommandTypeShell CommandType = "shell"
+)
+
 // AgenticRemediationState tracks the full state of a remediation loop
 type AgenticRemediationState struct {
 	// Identity
@@ -23,6 +31,7 @@ type AgenticRemediationState struct {
 	FailedCommand []string           `json:"failed_command"`
 	FailedOutput  string             `json:"failed_output"`
 	ErrorCategory AWSFailureCategory `json:"error_category"`
+	CommandType   CommandType        `json:"command_type"` // aws or shell
 
 	// Conversation history for multi-turn LLM interaction
 	History []ConversationTurn `json:"history"`
