@@ -112,6 +112,9 @@ func NewPlanLogWriter(runID string) (*PlanLogWriter, error) {
 }
 
 // Write implements io.Writer interface for capturing all output
+// IMPORTANT: This method NEVER returns an error because logging failures
+// should not break the deployment process. Any write errors are silently
+// ignored - the deployment is more important than the logs.
 func (w *PlanLogWriter) Write(p []byte) (n int, err error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -123,13 +126,11 @@ func (w *PlanLogWriter) Write(p []byte) (n int, err error) {
 	// Add timestamp prefix to each line
 	timestamp := time.Now().Format(time.RFC3339)
 	line := fmt.Sprintf("[%s] %s", timestamp, string(p))
-	_, err = w.outputFile.WriteString(line)
-	if err != nil {
-		return 0, err
-	}
-	// Return len(p) to satisfy io.Writer contract - caller expects
-	// the number of bytes from p that were processed, not the length
-	// of our timestamped output
+	// Ignore write errors - logging should never break deployment
+	_, _ = w.outputFile.WriteString(line)
+
+	// Always return success to satisfy io.Writer contract
+	// This ensures io.MultiWriter never fails due to logging
 	return len(p), nil
 }
 
