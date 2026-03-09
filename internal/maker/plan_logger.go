@@ -123,7 +123,14 @@ func (w *PlanLogWriter) Write(p []byte) (n int, err error) {
 	// Add timestamp prefix to each line
 	timestamp := time.Now().Format(time.RFC3339)
 	line := fmt.Sprintf("[%s] %s", timestamp, string(p))
-	return w.outputFile.WriteString(line)
+	_, err = w.outputFile.WriteString(line)
+	if err != nil {
+		return 0, err
+	}
+	// Return len(p) to satisfy io.Writer contract - caller expects
+	// the number of bytes from p that were processed, not the length
+	// of our timestamped output
+	return len(p), nil
 }
 
 // WriteEvent writes a structured event to events.log
