@@ -522,22 +522,47 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		}
 
 		// Record created resource for tracking/cleanup
+		// This is wrapped in a function with recover to ensure resource tracking
+		// errors never crash the maker process
 		if opts.ResourceStore != nil {
-			runID := ""
-			if planLogger != nil {
-				runID = planLogger.GetRunID()
-			}
-			accountID := bindings["ACCOUNT_ID"]
-			if accountID == "" {
-				accountID = bindings["AWS_ACCOUNT_ID"]
-			}
-			if resource := resourcedb.ExtractResource(args, out, idx, runID, opts.Region, opts.Profile, accountID, opts.ParentRunID); resource != nil {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						errMsg := fmt.Sprintf("panic in resource tracking: %v", r)
+						_, _ = fmt.Fprintf(opts.Writer, "[maker][resourcedb] warning: %s\n", errMsg)
+						if planLogger != nil {
+							planLogger.WriteEvent("resourcedb_error", errMsg)
+						}
+					}
+				}()
+
+				runID := ""
+				if planLogger != nil {
+					runID = planLogger.GetRunID()
+				}
+				accountID := bindings["ACCOUNT_ID"]
+				if accountID == "" {
+					accountID = bindings["AWS_ACCOUNT_ID"]
+				}
+
+				resource := resourcedb.ExtractResource(args, out, idx, runID, opts.Region, opts.Profile, accountID, opts.ParentRunID)
+				if resource == nil {
+					return
+				}
+
 				if err := opts.ResourceStore.RecordResource(resource); err != nil {
-					_, _ = fmt.Fprintf(opts.Writer, "[maker][resourcedb] warning: %v\n", err)
+					errMsg := fmt.Sprintf("failed to record resource: %v", err)
+					_, _ = fmt.Fprintf(opts.Writer, "[maker][resourcedb] warning: %s\n", errMsg)
+					if planLogger != nil {
+						planLogger.WriteEvent("resourcedb_error", errMsg)
+					}
 				} else {
 					_, _ = fmt.Fprintf(opts.Writer, "[maker][resourcedb] recorded %s\n", resource.String())
+					if planLogger != nil {
+						planLogger.WriteEvent("resourcedb_recorded", resource.String())
+					}
 				}
-			}
+			}()
 		}
 
 		// CloudFormation is async. If we just created/updated a stack, wait for it to complete.
