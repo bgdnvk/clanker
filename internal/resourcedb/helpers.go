@@ -252,6 +252,12 @@ func ExtractResource(args []string, output string, cmdIndex int, runID, region, 
 	// Extract resource IDs and ARNs from output
 	extractResourceIdentifiers(output, r)
 
+	// Only record if we actually extracted a resource identifier from the output
+	// This confirms the resource was actually created, not just that the command ran
+	if r.ResourceID == "" && r.ResourceARN == "" {
+		return nil
+	}
+
 	// Extract name from args
 	r.ResourceName = extractResourceName(args)
 

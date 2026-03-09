@@ -36,6 +36,32 @@ func TestResourceExtraction(t *testing.T) {
 	}
 }
 
+func TestResourceExtractionOnlyAfterConfirmedCreation(t *testing.T) {
+	// Non-creation operations should return nil
+	describeArgs := []string{"ec2", "describe-instances", "--instance-ids", "i-123"}
+	describeOutput := `{"Reservations": [{"Instances": [{"InstanceId": "i-123"}]}]}`
+	if resource := ExtractResource(describeArgs, describeOutput, 0, "run-123", "us-east-1", "default", "123456789012", ""); resource != nil {
+		t.Error("describe operation should not create a resource record")
+	}
+
+	// Creation operation but output has no resource ID should return nil
+	createArgs := []string{"ec2", "run-instances", "--instance-type", "t3.micro"}
+	emptyOutput := `{"error": "some error"}` // No InstanceId in output
+	if resource := ExtractResource(createArgs, emptyOutput, 0, "run-123", "us-east-1", "default", "123456789012", ""); resource != nil {
+		t.Error("creation without confirmed resource ID should not create a resource record")
+	}
+
+	// Creation operation with valid output should return resource
+	validOutput := `{"Instances": [{"InstanceId": "i-0def456abc789"}]}`
+	resource := ExtractResource(createArgs, validOutput, 0, "run-123", "us-east-1", "default", "123456789012", "")
+	if resource == nil {
+		t.Fatal("creation with confirmed resource ID should create a resource record")
+	}
+	if resource.ResourceID != "i-0def456abc789" {
+		t.Errorf("expected resource ID i-0def456abc789, got %s", resource.ResourceID)
+	}
+}
+
 func TestStoreOperations(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "resourcedb-test")
 	if err != nil {
