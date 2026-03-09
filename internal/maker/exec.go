@@ -21,6 +21,7 @@ import (
 
 	clankeraws "github.com/bgdnvk/clanker/internal/aws"
 	"github.com/bgdnvk/clanker/internal/openclaw"
+	"github.com/bgdnvk/clanker/internal/resourcedb"
 	"github.com/bgdnvk/clanker/internal/wordpress"
 )
 
@@ -237,6 +238,12 @@ type ExecOptions struct {
 
 	// PlanLogger is an optional logger for plan execution (writes to ~/.clanker/logs/plan/)
 	PlanLogger *PlanLogWriter
+
+	// ResourceStore tracks created resources for later cleanup/reference
+	ResourceStore *resourcedb.Store
+
+	// ParentRunID links this execution to a parent run (for nested deployments)
+	ParentRunID string
 }
 
 func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
@@ -512,6 +519,25 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		bindings["CHECKPOINT_LAST_FAILURE_INDEX"] = ""
 		if planLogger != nil {
 			planLogger.RecordCommandSuccess(idx, args0(args), args1(args), out)
+		}
+
+		// Record created resource for tracking/cleanup
+		if opts.ResourceStore != nil {
+			runID := ""
+			if planLogger != nil {
+				runID = planLogger.GetRunID()
+			}
+			accountID := bindings["ACCOUNT_ID"]
+			if accountID == "" {
+				accountID = bindings["AWS_ACCOUNT_ID"]
+			}
+			if resource := resourcedb.ExtractResource(args, out, idx, runID, opts.Region, opts.Profile, accountID, opts.ParentRunID); resource != nil {
+				if err := opts.ResourceStore.RecordResource(resource); err != nil {
+					_, _ = fmt.Fprintf(opts.Writer, "[maker][resourcedb] warning: %v\n", err)
+				} else {
+					_, _ = fmt.Fprintf(opts.Writer, "[maker][resourcedb] recorded %s\n", resource.String())
+				}
+			}
 		}
 
 		// CloudFormation is async. If we just created/updated a stack, wait for it to complete.

@@ -19,6 +19,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/deploy"
 	"github.com/bgdnvk/clanker/internal/maker"
 	"github.com/bgdnvk/clanker/internal/openclaw"
+	"github.com/bgdnvk/clanker/internal/resourcedb"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -1127,6 +1128,16 @@ Examples:
 			outputBindings["FORCE_IMAGE_DEPLOY"] = "true"
 			fmt.Fprintf(os.Stderr, "[deploy] image deploy enforcement enabled (ECR image build/pull workflow)\n")
 		}
+
+		// Initialize resource tracking database
+		var resourceStore *resourcedb.Store
+		resourceStore, err = resourcedb.NewStore("")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[deploy] warning: resource tracking unavailable: %v\n", err)
+		} else {
+			defer resourceStore.Close()
+		}
+
 		execOpts := maker.ExecOptions{
 			Profile:        targetProfile,
 			Region:         region,
@@ -1137,6 +1148,7 @@ Examples:
 			AIProfile:      aiProfile,
 			Debug:          debug,
 			OutputBindings: outputBindings,
+			ResourceStore:  resourceStore,
 		}
 		if strings.EqualFold(strings.TrimSpace(targetProvider), "cloudflare") {
 			execOpts.Profile = ""
