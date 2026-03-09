@@ -234,6 +234,9 @@ type ExecOptions struct {
 	// OutputBindings is populated by ExecutePlan with the final resource bindings
 	// (e.g., ALB_DNS, INSTANCE_ID, etc.) for the caller to use
 	OutputBindings map[string]string
+
+	// PlanLogger is an optional logger for plan execution (writes to ~/.clanker/logs/plan/)
+	PlanLogger *PlanLogWriter
 }
 
 func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
@@ -248,6 +251,32 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	}
 	if opts.Writer == nil {
 		return fmt.Errorf("missing output writer")
+	}
+
+	// Initialize plan logger if not provided (writes to ~/.clanker/logs/plan/<runID>/)
+	var planLogger *PlanLogWriter
+	if opts.PlanLogger != nil {
+		planLogger = opts.PlanLogger
+	} else {
+		var logErr error
+		planLogger, logErr = NewPlanLogWriter("")
+		if logErr != nil {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to create plan logger: %v\n", logErr)
+		}
+	}
+	if planLogger != nil {
+		defer func() {
+			planLogger.Close()
+		}()
+		// Tee output to both original writer and log file
+		originalWriter := opts.Writer
+		opts.Writer = io.MultiWriter(originalWriter, planLogger)
+		// Save the original plan
+		if err := planLogger.WritePlan(plan); err != nil {
+			_, _ = fmt.Fprintf(originalWriter, "[maker] warning: failed to write plan to log: %v\n", err)
+		}
+		planLogger.WriteEvent("start", fmt.Sprintf("Executing plan with %d commands", len(plan.Commands)))
+		_, _ = fmt.Fprintf(originalWriter, "[maker] logging to %s\n", planLogger.GetLogDir())
 	}
 
 	accountID, err := resolveAWSAccountID(ctx, opts)
@@ -434,6 +463,9 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		}
 
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: %s\n", idx+1, len(plan.Commands), formatAWSArgsForLog(awsArgs))
+		if planLogger != nil {
+			planLogger.RecordCommandStart(idx, args0(args), args1(args))
+		}
 
 		out, runErr := runAWSCommandStreaming(ctx, awsArgs, zipBytes, opts.Writer)
 		if runErr != nil {
@@ -455,6 +487,11 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 					_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] warning: failed to persist durable checkpoint: %v\n", persistErr)
 				}
 			}
+			if planLogger != nil {
+				planLogger.RecordCommandFailure(idx, args0(args), args1(args), runErr.Error())
+				planLogger.UpdateBindings(bindings)
+				planLogger.WriteSummary("failed", plan)
+			}
 			return fmt.Errorf("aws command %d failed: %w", idx+1, runErr)
 		}
 
@@ -463,6 +500,9 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		learnPlanBindings(args, out, bindings)
 		bindings["CHECKPOINT_LAST_SUCCESS_INDEX"] = strconv.Itoa(idx + 1)
 		bindings["CHECKPOINT_LAST_FAILURE_INDEX"] = ""
+		if planLogger != nil {
+			planLogger.RecordCommandSuccess(idx, args0(args), args1(args), out)
+		}
 
 		// CloudFormation is async. If we just created/updated a stack, wait for it to complete.
 		if len(args) >= 2 && args[0] == "cloudformation" && (args[1] == "create-stack" || args[1] == "update-stack") {
@@ -585,6 +625,15 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	if !opts.DisableDurableCheckpoint {
 		if clearErr := clearDurableCheckpoint(plan, opts); clearErr != nil {
 			_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] warning: failed to clear durable checkpoint: %v\n", clearErr)
+		}
+	}
+
+	// Write final success summary to plan logger
+	if planLogger != nil {
+		planLogger.UpdateBindings(bindings)
+		planLogger.WriteEvent("complete", fmt.Sprintf("Plan completed successfully: %d commands", len(plan.Commands)))
+		if err := planLogger.WriteSummary("success", plan); err != nil {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to write summary: %v\n", err)
 		}
 	}
 

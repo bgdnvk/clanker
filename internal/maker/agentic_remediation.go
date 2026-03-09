@@ -58,6 +58,9 @@ func AgenticRemediation(
 
 	_, _ = fmt.Fprintf(opts.Writer, "[agentic] starting remediation session %s for %s %s\n",
 		state.SessionID, args0(failedArgs), args1(failedArgs))
+	if opts.PlanLogger != nil {
+		opts.PlanLogger.WriteFix("agentic_loop_start", fmt.Sprintf("session=%s cmd=%s %s", state.SessionID, args0(failedArgs), args1(failedArgs)), "starting multi-turn remediation")
+	}
 
 	// Create AI client and conversation context
 	client := ai.NewClient(opts.AIProvider, opts.AIAPIKey, opts.Debug, opts.AIProfile)
@@ -109,16 +112,25 @@ func AgenticRemediation(
 			}
 			_, _ = fmt.Fprintf(opts.Writer, "[agentic] remediation successful after %d iteration(s)\n",
 				state.Iteration)
+			if opts.PlanLogger != nil {
+				opts.PlanLogger.WriteFixSuccess("agentic_loop_complete", fmt.Sprintf("session=%s iterations=%d", state.SessionID, state.Iteration), "multi-turn remediation succeeded")
+			}
 			return true, nil
 
 		case PhaseFailed:
 			_, _ = fmt.Fprintf(opts.Writer, "[agentic] remediation failed\n")
+			if opts.PlanLogger != nil {
+				opts.PlanLogger.WriteFix("agentic_loop_failed", fmt.Sprintf("session=%s iterations=%d", state.SessionID, state.Iteration), "multi-turn remediation failed")
+			}
 			return false, nil
 		}
 	}
 
 	// Budget exhausted
 	_, _ = fmt.Fprintf(opts.Writer, "[agentic] max iterations reached without resolution\n")
+	if opts.PlanLogger != nil {
+		opts.PlanLogger.WriteFix("agentic_loop_exhausted", fmt.Sprintf("session=%s iterations=%d", state.SessionID, state.Iteration), "budget exhausted")
+	}
 	return false, fmt.Errorf("agentic remediation exhausted budget after %d iterations", state.Iteration)
 }
 
@@ -165,6 +177,9 @@ func runDiagnosePhase(
 	}
 
 	_, _ = fmt.Fprintf(opts.Writer, "[agentic][diagnose] hypothesis: %s\n", diag.Hypothesis)
+	if opts.PlanLogger != nil {
+		opts.PlanLogger.WriteFix("agentic_diagnose", fmt.Sprintf("iteration=%d", state.Iteration), diag.Hypothesis)
+	}
 
 	// Execute diagnostic commands (read-only)
 	for i, cmd := range diag.Commands {
@@ -251,6 +266,9 @@ func runRemediatePhase(
 
 	_, _ = fmt.Fprintf(opts.Writer, "[agentic][remediate] root cause: %s\n", remediation.RootCause)
 	_, _ = fmt.Fprintf(opts.Writer, "[agentic][remediate] fix: %s\n", remediation.Fix)
+	if opts.PlanLogger != nil {
+		opts.PlanLogger.WriteFix("agentic_remediate", remediation.RootCause, remediation.Fix)
+	}
 
 	// Apply bindings from LLM
 	for k, v := range remediation.Bindings {
@@ -335,6 +353,9 @@ func runVerifyPhase(
 		// Original command succeeded
 		_, _ = fmt.Fprintf(opts.Writer, "[agentic][verify] original command succeeded\n")
 		learnPlanBindings(retryArgs, output, state.LearnedBindings)
+		if opts.PlanLogger != nil {
+			opts.PlanLogger.WriteFixSuccess("agentic_verify", fmt.Sprintf("session=%s iteration=%d", state.SessionID, state.Iteration), "original command now succeeds")
+		}
 		return true, nil
 	}
 
