@@ -104,9 +104,9 @@ var resourceTypeMap = map[string]map[string]string{
 		"create-rule":          "elbv2:rule",
 	},
 	"rds": {
-		"create-db-instance":       "rds:db-instance",
-		"create-db-cluster":        "rds:db-cluster",
-		"create-db-subnet-group":   "rds:db-subnet-group",
+		"create-db-instance":        "rds:db-instance",
+		"create-db-cluster":         "rds:db-cluster",
+		"create-db-subnet-group":    "rds:db-subnet-group",
 		"create-db-parameter-group": "rds:db-parameter-group",
 	},
 	"ecr": {
@@ -135,9 +135,9 @@ var resourceTypeMap = map[string]map[string]string{
 		"create-function": "lambda:function",
 	},
 	"ecs": {
-		"create-cluster":                 "ecs:cluster",
-		"create-service":                 "ecs:service",
-		"register-task-definition":       "ecs:task-definition",
+		"create-cluster":           "ecs:cluster",
+		"create-service":           "ecs:service",
+		"register-task-definition": "ecs:task-definition",
 	},
 	"sns": {
 		"create-topic": "sns:topic",
@@ -149,9 +149,9 @@ var resourceTypeMap = map[string]map[string]string{
 		"create-table": "dynamodb:table",
 	},
 	"elasticache": {
-		"create-cache-cluster":       "elasticache:cluster",
-		"create-replication-group":   "elasticache:replication-group",
-		"create-cache-subnet-group":  "elasticache:subnet-group",
+		"create-cache-cluster":      "elasticache:cluster",
+		"create-replication-group":  "elasticache:replication-group",
+		"create-cache-subnet-group": "elasticache:subnet-group",
 	},
 	"route53": {
 		"create-hosted-zone": "route53:hosted-zone",
@@ -195,23 +195,23 @@ func InferResourceType(service, op string) string {
 
 // JSON path patterns for extracting resource identifiers
 var (
-	instanceIDRe   = regexp.MustCompile(`"InstanceId"\s*:\s*"(i-[a-f0-9]+)"`)
-	vpcIDRe        = regexp.MustCompile(`"VpcId"\s*:\s*"(vpc-[a-f0-9]+)"`)
-	subnetIDRe     = regexp.MustCompile(`"SubnetId"\s*:\s*"(subnet-[a-f0-9]+)"`)
-	sgIDRe         = regexp.MustCompile(`"GroupId"\s*:\s*"(sg-[a-f0-9]+)"`)
-	igwIDRe        = regexp.MustCompile(`"InternetGatewayId"\s*:\s*"(igw-[a-f0-9]+)"`)
-	natgwIDRe      = regexp.MustCompile(`"NatGatewayId"\s*:\s*"(nat-[a-f0-9]+)"`)
-	rtbIDRe        = regexp.MustCompile(`"RouteTableId"\s*:\s*"(rtb-[a-f0-9]+)"`)
-	eipAllocIDRe   = regexp.MustCompile(`"AllocationId"\s*:\s*"(eipalloc-[a-f0-9]+)"`)
-	arnRe          = regexp.MustCompile(`"(?:Arn|ARN|[A-Za-z]+Arn)"\s*:\s*"(arn:aws:[^"]+)"`)
-	loadBalancerARNRe = regexp.MustCompile(`"LoadBalancerArn"\s*:\s*"(arn:aws:elasticloadbalancing:[^"]+)"`)
-	targetGroupARNRe  = regexp.MustCompile(`"TargetGroupArn"\s*:\s*"(arn:aws:elasticloadbalancing:[^"]+)"`)
-	repositoryURIRe   = regexp.MustCompile(`"repositoryUri"\s*:\s*"([^"]+)"`)
-	roleARNRe         = regexp.MustCompile(`"Arn"\s*:\s*"(arn:aws:iam::[^"]+:role/[^"]+)"`)
+	instanceIDRe         = regexp.MustCompile(`"InstanceId"\s*:\s*"(i-[a-f0-9]+)"`)
+	vpcIDRe              = regexp.MustCompile(`"VpcId"\s*:\s*"(vpc-[a-f0-9]+)"`)
+	subnetIDRe           = regexp.MustCompile(`"SubnetId"\s*:\s*"(subnet-[a-f0-9]+)"`)
+	sgIDRe               = regexp.MustCompile(`"GroupId"\s*:\s*"(sg-[a-f0-9]+)"`)
+	igwIDRe              = regexp.MustCompile(`"InternetGatewayId"\s*:\s*"(igw-[a-f0-9]+)"`)
+	natgwIDRe            = regexp.MustCompile(`"NatGatewayId"\s*:\s*"(nat-[a-f0-9]+)"`)
+	rtbIDRe              = regexp.MustCompile(`"RouteTableId"\s*:\s*"(rtb-[a-f0-9]+)"`)
+	eipAllocIDRe         = regexp.MustCompile(`"AllocationId"\s*:\s*"(eipalloc-[a-f0-9]+)"`)
+	arnRe                = regexp.MustCompile(`"(?:Arn|ARN|[A-Za-z]+Arn)"\s*:\s*"(arn:aws:[^"]+)"`)
+	loadBalancerARNRe    = regexp.MustCompile(`"LoadBalancerArn"\s*:\s*"(arn:aws:elasticloadbalancing:[^"]+)"`)
+	targetGroupARNRe     = regexp.MustCompile(`"TargetGroupArn"\s*:\s*"(arn:aws:elasticloadbalancing:[^"]+)"`)
+	repositoryURIRe      = regexp.MustCompile(`"repositoryUri"\s*:\s*"([^"]+)"`)
+	roleARNRe            = regexp.MustCompile(`"Arn"\s*:\s*"(arn:aws:iam::[^"]+:role/[^"]+)"`)
 	instanceProfileARNRe = regexp.MustCompile(`"Arn"\s*:\s*"(arn:aws:iam::[^"]+:instance-profile/[^"]+)"`)
-	secretARNRe       = regexp.MustCompile(`"ARN"\s*:\s*"(arn:aws:secretsmanager:[^"]+)"`)
-	functionARNRe     = regexp.MustCompile(`"FunctionArn"\s*:\s*"(arn:aws:lambda:[^"]+)"`)
-	distributionIDRe  = regexp.MustCompile(`"Id"\s*:\s*"([A-Z0-9]+)"`)
+	secretARNRe          = regexp.MustCompile(`"ARN"\s*:\s*"(arn:aws:secretsmanager:[^"]+)"`)
+	functionARNRe        = regexp.MustCompile(`"FunctionArn"\s*:\s*"(arn:aws:lambda:[^"]+)"`)
+	distributionIDRe     = regexp.MustCompile(`"Id"\s*:\s*"([A-Z0-9]+)"`)
 )
 
 // ExtractResource extracts resource information from command args and output
