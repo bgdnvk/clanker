@@ -81,6 +81,11 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 			_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: docker %s\n", idx+1, len(plan.Commands), strings.Join(dockerArgs(args), " "))
 			out, runErr := runDockerCommandStreaming(ctx, args, opts, cloneDir, opts.Writer)
 			if runErr != nil {
+				// "Cannot connect to the Docker daemon" is a local env issue — non-repairable
+				if strings.Contains(out, "Cannot connect to the Docker daemon") ||
+					strings.Contains(out, "docker daemon running") {
+					return fmt.Errorf("docker command %d failed (local-env: Docker Desktop not running): %w", idx+1, runErr)
+				}
 				return fmt.Errorf("docker command %d failed: %w", idx+1, runErr)
 			}
 			// Docker build/push output is NOT JSON — learnPlanBindingsFromProduces won't work.
@@ -218,6 +223,7 @@ func dockerArgs(args []string) []string {
 
 // runDockerCommandStreaming executes a docker CLI command with streaming output.
 // workDir is set as cmd.Dir for build commands so the "." context resolves to the cloned repo.
+// Push commands get a 15-min timeout to avoid indefinite hangs (e.g. DOCR storage quota exceeded).
 func runDockerCommandStreaming(ctx context.Context, args []string, opts ExecOptions, workDir string, w io.Writer) (string, error) {
 	bin, err := exec.LookPath("docker")
 	if err != nil {
@@ -225,7 +231,16 @@ func runDockerCommandStreaming(ctx context.Context, args []string, opts ExecOpti
 	}
 
 	cmdArgs := dockerArgs(args)
-	cmd := exec.CommandContext(ctx, bin, cmdArgs...)
+
+	// Apply a 5-min timeout for docker push — DOCR silently stalls when storage quota is exceeded
+	execCtx := ctx
+	if len(cmdArgs) > 0 && strings.EqualFold(strings.TrimSpace(cmdArgs[0]), "push") {
+		var cancel context.CancelFunc
+		execCtx, cancel = context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+	}
+
+	cmd := exec.CommandContext(execCtx, bin, cmdArgs...)
 	cmd.Env = os.Environ()
 
 	// Set working dir for build/tag — the "." build context needs to point at the repo
@@ -247,6 +262,10 @@ func runDockerCommandStreaming(ctx context.Context, args []string, opts ExecOpti
 	err = cmd.Run()
 	out := buf.String()
 	if err != nil {
+		// Detect push timeout — likely DOCR storage quota exceeded
+		if execCtx.Err() == context.DeadlineExceeded && len(cmdArgs) > 0 && strings.EqualFold(cmdArgs[0], "push") {
+			return out, fmt.Errorf("docker push timed out after 5m (DOCR storage quota may be exceeded — ensure registry uses 'basic' tier or higher): %w", err)
+		}
 		return out, err
 	}
 	return out, nil

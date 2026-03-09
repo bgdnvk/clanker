@@ -914,9 +914,8 @@ Estimate the MONTHLY cost in USD.
 3. **do-k8s** — Kubernetes (overkill unless explicitly requested)
 
 ## DigitalOcean Services
-- Droplet for always-on runtime
+- Droplet for always-on runtime (build Docker image on droplet, NOT via DOCR)
 - Block storage volume for stateful data (optional)
-- Container Registry (DOCR) for Docker images
 - Cloud Firewall for port restrictions
 - Reserved IP for stable public endpoint
 
@@ -936,20 +935,20 @@ Estimate the MONTHLY cost in USD.
 		{"method": "do-k8s", "why_not": "Unnecessary complexity for this workload"}
 	],
 	"buildSteps": [
-		"Create Container Registry and push Docker image",
 		"Create Cloud Firewall for required ports",
-		"Create Droplet with user-data (install Docker, pull image, compose up)",
+		"Create Droplet with user-data (clone repo, docker compose build, compose up)",
+		"Attach firewall and create reserved IP",
 		"Verify service health"
 	],
 	"runCmd": "docker compose up -d",
-	"notes": ["Expose only required ports via Cloud Firewall", "Persist any required state on disk"],
+	"notes": ["Build image on droplet, do NOT use DOCR", "Expose only required ports via Cloud Firewall", "Persist any required state on disk"],
 	"cpuMemory": "s-1vcpu-2gb",
 	"needsAlb": false,
 	"useApiGateway": false,
 	"needsDb": false,
 	"dbService": "",
-	"estMonthly": "$12-18",
-	"costBreakdown": ["Droplet", "Container Registry basic", "Reserved IP"]
+	"estMonthly": "$6-12",
+	"costBreakdown": ["Droplet", "Reserved IP"]
 }`)
 	default:
 		// Add user's deployment target preference
@@ -1534,18 +1533,22 @@ func doDropletPrompt(p *RepoProfile, deep *DeepAnalysis, opts *DeployOptions) st
 		deployID = opts.DeployID
 	}
 	resourcePrefix := repoResourcePrefix(p.RepoURL, deployID)
-	b.WriteString("Deploy using DigitalOcean Droplet (VM + Docker Compose):\n")
-	b.WriteString(fmt.Sprintf("Naming: use prefix %s for droplet/firewall/registry resources\n", resourcePrefix))
-	b.WriteString("1. Create a DigitalOcean Container Registry (doctl registry create)\n")
-	b.WriteString("2. Build Docker image locally and push to DOCR\n")
-	b.WriteString("3. Create a Cloud Firewall allowing required inbound ports\n")
-	b.WriteString("4. Create a Droplet (Ubuntu 22.04 Docker image) with user-data script\n")
-	b.WriteString("5. User-data: install Docker Compose, login to DOCR, pull image, write .env, compose up\n")
-	b.WriteString(fmt.Sprintf("6. Clone repository: %s\n", p.RepoURL))
-	b.WriteString("7. Create .env with required env vars and secrets\n")
-	b.WriteString("8. If the app is stateful, create persistent directories on disk\n")
-	b.WriteString("9. Build and start with: docker compose build && docker compose up -d\n")
-	b.WriteString("10. Verify service health and endpoint readiness\n")
+	b.WriteString("Deploy using DigitalOcean Droplet (VM + Docker Compose, build on droplet):\n")
+	b.WriteString(fmt.Sprintf("Naming: use prefix %s for droplet/firewall resources\n", resourcePrefix))
+	b.WriteString("1. Create a Cloud Firewall allowing required inbound ports\n")
+	b.WriteString("2. Create a Droplet (Ubuntu 22.04 Docker image) with user-data script\n")
+	b.WriteString(fmt.Sprintf("3. User-data: clone %s, write .env, 'docker build -t openclaw:local .', run onboarding, docker compose up\n", p.RepoURL))
+	b.WriteString("4. Attach firewall to droplet\n")
+	b.WriteString("5. Create reserved IP for stable endpoint\n")
+	b.WriteString("\nNotes:\n")
+	b.WriteString("- Do NOT use DOCR (Container Registry). Build the image directly on the droplet via user-data.\n")
+	b.WriteString("- No registry create, registry login, docker build (local), or docker push steps in the plan.\n")
+	b.WriteString("- The plan should only have doctl infrastructure commands.\n")
+	b.WriteString("- CRITICAL: If the docker-compose.yml uses 'image: <name>:local' (no build: directive),\n")
+	b.WriteString("  the user-data MUST run 'docker build -t <name>:local .' before 'docker compose up'.\n")
+	b.WriteString("  Do NOT use 'docker compose build' — it will find nothing to build.\n")
+	b.WriteString("- Do NOT run 'cloud-init status --wait' inside user-data. It already runs inside cloud-init and will deadlock.\n")
+	b.WriteString("- Set 'export HOME=/root' in user-data before running any setup/onboarding scripts.\n")
 	return b.String()
 }
 

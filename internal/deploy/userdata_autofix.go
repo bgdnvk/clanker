@@ -150,6 +150,14 @@ func fixUserDataScript(script string) (string, int) {
 		}
 	}
 
+	// 5. Never wait for cloud-init from inside cloud-init user-data.
+	// This deadlocks the final stage and prints dots forever.
+	cloudInitWaitRe := regexp.MustCompile(`(?m)^\s*cloud-init\s+status\s+--wait(?:\s*\|\|\s*true)?\s*$\n?`)
+	if cloudInitWaitRe.MatchString(fixed) {
+		fixed = cloudInitWaitRe.ReplaceAllString(fixed, "")
+		count++
+	}
+
 	return fixed, count
 }
 

@@ -163,8 +163,8 @@ func buildSkeletonPrompt(provider, enrichedPrompt string, requiredLaunchOps []st
 		b.WriteString("Provider: Azure (az commands)\n")
 	case "digitalocean":
 		b.WriteString("Provider: DigitalOcean (doctl commands, WITHOUT leading 'doctl' prefix)\n")
-		b.WriteString("Services: registry, compute (droplet/firewall/ssh-key/reserved-ip), databases\n")
-		b.WriteString("Operations: registry create, registry login, compute droplet create, compute firewall create, compute ssh-key list, compute firewall add-droplets, compute reserved-ip create\n")
+		b.WriteString("Services: compute (droplet/firewall/ssh-key/reserved-ip), databases\n")
+		b.WriteString("Operations: compute droplet create, compute firewall create, compute ssh-key list, compute firewall add-droplets, compute reserved-ip create\n")
 	case "hetzner":
 		b.WriteString("Provider: Hetzner Cloud (hcloud commands)\n")
 	default:
@@ -193,10 +193,10 @@ func buildSkeletonPrompt(provider, enrichedPrompt string, requiredLaunchOps []st
 	b.WriteString("- Do NOT add redundant diagnostic/verification steps unless essential for correctness.\n")
 	if provider == "digitalocean" {
 		b.WriteString("- For user-data on Droplet: embed the boot script in compute droplet create --user-data.\n")
-		b.WriteString("- A typical Droplet deploy needs: ssh-key list, registry create, registry login, docker build, docker push, firewall create, droplet create, firewall add-droplets, reserved-ip create.\n")
+		b.WriteString("- A typical Droplet deploy needs: ssh-key list, firewall create, droplet create, firewall add-droplets, reserved-ip create.\n")
 		b.WriteString("- IMPORTANT: generate ALL infrastructure steps as separate skeleton entries. Do NOT collapse everything into a single droplet create step.\n")
-		b.WriteString("- 'docker build' and 'docker push' use the plain docker CLI (service='docker'). Do NOT use 'registry docker build' or 'registry docker-push' — those are NOT valid doctl commands.\n")
-		b.WriteString("- For DOCR auth on the Droplet user-data: install doctl, run 'doctl auth init -t $TOKEN && doctl registry login'. Do NOT read /root/.config/doctl/config.yaml.\n")
+		b.WriteString("- Do NOT include registry create, registry login, docker build, or docker push steps. The image is built on the droplet itself via user-data.\n")
+		b.WriteString("- User-data script should: clone the repo, write .env, docker compose build, docker compose up.\n")
 	} else {
 		b.WriteString("- For user-data on EC2: use ONE 'ssm send-command' or embed in run-instances user-data. Do NOT repeat.\n")
 	}

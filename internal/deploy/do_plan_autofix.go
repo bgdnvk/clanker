@@ -26,6 +26,12 @@ func ApplyDigitalOceanPlanAutofix(plan *maker.Plan, logf func(string, ...any)) *
 		logf("[deploy] do autofix: stripped leading 'doctl' from %d command(s)", prefixFixed)
 	}
 
+	// Strip all DOCR / docker-build / docker-push commands — we build on the droplet now
+	docrStripped := fixDOStripDOCRCommands(plan)
+	if docrStripped > 0 {
+		logf("[deploy] do autofix: stripped %d DOCR/docker-build/docker-push command(s) (build on droplet)", docrStripped)
+	}
+
 	// Fix "registry docker-credential configure" → "registry login <REGISTRY_NAME>"
 	credFixed := fixDORegistryCredentialHallucination(plan)
 	if credFixed > 0 {
@@ -42,6 +48,12 @@ func ApplyDigitalOceanPlanAutofix(plan *maker.Plan, logf func(string, ...any)) *
 	regUserDataFixed := fixDOHardcodedRegistryInUserData(plan)
 	if regUserDataFixed > 0 {
 		logf("[deploy] do autofix: replaced %d hardcoded registry name(s) in user-data with <REGISTRY_NAME>", regUserDataFixed)
+	}
+
+	// Fix bare "build -t ..." / "push ..." → "docker build -t ..." / "docker push ..."
+	barePrefixed := fixDOBareDockerPrefix(plan)
+	if barePrefixed > 0 {
+		logf("[deploy] do autofix: prepended 'docker' to %d bare build/push command(s)", barePrefixed)
 	}
 
 	// Inject missing docker build + push when user-data references DOCR images
@@ -79,6 +91,12 @@ func ApplyDigitalOceanPlanAutofix(plan *maker.Plan, logf func(string, ...any)) *
 		logf("[deploy] do autofix: stripped %d unsupported flag(s)", flagFixed)
 	}
 
+	// Ensure registry create uses basic tier (starter=500MiB causes silent push stalls)
+	tierFixed := fixDORegistrySubscriptionTier(plan)
+	if tierFixed > 0 {
+		logf("[deploy] do autofix: ensured --subscription-tier basic on %d registry create(s)", tierFixed)
+	}
+
 	// Fix reserved-ip create: --region conflicts with --droplet-id
 	ripFixed := fixDOReservedIPFlags(plan)
 	if ripFixed > 0 {
@@ -103,6 +121,13 @@ func ApplyDigitalOceanPlanAutofix(plan *maker.Plan, logf func(string, ...any)) *
 		logf("[deploy] do autofix: fixed %d user-data compose issue(s)", udFixed)
 	}
 
+	// OpenClaw: replace 'docker compose build' with 'docker build -t openclaw:local .'
+	// because compose file uses 'image: openclaw:local' (no build: directive)
+	ocBuildFixed := fixDOOpenClawComposeBuild(plan)
+	if ocBuildFixed > 0 {
+		logf("[deploy] do autofix: replaced %d 'docker compose build' → 'docker build -t openclaw:local .' in user-data", ocBuildFixed)
+	}
+
 	// Fix ssh-key import pointing at nonexistent local key file
 	sshFixed := fixDOSSHKeyPath(plan)
 	if sshFixed > 0 {
@@ -113,6 +138,13 @@ func ApplyDigitalOceanPlanAutofix(plan *maker.Plan, logf func(string, ...any)) *
 	gitFixed := fixDOStripGitClone(plan)
 	if gitFixed > 0 {
 		logf("[deploy] do autofix: stripped %d git clone step(s) (executor handles clone)", gitFixed)
+	}
+
+	// Normalize <REGISTRY_ENDPOINT>/ → registry.digitalocean.com/<REGISTRY_NAME>/
+	// and fix bare /image:tag patterns in docker build -t tags
+	repFixed := fixDORegistryEndpointHallucination(plan)
+	if repFixed > 0 {
+		logf("[deploy] do autofix: normalized %d REGISTRY_ENDPOINT reference(s) to REGISTRY_NAME", repFixed)
 	}
 
 	// Fix registry create produce paths (doctl output doesn't have 'endpoint' field)
@@ -200,64 +232,53 @@ func fixDOHardcodedRegistryInUserData(plan *maker.Plan) int {
 // Inject missing docker build + push
 // ---------------------------------------------------------------------------
 
+// fixDOStripDOCRCommands removes all DOCR-related commands from the plan.
+// We build on the droplet now — no registry create/login/docker build/push needed.
+func fixDOStripDOCRCommands(plan *maker.Plan) int {
+	count := 0
+	kept := make([]maker.Command, 0, len(plan.Commands))
+	for _, cmd := range plan.Commands {
+		if isDOCRCommand(cmd.Args) {
+			count++
+			continue
+		}
+		kept = append(kept, cmd)
+	}
+	plan.Commands = kept
+	return count
+}
+
+// isDOCRCommand returns true for registry create/login, docker build, docker push.
+func isDOCRCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	a0 := strings.ToLower(strings.TrimSpace(args[0]))
+	// "registry create" / "registry login" / "registry ..."
+	if a0 == "registry" {
+		return true
+	}
+	// "docker build ..." or "docker push ..."
+	if a0 == "docker" && len(args) >= 2 {
+		sub := strings.ToLower(strings.TrimSpace(args[1]))
+		if sub == "build" || sub == "push" {
+			return true
+		}
+	}
+	// bare "build -t ..." or "push ..."
+	if a0 == "build" || a0 == "push" {
+		return true
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
+
 // fixDOMissingDockerBuildPush injects docker build + docker push when the plan
 // references DOCR images (in user-data or notes) but has no docker build/push.
+// DEPRECATED: no-op since we build on the droplet now. Kept for compatibility.
 func fixDOMissingDockerBuildPush(plan *maker.Plan) int {
-	// Already has docker build? Nothing to do.
-	for _, cmd := range plan.Commands {
-		if isDockerSubcommand(cmd.Args, "build") {
-			return 0
-		}
-	}
-
-	// Extract the DOCR image reference from user-data or notes
-	imageTag := extractDOCRImageFromPlan(plan)
-	if imageTag == "" {
-		return 0
-	}
-
-	// Find where to insert: after registry login, before droplet create
-	insertIdx := -1
-	for i, cmd := range plan.Commands {
-		if len(cmd.Args) >= 2 &&
-			strings.EqualFold(cmd.Args[0], "registry") &&
-			strings.EqualFold(cmd.Args[1], "login") {
-			insertIdx = i + 1
-			break
-		}
-	}
-	if insertIdx < 0 {
-		// Fallback: before droplet create
-		for i, cmd := range plan.Commands {
-			if isDODropletCreate(cmd.Args) {
-				insertIdx = i
-				break
-			}
-		}
-	}
-	if insertIdx < 0 {
-		return 0
-	}
-
-	buildCmd := maker.Command{
-		Args:   []string{"docker", "build", "-t", imageTag, "."},
-		Reason: "Build the container image for DOCR",
-		Produces: map[string]string{
-			"IMAGE_TAG": imageTag,
-			"IMAGE_URI": imageTag,
-		},
-	}
-	pushCmd := maker.Command{
-		Args:   []string{"docker", "push", "<IMAGE_URI>"},
-		Reason: "Push the container image to DOCR",
-	}
-
-	newCmds := make([]maker.Command, 0, len(plan.Commands)+2)
-	newCmds = append(newCmds, plan.Commands[:insertIdx]...)
-	newCmds = append(newCmds, buildCmd, pushCmd)
-	newCmds = append(newCmds, plan.Commands[insertIdx:]...)
-	plan.Commands = newCmds
-	return 2
+	return 0 // build on droplet — no local docker build/push needed
 }
 
 // docrImageRefRe matches DOCR image references in text
@@ -424,6 +445,49 @@ func isDockerSubcommand(args []string, sub string) bool {
 		return false
 	}
 	return strings.EqualFold(args[0], "docker") && strings.EqualFold(args[1], sub)
+}
+
+// isBareDockerCommand detects bare "build -t ..." / "push ..." without "docker" prefix.
+func isBareDockerCommand(args []string, sub string) bool {
+	if len(args) < 1 {
+		return false
+	}
+	if !strings.EqualFold(args[0], sub) {
+		return false
+	}
+	// For "build" require "-t" flag to avoid false positives (e.g. terraform build)
+	if strings.EqualFold(sub, "build") {
+		for _, a := range args {
+			if a == "-t" {
+				return true
+			}
+		}
+		return false
+	}
+	// For "push" require a registry.digitalocean.com ref
+	if strings.EqualFold(sub, "push") {
+		for _, a := range args {
+			if strings.Contains(a, "registry.digitalocean.com") || strings.Contains(a, "<IMAGE") {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// fixDOBareDockerPrefix prepends "docker" to bare "build -t" / "push" commands
+// that are clearly docker commands missing the prefix.
+func fixDOBareDockerPrefix(plan *maker.Plan) int {
+	count := 0
+	for ci := range plan.Commands {
+		args := plan.Commands[ci].Args
+		if isBareDockerCommand(args, "build") || isBareDockerCommand(args, "push") {
+			plan.Commands[ci].Args = append([]string{"docker"}, args...)
+			count++
+		}
+	}
+	return count
 }
 
 // fixDORegistryLoginArgs strips the registry name arg from "registry login <NAME>".
@@ -827,6 +891,53 @@ func fixDOUserDataScript(plan *maker.Plan) int {
 	return count
 }
 
+// fixDOOpenClawComposeBuild replaces 'docker compose build ...' with
+// 'docker build -t openclaw:local .' in user-data scripts.
+// OpenClaw's docker-compose.yml uses 'image: openclaw:local' (no build: directive),
+// so 'docker compose build' silently does nothing — we need a direct docker build.
+func fixDOOpenClawComposeBuild(plan *maker.Plan) int {
+	count := 0
+	for ci := range plan.Commands {
+		args := plan.Commands[ci].Args
+		if !isDODropletCreate(args) {
+			continue
+		}
+		for ai, arg := range args {
+			if arg == "--user-data" && ai+1 < len(args) {
+				script := args[ai+1]
+				// Only apply to scripts that mention openclaw
+				if !strings.Contains(strings.ToLower(script), "openclaw") {
+					continue
+				}
+				newScript := script
+				// Replace 'docker compose build ...' with 'docker build -t openclaw:local .'
+				// Handles: docker compose build, docker compose build openclaw-gateway, docker-compose build, etc.
+				composeBuildRe := regexp.MustCompile(`docker[\s-]+compose\s+build\s*[^\n]*`)
+				if composeBuildRe.MatchString(newScript) {
+					newScript = composeBuildRe.ReplaceAllString(newScript, "docker build -t openclaw:local .")
+					count++
+				}
+				// Also fix 'docker pull openclaw:local' or 'docker pull <IMAGE_URI>' → remove (we build locally)
+				pullLocalRe := regexp.MustCompile(`(?m)^.*docker\s+pull\s+openclaw:local.*\n?`)
+				if pullLocalRe.MatchString(newScript) {
+					newScript = pullLocalRe.ReplaceAllString(newScript, "")
+					count++
+				}
+				// Fix 'docker tag <IMAGE_URI> openclaw:latest' → remove (we build locally as openclaw:local)
+				tagLocalRe := regexp.MustCompile(`(?m)^.*docker\s+tag\s+\S+\s+openclaw:(local|latest).*\n?`)
+				if tagLocalRe.MatchString(newScript) {
+					newScript = tagLocalRe.ReplaceAllString(newScript, "")
+					count++
+				}
+				if newScript != script {
+					plan.Commands[ci].Args[ai+1] = newScript
+				}
+			}
+		}
+	}
+	return count
+}
+
 func isDODropletCreate(args []string) bool {
 	if len(args) < 3 {
 		return false
@@ -1017,6 +1128,120 @@ func fixDOStripGitClone(plan *maker.Plan) int {
 // fixDORegistryProducePaths fixes hallucinated produce paths on registry create.
 // doctl returns {"name":"..."} (no "endpoint" field); LLMs often emit "registry.name"
 // or "registry.endpoint" which don't match the flat JSON structure.
+// fixDORegistryEndpointHallucination replaces <REGISTRY_ENDPOINT>/ with
+// registry.digitalocean.com/<REGISTRY_NAME>/ in docker build/push args and
+// produces values. Also fixes bare "/image:tag" patterns in docker build -t.
+// The LLM sometimes invents REGISTRY_ENDPOINT which doctl never produces.
+func fixDORegistryEndpointHallucination(plan *maker.Plan) int {
+	count := 0
+	const repl = "registry.digitalocean.com/<REGISTRY_NAME>/"
+
+	for ci := range plan.Commands {
+		args := plan.Commands[ci].Args
+
+		// Fix docker build -t and docker push args
+		if isDockerSubcommand(args, "build") || isDockerSubcommand(args, "push") {
+			for ai, arg := range args {
+				orig := arg
+				// <REGISTRY_ENDPOINT>/image:tag → registry.digitalocean.com/<REGISTRY_NAME>/image:tag
+				arg = strings.ReplaceAll(arg, "<REGISTRY_ENDPOINT>/", repl)
+				// Bare /image:tag (LLM stripped the placeholder entirely)
+				if isDockerSubcommand(args, "build") && ai > 0 && args[ai-1] == "-t" {
+					if strings.HasPrefix(arg, "/") && strings.Contains(arg, ":") {
+						arg = repl + strings.TrimPrefix(arg, "/")
+					}
+				}
+				if arg != orig {
+					plan.Commands[ci].Args[ai] = arg
+					count++
+				}
+			}
+		}
+
+		// Fix produces values
+		for k, v := range plan.Commands[ci].Produces {
+			orig := v
+			v = strings.ReplaceAll(v, "<REGISTRY_ENDPOINT>/", repl)
+			if strings.HasPrefix(v, "/") && strings.Contains(v, ":") {
+				v = repl + strings.TrimPrefix(v, "/")
+			}
+			if v != orig {
+				plan.Commands[ci].Produces[k] = v
+				count++
+			}
+		}
+
+		// Fix user-data references
+		if isDODropletCreate(args) {
+			for ai, arg := range args {
+				if arg == "--user-data" && ai+1 < len(args) {
+					ud := args[ai+1]
+					fixed := strings.ReplaceAll(ud, "<REGISTRY_ENDPOINT>/", repl)
+					if fixed != ud {
+						plan.Commands[ci].Args[ai+1] = fixed
+						count++
+					}
+				}
+			}
+		}
+	}
+
+	// Also strip any "registry get" command that produces REGISTRY_ENDPOINT
+	// (doctl registry get doesn't have server_url or endpoint field)
+	var cleaned []maker.Command
+	for _, cmd := range plan.Commands {
+		hasEndpoint := false
+		if len(cmd.Args) >= 2 && strings.EqualFold(cmd.Args[0], "registry") &&
+			strings.EqualFold(cmd.Args[1], "get") {
+			for k := range cmd.Produces {
+				if strings.Contains(strings.ToUpper(k), "ENDPOINT") {
+					hasEndpoint = true
+					break
+				}
+			}
+		}
+		if hasEndpoint {
+			count++
+			continue // drop this command
+		}
+		cleaned = append(cleaned, cmd)
+	}
+	if len(cleaned) < len(plan.Commands) {
+		plan.Commands = cleaned
+	}
+
+	return count
+}
+
+// fixDORegistrySubscriptionTier ensures registry create uses --subscription-tier basic.
+// Starter tier (free) has only 500 MiB storage which causes docker push to silently hang
+// when the image exceeds the quota.
+func fixDORegistrySubscriptionTier(plan *maker.Plan) int {
+	count := 0
+	for ci := range plan.Commands {
+		args := plan.Commands[ci].Args
+		if len(args) < 2 {
+			continue
+		}
+		if !strings.EqualFold(args[0], "registry") || !strings.EqualFold(args[1], "create") {
+			continue
+		}
+		// Check if --subscription-tier is already present
+		hasTier := false
+		for _, a := range args {
+			if strings.HasPrefix(strings.TrimSpace(a), "--subscription-tier") {
+				hasTier = true
+				break
+			}
+		}
+		if !hasTier {
+			plan.Commands[ci].Args = append(args, "--subscription-tier", "basic")
+			count++
+		}
+	}
+	return count
+}
+
 func fixDORegistryProducePaths(plan *maker.Plan) int {
 	count := 0
 	for ci := range plan.Commands {

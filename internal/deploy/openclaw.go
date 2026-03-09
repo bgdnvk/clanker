@@ -144,7 +144,7 @@ func OpenClawArchitectPromptDigitalOcean() string {
 3. **do-k8s** — Kubernetes (overkill unless explicitly requested)
 
 ## DigitalOcean Services
-- Droplet for always-on gateway runtime
+- Droplet for always-on gateway runtime (build Docker image on droplet, NOT via DOCR)
 - Block storage volume for persistent OpenClaw state/workspace
 - Reserved IP for stable public endpoint
 - Cloud Firewall for port restrictions
@@ -165,21 +165,20 @@ Estimate the MONTHLY cost in USD.
 		{"method": "do-k8s", "why_not": "Operationally complex for this use case"}
 	],
 	"buildSteps": [
-		"Create DigitalOcean Container Registry",
-		"Build and push Docker image to DOCR",
 		"Create Cloud Firewall for required ports",
-		"Create Droplet with user-data (install Docker, pull image, compose up)",
+		"Create Droplet with user-data (clone repo, docker compose build, compose up)",
+		"Attach firewall and create reserved IP",
 		"Verify gateway health"
 	],
 	"runCmd": "docker compose up -d openclaw-gateway",
-	"notes": ["Expose only required ports via Cloud Firewall", "Persist OpenClaw config/workspace on disk or volume"],
+	"notes": ["Build image on droplet, do NOT use DOCR", "Expose only required ports via Cloud Firewall", "Persist OpenClaw config/workspace on disk or volume"],
 	"cpuMemory": "s-1vcpu-2gb",
 	"needsAlb": false,
 	"useApiGateway": false,
 	"needsDb": false,
 	"dbService": "",
-	"estMonthly": "$12-18",
-	"costBreakdown": ["Droplet s-1vcpu-2gb", "Container Registry basic", "Reserved IP"]
+	"estMonthly": "$6-12",
+	"costBreakdown": ["Droplet s-1vcpu-2gb", "Reserved IP"]
 }`
 }
 
@@ -190,20 +189,23 @@ func OpenClawDigitalOceanDropletPrompt(p *RepoProfile, deep *DeepAnalysis, opts 
 		deployID = opts.DeployID
 	}
 	resourcePrefix := repoResourcePrefix(p.RepoURL, deployID)
-	b.WriteString("Deploy OpenClaw using DigitalOcean Droplet (VM + Docker Compose):\n")
-	b.WriteString(fmt.Sprintf("Naming: use prefix %s for droplet/firewall/registry resources\n", resourcePrefix))
-	b.WriteString("1. Create a DigitalOcean Container Registry (doctl registry create)\n")
-	b.WriteString("2. Build Docker image locally and push to DOCR\n")
-	b.WriteString("3. Create a Cloud Firewall allowing inbound on required ports (18789, 443, 80, 22)\n")
-	b.WriteString("4. Create a Droplet (Ubuntu 22.04 Docker image, s-1vcpu-2gb) with user-data script\n")
-	b.WriteString("5. User-data must: install Docker Compose, login to DOCR, pull image, write .env, run onboarding, compose up\n")
-	b.WriteString(fmt.Sprintf("6. Clone repository: %s\n", p.RepoURL))
-	b.WriteString("7. Create persistent directories for OpenClaw config/workspace on disk\n")
-	b.WriteString("8. Build and start with: docker compose build && docker compose up -d openclaw-gateway\n")
-	b.WriteString("9. Verify gateway health and endpoint readiness\n")
+	b.WriteString("Deploy OpenClaw using DigitalOcean Droplet (VM + Docker Compose, build on droplet):\n")
+	b.WriteString(fmt.Sprintf("Naming: use prefix %s for droplet/firewall resources\n", resourcePrefix))
+	b.WriteString("1. Create a Cloud Firewall allowing inbound on required ports (18789, 443, 80, 22)\n")
+	b.WriteString("2. Create a Droplet (Ubuntu 22.04 Docker image, s-1vcpu-2gb) with user-data script\n")
+	b.WriteString(fmt.Sprintf("3. User-data must: clone %s, write .env, 'docker build -t openclaw:local .', run onboarding, docker compose up\n", p.RepoURL))
+	b.WriteString("4. Attach firewall to droplet\n")
+	b.WriteString("5. Create reserved IP for stable endpoint\n")
 	b.WriteString("\nDigitalOcean-specific notes:\n")
-	b.WriteString("- Steps 2 (build) and 2 (push) use plain 'docker build' / 'docker push' CLI, NOT doctl subcommands.\n")
-	b.WriteString("- User-data DOCR auth: install doctl, then 'doctl auth init -t $DIGITALOCEAN_ACCESS_TOKEN && doctl registry login'. Do NOT read /root/.config/doctl/config.yaml.\n")
+	b.WriteString("- Do NOT use DOCR (Container Registry). Build the image directly on the droplet.\n")
+	b.WriteString("- No 'registry create', 'registry login', local 'docker build', or 'docker push' steps.\n")
+	b.WriteString("- The plan should only have doctl infrastructure commands (firewall, droplet, reserved-ip).\n")
+	b.WriteString("- CRITICAL: OpenClaw's docker-compose.yml uses 'image: openclaw:local' (NOT build:).\n")
+	b.WriteString("  The user-data must run 'docker build -t openclaw:local .' to build the image FIRST,\n")
+	b.WriteString("  then 'docker compose up -d openclaw-gateway' which references that local image.\n")
+	b.WriteString("  Do NOT use 'docker compose build' — it will find nothing to build.\n")
+	b.WriteString("- CRITICAL: Do NOT run 'cloud-init status --wait' inside user-data. User-data already runs inside cloud-init, so that causes a deadlock.\n")
+	b.WriteString("- CRITICAL: Set 'export HOME=/root' before running docker-setup.sh (it uses $HOME internally).\n")
 	b.WriteString("- .env MUST include OPENCLAW_GATEWAY_BIND=lan (required for gateway to accept external connections).\n")
 	return b.String()
 }
@@ -308,11 +310,12 @@ func AppendOpenClawDeploymentRequirements(b *strings.Builder, p *RepoProfile, de
 	switch prov {
 	case "digitalocean":
 		b.WriteString("\n### DigitalOcean Deployment Ordering\n")
-		b.WriteString("- Create Container Registry BEFORE building/pushing the Docker image.\n")
+		b.WriteString("- Do NOT use DOCR (Container Registry). Build the image directly on the droplet.\n")
 		b.WriteString("- Create Cloud Firewall BEFORE OR AFTER creating the Droplet (both work, but before is cleaner).\n")
-		b.WriteString("- The Droplet user-data script runs at first boot — it must login to DOCR, pull the image, write .env, and docker compose up.\n")
-		b.WriteString("- DO does NOT have IAM roles; use doctl auth or access tokens for registry login.\n")
-		b.WriteString("- Secrets go directly into the .env file written by user-data (no Secrets Manager equivalent needed for basic deploys).\n")
+		b.WriteString("- The Droplet user-data script runs at first boot — it must clone the repo, write .env, build with 'docker build -t openclaw:local .', run onboarding with 'export HOME=/root', and docker compose up.\n")
+		b.WriteString("- CRITICAL: OpenClaw's docker-compose.yml uses 'image: openclaw:local' — there is no 'build:' in compose. You MUST run 'docker build -t openclaw:local .' before 'docker compose up -d openclaw-gateway'.\n")
+		b.WriteString("- CRITICAL: Do NOT include 'cloud-init status --wait' in user-data. That waits on itself and hangs forever.\n")
+		b.WriteString("- DO does NOT have IAM roles; secrets go directly into the .env file written by user-data.\n")
 	default:
 		// AWS-specific ordering
 		b.WriteString("- For AWS EC2+ALB deployments, ALWAYS create CloudFront in front of ALB and set HTTPS as the primary endpoint\n")
