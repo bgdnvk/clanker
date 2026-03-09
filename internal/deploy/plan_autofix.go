@@ -16,6 +16,103 @@ import (
 // Does NOT match the canonical <USER_DATA> since we require at least _X suffix.
 var userDataVariantRe = regexp.MustCompile(`<USER_DATA_[A-Z0-9_]+>`)
 
+// resourceIDPrefixToPlaceholder maps AWS resource ID prefixes to placeholder names
+var resourceIDPrefixToPlaceholder = map[string]string{
+	"sg":     "SG_ID",
+	"subnet": "SUBNET_ID",
+	"vpc":    "VPC_ID",
+	"vol":    "VOLUME_ID",
+	"igw":    "IGW_ID",
+	"nat":    "NAT_GW_ID",
+	"eni":    "ENI_ID",
+	"rtb":    "RTB_ID",
+	"acl":    "ACL_ID",
+	"tgw":    "TGW_ID",
+	"pcx":    "PCX_ID",
+	"eip":    "EIP_ID",
+	"eigw":   "EIGW_ID",
+}
+
+// fixHardcodedResourceIDs replaces hardcoded AWS resource IDs with placeholders
+// when an earlier command produces that resource type
+func fixHardcodedResourceIDs(plan *maker.Plan) int {
+	if plan == nil || len(plan.Commands) == 0 {
+		return 0
+	}
+
+	// First pass: build a map of produced placeholder names and their hardcoded values
+	// e.g., if command 1 produces VPC_ID and outputs vpc-12345, we track that
+	producedPlaceholders := make(map[string]string) // placeholder name -> resource type prefix
+
+	// Track which resource types have been produced
+	for _, cmd := range plan.Commands {
+		for placeholder := range cmd.Produces {
+			upper := strings.ToUpper(placeholder)
+			// Map placeholder name back to resource type
+			for prefix, phName := range resourceIDPrefixToPlaceholder {
+				if strings.Contains(upper, strings.TrimSuffix(phName, "_ID")) {
+					producedPlaceholders[placeholder] = prefix
+					break
+				}
+			}
+		}
+	}
+
+	// Second pass: find hardcoded IDs and replace with matching placeholders
+	fixCount := 0
+	seenHardcodedIDs := make(map[string]string) // hardcoded ID -> placeholder name to use
+
+	for i, cmd := range plan.Commands {
+		// Track what this command produces for later commands
+		for placeholder, prefix := range producedPlaceholders {
+			for _, arg := range cmd.Args {
+				matches := hardcodedAWSResourceIDRe.FindAllString(arg, -1)
+				for _, match := range matches {
+					matchPrefix := strings.Split(match, "-")[0]
+					if matchPrefix == prefix {
+						seenHardcodedIDs[match] = placeholder
+					}
+				}
+			}
+		}
+
+		// Now check if this command uses hardcoded IDs that match earlier produces
+		for ai, arg := range cmd.Args {
+			matches := hardcodedAWSResourceIDRe.FindAllString(arg, -1)
+			for _, match := range matches {
+				// Check if we've seen this exact ID produced earlier
+				if placeholder, ok := seenHardcodedIDs[match]; ok {
+					// Replace hardcoded ID with placeholder
+					newArg := strings.Replace(arg, match, "<"+placeholder+">", 1)
+					if newArg != arg {
+						plan.Commands[i].Args[ai] = newArg
+						arg = newArg // update for next iteration
+						fixCount++
+					}
+				} else {
+					// Check if any earlier command produces this resource type
+					matchPrefix := strings.Split(match, "-")[0]
+					for placeholder, prefix := range producedPlaceholders {
+						if prefix == matchPrefix {
+							// Use the placeholder
+							newArg := strings.Replace(arg, match, "<"+placeholder+">", 1)
+							if newArg != arg {
+								plan.Commands[i].Args[ai] = newArg
+								arg = newArg
+								fixCount++
+								seenHardcodedIDs[match] = placeholder
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return fixCount
+}
+
 // normalizeUserDataPlaceholders rewrites creative <USER_DATA_*> variants
 // to the canonical <USER_DATA> the maker recognizes.
 func normalizeUserDataPlaceholders(plan *maker.Plan) int {
@@ -81,6 +178,12 @@ func ApplyGenericPlanAutofix(plan *maker.Plan, logf func(string, ...any), extern
 	orphanRemoved := pruneOrphanedPlaceholderRefs(plan, externalBindings...)
 	if orphanRemoved > 0 {
 		logf("[deploy] generic autofix: removed %d orphaned-placeholder command(s)", orphanRemoved)
+	}
+
+	// Replace hardcoded AWS resource IDs with placeholders when earlier commands produce them
+	hardcodedFixed := fixHardcodedResourceIDs(plan)
+	if hardcodedFixed > 0 {
+		logf("[deploy] generic autofix: replaced %d hardcoded resource ID(s) with placeholders", hardcodedFixed)
 	}
 
 	return plan

@@ -36,6 +36,7 @@ var commandPriorities = []CommandPriority{
 	{"ecr create-repository", 40},
 	{"ecr describe-repositories", 41},
 	{"ecr get-authorization-token", 42},
+	{"ecr get-login-password", 43},
 
 	// Phase 1: Secrets (priority 50-59)
 	{"secretsmanager create-secret", 50},
