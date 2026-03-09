@@ -253,6 +253,16 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		return fmt.Errorf("missing output writer")
 	}
 
+	// Validate plan sequencing and reorder if needed
+	if warnings := ValidatePlanSequencing(plan); len(warnings) > 0 {
+		for _, w := range warnings {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] WARNING: %s\n", w)
+		}
+		// Reorder plan to fix sequencing issues
+		_, _ = fmt.Fprintf(opts.Writer, "[maker] reordering plan to fix sequencing...\n")
+		plan = ReorderPlanCommands(plan)
+	}
+
 	// Initialize plan logger if not provided (writes to ~/.clanker/logs/plan/<runID>/)
 	var planLogger *PlanLogWriter
 	if opts.PlanLogger != nil {
@@ -547,6 +557,41 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		if !opts.DisableDurableCheckpoint {
 			if persistErr := persistDurableCheckpoint(plan, opts, bindings); persistErr != nil {
 				_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] warning: failed to persist durable checkpoint: %v\n", persistErr)
+			}
+		}
+
+		// Service health verification: before ALB commands, verify the service is healthy on the instance
+		if IsTransitionToALB(plan.Commands, idx) {
+			instanceID := bindings["INSTANCE_ID"]
+			if instanceID == "" {
+				// Try alternate bindings
+				for k, v := range bindings {
+					if strings.Contains(strings.ToUpper(k), "INSTANCE") && strings.HasPrefix(v, "i-") {
+						instanceID = v
+						break
+					}
+				}
+			}
+
+			if instanceID != "" {
+				healthCfg := ServiceHealthConfig{
+					InstanceID:    instanceID,
+					Port:          InferServicePort(plan, bindings),
+					HealthPath:    InferHealthPath(plan),
+					MaxRetries:    20,
+					RetryInterval: 15 * time.Second,
+					Profile:       opts.Profile,
+					Region:        opts.Region,
+				}
+
+				WriteHealthCheckpoint(opts.Writer, "SERVICE HEALTH VERIFICATION (before ALB exposure)")
+
+				if err := VerifyServiceHealthViaSSM(ctx, healthCfg, opts); err != nil {
+					WriteHealthCheckpoint(opts.Writer, fmt.Sprintf("SERVICE UNHEALTHY: %v", err))
+					return fmt.Errorf("service unhealthy after all fix attempts, cannot proceed to ALB: %w", err)
+				}
+
+				WriteHealthCheckpoint(opts.Writer, "SERVICE HEALTHY - proceeding to ALB creation")
 			}
 		}
 	}
@@ -4333,6 +4378,18 @@ func validateCommand(args []string, allowDestructive bool) error {
 		return fmt.Errorf("non-aws command is not allowed: %q", args[0])
 	}
 
+	// Validate first arg is a known AWS service (or "aws")
+	if err := ValidateAWSService(first); err != nil {
+		return err
+	}
+
+	// If first is "aws", validate second arg is a service
+	if first == "aws" && len(args) > 1 {
+		if err := ValidateAWSService(args[1]); err != nil {
+			return err
+		}
+	}
+
 	for i, a := range args {
 		trimmed := strings.TrimSpace(a)
 		lowerTrimmed := strings.ToLower(trimmed)
@@ -4345,6 +4402,11 @@ func validateCommand(args []string, allowDestructive bool) error {
 		}
 		if strings.HasPrefix(lowerTrimmed, "--user-data=") {
 			continue
+		}
+
+		// Detect multi-line shell scripts embedded in args (outside user-data)
+		if LooksLikeShellScript(a) {
+			return fmt.Errorf("arg %d appears to be a shell script, not an AWS CLI argument", i)
 		}
 
 		// Args are executed via exec.Command(argv...), not a shell.
