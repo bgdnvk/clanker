@@ -3,7 +3,11 @@ package maker
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +16,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 // ExecuteDigitalOceanPlan executes a Digital Ocean infrastructure plan
@@ -65,6 +71,16 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 		}
 		args = applyPlanBindings(args, bindings)
 		args = expandTildeInArgs(args) // doctl doesn't do shell expansion
+		if generatedArgs, err := ensureDOSSHImportKeyMaterial(args, opts.Writer); err != nil {
+			return fmt.Errorf("command %d rejected: %w", idx+1, err)
+		} else {
+			args = generatedArgs
+		}
+		args = normalizeFirewallRuleFlagsAtExec(args)
+
+		if err := validateDOUserDataAtExec(args); err != nil {
+			return fmt.Errorf("command %d rejected: %w", idx+1, err)
+		}
 
 		if hasUnresolvedPlaceholders(args) {
 			return fmt.Errorf("command %d has unresolved placeholders after substitutions", idx+1)
@@ -98,7 +114,7 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 		// Safety net: fix firewall empty address right before execution
 		args = fixFirewallEmptyAddressAtExec(args)
 		args = normalizeDoctlOutputFlags(args)
-		_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: doctl %s\n", idx+1, len(plan.Commands), strings.Join(args, " "))
+		_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: doctl %s\n", idx+1, len(plan.Commands), strings.Join(redactDOCommandArgsForLog(args), " "))
 
 		out, runErr := runDoctlCommandWithRetry(ctx, args, opts, opts.Writer)
 		if runErr != nil {
@@ -119,6 +135,9 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 
 		learnPlanBindingsFromProduces(cmdSpec.Produces, out, bindings)
 		computeDORuntimeBindings(bindings)
+		if err := postCheckDOCommand(args, out); err != nil {
+			return fmt.Errorf("digitalocean command %d post-check failed: %w", idx+1, err)
+		}
 	}
 
 	return nil
@@ -297,6 +316,67 @@ func normalizeDoctlOutputFlags(args []string) []string {
 	return args
 }
 
+// normalizeFirewallRuleFlagsAtExec merges repeated --inbound-rules/--outbound-rules
+// into the single doctl form DigitalOcean expects. Repeated flags cause only the
+// last rule set to survive, silently dropping SSH/app ports.
+func normalizeFirewallRuleFlagsAtExec(args []string) []string {
+	if len(args) < 3 {
+		return args
+	}
+	if !strings.EqualFold(strings.TrimSpace(args[0]), "compute") || !strings.EqualFold(strings.TrimSpace(args[1]), "firewall") {
+		return args
+	}
+	verb := strings.ToLower(strings.TrimSpace(args[2]))
+	if verb != "create" && verb != "update" {
+		return args
+	}
+
+	var inboundVals, outboundVals []string
+	cleaned := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		trimmed := strings.TrimSpace(args[i])
+		switch {
+		case trimmed == "--inbound-rules" && i+1 < len(args):
+			if v := strings.TrimSpace(args[i+1]); v != "" {
+				inboundVals = append(inboundVals, v)
+			}
+			i++
+		case strings.HasPrefix(trimmed, "--inbound-rules="):
+			if v := strings.TrimSpace(strings.TrimPrefix(trimmed, "--inbound-rules=")); v != "" {
+				inboundVals = append(inboundVals, v)
+			}
+		case trimmed == "--outbound-rules" && i+1 < len(args):
+			if v := strings.TrimSpace(args[i+1]); v != "" {
+				outboundVals = append(outboundVals, v)
+			}
+			i++
+		case strings.HasPrefix(trimmed, "--outbound-rules="):
+			if v := strings.TrimSpace(strings.TrimPrefix(trimmed, "--outbound-rules=")); v != "" {
+				outboundVals = append(outboundVals, v)
+			}
+		default:
+			cleaned = append(cleaned, args[i])
+		}
+	}
+
+	insertAt := len(cleaned)
+	for i, a := range cleaned {
+		if strings.EqualFold(strings.TrimSpace(a), "--output") || strings.HasPrefix(strings.TrimSpace(a), "--output=") {
+			insertAt = i
+			break
+		}
+	}
+	prefix := append([]string{}, cleaned[:insertAt]...)
+	suffix := append([]string{}, cleaned[insertAt:]...)
+	if len(inboundVals) > 0 {
+		prefix = append(prefix, "--inbound-rules", strings.Join(inboundVals, " "))
+	}
+	if len(outboundVals) > 0 {
+		prefix = append(prefix, "--outbound-rules", strings.Join(outboundVals, " "))
+	}
+	return append(prefix, suffix...)
+}
+
 // runDoctlCommandStreaming executes a doctl command with streaming output
 func runDoctlCommandStreaming(ctx context.Context, args []string, opts ExecOptions, w io.Writer) (string, error) {
 	bin, err := exec.LookPath("doctl")
@@ -317,16 +397,40 @@ func runDoctlCommandStreaming(ctx context.Context, args []string, opts ExecOptio
 	cmd.Env = os.Environ()
 
 	var buf bytes.Buffer
-	mw := io.MultiWriter(w, &buf)
-	cmd.Stdout = mw
-	cmd.Stderr = mw
+	if shouldSanitizeDOOutputForLog(args) {
+		cmd.Stdout = &buf
+		cmd.Stderr = &buf
+	} else {
+		mw := io.MultiWriter(w, &buf)
+		cmd.Stdout = mw
+		cmd.Stderr = mw
+	}
 
 	err = cmd.Run()
 	out := buf.String()
+	if shouldSanitizeDOOutputForLog(args) && w != nil {
+		_, _ = io.WriteString(w, sanitizeDOOutputForLog(out))
+	}
 	if err != nil {
 		return out, err
 	}
 	return out, nil
+}
+
+func shouldSanitizeDOOutputForLog(args []string) bool {
+	if len(args) < 3 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(args[0]), "compute") &&
+		strings.EqualFold(strings.TrimSpace(args[1]), "ssh-key") &&
+		(strings.EqualFold(strings.TrimSpace(args[2]), "list") ||
+			strings.EqualFold(strings.TrimSpace(args[2]), "get") ||
+			strings.EqualFold(strings.TrimSpace(args[2]), "import"))
+}
+
+func sanitizeDOOutputForLog(out string) string {
+	publicKeyRe := regexp.MustCompile(`"public_key"\s*:\s*"[^"]*"`)
+	return publicKeyRe.ReplaceAllString(out, `"public_key":"<redacted>"`)
 }
 
 // ---------------------------------------------------------------------------
@@ -425,7 +529,9 @@ func classifyDOFailure(args []string, output string) DOFailure {
 	// Quota
 	if strings.Contains(lower, "droplet limit") ||
 		strings.Contains(lower, "quota") ||
-		strings.Contains(lower, "limit reached") {
+		strings.Contains(lower, "limit reached") ||
+		strings.Contains(lower, "will exceed your reserved ip limit") ||
+		strings.Contains(lower, "exceed your reserved ip limit") {
 		f.Category = DOFailureQuota
 		return f
 	}
@@ -442,6 +548,9 @@ func classifyDOFailure(args []string, output string) DOFailure {
 
 // shouldIgnoreDOFailure returns true for non-fatal errors on create commands.
 func shouldIgnoreDOFailure(args []string, failure DOFailure) bool {
+	if failure.Category == DOFailureQuota && len(args) >= 3 && strings.EqualFold(args[0], "compute") && strings.EqualFold(args[1], "reserved-ip") && strings.EqualFold(args[2], "create") {
+		return true
+	}
 	if failure.Category != DOFailureAlreadyExists {
 		return false
 	}
@@ -596,6 +705,309 @@ func learnDockerProducesLiteral(args []string, produces map[string]string, bindi
 	if strings.TrimSpace(bindings["IMAGE_TAG"]) == "" {
 		bindings["IMAGE_TAG"] = tag
 	}
+}
+
+func validateDOUserDataAtExec(args []string) error {
+	if len(args) < 3 {
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(args[0]), "compute") ||
+		!strings.EqualFold(strings.TrimSpace(args[1]), "droplet") ||
+		!strings.EqualFold(strings.TrimSpace(args[2]), "create") {
+		return nil
+	}
+
+	script := extractDOUserDataArg(args)
+	if strings.TrimSpace(script) == "" {
+		return nil
+	}
+	lower := strings.ToLower(script)
+	isOpenClaw := strings.Contains(lower, "openclaw") || strings.Contains(lower, "docker-setup.sh")
+	if !isOpenClaw {
+		return nil
+	}
+	if strings.Contains(lower, "cloud-init status --wait") {
+		return fmt.Errorf("OpenClaw user-data must not run 'cloud-init status --wait' inside cloud-init")
+	}
+	if strings.Contains(lower, "docker compose build") || strings.Contains(lower, "docker-compose build") {
+		return fmt.Errorf("OpenClaw user-data must use 'docker build -t openclaw:local .' instead of 'docker compose build'")
+	}
+	if !strings.Contains(lower, "openclaw_gateway_token") && !strings.Contains(lower, "openclaw_gateway_password") {
+		return fmt.Errorf("OpenClaw user-data is missing OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_PASSWORD in .env")
+	}
+	if strings.Contains(lower, "placeholder_replace_me") || strings.Contains(lower, "changeme") || strings.Contains(lower, "replace_me") {
+		return fmt.Errorf("OpenClaw user-data contains dummy secret values like placeholder_replace_me/changeme")
+	}
+	if strings.Contains(lower, "openssl rand") || strings.Contains(lower, "gateway_token=$(") || strings.Contains(lower, "openclaw_gateway_token=${gateway_token}") || strings.Contains(lower, "openclaw_gateway_token=$gateway_token") {
+		return fmt.Errorf("OpenClaw user-data must use the provided gateway token, not generate a random one in user-data")
+	}
+	if !strings.Contains(lower, "anthropic_api_key") && !strings.Contains(lower, "openai_api_key") && !strings.Contains(lower, "gemini_api_key") {
+		return fmt.Errorf("OpenClaw user-data is missing all AI provider keys in .env")
+	}
+	return nil
+}
+
+func ensureDOSSHImportKeyMaterial(args []string, w io.Writer) ([]string, error) {
+	if len(args) < 3 {
+		return args, nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(args[0]), "compute") ||
+		!strings.EqualFold(strings.TrimSpace(args[1]), "ssh-key") ||
+		!strings.EqualFold(strings.TrimSpace(args[2]), "import") {
+		return args, nil
+	}
+	for i := 0; i < len(args); i++ {
+		if strings.TrimSpace(args[i]) != "--public-key-file" || i+1 >= len(args) {
+			continue
+		}
+		pubPath := strings.TrimSpace(args[i+1])
+		if pubPath == "" {
+			return args, fmt.Errorf("DigitalOcean ssh-key import is missing --public-key-file path")
+		}
+		pubPath = expandHomePath(pubPath)
+		if filepath.Ext(pubPath) != ".pub" {
+			pubPath += ".pub"
+		}
+		args[i+1] = pubPath
+		if _, err := os.Stat(pubPath); err == nil {
+			return args, nil
+		}
+		privPath := strings.TrimSuffix(pubPath, ".pub")
+		if err := generateLocalSSHKeyPair(privPath); err != nil {
+			return args, fmt.Errorf("generate DigitalOcean SSH key pair: %w", err)
+		}
+		if w != nil {
+			_, _ = fmt.Fprintf(w, "[maker] generated dedicated local SSH key pair for DigitalOcean import: %s\n", pubPath)
+		}
+		return args, nil
+	}
+	return args, nil
+}
+
+func generateLocalSSHKeyPair(privateKeyPath string) error {
+	sshDir := filepath.Dir(privateKeyPath)
+	if err := os.MkdirAll(sshDir, 0700); err != nil {
+		return err
+	}
+	privateKey, err := rsa.GenerateKey(rand.Reader, 4096)
+	if err != nil {
+		return err
+	}
+	privateKeyFile, err := os.OpenFile(privateKeyPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	defer privateKeyFile.Close()
+	privateKeyPEM := &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privateKey)}
+	if err := pem.Encode(privateKeyFile, privateKeyPEM); err != nil {
+		return err
+	}
+	publicKey, err := ssh.NewPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		return err
+	}
+	publicKeyPath := privateKeyPath + ".pub"
+	if err := os.WriteFile(publicKeyPath, ssh.MarshalAuthorizedKey(publicKey), 0644); err != nil {
+		return err
+	}
+	return nil
+}
+
+func expandHomePath(p string) string {
+	if strings.HasPrefix(p, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return filepath.Join(home, p[2:])
+		}
+	}
+	return p
+}
+
+func redactDOCommandArgsForLog(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	masked := append([]string(nil), args...)
+	for i := 0; i < len(masked); i++ {
+		trimmed := strings.TrimSpace(masked[i])
+		if trimmed == "--user-data" && i+1 < len(masked) {
+			masked[i+1] = "<redacted-user-data>"
+			i++
+			continue
+		}
+		if strings.HasPrefix(trimmed, "--user-data=") {
+			masked[i] = "--user-data=<redacted-user-data>"
+		}
+	}
+	return masked
+}
+
+func extractDOUserDataArg(args []string) string {
+	for i := 0; i < len(args); i++ {
+		trimmed := strings.TrimSpace(args[i])
+		if trimmed == "--user-data" && i+1 < len(args) {
+			return args[i+1]
+		}
+		if strings.HasPrefix(trimmed, "--user-data=") {
+			return strings.TrimPrefix(trimmed, "--user-data=")
+		}
+	}
+	return ""
+}
+
+func postCheckDOCommand(args []string, output string) error {
+	if len(args) < 3 {
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(args[0]), "compute") || !strings.EqualFold(strings.TrimSpace(args[1]), "firewall") {
+		return nil
+	}
+	verb := strings.ToLower(strings.TrimSpace(args[2]))
+	if verb != "create" && verb != "update" {
+		return nil
+	}
+	expectedInbound := expectedFirewallPortsFromArgs(args, "--inbound-rules", "tcp")
+	expectedOutbound := expectedFirewallAllProtocolsFromArgs(args)
+	if len(expectedInbound) == 0 && len(expectedOutbound) == 0 {
+		return nil
+	}
+	actual, err := parseDOFirewallOutput(output)
+	if err != nil {
+		return nil // don't fail if doctl changed output shape; exec success still stands
+	}
+	for port := range expectedInbound {
+		if !actual.InboundTCPPorts[port] {
+			return fmt.Errorf("firewall result is missing inbound TCP port %s after create/update", port)
+		}
+	}
+	for proto := range expectedOutbound {
+		if !actual.OutboundAllProtocols[proto] {
+			return fmt.Errorf("firewall result is missing outbound %s all rule after create/update", proto)
+		}
+	}
+	return nil
+}
+
+type doFirewallObserved struct {
+	InboundTCPPorts      map[string]bool
+	OutboundAllProtocols map[string]bool
+}
+
+type doFirewallOutput struct {
+	InboundRules  []doFirewallRule `json:"inbound_rules"`
+	OutboundRules []doFirewallRule `json:"outbound_rules"`
+}
+
+type doFirewallRule struct {
+	Protocol string `json:"protocol"`
+	Ports    string `json:"ports"`
+	Sources  struct {
+		Addresses []string `json:"addresses"`
+	} `json:"sources"`
+	Destinations struct {
+		Addresses []string `json:"addresses"`
+	} `json:"destinations"`
+}
+
+func parseDOFirewallOutput(output string) (doFirewallObserved, error) {
+	obs := doFirewallObserved{
+		InboundTCPPorts:      map[string]bool{},
+		OutboundAllProtocols: map[string]bool{},
+	}
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return obs, fmt.Errorf("empty output")
+	}
+	var single doFirewallOutput
+	if err := json.Unmarshal([]byte(trimmed), &single); err == nil && (len(single.InboundRules) > 0 || len(single.OutboundRules) > 0) {
+		return observeDOFirewall(single), nil
+	}
+	var arr []doFirewallOutput
+	if err := json.Unmarshal([]byte(trimmed), &arr); err == nil && len(arr) > 0 {
+		return observeDOFirewall(arr[0]), nil
+	}
+	return obs, fmt.Errorf("unrecognized firewall output")
+}
+
+func observeDOFirewall(fw doFirewallOutput) doFirewallObserved {
+	obs := doFirewallObserved{
+		InboundTCPPorts:      map[string]bool{},
+		OutboundAllProtocols: map[string]bool{},
+	}
+	for _, rule := range fw.InboundRules {
+		if strings.EqualFold(strings.TrimSpace(rule.Protocol), "tcp") {
+			if port := strings.TrimSpace(rule.Ports); port != "" {
+				obs.InboundTCPPorts[port] = true
+			}
+		}
+	}
+	for _, rule := range fw.OutboundRules {
+		proto := strings.ToLower(strings.TrimSpace(rule.Protocol))
+		ports := strings.ToLower(strings.TrimSpace(rule.Ports))
+		if proto != "" && (ports == "all" || ports == "0") {
+			obs.OutboundAllProtocols[proto] = true
+		}
+	}
+	return obs
+}
+
+func expectedFirewallPortsFromArgs(args []string, flagName string, protocol string) map[string]bool {
+	out := map[string]bool{}
+	for _, value := range extractFirewallRuleValuesAtExec(args, flagName) {
+		for _, rule := range strings.Fields(value) {
+			parts := parseFirewallRuleAtExec(rule)
+			if !strings.EqualFold(parts["protocol"], protocol) {
+				continue
+			}
+			if port := strings.TrimSpace(parts["ports"]); port != "" {
+				out[port] = true
+			}
+		}
+	}
+	return out
+}
+
+func expectedFirewallAllProtocolsFromArgs(args []string) map[string]bool {
+	out := map[string]bool{}
+	for _, value := range extractFirewallRuleValuesAtExec(args, "--outbound-rules") {
+		for _, rule := range strings.Fields(value) {
+			parts := parseFirewallRuleAtExec(rule)
+			proto := strings.ToLower(strings.TrimSpace(parts["protocol"]))
+			ports := strings.ToLower(strings.TrimSpace(parts["ports"]))
+			if proto != "" && (ports == "all" || ports == "0") {
+				out[proto] = true
+			}
+		}
+	}
+	return out
+}
+
+func extractFirewallRuleValuesAtExec(args []string, flagName string) []string {
+	var values []string
+	for i := 0; i < len(args); i++ {
+		trimmed := strings.TrimSpace(args[i])
+		if trimmed == flagName && i+1 < len(args) {
+			values = append(values, strings.TrimSpace(args[i+1]))
+			i++
+			continue
+		}
+		if strings.HasPrefix(trimmed, flagName+"=") {
+			values = append(values, strings.TrimSpace(strings.TrimPrefix(trimmed, flagName+"=")))
+		}
+	}
+	return values
+}
+
+func parseFirewallRuleAtExec(rule string) map[string]string {
+	out := map[string]string{}
+	for _, part := range strings.Split(rule, ",") {
+		k, v, ok := strings.Cut(strings.TrimSpace(part), ":")
+		if !ok {
+			continue
+		}
+		out[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
+	}
+	return out
 }
 
 // emptyFWAddrExecRe matches "address:" followed by whitespace or end-of-string.

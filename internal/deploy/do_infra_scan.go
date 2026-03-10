@@ -180,7 +180,12 @@ func (s *DOInfraSnapshot) FormatForPrompt() string {
 			names = append(names, fmt.Sprintf("%s (id=%s)", k.Name, k.ID))
 		}
 		b.WriteString(fmt.Sprintf("- SSH Keys: %s\n", strings.Join(names, ", ")))
-		b.WriteString("  → REUSE an existing SSH key ID in droplet create; do NOT create a new one\n")
+		if s.LocalSSHPubKey != "" {
+			b.WriteString(fmt.Sprintf("  → Prefer importing a dedicated deployment SSH key from local file: %s\n", s.LocalSSHPubKey))
+			b.WriteString("  → Use 'compute ssh-key import <name> --public-key-file <path>' as the FIRST step, then use that produced SSH_KEY_ID in droplet create\n")
+		} else {
+			b.WriteString("  → Prefer creating/importing a dedicated deployment SSH key instead of reusing an unrelated account-wide key\n")
+		}
 	} else {
 		if s.LocalSSHPubKey != "" {
 			b.WriteString(fmt.Sprintf("- SSH Keys: NONE on DigitalOcean — import from local file: %s\n", s.LocalSSHPubKey))

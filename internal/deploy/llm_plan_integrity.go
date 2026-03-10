@@ -252,6 +252,7 @@ func buildGenericPlanIntegrityPrompt(deploymentIntent, projectSummary, candidate
 	b.WriteString("  * Keep flags outside scripts (e.g., do not merge CLI flags into --user-data body).\n")
 	b.WriteString("  * Keep run-instances user-data as script content only; preserve separate CLI flags.\n")
 	b.WriteString("  * Replace obvious placeholder secrets like 'changeme' with placeholders (<OPENCLAW_GATEWAY_TOKEN>) if needed.\n")
+	b.WriteString("  * NEVER replace provided secret placeholders/envs with generated shell values or dummy literals like 'placeholder_replace_me', 'changeme', or 'openssl rand'.\n")
 	b.WriteString("  * Keep existing launch chain; do not drop required front-door steps if already present.\n")
 	b.WriteString("- NOT allowed: swapping deployment method, introducing unrelated services, or broad resource churn.\n")
 	b.WriteString("- Keep placeholders in angle form <NAME>; never ${NAME} or $NAME.\n")

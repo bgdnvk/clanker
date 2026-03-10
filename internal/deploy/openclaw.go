@@ -166,19 +166,19 @@ Estimate the MONTHLY cost in USD.
 	],
 	"buildSteps": [
 		"Create Cloud Firewall for required ports",
-		"Create Droplet with user-data (clone repo, docker compose build, compose up)",
+		"Create Droplet with user-data (clone repo, docker build -t openclaw:local ., compose up)",
 		"Attach firewall and create reserved IP",
 		"Verify gateway health"
 	],
 	"runCmd": "docker compose up -d openclaw-gateway",
 	"notes": ["Build image on droplet, do NOT use DOCR", "Expose only required ports via Cloud Firewall", "Persist OpenClaw config/workspace on disk or volume"],
-	"cpuMemory": "s-1vcpu-2gb",
+	"cpuMemory": "s-2vcpu-4gb",
 	"needsAlb": false,
 	"useApiGateway": false,
 	"needsDb": false,
 	"dbService": "",
-	"estMonthly": "$6-12",
-	"costBreakdown": ["Droplet s-1vcpu-2gb", "Reserved IP"]
+	"estMonthly": "$24-30",
+	"costBreakdown": ["Droplet s-2vcpu-4gb", "Reserved IP"]
 }`
 }
 
@@ -192,7 +192,7 @@ func OpenClawDigitalOceanDropletPrompt(p *RepoProfile, deep *DeepAnalysis, opts 
 	b.WriteString("Deploy OpenClaw using DigitalOcean Droplet (VM + Docker Compose, build on droplet):\n")
 	b.WriteString(fmt.Sprintf("Naming: use prefix %s for droplet/firewall resources\n", resourcePrefix))
 	b.WriteString("1. Create a Cloud Firewall allowing inbound on required ports (18789, 443, 80, 22)\n")
-	b.WriteString("2. Create a Droplet (Ubuntu 22.04 Docker image, s-1vcpu-2gb) with user-data script\n")
+	b.WriteString("2. Create a Droplet (Ubuntu 22.04 Docker image, s-2vcpu-4gb) with user-data script\n")
 	b.WriteString(fmt.Sprintf("3. User-data must: clone %s, write .env, 'docker build -t openclaw:local .', run onboarding, docker compose up\n", p.RepoURL))
 	b.WriteString("4. Attach firewall to droplet\n")
 	b.WriteString("5. Create reserved IP for stable endpoint\n")

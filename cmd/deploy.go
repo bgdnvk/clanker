@@ -1013,6 +1013,24 @@ Examples:
 			plan = patched
 		}
 
+		if finalDet := deploy.ValidatePlanDeterministicFinal(plan, rp, intel.DeepAnalysis, intel.Docker); finalDet != nil {
+			for _, warning := range finalDet.Warnings {
+				logf("[deploy] final deterministic warning: %s", warning)
+			}
+			if len(finalDet.Issues) > 0 {
+				logf("[deploy] final deterministic validation found %d issue(s)", len(finalDet.Issues))
+				for _, issue := range finalDet.Issues {
+					logf("[deploy]   issue: %s", issue)
+				}
+				for _, fix := range finalDet.Fixes {
+					logf("[deploy]   fix: %s", fix)
+				}
+				if applyMode {
+					return fmt.Errorf("final deterministic validation failed with %d issue(s); refusing to apply", len(finalDet.Issues))
+				}
+			}
+		}
+
 		openClawUnresolvedApplyBlock := false
 		openClawUnresolvedCritical := make([]string, 0, 12)
 		if isOpenClawDeploy {

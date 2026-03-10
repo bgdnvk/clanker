@@ -164,7 +164,7 @@ func buildSkeletonPrompt(provider, enrichedPrompt string, requiredLaunchOps []st
 	case "digitalocean":
 		b.WriteString("Provider: DigitalOcean (doctl commands, WITHOUT leading 'doctl' prefix)\n")
 		b.WriteString("Services: compute (droplet/firewall/ssh-key/reserved-ip), databases\n")
-		b.WriteString("Operations: compute droplet create, compute firewall create, compute ssh-key list, compute firewall add-droplets, compute reserved-ip create\n")
+		b.WriteString("Operations: compute ssh-key import, compute droplet create, compute firewall create, compute firewall add-droplets, compute reserved-ip create\n")
 	case "hetzner":
 		b.WriteString("Provider: Hetzner Cloud (hcloud commands)\n")
 	default:
@@ -193,10 +193,11 @@ func buildSkeletonPrompt(provider, enrichedPrompt string, requiredLaunchOps []st
 	b.WriteString("- Do NOT add redundant diagnostic/verification steps unless essential for correctness.\n")
 	if provider == "digitalocean" {
 		b.WriteString("- For user-data on Droplet: embed the boot script in compute droplet create --user-data.\n")
-		b.WriteString("- A typical Droplet deploy needs: ssh-key list, firewall create, droplet create, firewall add-droplets, reserved-ip create.\n")
+		b.WriteString("- A typical Droplet deploy needs: ssh-key import, firewall create, droplet create, firewall add-droplets, reserved-ip create.\n")
 		b.WriteString("- IMPORTANT: generate ALL infrastructure steps as separate skeleton entries. Do NOT collapse everything into a single droplet create step.\n")
 		b.WriteString("- Do NOT include registry create, registry login, docker build, or docker push steps. The image is built on the droplet itself via user-data.\n")
-		b.WriteString("- User-data script should: clone the repo, write .env, docker compose build, docker compose up.\n")
+		b.WriteString("- Prefer a dedicated deployment SSH key import step over reusing an unrelated existing SSH key.\n")
+		b.WriteString("- User-data script should: clone the repo, write .env, docker build -t openclaw:local ., docker compose up.\n")
 	} else {
 		b.WriteString("- For user-data on EC2: use ONE 'ssm send-command' or embed in run-instances user-data. Do NOT repeat.\n")
 	}
@@ -218,8 +219,8 @@ func buildSkeletonPrompt(provider, enrichedPrompt string, requiredLaunchOps []st
 		b.WriteString("  \"steps\": [\n")
 		b.WriteString("    {\n")
 		b.WriteString("      \"service\": \"compute\",\n")
-		b.WriteString("      \"operation\": \"ssh-key list\",\n")
-		b.WriteString("      \"reason\": \"Retrieve SSH key ID for Droplet authentication\",\n")
+		b.WriteString("      \"operation\": \"ssh-key import\",\n")
+		b.WriteString("      \"reason\": \"Import a dedicated SSH public key for Droplet authentication\",\n")
 		b.WriteString("      \"produces\": [\"SSH_KEY_ID\"],\n")
 		b.WriteString("      \"depends_on\": []\n")
 		b.WriteString("    },\n")

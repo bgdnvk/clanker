@@ -936,19 +936,19 @@ Estimate the MONTHLY cost in USD.
 	],
 	"buildSteps": [
 		"Create Cloud Firewall for required ports",
-		"Create Droplet with user-data (clone repo, docker compose build, compose up)",
+		"Create Droplet with user-data (clone repo, docker build -t openclaw:local ., compose up)",
 		"Attach firewall and create reserved IP",
 		"Verify service health"
 	],
 	"runCmd": "docker compose up -d",
 	"notes": ["Build image on droplet, do NOT use DOCR", "Expose only required ports via Cloud Firewall", "Persist any required state on disk"],
-	"cpuMemory": "s-1vcpu-2gb",
+	"cpuMemory": "s-2vcpu-4gb",
 	"needsAlb": false,
 	"useApiGateway": false,
 	"needsDb": false,
 	"dbService": "",
-	"estMonthly": "$6-12",
-	"costBreakdown": ["Droplet", "Reserved IP"]
+	"estMonthly": "$24-30",
+	"costBreakdown": ["Droplet s-2vcpu-4gb", "Reserved IP"]
 }`)
 	default:
 		// Add user's deployment target preference
