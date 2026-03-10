@@ -753,6 +753,53 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 				return true, nil
 			}
 
+			// Remediation: subnets in the same Availability Zone.
+			// ALB requires subnets in different AZs. Pick new subnets from the same VPC.
+			if strings.Contains(lower, "multiple subnets in the same availability zone") ||
+				strings.Contains(lower, "subnets in the same availability zone") {
+				subnets := clankeraws.ExtractELBv2SubnetsFromArgs(args)
+				vpcID := ""
+				if len(subnets) > 0 {
+					vpcID, _ = describeSubnetVpcID(ctx, opts, subnets[0])
+				}
+				if vpcID == "" {
+					vpcID = strings.TrimSpace(bindings["VPC_ID"])
+				}
+				if vpcID == "" {
+					return true, fmt.Errorf("could not infer VPC ID for subnet AZ remediation; subnets must be in different Availability Zones")
+				}
+
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation attempted: selecting subnets from different AZs (vpc=%s)\n", vpcID)
+
+				newSubnets, err := pickSubnetsForVPC(ctx, opts, vpcID, 2)
+				if err != nil {
+					return true, fmt.Errorf("failed to pick subnets from different AZs: %w", err)
+				}
+				if len(newSubnets) < 2 {
+					return true, fmt.Errorf("could not find at least 2 subnets in different AZs for VPC %s", vpcID)
+				}
+
+				// Ensure the instance's subnet is included so ALB can route to the target
+				instanceSubnet := strings.TrimSpace(bindings["INSTANCE_SUBNET_ID"])
+				if instanceSubnet != "" {
+					newSubnets = ensureSubnetIncluded(ctx, opts, newSubnets, instanceSubnet)
+					_, _ = fmt.Fprintf(opts.Writer, "[maker] ensuring instance subnet %s is included for target routing\n", instanceSubnet)
+				}
+
+				// Rewrite the args with new subnets
+				rewrittenArgs := replaceSubnetsInArgs(args, newSubnets)
+				rewrittenAWSArgs := append(rewrittenArgs, "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
+
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] retrying create-load-balancer with subnets: %v\n", newSubnets)
+
+				out2, err2 := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, opts.Writer)
+				if err2 != nil {
+					return true, err2
+				}
+				learnPlanBindings(rewrittenArgs, out2, bindings)
+				return true, nil
+			}
+
 			if failure.Category == FailureAlreadyExists || failure.Category == FailureConflict || strings.Contains(lower, "duplicateloadbalancername") || strings.Contains(lower, "already exists") {
 				lbName := strings.TrimSpace(flagValue(args, "--name"))
 				if lbName != "" {
@@ -2234,6 +2281,123 @@ func pickSubnetsForVPC(ctx context.Context, opts ExecOptions, vpcID string, want
 		chosen = append(chosen, it.id)
 	}
 	return chosen, nil
+}
+
+// ensureSubnetIncluded ensures the specified subnet is in the list while maintaining
+// different AZs. If the subnet is already included, returns the list unchanged.
+// If not, it replaces one subnet (preferring one in the same AZ as instanceSubnet)
+// while ensuring we still have subnets in at least 2 different AZs.
+// Guarantees no duplicate subnet IDs in the result.
+func ensureSubnetIncluded(ctx context.Context, opts ExecOptions, subnets []string, instanceSubnet string) []string {
+	// Check if already included
+	for _, s := range subnets {
+		if s == instanceSubnet {
+			return subnets
+		}
+	}
+
+	// Get AZ info for all subnets
+	type subnetAZ struct {
+		id string
+		az string
+	}
+	subnetAZs := make([]subnetAZ, 0, len(subnets)+1)
+
+	// Get AZ for instance subnet
+	instanceAZ := ""
+	if az, err := describeSubnetAZ(ctx, opts, instanceSubnet); err == nil {
+		instanceAZ = az
+	}
+	subnetAZs = append(subnetAZs, subnetAZ{id: instanceSubnet, az: instanceAZ})
+
+	// Get AZ for existing subnets
+	for _, s := range subnets {
+		az, _ := describeSubnetAZ(ctx, opts, s)
+		subnetAZs = append(subnetAZs, subnetAZ{id: s, az: az})
+	}
+
+	// Build result: start with instance subnet, then add subnets from different AZs
+	// Track both seen IDs and seen AZs to prevent duplicates
+	result := []string{instanceSubnet}
+	seenAZ := map[string]bool{}
+	seenID := map[string]bool{instanceSubnet: true}
+	if instanceAZ != "" {
+		seenAZ[instanceAZ] = true
+	}
+
+	for _, s := range subnetAZs[1:] { // Skip instance subnet (already added)
+		// Skip if we already have this subnet ID
+		if seenID[s.id] {
+			continue
+		}
+		// Prefer subnets from different AZs
+		if s.az != "" && !seenAZ[s.az] {
+			result = append(result, s.id)
+			seenAZ[s.az] = true
+			seenID[s.id] = true
+			if len(result) >= 2 {
+				break
+			}
+		}
+	}
+
+	// If we couldn't get 2 subnets from different AZs, add any non-duplicate subnet
+	if len(result) < 2 {
+		for _, s := range subnetAZs[1:] {
+			if !seenID[s.id] {
+				result = append(result, s.id)
+				seenID[s.id] = true
+				break
+			}
+		}
+	}
+
+	return result
+}
+
+// describeSubnetAZ returns the availability zone for a subnet.
+func describeSubnetAZ(ctx context.Context, opts ExecOptions, subnetID string) (string, error) {
+	q := []string{"ec2", "describe-subnets", "--subnet-ids", subnetID, "--output", "json", "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+	out, err := runAWSCommandStreaming(ctx, q, nil, io.Discard)
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		Subnets []struct {
+			AvailabilityZone string `json:"AvailabilityZone"`
+		} `json:"Subnets"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return "", err
+	}
+	if len(resp.Subnets) == 0 {
+		return "", fmt.Errorf("subnet not found: %s", subnetID)
+	}
+	return resp.Subnets[0].AvailabilityZone, nil
+}
+
+// replaceSubnetsInArgs replaces the --subnets values in args with new subnet IDs.
+// It preserves all other args and their order.
+func replaceSubnetsInArgs(args []string, newSubnets []string) []string {
+	result := make([]string, 0, len(args))
+	i := 0
+	for i < len(args) {
+		if args[i] == "--subnets" {
+			// Add --subnets flag
+			result = append(result, "--subnets")
+			i++
+			// Skip old subnet values (they don't start with --)
+			for i < len(args) && !strings.HasPrefix(args[i], "--") {
+				i++
+			}
+			// Add new subnet values
+			result = append(result, newSubnets...)
+		} else {
+			result = append(result, args[i])
+			i++
+		}
+	}
+	return result
 }
 
 func indexOfExactFlag(args []string, flag string) int {

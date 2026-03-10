@@ -1624,10 +1624,15 @@ func learnPlanBindings(args []string, output string, bindings map[string]string)
 				bindings["WEB_SG_ID"] = bindings["SG_WEB_ID"]
 			}
 		case "run-instances":
-			// {"Instances":[{"InstanceId":"i-..."}]}
+			// {"Instances":[{"InstanceId":"i-...", "SubnetId":"subnet-..."}]}
 			inst := deepString(obj, "Instances", "0", "InstanceId")
 			if inst != "" {
 				bindings["INSTANCE_ID"] = inst
+			}
+			// Capture the subnet the instance was launched in for ALB targeting
+			instSubnet := deepString(obj, "Instances", "0", "SubnetId")
+			if instSubnet != "" {
+				bindings["INSTANCE_SUBNET_ID"] = instSubnet
 			}
 		}
 	case "elbv2":
