@@ -151,7 +151,7 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 			if err != nil {
 				return true, err
 			}
-			learnPlanBindings(rewritten, out2, bindings)
+			learnPlanBindings(rewritten, out2, bindings, -1)
 			return true, nil
 		}
 	}
@@ -749,7 +749,7 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 				if err2 != nil {
 					return true, err2
 				}
-				learnPlanBindings(args, out2, bindings)
+				learnPlanBindings(args, out2, bindings, -1)
 				return true, nil
 			}
 
@@ -796,7 +796,7 @@ func maybeRewriteAndRetry(ctx context.Context, opts ExecOptions, args []string, 
 				if err2 != nil {
 					return true, err2
 				}
-				learnPlanBindings(rewrittenArgs, out2, bindings)
+				learnPlanBindings(rewrittenArgs, out2, bindings, -1)
 				return true, nil
 			}
 
@@ -3770,7 +3770,7 @@ func remediateEC2InvalidInstanceProfileAndRetry(ctx context.Context, opts ExecOp
 		out, err := runAWSCommandStreaming(ctx, rewrittenAWSArgs, stdinBytes, w)
 		if err == nil {
 			// Learn bindings from successful run-instances output
-			learnPlanBindings(rewritten, out, bindings)
+			learnPlanBindings(rewritten, out, bindings, -1)
 			return nil
 		}
 

@@ -169,7 +169,7 @@ func maybeAgenticFix(
 					continue
 				}
 				// Learn from pre-command output
-				learnPlanBindings(cmd.Args, out, bindings)
+				learnPlanBindings(cmd.Args, out, bindings, -1)
 			}
 		}
 
@@ -191,7 +191,7 @@ func maybeAgenticFix(
 		out, retryErr := runAWSCommandStreaming(ctx, finalArgs, stdinBytes, opts.Writer)
 		if retryErr == nil {
 			// Success! Learn from output
-			learnPlanBindings(retryArgs, out, bindings)
+			learnPlanBindings(retryArgs, out, bindings, -1)
 			if opts.PlanLogger != nil {
 				opts.PlanLogger.WriteFixSuccess("agentic_single", fmt.Sprintf("attempt=%d cmd=%s %s", attempt, args0(retryArgs), args1(retryArgs)), "retry succeeded")
 			}

@@ -325,7 +325,7 @@ func runRemediatePhase(
 			// Continue - some steps may fail but others succeed
 		} else {
 			// Learn from successful command output
-			learnPlanBindings(cmd.Args, output, state.LearnedBindings)
+			learnPlanBindings(cmd.Args, output, state.LearnedBindings, -1)
 		}
 	}
 
@@ -353,7 +353,7 @@ func runVerifyPhase(
 	if err == nil {
 		// Original command succeeded
 		_, _ = fmt.Fprintf(opts.Writer, "[agentic][verify] original command succeeded\n")
-		learnPlanBindings(retryArgs, output, state.LearnedBindings)
+		learnPlanBindings(retryArgs, output, state.LearnedBindings, -1)
 		if opts.PlanLogger != nil {
 			opts.PlanLogger.WriteFixSuccess("agentic_verify", fmt.Sprintf("session=%s iteration=%d", state.SessionID, state.Iteration), "original command now succeeds")
 		}

@@ -514,7 +514,7 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 
 		// Learn placeholder bindings from successful command outputs.
 		learnPlanBindingsFromProduces(cmdSpec.Produces, out, bindings)
-		learnPlanBindings(args, out, bindings)
+		learnPlanBindings(args, out, bindings, idx)
 		bindings["CHECKPOINT_LAST_SUCCESS_INDEX"] = strconv.Itoa(idx + 1)
 		bindings["CHECKPOINT_LAST_FAILURE_INDEX"] = ""
 		if planLogger != nil {
@@ -1422,7 +1422,7 @@ func fixRoleNameArg(args []string) []string {
 	return args
 }
 
-func learnPlanBindings(args []string, output string, bindings map[string]string) {
+func learnPlanBindings(args []string, output string, bindings map[string]string, cmdIndex int) {
 	if len(args) < 2 {
 		return
 	}
@@ -1628,6 +1628,9 @@ func learnPlanBindings(args []string, output string, bindings map[string]string)
 			inst := deepString(obj, "Instances", "0", "InstanceId")
 			if inst != "" {
 				bindings["INSTANCE_ID"] = inst
+				// Also store with command index for tracking stale IDs on checkpoint resume
+				bindings[fmt.Sprintf("INSTANCE_ID_%d", cmdIndex)] = inst
+				bindings["LAST_RUN_INSTANCES_IDX"] = strconv.Itoa(cmdIndex)
 			}
 			// Capture the subnet the instance was launched in for ALB targeting
 			instSubnet := deepString(obj, "Instances", "0", "SubnetId")
