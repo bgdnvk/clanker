@@ -23,6 +23,27 @@ type ServiceHealthConfig struct {
 	Region        string        // AWS region
 }
 
+// SSM agent startup grace period delays (exponential backoff)
+var ssmBackoffDelays = []time.Duration{
+	5 * time.Second,
+	10 * time.Second,
+	20 * time.Second,
+	30 * time.Second,
+	45 * time.Second,
+}
+
+// isSSMNotReadyError checks if the error indicates SSM agent is not ready
+func isSSMNotReadyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "invalidinstanceid") ||
+		strings.Contains(errStr, "not in a valid state") ||
+		strings.Contains(errStr, "instance not connected") ||
+		strings.Contains(errStr, "target not connected")
+}
+
 // VerifyServiceHealthViaSSM logs into instance via SSM to check container and service health
 func VerifyServiceHealthViaSSM(ctx context.Context, cfg ServiceHealthConfig, opts ExecOptions) error {
 	if cfg.InstanceID == "" {
@@ -42,6 +63,7 @@ func VerifyServiceHealthViaSSM(ctx context.Context, cfg ServiceHealthConfig, opt
 	_, _ = fmt.Fprintf(opts.Writer, "[health] verifying service on instance %s via SSM\n", cfg.InstanceID)
 
 	var lastErr error
+	ssmNotReadyCount := 0
 
 	for attempt := 1; attempt <= cfg.MaxRetries; attempt++ {
 		select {
@@ -57,6 +79,24 @@ func VerifyServiceHealthViaSSM(ctx context.Context, cfg ServiceHealthConfig, opt
 		if err != nil {
 			_, _ = fmt.Fprintf(opts.Writer, "[health] SSM command failed: %v\n", err)
 			lastErr = err
+
+			// Handle SSM agent not ready with exponential backoff
+			if isSSMNotReadyError(err) {
+				ssmNotReadyCount++
+				if ssmNotReadyCount <= len(ssmBackoffDelays) {
+					delay := ssmBackoffDelays[ssmNotReadyCount-1]
+					_, _ = fmt.Fprintf(opts.Writer, "[health] SSM agent not ready (attempt %d), waiting %v for agent startup...\n", ssmNotReadyCount, delay)
+					time.Sleep(delay)
+					continue
+				}
+				// After exhausting backoff delays, provide diagnostic context
+				_, _ = fmt.Fprintf(opts.Writer, "[health] SSM agent still not ready after %d attempts. Possible issues:\n", ssmNotReadyCount)
+				_, _ = fmt.Fprintf(opts.Writer, "[health]   - Instance may not have SSM agent installed\n")
+				_, _ = fmt.Fprintf(opts.Writer, "[health]   - IAM role may be missing AmazonSSMManagedInstanceCore policy\n")
+				_, _ = fmt.Fprintf(opts.Writer, "[health]   - Instance may be in a private subnet without VPC endpoint\n")
+				_, _ = fmt.Fprintf(opts.Writer, "[health]   - Instance ID %s may be invalid or from a stale checkpoint\n", cfg.InstanceID)
+			}
+
 			time.Sleep(cfg.RetryInterval)
 			continue
 		}
@@ -128,6 +168,10 @@ func VerifyServiceHealthViaSSM(ctx context.Context, cfg ServiceHealthConfig, opt
 		time.Sleep(cfg.RetryInterval)
 	}
 
+	// Provide specific error context for common failure modes
+	if isSSMNotReadyError(lastErr) {
+		return fmt.Errorf("SSM agent not ready after %d attempts (instance=%s): %w. Check IAM role has AmazonSSMManagedInstanceCore policy and instance can reach SSM endpoint", cfg.MaxRetries, cfg.InstanceID, lastErr)
+	}
 	return fmt.Errorf("service unhealthy after %d attempts: %w", cfg.MaxRetries, lastErr)
 }
 
