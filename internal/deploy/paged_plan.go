@@ -328,6 +328,10 @@ func BuildPlanPagePrompt(provider string, enrichedPrompt string, currentPlan *ma
 		b.WriteString("\n")
 	}
 
+	if summary := formatSkeletonCapabilities(inferSkeletonCapabilities(provider, enrichedPrompt, requiredLaunchOps)); summary != "" {
+		b.WriteString(summary)
+	}
+
 	if len(mustFixIssues) > 0 {
 		b.WriteString("You MUST address these HARD issues in the next commands you generate (or by reaching the missing step):\n")
 		max := 12

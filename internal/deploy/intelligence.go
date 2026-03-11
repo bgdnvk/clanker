@@ -394,11 +394,13 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 		}
 	}
 
-	// Deterministic override: OpenClaw is stateful + long-lived websocket gateway.
-	// When deploying to AWS and the target is default/unspecified, prefer EC2.
-	ApplyOpenClawArchitectureDefaults(targetProvider, opts, profile, deep, arch)
-	// Deterministic override: WordPress one-click deploy uses EC2 + ALB + Docker Hub images.
-	ApplyWordPressArchitectureDefaults(targetProvider, opts, profile, deep, arch)
+	ApplyRulePackArchitectureDefaults(RulePackContext{
+		TargetProvider: targetProvider,
+		Options:        opts,
+		Profile:        profile,
+		Deep:           deep,
+		Docker:         result.Docker,
+	}, arch)
 	result.Architecture = arch
 
 	// Deterministic override: static sites should prefer static hosting unless user explicitly requested EC2/EKS.
@@ -1283,8 +1285,13 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAn
 			b.WriteString(fmt.Sprintf("- Prefer Docker runtime command: %s\n", docker.RunCommand))
 		}
 	}
-	AppendOpenClawDeploymentRequirements(&b, p, deep, strat.Provider)
-	AppendWordPressDeploymentRequirements(&b, p, deep)
+	AppendRulePackDeploymentRequirements(&b, RulePackContext{
+		TargetProvider: strat.Provider,
+		Options:        opts,
+		Profile:        p,
+		Deep:           deep,
+		Docker:         docker,
+	})
 	if pf := BuildPreflightReport(p, docker, deep); pf != nil {
 		ctx := pf.FormatForPrompt()
 		if strings.TrimSpace(ctx) != "" {

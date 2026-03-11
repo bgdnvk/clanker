@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 
@@ -154,28 +155,16 @@ func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepA
 	}
 	appPorts = uniqueInts(appPorts)
 
-	// Plan-wide AWS checks (ports/health checks) for ALB-based EC2 deploys — only for AWS.
-	if isAWS {
-		awsChecks := validateAWSPlanCommands(&plan, appPorts, deep)
-		out.Issues = append(out.Issues, awsChecks.Issues...)
-		out.Fixes = append(out.Fixes, awsChecks.Fixes...)
-		out.Warnings = append(out.Warnings, awsChecks.Warnings...)
-	}
-
-	if isOpenClaw && isAWS {
-		openClawChecks := validateOpenClawPlanCommands(&plan)
-		out.Issues = append(out.Issues, openClawChecks.Issues...)
-		out.Fixes = append(out.Fixes, openClawChecks.Fixes...)
-		out.Warnings = append(out.Warnings, openClawChecks.Warnings...)
-	}
-
-	// DO-specific plan checks.
-	if provider == "digitalocean" {
-		doChecks := validateDigitalOceanPlanCommands(&plan, appPorts, isOpenClaw)
-		out.Issues = append(out.Issues, doChecks.Issues...)
-		out.Fixes = append(out.Fixes, doChecks.Fixes...)
-		out.Warnings = append(out.Warnings, doChecks.Warnings...)
-	}
+	packChecks := ApplyRulePackDeterministicValidation(&plan, RulePackContext{
+		PlanProvider: plan.Provider,
+		Profile:      p,
+		Deep:         deep,
+		Docker:       docker,
+		AppPorts:     appPorts,
+	})
+	out.Issues = append(out.Issues, packChecks.Issues...)
+	out.Fixes = append(out.Fixes, packChecks.Fixes...)
+	out.Warnings = append(out.Warnings, packChecks.Warnings...)
 
 	// EC2 user-data lint — only for AWS plans.
 	if isAWS {
@@ -310,7 +299,7 @@ func CheckBulkRepairInvariants(plan *maker.Plan, profile *RepoProfile, deep *Dee
 		issues = append(issues, "[HARD] bulk invariant failed: plan has no commands")
 		fixes = append(fixes, "Ensure repaired plan keeps a non-empty commands array")
 	}
-	if unresolved := GetUnresolvedPlaceholders(plan); len(unresolved) > 0 {
+	if unresolved := FilterRuntimeInjectedTokens(GetUnresolvedPlaceholders(plan), os.Environ()); len(unresolved) > 0 {
 		issues = append(issues, "[HARD] bulk invariant failed: unresolved placeholders remain")
 		fixes = append(fixes, "Resolve placeholder bindings so every <TOKEN> has a concrete produced value")
 	}
@@ -755,6 +744,7 @@ func validateDigitalOceanPlanCommands(plan *maker.Plan, appPorts []int, isOpenCl
 			hasFirewallCreate = true
 			inboundCount := countDOFlagOccurrences(args, "--inbound-rules")
 			outboundCount := countDOFlagOccurrences(args, "--outbound-rules")
+			firewallSpec := extractDOFirewallSpec(args)
 			if inboundCount > 1 {
 				out.Issues = append(out.Issues, "[HARD] DigitalOcean firewall create uses repeated --inbound-rules flags; doctl keeps only the last one")
 				out.Fixes = append(out.Fixes, "Use exactly ONE --inbound-rules arg containing a quoted string of space-separated rules")
@@ -764,20 +754,26 @@ func validateDigitalOceanPlanCommands(plan *maker.Plan, appPorts []int, isOpenCl
 				out.Fixes = append(out.Fixes, "Use exactly ONE --outbound-rules arg containing a quoted string of space-separated rules")
 			}
 
-			inboundPorts := extractDOFirewallPorts(args, "--inbound-rules", "tcp")
 			for port := range requiredInboundPorts {
-				if !inboundPorts[port] {
+				if !doFirewallSpecHasInboundPort(firewallSpec, "tcp", port) {
 					out.Issues = append(out.Issues, fmt.Sprintf("[HARD] DigitalOcean firewall create is missing inbound TCP port %s", port))
 					out.Fixes = append(out.Fixes, fmt.Sprintf("Add inbound rule protocol:tcp,ports:%s,address:0.0.0.0/0 to compute firewall create", port))
 				}
 			}
+			if isOpenClaw {
+				for _, forbidden := range []string{"80", "443", "8080"} {
+					if doFirewallSpecHasInboundPort(firewallSpec, "tcp", forbidden) {
+						out.Issues = append(out.Issues, fmt.Sprintf("[HARD] DigitalOcean firewall create exposes TCP port %s for OpenClaw without an explicit reverse proxy requirement", forbidden))
+						out.Fixes = append(out.Fixes, fmt.Sprintf("Remove inbound TCP port %s from compute firewall create; plain OpenClaw droplet needs only 22, 18789, and 18790", forbidden))
+					}
+				}
+			}
 
-			outboundAll := extractDOFirewallOutboundAll(args)
-			if !outboundAll["tcp"] {
+			if !doFirewallSpecHasOutboundAll(firewallSpec, "tcp") {
 				out.Issues = append(out.Issues, "[HARD] DigitalOcean firewall create is missing outbound TCP all rule")
 				out.Fixes = append(out.Fixes, "Add outbound rule protocol:tcp,ports:all,address:0.0.0.0/0 to compute firewall create")
 			}
-			if !outboundAll["udp"] {
+			if !doFirewallSpecHasOutboundAll(firewallSpec, "udp") {
 				out.Issues = append(out.Issues, "[HARD] DigitalOcean firewall create is missing outbound UDP all rule")
 				out.Fixes = append(out.Fixes, "Add outbound rule protocol:udp,ports:all,address:0.0.0.0/0 to compute firewall create")
 			}
@@ -816,11 +812,13 @@ func validateDigitalOceanPlanCommands(plan *maker.Plan, appPorts []int, isOpenCl
 	}
 
 	if !hasSSHKeyList {
-		out.Warnings = append(out.Warnings, "No ssh-key list step — <SSH_KEY_ID> placeholder will be unresolved unless hardcoded")
+		out.Warnings = append(out.Warnings, "No ssh-key import/list step — <SSH_KEY_ID> placeholder will be unresolved unless hardcoded")
 	}
 
-	if !hasReservedIP {
+	if !hasReservedIP && !isOpenClaw {
 		out.Warnings = append(out.Warnings, "No reserved IP — Droplet public IP may change on reboot; consider compute reserved-ip create")
+	} else if hasReservedIP && isOpenClaw {
+		out.Warnings = append(out.Warnings, "Reserved IP is optional for OpenClaw on DigitalOcean — omit compute reserved-ip create unless quota is available and a pinned IP is required")
 	}
 
 	if hasDropletCreate && !producesDropletID {
@@ -879,6 +877,7 @@ func validateDigitalOceanPlanCommands(plan *maker.Plan, appPorts []int, isOpenCl
 			continue
 		}
 		lower := strings.ToLower(script)
+		runtimeSpec, hasRuntime := inferOpenClawDORuntimeSpec(script)
 
 		// Unterminated single-quote check (shared with AWS)
 		if hasLikelyBrokenSingleQuoteLine(script) {
@@ -905,36 +904,52 @@ func validateDigitalOceanPlanCommands(plan *maker.Plan, appPorts []int, isOpenCl
 		}
 
 		// Check OpenClaw-specific user-data requirements
-		if isOpenClaw {
+		if isOpenClaw || hasRuntime {
 			if strings.Contains(lower, "cloud-init status --wait") {
 				out.Issues = append(out.Issues, "[HARD] DigitalOcean droplet user-data runs 'cloud-init status --wait' inside cloud-init and will deadlock")
 				out.Fixes = append(out.Fixes, "Remove 'cloud-init status --wait' from user-data; it already runs inside cloud-init")
 			}
-			if strings.Contains(lower, "docker compose build") || strings.Contains(lower, "docker-compose build") {
+			if runtimeSpec.HasComposeBuild {
 				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data uses 'docker compose build' even though compose references image: openclaw:local")
 				out.Fixes = append(out.Fixes, "Replace 'docker compose build ...' with 'docker build -t openclaw:local .' before docker compose up")
 			}
-			if !strings.Contains(lower, "docker compose up") && !strings.Contains(lower, "docker-compose up") && !strings.Contains(lower, "docker run") {
+			if hasRuntime && !runtimeSpec.HasComposeUp && !runtimeSpec.HasDockerRun {
 				out.Issues = append(out.Issues, "[HARD] DigitalOcean droplet user-data does not start OpenClaw (missing docker compose up or docker run)")
 				out.Fixes = append(out.Fixes, "Add 'docker compose up -d openclaw-gateway' to user-data script")
 			}
-			if !strings.Contains(lower, "openclaw_gateway_token") && !strings.Contains(lower, "openclaw_gateway_password") {
+			if hasRuntime && !runtimeSpec.HasGatewaySecret {
 				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data .env is missing OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_PASSWORD")
 				out.Fixes = append(out.Fixes, "Write OPENCLAW_GATEWAY_TOKEN=<OPENCLAW_GATEWAY_TOKEN> or OPENCLAW_GATEWAY_PASSWORD=<...> into the .env heredoc before docker compose up")
 			}
-			if strings.Contains(lower, "placeholder_replace_me") || strings.Contains(lower, "changeme") || strings.Contains(lower, "replace_me") {
+			if runtimeSpec.LeaksDOAccessToken {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data writes DIGITALOCEAN_ACCESS_TOKEN into .env")
+				out.Fixes = append(out.Fixes, "Remove DIGITALOCEAN_ACCESS_TOKEN from the OpenClaw .env heredoc; it is not an application secret")
+			}
+			if runtimeSpec.HasCloneSoftFail {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data ignores git clone failure with a shell fallback ('|| ...')")
+				out.Fixes = append(out.Fixes, "Remove the shell fallback from git clone so user-data fails fast when repository checkout fails")
+			}
+			if runtimeSpec.HasDockerSetupSoftFail {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data ignores docker-setup.sh failure with a shell fallback ('|| ...')")
+				out.Fixes = append(out.Fixes, "Remove the shell fallback from docker-setup.sh so onboarding failure stops the deployment")
+			}
+			if runtimeSpec.HasLeakedDoctlFlags {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data includes outer doctl flags like --wait/--output on the docker compose up line")
+				out.Fixes = append(out.Fixes, "Keep doctl flags outside user-data; the user-data runtime command must be just 'docker compose up -d openclaw-gateway'")
+			}
+			if runtimeSpec.HasDummySecrets {
 				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data contains dummy secret values like placeholder_replace_me/changeme")
 				out.Fixes = append(out.Fixes, "Preserve provided placeholders such as <OPENCLAW_GATEWAY_TOKEN> and <ANTHROPIC_API_KEY>; never replace them with dummy literals")
 			}
-			if strings.Contains(lower, "openssl rand") || strings.Contains(lower, "gateway_token=$(") || strings.Contains(lower, "openclaw_gateway_token=${gateway_token}") || strings.Contains(lower, "openclaw_gateway_token=$gateway_token") {
+			if runtimeSpec.HasGeneratedGateway {
 				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data generates a random gateway token instead of using the user-provided gateway secret")
 				out.Fixes = append(out.Fixes, "Write OPENCLAW_GATEWAY_TOKEN=<OPENCLAW_GATEWAY_TOKEN> directly into the .env heredoc; do not generate a random token in user-data")
 			}
-			if !strings.Contains(lower, "anthropic_api_key") && !strings.Contains(lower, "openai_api_key") && !strings.Contains(lower, "gemini_api_key") {
+			if hasRuntime && !runtimeSpec.HasProviderKey {
 				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data .env is missing all AI provider keys (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY)")
 				out.Fixes = append(out.Fixes, "Write at least one provider key placeholder into the .env heredoc before docker compose up")
 			}
-			if !strings.Contains(lower, "openclaw_gateway_bind") {
+			if hasRuntime && !runtimeSpec.HasBindSetting {
 				out.Warnings = append(out.Warnings, "user-data .env missing OPENCLAW_GATEWAY_BIND=lan — gateway may not accept external connections")
 			}
 			for _, marker := range []string{"discord_bot_token", "telegram_bot_token"} {
@@ -949,90 +964,6 @@ func validateDigitalOceanPlanCommands(plan *maker.Plan, appPorts []int, isOpenCl
 	}
 
 	return out
-}
-
-func countDOFlagOccurrences(args []string, name string) int {
-	count := 0
-	for i := 0; i < len(args); i++ {
-		trimmed := strings.TrimSpace(args[i])
-		if trimmed == name || strings.HasPrefix(trimmed, name+"=") {
-			count++
-		}
-	}
-	return count
-}
-
-func extractDOFirewallRuleValues(args []string, name string) []string {
-	var values []string
-	for i := 0; i < len(args); i++ {
-		trimmed := strings.TrimSpace(args[i])
-		if trimmed == name && i+1 < len(args) {
-			values = append(values, strings.TrimSpace(args[i+1]))
-			i++
-			continue
-		}
-		if strings.HasPrefix(trimmed, name+"=") {
-			values = append(values, strings.TrimSpace(strings.TrimPrefix(trimmed, name+"=")))
-		}
-	}
-	return values
-}
-
-func extractDOFirewallPorts(args []string, flagName string, protocol string) map[string]bool {
-	out := map[string]bool{}
-	for _, value := range extractDOFirewallRuleValues(args, flagName) {
-		for _, rule := range strings.Fields(value) {
-			parts := parseDOFirewallRule(rule)
-			if !strings.EqualFold(parts["protocol"], protocol) {
-				continue
-			}
-			port := strings.TrimSpace(parts["ports"])
-			if port != "" {
-				out[port] = true
-			}
-		}
-	}
-	return out
-}
-
-func extractDOFirewallOutboundAll(args []string) map[string]bool {
-	out := map[string]bool{}
-	for _, value := range extractDOFirewallRuleValues(args, "--outbound-rules") {
-		for _, rule := range strings.Fields(value) {
-			parts := parseDOFirewallRule(rule)
-			proto := strings.ToLower(strings.TrimSpace(parts["protocol"]))
-			ports := strings.ToLower(strings.TrimSpace(parts["ports"]))
-			if proto == "" {
-				continue
-			}
-			if ports == "all" || ports == "0" {
-				out[proto] = true
-			}
-		}
-	}
-	return out
-}
-
-func parseDOFirewallRule(rule string) map[string]string {
-	out := map[string]string{}
-	for _, part := range strings.Split(rule, ",") {
-		k, v, ok := strings.Cut(strings.TrimSpace(part), ":")
-		if !ok {
-			continue
-		}
-		out[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
-	}
-	return out
-}
-
-// extractDoctlUserDataScript extracts the --user-data value from doctl args.
-func extractDoctlUserDataScript(args []string) string {
-	for i, a := range args {
-		if strings.EqualFold(strings.TrimSpace(a), "--user-data") && i+1 < len(args) {
-			return args[i+1]
-		}
-	}
-	return ""
 }
 
 // hasOpenClawSSMRuntimePath checks if SSM send-command steps collectively

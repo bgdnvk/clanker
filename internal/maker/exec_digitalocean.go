@@ -10,10 +10,12 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,6 +79,11 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 			args = generatedArgs
 		}
 		args = normalizeFirewallRuleFlagsAtExec(args)
+		args = stripInvalidICMPPortsAtExec(args)
+		args = fixFirewallEmptyAddressAtExec(args)
+		if err := validateDOFirewallRulesAtExec(args); err != nil {
+			return fmt.Errorf("command %d rejected: %w", idx+1, err)
+		}
 
 		if err := validateDOUserDataAtExec(args); err != nil {
 			return fmt.Errorf("command %d rejected: %w", idx+1, err)
@@ -111,8 +118,6 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 			continue
 		}
 
-		// Safety net: fix firewall empty address right before execution
-		args = fixFirewallEmptyAddressAtExec(args)
 		args = normalizeDoctlOutputFlags(args)
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: doctl %s\n", idx+1, len(plan.Commands), strings.Join(redactDOCommandArgsForLog(args), " "))
 
@@ -609,6 +614,8 @@ func recoverDOBindingsAfterSkip(ctx context.Context, args []string, produces map
 		getArgs = []string{"registry", "get", "--output", "json"}
 	case strings.Contains(lower, "ssh-key import"):
 		getArgs = []string{"compute", "ssh-key", "list", "--output", "json"}
+	case strings.Contains(lower, "firewall create"):
+		getArgs = []string{"compute", "firewall", "list", "--output", "json"}
 	default:
 		return
 	}
@@ -628,6 +635,14 @@ func recoverDOBindingsAfterSkip(ctx context.Context, args []string, produces map
 	// Direct extraction for registry (produce paths may be hallucinated)
 	if strings.HasPrefix(lower, "registry create") {
 		extractRegistryBindingsDirect(out, bindings)
+		return
+	}
+	if strings.Contains(lower, "ssh-key import") {
+		extractSSHKeyBindingsDirect(args, out, bindings)
+		return
+	}
+	if strings.Contains(lower, "firewall create") {
+		extractFirewallBindingsDirect(args, out, bindings)
 	}
 }
 
@@ -658,6 +673,93 @@ func extractRegistryBindingsDirect(output string, bindings map[string]string) {
 		if strings.TrimSpace(bindings["REGISTRY_NAME"]) == "" {
 			bindings["REGISTRY_NAME"] = name
 		}
+	}
+}
+
+func extractSSHKeyBindingsDirect(args []string, output string, bindings map[string]string) {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return
+	}
+	keyName := ""
+	if len(args) >= 4 {
+		keyName = strings.TrimSpace(args[3])
+	}
+	publicKeyPath := expandHomePath(strings.TrimSpace(flagValue(args, "--public-key-file")))
+	publicKeyText := ""
+	if publicKeyPath != "" {
+		if blob, err := os.ReadFile(publicKeyPath); err == nil {
+			publicKeyText = strings.TrimSpace(string(blob))
+		}
+	}
+
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(output), &entries); err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := doJSONStringValue(entry["name"])
+		pub := doJSONStringValue(entry["public_key"])
+		if publicKeyText != "" && pub == publicKeyText {
+			if id := doJSONStringValue(entry["id"]); id != "" {
+				bindings["SSH_KEY_ID"] = id
+			}
+			return
+		}
+		if keyName != "" && name == keyName {
+			if id := doJSONStringValue(entry["id"]); id != "" {
+				bindings["SSH_KEY_ID"] = id
+			}
+			return
+		}
+	}
+}
+
+func extractFirewallBindingsDirect(args []string, output string, bindings map[string]string) {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return
+	}
+	firewallName := strings.TrimSpace(flagValue(args, "--name"))
+	if firewallName == "" {
+		return
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(output), &entries); err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := doJSONStringValue(entry["name"])
+		if name != firewallName {
+			continue
+		}
+		if id := doJSONStringValue(entry["id"]); id != "" {
+			bindings["FIREWALL_ID"] = id
+		}
+		return
+	}
+}
+
+func doJSONStringValue(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(x)
+	case float64:
+		if x == float64(int64(x)) {
+			return strconv.FormatInt(int64(x), 10)
+		}
+		return strings.TrimSpace(strconv.FormatFloat(x, 'f', -1, 64))
+	case json.Number:
+		return strings.TrimSpace(x.String())
+	case bool:
+		if x {
+			return "true"
+		}
+		return "false"
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", v))
 	}
 }
 
@@ -734,6 +836,20 @@ func validateDOUserDataAtExec(args []string) error {
 	}
 	if !strings.Contains(lower, "openclaw_gateway_token") && !strings.Contains(lower, "openclaw_gateway_password") {
 		return fmt.Errorf("OpenClaw user-data is missing OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_PASSWORD in .env")
+	}
+	if strings.Contains(lower, "digitalocean_access_token=") {
+		return fmt.Errorf("OpenClaw user-data must not write DIGITALOCEAN_ACCESS_TOKEN into .env")
+	}
+	cloneSoftFailRe := regexp.MustCompile(`(?im)^\s*git\s+clone[^\n]*\s*\|\|[^\n]*$`)
+	if cloneSoftFailRe.MatchString(script) {
+		return fmt.Errorf("OpenClaw user-data must not ignore git clone failure with a shell fallback ('|| ...')")
+	}
+	setupSoftFailRe := regexp.MustCompile(`(?im)^\s*\./docker-setup\.sh[^\n]*\s*\|\|[^\n]*$`)
+	if setupSoftFailRe.MatchString(script) {
+		return fmt.Errorf("OpenClaw user-data must not ignore docker-setup.sh failure with a shell fallback ('|| ...')")
+	}
+	if strings.Contains(lower, "docker compose up -d openclaw-gateway --wait") || strings.Contains(lower, "docker-compose up -d openclaw-gateway --wait") || strings.Contains(lower, "docker compose up -d openclaw-gateway --output") || strings.Contains(lower, "docker-compose up -d openclaw-gateway --output") {
+		return fmt.Errorf("OpenClaw user-data must not include outer doctl flags like --wait/--output on the docker compose up line")
 	}
 	if strings.Contains(lower, "placeholder_replace_me") || strings.Contains(lower, "changeme") || strings.Contains(lower, "replace_me") {
 		return fmt.Errorf("OpenClaw user-data contains dummy secret values like placeholder_replace_me/changeme")
@@ -1030,4 +1146,97 @@ func fixFirewallEmptyAddressAtExec(args []string) []string {
 		}
 	}
 	return args
+}
+
+func stripInvalidICMPPortsAtExec(args []string) []string {
+	if len(args) < 3 {
+		return args
+	}
+	s0 := strings.ToLower(strings.TrimSpace(args[0]))
+	s1 := strings.ToLower(strings.TrimSpace(args[1]))
+	if s0 != "compute" || s1 != "firewall" {
+		return args
+	}
+	for i, arg := range args {
+		trimmed := strings.TrimSpace(arg)
+		if !strings.Contains(trimmed, "protocol:icmp") || !strings.Contains(trimmed, "ports:") {
+			continue
+		}
+		trimmed = strings.ReplaceAll(trimmed, "protocol:icmp,ports:all,", "protocol:icmp,")
+		trimmed = strings.ReplaceAll(trimmed, "protocol:icmp,ports:0,", "protocol:icmp,")
+		trimmed = strings.ReplaceAll(trimmed, ",ports:all,address:", ",address:")
+		trimmed = strings.ReplaceAll(trimmed, ",ports:0,address:", ",address:")
+		trimmed = strings.ReplaceAll(trimmed, "protocol:icmp,ports:all", "protocol:icmp")
+		trimmed = strings.ReplaceAll(trimmed, "protocol:icmp,ports:0", "protocol:icmp")
+		args[i] = trimmed
+	}
+	return args
+}
+
+var doFirewallPortSpecRe = regexp.MustCompile(`^(?:all|0|\d+|\d+-\d+)$`)
+
+func validateDOFirewallRulesAtExec(args []string) error {
+	if len(args) < 3 {
+		return nil
+	}
+	s0 := strings.ToLower(strings.TrimSpace(args[0]))
+	s1 := strings.ToLower(strings.TrimSpace(args[1]))
+	if s0 != "compute" || s1 != "firewall" {
+		return nil
+	}
+	verb := strings.ToLower(strings.TrimSpace(args[2]))
+	if verb != "create" && verb != "update" {
+		return nil
+	}
+	for _, spec := range []struct {
+		flag      string
+		direction string
+	}{
+		{flag: "--inbound-rules", direction: "inbound"},
+		{flag: "--outbound-rules", direction: "outbound"},
+	} {
+		for _, value := range extractFirewallRuleValuesAtExec(args, spec.flag) {
+			for idx, rawRule := range strings.Fields(value) {
+				parts := parseFirewallRuleAtExec(rawRule)
+				if err := validateDOFirewallRuleAtExec(spec.direction, idx+1, rawRule, parts); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateDOFirewallRuleAtExec(direction string, index int, rawRule string, parts map[string]string) error {
+	protocol := strings.ToLower(strings.TrimSpace(parts["protocol"]))
+	ports := strings.ToLower(strings.TrimSpace(parts["ports"]))
+	address := strings.TrimSpace(parts["address"])
+	label := fmt.Sprintf("%s rule %d (%s)", direction, index, strings.TrimSpace(rawRule))
+
+	if protocol == "" {
+		return fmt.Errorf("firewall %s is missing protocol", label)
+	}
+	switch protocol {
+	case "tcp", "udp":
+		if ports == "" {
+			return fmt.Errorf("firewall %s is missing ports", label)
+		}
+		if !doFirewallPortSpecRe.MatchString(ports) {
+			return fmt.Errorf("firewall %s has invalid ports value %q", label, ports)
+		}
+	case "icmp":
+		if ports != "" {
+			return fmt.Errorf("firewall %s cannot set ports for icmp", label)
+		}
+	default:
+		return fmt.Errorf("firewall %s has unsupported protocol %q", label, protocol)
+	}
+
+	if address == "" {
+		return fmt.Errorf("firewall %s is missing address", label)
+	}
+	if _, _, err := net.ParseCIDR(address); err != nil {
+		return fmt.Errorf("firewall %s has invalid CIDR %q", label, address)
+	}
+	return nil
 }

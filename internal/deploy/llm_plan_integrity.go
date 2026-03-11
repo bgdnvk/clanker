@@ -89,6 +89,9 @@ func RepairPlanJSONWithLLM(
 		cleaned := strings.TrimSpace(clean(resp))
 		plan, pErr := maker.ParsePlan(cleaned)
 		if pErr == nil {
+			if baseline, bErr := maker.ParsePlan(strings.TrimSpace(baselinePlanJSON)); bErr == nil && baseline != nil && baseline.Capabilities != nil && plan.Capabilities == nil {
+				plan.Capabilities = baseline.Capabilities
+			}
 			return plan, nil
 		}
 		logf("[deploy] warning: plan JSON-fix attempt %d failed (%v)", attempt, pErr)
@@ -137,6 +140,7 @@ func RunGenericPlanIntegrityPassWithLLM(
 		if parseErr == nil {
 			fixedPlan.Provider = plan.Provider
 			fixedPlan.Question = plan.Question
+			fixedPlan.Capabilities = plan.Capabilities
 			if fixedPlan.CreatedAt.IsZero() {
 				fixedPlan.CreatedAt = plan.CreatedAt
 			}

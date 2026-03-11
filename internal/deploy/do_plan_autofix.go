@@ -128,6 +128,18 @@ func ApplyDigitalOceanPlanAutofix(plan *maker.Plan, logf func(string, ...any)) *
 		logf("[deploy] do autofix: replaced %d 'docker compose build' → 'docker build -t openclaw:local .' in user-data", ocBuildFixed)
 	}
 
+	// OpenClaw: remove DO token leakage and masked clone failures from user-data
+	ocUserDataFixed := fixDOOpenClawUserDataSafety(plan)
+	if ocUserDataFixed > 0 {
+		logf("[deploy] do autofix: fixed %d OpenClaw user-data safety issue(s)", ocUserDataFixed)
+	}
+
+	// OpenClaw: strip unnecessary 80/443/8080 firewall ports on plain droplet plans
+	ocFirewallFixed := fixDOOpenClawFirewallSpec(plan)
+	if ocFirewallFixed > 0 {
+		logf("[deploy] do autofix: canonicalized %d OpenClaw firewall command(s)", ocFirewallFixed)
+	}
+
 	// Fix ssh-key import pointing at nonexistent local key file
 	sshFixed := fixDOSSHKeyPath(plan)
 	if sshFixed > 0 {
@@ -938,13 +950,89 @@ func fixDOOpenClawComposeBuild(plan *maker.Plan) int {
 	return count
 }
 
-func isDODropletCreate(args []string) bool {
-	if len(args) < 3 {
-		return false
+func fixDOOpenClawUserDataSafety(plan *maker.Plan) int {
+	count := 0
+	for ci := range plan.Commands {
+		args := plan.Commands[ci].Args
+		if !isDODropletCreate(args) {
+			continue
+		}
+		for ai, arg := range args {
+			if arg != "--user-data" || ai+1 >= len(args) {
+				continue
+			}
+			script := args[ai+1]
+			if !hasOpenClawDORuntimeScript(script) {
+				continue
+			}
+			newScript := script
+			doTokenRe := regexp.MustCompile(`(?m)^\s*DIGITALOCEAN_ACCESS_TOKEN=.*\n?`)
+			if doTokenRe.MatchString(newScript) {
+				newScript = doTokenRe.ReplaceAllString(newScript, "")
+				count++
+			}
+			if fixed, changed := stripOpenClawCloneSoftFail(newScript); changed {
+				newScript = fixed
+				count++
+			}
+			if fixed, changed := stripOpenClawDockerSetupSoftFail(newScript); changed {
+				newScript = fixed
+				count++
+			}
+			composeUpFlagRe := regexp.MustCompile(`(?m)(docker(?:-compose|\s+compose)\s+up\s+-d\s+openclaw-gateway)\s+--wait(?:\s+--output\s+\S+)?(\s*)$`)
+			if composeUpFlagRe.MatchString(newScript) {
+				newScript = composeUpFlagRe.ReplaceAllString(newScript, `$1$2`)
+				count++
+			}
+			composeUpOutputOnlyRe := regexp.MustCompile(`(?m)(docker(?:-compose|\s+compose)\s+up\s+-d\s+openclaw-gateway)\s+--output\s+\S+(\s*)$`)
+			if composeUpOutputOnlyRe.MatchString(newScript) {
+				newScript = composeUpOutputOnlyRe.ReplaceAllString(newScript, `$1$2`)
+				count++
+			}
+			if canonical, changed := normalizeOpenClawDOBootstrapScript(newScript); changed {
+				newScript = canonical
+				count++
+			}
+			if newScript != script {
+				plan.Commands[ci].Args[ai+1] = newScript
+			}
+		}
 	}
-	return strings.EqualFold(args[0], "compute") &&
-		strings.EqualFold(args[1], "droplet") &&
-		strings.EqualFold(args[2], "create")
+	return count
+}
+
+func fixDOOpenClawFirewallSpec(plan *maker.Plan) int {
+	if plan == nil || len(plan.Commands) == 0 {
+		return 0
+	}
+	hasOpenClawDroplet := false
+	for _, cmd := range plan.Commands {
+		if !isDODropletCreate(cmd.Args) {
+			continue
+		}
+		script := extractDoctlUserDataScript(cmd.Args)
+		if hasOpenClawDORuntimeScript(script) {
+			hasOpenClawDroplet = true
+			break
+		}
+	}
+	if !hasOpenClawDroplet {
+		return 0
+	}
+	count := 0
+	for ci := range plan.Commands {
+		args := plan.Commands[ci].Args
+		if len(args) < 3 || !strings.EqualFold(args[0], "compute") || !strings.EqualFold(args[1], "firewall") {
+			continue
+		}
+		fixed, changed := canonicalizeOpenClawDOFirewallArgs(args)
+		if !changed {
+			continue
+		}
+		plan.Commands[ci].Args = fixed
+		count++
+	}
+	return count
 }
 
 // Regex for user-data compose sanitization

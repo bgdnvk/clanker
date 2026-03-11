@@ -408,16 +408,14 @@ Examples:
 			return fmt.Errorf("failed to generate a plan (no commands produced)")
 		}
 
-		// Apply project-specific and generic autofixes
-		if isOpenClawDeploy {
-			if patched := deploy.ApplyOpenClawPlanAutofix(plan, rp, intel.DeepAnalysis, logf); patched != nil {
-				plan = patched
-			}
-		}
-		if strings.EqualFold(strings.TrimSpace(planProvider), "digitalocean") {
-			if patched := deploy.ApplyDigitalOceanPlanAutofix(plan, logf); patched != nil {
-				plan = patched
-			}
+		if patched := deploy.ApplyRulePackPlanAutofix(plan, deploy.RulePackContext{
+			TargetProvider: planProvider,
+			PlanProvider:   plan.Provider,
+			Profile:        rp,
+			Deep:           intel.DeepAnalysis,
+			Docker:         intel.Docker,
+		}, logf); patched != nil {
+			plan = patched
 		}
 		if patched := deploy.ApplyGenericPlanAutofix(plan, logf, rp.EnvVars...); patched != nil {
 			plan = patched
@@ -438,10 +436,14 @@ Examples:
 			pagedPlan := generatePagedPlan(ctx, aiClient, planProvider, planningContext, rp, intel, requiredLaunchOps, isOpenClawDeploy, applyMode, logf)
 			if pagedPlan != nil && len(pagedPlan.Commands) > 0 {
 				// Compare: use whichever has fewer issues
-				if isOpenClawDeploy {
-					if patched := deploy.ApplyOpenClawPlanAutofix(pagedPlan, rp, intel.DeepAnalysis, logf); patched != nil {
-						pagedPlan = patched
-					}
+				if patched := deploy.ApplyRulePackPlanAutofix(pagedPlan, deploy.RulePackContext{
+					TargetProvider: planProvider,
+					PlanProvider:   pagedPlan.Provider,
+					Profile:        rp,
+					Deep:           intel.DeepAnalysis,
+					Docker:         intel.Docker,
+				}, logf); patched != nil {
+					pagedPlan = patched
 				}
 				if patched := deploy.ApplyGenericPlanAutofix(pagedPlan, logf, rp.EnvVars...); patched != nil {
 					pagedPlan = patched
@@ -998,14 +1000,14 @@ Examples:
 		}
 	skipIntegrityApply:
 
-		if patched := deploy.ApplyOpenClawPlanAutofix(plan, rp, intel.DeepAnalysis, logf); patched != nil {
+		if patched := deploy.ApplyRulePackPlanAutofix(plan, deploy.RulePackContext{
+			TargetProvider: planProvider,
+			PlanProvider:   plan.Provider,
+			Profile:        rp,
+			Deep:           intel.DeepAnalysis,
+			Docker:         intel.Docker,
+		}, logf); patched != nil {
 			plan = patched
-		}
-		// Re-run DO autofix — repair/integrity can reintroduce hallucinated args
-		if strings.EqualFold(strings.TrimSpace(planProvider), "digitalocean") {
-			if patched := deploy.ApplyDigitalOceanPlanAutofix(plan, logf); patched != nil {
-				plan = patched
-			}
 		}
 
 		// Generic dedup: collapse redundant launch cycles for any project.
@@ -1035,9 +1037,16 @@ Examples:
 		openClawUnresolvedCritical := make([]string, 0, 12)
 		if isOpenClawDeploy {
 			if unresolved := deploy.GetUnresolvedPlaceholders(plan); len(unresolved) > 0 {
+				runtimeEnvKeys := append([]string(nil), rp.EnvVars...)
+				if userConfig != nil && len(userConfig.EnvVars) > 0 {
+					runtimeEnvKeys = runtimeEnvKeys[:0]
+					for key := range userConfig.EnvVars {
+						runtimeEnvKeys = append(runtimeEnvKeys, key+"=set")
+					}
+				}
 				// Filter out tokens that are injected at runtime via env vars
 				// (DO executor imports secret-like env vars + DIGITALOCEAN_ACCESS_TOKEN)
-				trueUnresolved := deploy.FilterRuntimeInjectedTokens(unresolved, rp.EnvVars)
+				trueUnresolved := deploy.FilterRuntimeInjectedTokens(unresolved, runtimeEnvKeys)
 				if len(trueUnresolved) > 0 && !deploy.AllPlaceholdersAreProduced(plan, trueUnresolved) {
 					openClawUnresolvedApplyBlock = true
 					openClawUnresolvedCritical = append(openClawUnresolvedCritical, trueUnresolved...)
@@ -1443,17 +1452,19 @@ func generatePagedPlan(
 	const earlyRepairAfterFailures = 3
 	const openClawSoftPlanCommands = 30
 	const openClawHardPlanCommands = 40
+	effectiveProvider := strings.TrimSpace(planProvider)
+	if strings.TrimSpace(intel.Architecture.Provider) != "" {
+		effectiveProvider = strings.TrimSpace(intel.Architecture.Provider)
+	}
 
 	plan := &maker.Plan{
-		Version:   maker.CurrentPlanVersion,
-		CreatedAt: time.Now().UTC(),
-		Provider:  planProvider,
-		Question:  fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, planProvider, intel.Architecture.Method),
-		Summary:   "",
-		Commands:  nil,
-	}
-	if strings.TrimSpace(intel.Architecture.Provider) != "" {
-		plan.Provider = strings.TrimSpace(intel.Architecture.Provider)
+		Version:      maker.CurrentPlanVersion,
+		CreatedAt:    time.Now().UTC(),
+		Provider:     effectiveProvider,
+		Question:     fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, effectiveProvider, intel.Architecture.Method),
+		Summary:      "",
+		Commands:     nil,
+		Capabilities: deploy.InferPlanCapabilities(effectiveProvider, planningContext, requiredLaunchOps),
 	}
 
 	var mustFixIssues []string
@@ -1572,6 +1583,7 @@ func generatePagedPlan(
 		if strings.TrimSpace(intel.Architecture.Provider) != "" {
 			plan.Provider = strings.TrimSpace(intel.Architecture.Provider)
 		}
+		plan.Capabilities = deploy.InferPlanCapabilities(plan.Provider, planningContext, requiredLaunchOps)
 		plan.Question = fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, strings.ToLower(strings.TrimSpace(plan.Provider)), intel.Architecture.Method)
 		if plan.CreatedAt.IsZero() {
 			plan.CreatedAt = time.Now().UTC()
