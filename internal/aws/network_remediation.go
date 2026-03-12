@@ -17,12 +17,14 @@ func ExtractELBv2SubnetsFromArgs(args []string) []string {
 			continue
 		}
 		out := make([]string, 0, 4)
+		seen := make(map[string]bool)
 		for j := i + 1; j < len(args); j++ {
 			if strings.HasPrefix(args[j], "--") {
 				break
 			}
 			v := strings.TrimSpace(args[j])
-			if v != "" {
+			if v != "" && !seen[v] {
+				seen[v] = true
 				out = append(out, v)
 			}
 		}

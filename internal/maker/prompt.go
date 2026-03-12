@@ -143,12 +143,42 @@ Rules for commands:
   - For destructive/teardown plans, strongly prefer region-grouped delete order: complete one region block, then move to the next region.
   - Avoid interleaving unrelated cross-region deletes in alternating steps.
 
+CRITICAL VALIDATION RULES (violations will cause plan rejection):
+
+1. COMMAND STRUCTURE:
+   - Each command must be: ["service", "operation", ...flags] or ["aws", "service", "operation", ...flags]
+   - Service must be a valid AWS service (ec2, s3, iam, elbv2, ecr, secretsmanager, etc.)
+   - Operation must be a valid AWS CLI operation (create-*, describe-*, put-*, etc.)
+   - NEVER embed shell scripts in command args
+   - NEVER use newlines within args (except in --user-data values)
+
+2. FORBIDDEN PATTERNS (these WILL be rejected):
+   - No "set -e", "set -u", "set -o pipefail" as args
+   - No "#!/bin/bash" or shebangs in args (except --user-data)
+   - No "docker build", "git clone", "curl" as separate commands (the runner handles image prep)
+   - No multi-line strings as single args (except --user-data)
+
+3. SEQUENCING REQUIREMENTS (compute BEFORE load balancing):
+   - IAM roles MUST come before instance profiles
+   - ECR create-repository MUST come before any ec2 run-instances that uses that image
+   - Security groups MUST be created before resources that use them
+   - EC2 run-instances MUST come before elbv2 commands (ALB, target groups)
+   - Target groups MUST be created before listeners
+   - ALB MUST be created before CloudFront
+
+4. IMAGE PREPARATION:
+   - Do NOT include docker build/push commands in the plan
+   - The runner handles image preparation automatically
+   - Just create the ECR repository and the runner will build/push the image
+
 Placeholders and bindings (CRITICAL):
-- You MAY use placeholder tokens inside args like "<SG_RDS_ID>" or "<SUBNET_1>".
+- NEVER use hardcoded resource IDs like sg-xxx, subnet-xxx, vpc-xxx, i-xxx, arn:aws:..., etc.
+- If a resource will be CREATED by the plan, you MUST use a placeholder like "<SG_ID>" or "<SUBNET_1>".
 - If you use ANY placeholder token "<NAME>", you MUST ensure an earlier command includes:
   - "produces": { "NAME": "$.json.path.to.value" }
 - The produces mapping is REQUIRED for EVERY command that creates a resource used later.
 - Without produces, the placeholder will NOT be substituted and the command will fail.
+- Resource IDs from previous runs are STALE and must NOT be reused. Always create new resources or use placeholders.
 
 Common produces mappings (use these exact JSON paths):
 - ec2 create-security-group: { "SG_ID": "$.GroupId" }

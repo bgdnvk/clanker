@@ -101,11 +101,12 @@ uninstall:
 	fi
 	@echo "Uninstallation complete"
 
-# Development build (builds in current directory)
+# Development build (builds in current directory with timestamp version)
+DEV_VERSION := dev:$(shell date +%Y%m%d%H%M%S)
 dev:
-	@echo "Building for development..."
-	@go build -o $(BINARY_NAME) $(MAIN_PATH)
-	@echo "Development build complete: ./$(BINARY_NAME)"
+	@echo "Building for development ($(DEV_VERSION))..."
+	@go build -ldflags "-X github.com/bgdnvk/clanker/cmd.Version=$(DEV_VERSION)" -o $(BINARY_NAME) $(MAIN_PATH)
+	@echo "Development build complete: ./$(BINARY_NAME) ($(DEV_VERSION))"
 
 # Download dependencies
 deps:

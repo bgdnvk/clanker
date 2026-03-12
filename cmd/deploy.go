@@ -19,6 +19,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/deploy"
 	"github.com/bgdnvk/clanker/internal/maker"
 	"github.com/bgdnvk/clanker/internal/openclaw"
+	"github.com/bgdnvk/clanker/internal/resourcedb"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -62,6 +63,7 @@ Examples:
 		gcpProject, _ := cmd.Flags().GetString("gcp-project")
 		azureSubscription, _ := cmd.Flags().GetString("azure-subscription")
 		doAccessToken, _ := cmd.Flags().GetString("do-token")
+		hetznerToken, _ := cmd.Flags().GetString("hetzner-token")
 		enforceImageDeploy, _ := cmd.Flags().GetBool("enforce-image-deploy")
 
 		// 1. Clone + analyze
@@ -138,6 +140,18 @@ Examples:
 				tok = strings.TrimSpace(os.Getenv("DO_API_TOKEN"))
 			}
 			deployOpts.DOToken = tok
+		}
+
+		// Pass Hetzner token for infra scan if targeting Hetzner
+		if strings.EqualFold(strings.TrimSpace(targetProvider), "hetzner") {
+			tok := strings.TrimSpace(hetznerToken)
+			if tok == "" {
+				tok = strings.TrimSpace(os.Getenv("HCLOUD_TOKEN"))
+			}
+			if tok == "" {
+				tok = strings.TrimSpace(os.Getenv("HETZNER_API_TOKEN"))
+			}
+			deployOpts.HetznerToken = tok
 		}
 
 		// 4. Run multi-phase intelligence pipeline (explore → deep analysis → infra scan → architecture)
@@ -420,14 +434,16 @@ Examples:
 			return fmt.Errorf("failed to generate a plan (no commands produced)")
 		}
 
-		if patched := deploy.ApplyRulePackPlanAutofix(plan, deploy.RulePackContext{
-			TargetProvider: planProvider,
-			PlanProvider:   plan.Provider,
-			Profile:        rp,
-			Deep:           intel.DeepAnalysis,
-			Docker:         intel.Docker,
-		}, logf); patched != nil {
-			plan = patched
+		// Apply project-specific and generic autofixes
+		if isOpenClawDeploy {
+			if patched := deploy.ApplyOpenClawPlanAutofix(plan, rp, intel.DeepAnalysis, logf); patched != nil {
+				plan = patched
+			}
+		}
+		if strings.EqualFold(strings.TrimSpace(planProvider), "digitalocean") {
+			if patched := deploy.ApplyDigitalOceanPlanAutofix(plan, logf); patched != nil {
+				plan = patched
+			}
 		}
 		if patched := deploy.ApplyGenericPlanAutofix(plan, logf, rp.EnvVars...); patched != nil {
 			plan = patched
@@ -448,14 +464,10 @@ Examples:
 			pagedPlan := generatePagedPlan(ctx, aiClient, planProvider, planningContext, rp, intel, requiredLaunchOps, isOpenClawDeploy, applyMode, logf)
 			if pagedPlan != nil && len(pagedPlan.Commands) > 0 {
 				// Compare: use whichever has fewer issues
-				if patched := deploy.ApplyRulePackPlanAutofix(pagedPlan, deploy.RulePackContext{
-					TargetProvider: planProvider,
-					PlanProvider:   pagedPlan.Provider,
-					Profile:        rp,
-					Deep:           intel.DeepAnalysis,
-					Docker:         intel.Docker,
-				}, logf); patched != nil {
-					pagedPlan = patched
+				if isOpenClawDeploy {
+					if patched := deploy.ApplyOpenClawPlanAutofix(pagedPlan, rp, intel.DeepAnalysis, logf); patched != nil {
+						pagedPlan = patched
+					}
 				}
 				if patched := deploy.ApplyGenericPlanAutofix(pagedPlan, logf, rp.EnvVars...); patched != nil {
 					pagedPlan = patched
@@ -1012,13 +1024,7 @@ Examples:
 		}
 	skipIntegrityApply:
 
-		if patched := deploy.ApplyRulePackPlanAutofix(plan, deploy.RulePackContext{
-			TargetProvider: planProvider,
-			PlanProvider:   plan.Provider,
-			Profile:        rp,
-			Deep:           intel.DeepAnalysis,
-			Docker:         intel.Docker,
-		}, logf); patched != nil {
+		if patched := deploy.ApplyOpenClawPlanAutofix(plan, rp, intel.DeepAnalysis, logf); patched != nil {
 			plan = patched
 		}
 
@@ -1027,45 +1033,14 @@ Examples:
 			plan = patched
 		}
 
-		if finalDet := deploy.ValidatePlanDeterministicFinal(plan, rp, intel.DeepAnalysis, intel.Docker, rp.EnvVars); finalDet != nil {
-			for _, warning := range finalDet.Warnings {
-				logf("[deploy] final deterministic warning: %s", warning)
-			}
-			if len(finalDet.Issues) > 0 {
-				logf("[deploy] final deterministic validation found %d issue(s)", len(finalDet.Issues))
-				for _, issue := range finalDet.Issues {
-					logf("[deploy]   issue: %s", issue)
-				}
-				for _, fix := range finalDet.Fixes {
-					logf("[deploy]   fix: %s", fix)
-				}
-				if applyMode {
-					return fmt.Errorf("final deterministic validation failed with %d issue(s); refusing to apply", len(finalDet.Issues))
-				}
-				if isOpenClawDeploy && strings.EqualFold(strings.TrimSpace(planProvider), "digitalocean") {
-					return fmt.Errorf("final deterministic validation failed with %d issue(s); refusing to emit invalid openclaw digitalocean plan", len(finalDet.Issues))
-				}
-			}
-		}
-
 		openClawUnresolvedApplyBlock := false
 		openClawUnresolvedCritical := make([]string, 0, 12)
 		if isOpenClawDeploy {
 			if unresolved := deploy.GetUnresolvedPlaceholders(plan); len(unresolved) > 0 {
-				runtimeEnvKeys := append([]string(nil), rp.EnvVars...)
-				if userConfig != nil && len(userConfig.EnvVars) > 0 {
-					runtimeEnvKeys = runtimeEnvKeys[:0]
-					for key := range userConfig.EnvVars {
-						runtimeEnvKeys = append(runtimeEnvKeys, key+"=set")
-					}
-				}
-				// Filter out tokens that are injected at runtime via env vars
-				// (DO executor imports secret-like env vars + DIGITALOCEAN_ACCESS_TOKEN)
-				trueUnresolved := deploy.FilterRuntimeInjectedTokens(unresolved, runtimeEnvKeys)
-				if len(trueUnresolved) > 0 && !deploy.AllPlaceholdersAreProduced(plan, trueUnresolved) {
+				if !deploy.AllPlaceholdersAreProduced(plan, unresolved) {
 					openClawUnresolvedApplyBlock = true
-					openClawUnresolvedCritical = append(openClawUnresolvedCritical, trueUnresolved...)
-					logf("[deploy] warning: openclaw plan has unresolved non-runtime placeholders (%d): %v", len(trueUnresolved), trueUnresolved)
+					openClawUnresolvedCritical = append(openClawUnresolvedCritical, unresolved...)
+					logf("[deploy] warning: openclaw plan has unresolved non-runtime placeholders (%d): %v", len(unresolved), unresolved)
 				} else {
 					logf("[deploy] openclaw placeholders are runtime-produced; continuing with non-deterministic plan")
 				}
@@ -1233,6 +1208,16 @@ Examples:
 			outputBindings["FORCE_IMAGE_DEPLOY"] = "true"
 			fmt.Fprintf(os.Stderr, "[deploy] image deploy enforcement enabled (ECR image build/pull workflow)\n")
 		}
+
+		// Initialize resource tracking database
+		var resourceStore *resourcedb.Store
+		resourceStore, err = resourcedb.NewStore("")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[deploy] warning: resource tracking unavailable: %v\n", err)
+		} else {
+			defer resourceStore.Close()
+		}
+
 		execOpts := maker.ExecOptions{
 			Profile:        targetProfile,
 			Region:         region,
@@ -1243,6 +1228,7 @@ Examples:
 			AIProfile:      aiProfile,
 			Debug:          debug,
 			OutputBindings: outputBindings,
+			ResourceStore:  resourceStore,
 		}
 		if strings.EqualFold(strings.TrimSpace(targetProvider), "cloudflare") {
 			execOpts.Profile = ""
@@ -1476,19 +1462,17 @@ func generatePagedPlan(
 	const earlyRepairAfterFailures = 3
 	const openClawSoftPlanCommands = 30
 	const openClawHardPlanCommands = 40
-	effectiveProvider := strings.TrimSpace(planProvider)
-	if strings.TrimSpace(intel.Architecture.Provider) != "" {
-		effectiveProvider = strings.TrimSpace(intel.Architecture.Provider)
-	}
 
 	plan := &maker.Plan{
-		Version:      maker.CurrentPlanVersion,
-		CreatedAt:    time.Now().UTC(),
-		Provider:     effectiveProvider,
-		Question:     fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, effectiveProvider, intel.Architecture.Method),
-		Summary:      "",
-		Commands:     nil,
-		Capabilities: deploy.InferPlanCapabilities(effectiveProvider, planningContext, requiredLaunchOps),
+		Version:   maker.CurrentPlanVersion,
+		CreatedAt: time.Now().UTC(),
+		Provider:  planProvider,
+		Question:  fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, planProvider, intel.Architecture.Method),
+		Summary:   "",
+		Commands:  nil,
+	}
+	if strings.TrimSpace(intel.Architecture.Provider) != "" {
+		plan.Provider = strings.TrimSpace(intel.Architecture.Provider)
 	}
 
 	var mustFixIssues []string
@@ -1595,51 +1579,6 @@ func generatePagedPlan(
 				logf("[deploy] warning: page returned %d commands; clamping to %d", len(page.Commands), maxCommandsPerPage)
 				page.Commands = page.Commands[:maxCommandsPerPage]
 			}
-			if boundaryErr := deploy.ValidatePlanPageBoundary(plan, page, rp.EnvVars); boundaryErr != nil {
-				repairedPage, repairedRaw, rErr := deploy.RepairPlanPageWithLLM(
-					ctx,
-					aiClient.AskPrompt,
-					aiClient.CleanJSONResponse,
-					planProvider,
-					planningContext,
-					projectSummaryForLLM,
-					cleaned,
-					"Last response violated the DigitalOcean command schema or placeholder production order. "+boundaryErr.Error()+". Return only the next valid commands.",
-					logf,
-				)
-				if rErr == nil && repairedPage != nil && len(repairedPage.Commands) > 0 {
-					tmp = &maker.Plan{Provider: planProvider, Question: "", Summary: "", Commands: repairedPage.Commands}
-					tmpJSON, _ = json.Marshal(tmp)
-					normalized, nErr = maker.ParsePlan(string(tmpJSON))
-					if nErr == nil {
-						repairedPage.Commands = normalized.Commands
-						if secondBoundaryErr := deploy.ValidatePlanPageBoundary(plan, repairedPage, rp.EnvVars); secondBoundaryErr == nil {
-							logf("[deploy] plan page boundary auto-repaired via LLM")
-							page = repairedPage
-							cleaned = repairedRaw
-							consecutivePageFailures = 0
-							pageFormatHint = ""
-							goto pageNormalized
-						}
-					}
-				}
-				consecutivePageFailures++
-				pageFormatHint = boundaryErr.Error()
-				logf("[deploy] warning: plan page rejected by boundary checks (%v), retrying (page %d/%d)...", boundaryErr, pageRound, maxPlanPages)
-				if consecutivePageFailures >= earlyRepairAfterFailures && len(plan.Commands) > 0 {
-					logf("[deploy] warning: switching early to deterministic repair after %d consecutive page failures", consecutivePageFailures)
-					break
-				}
-				if consecutivePageFailures >= maxConsecutivePageFailures {
-					if !applyMode && len(plan.Commands) > 0 {
-						logf("[deploy] warning: stopping after %d consecutive page failures; continuing with partial plan (%d command(s))", consecutivePageFailures, len(plan.Commands))
-						break
-					}
-					logf("[deploy] paged plan generation failed: too many page boundary failures (%d)", consecutivePageFailures)
-					return nil
-				}
-				continue
-			}
 		}
 	pageNormalized:
 		consecutivePageFailures = 0
@@ -1652,7 +1591,6 @@ func generatePagedPlan(
 		if strings.TrimSpace(intel.Architecture.Provider) != "" {
 			plan.Provider = strings.TrimSpace(intel.Architecture.Provider)
 		}
-		plan.Capabilities = deploy.InferPlanCapabilities(plan.Provider, planningContext, requiredLaunchOps)
 		plan.Question = fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, strings.ToLower(strings.TrimSpace(plan.Provider)), intel.Architecture.Method)
 		if plan.CreatedAt.IsZero() {
 			plan.CreatedAt = time.Now().UTC()
@@ -1832,9 +1770,6 @@ func enforceStrictPlanRetention(baseline *maker.Plan, candidate *maker.Plan, req
 	if candidate == nil || len(candidate.Commands) == 0 {
 		return fmt.Errorf("candidate plan has no commands")
 	}
-	if strictErr := deploy.CheckStrictPlanCandidateRegression(baseline, candidate); strictErr != nil {
-		return strictErr
-	}
 
 	removedCount := len(baseline.Commands) - len(candidate.Commands)
 	if removedCount > 0 {
@@ -1935,14 +1870,6 @@ func commandPair(args []string) string {
 	if second == "" {
 		return first
 	}
-	// DO/GCP commands use 3-token patterns: compute droplet create, compute firewall create, etc.
-	// Check if the third token is an operation verb (create/delete/list/update/get)
-	if len(args) >= 3 {
-		third := strings.ToLower(strings.TrimSpace(args[2]))
-		if third == "create" || third == "delete" || third == "list" || third == "update" || third == "get" || third == "add-droplets" {
-			return first + " " + second + " " + third
-		}
-	}
 	return first + " " + second
 }
 
@@ -1971,12 +1898,13 @@ func hasRequiredLaunchOp(plan *maker.Plan, requiredLaunchOps []string) bool {
 	if plan == nil || len(plan.Commands) == 0 || len(requiredLaunchOps) == 0 {
 		return len(requiredLaunchOps) == 0
 	}
-	required := make([]string, 0, len(requiredLaunchOps))
+	required := make(map[string]struct{}, len(requiredLaunchOps))
 	for _, op := range requiredLaunchOps {
 		tok := strings.ToLower(strings.TrimSpace(op))
-		if tok != "" {
-			required = append(required, tok)
+		if tok == "" {
+			continue
 		}
+		required[tok] = struct{}{}
 	}
 	if len(required) == 0 {
 		return true
@@ -1986,12 +1914,8 @@ func hasRequiredLaunchOp(plan *maker.Plan, requiredLaunchOps []string) bool {
 		if pair == "" {
 			continue
 		}
-		// Prefix match: "compute instances" matches "compute instances create"
-		// and exact: "ec2 run-instances" matches "ec2 run-instances"
-		for _, req := range required {
-			if pair == req || strings.HasPrefix(pair, req+" ") || strings.HasPrefix(req, pair+" ") {
-				return true
-			}
+		if _, ok := required[pair]; ok {
+			return true
 		}
 	}
 	return false
@@ -2145,7 +2069,7 @@ func init() {
 	deployCmd.Flags().String("deepseek-model", "", "DeepSeek model to use (overrides config)")
 	deployCmd.Flags().String("minimax-model", "", "MiniMax model to use (overrides config)")
 	deployCmd.Flags().Bool("apply", false, "Apply the plan immediately after generation")
-	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws, gcp, azure, cloudflare, or digitalocean")
+	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws, gcp, azure, cloudflare, digitalocean, or hetzner")
 	deployCmd.Flags().String("target", "fargate", "Deployment target: fargate (default), ec2, or eks")
 	deployCmd.Flags().String("instance-type", "t3.small", "EC2 instance type (only used with --target ec2)")
 	deployCmd.Flags().Bool("new-vpc", false, "Create a new VPC instead of using default")
@@ -2153,6 +2077,7 @@ func init() {
 	deployCmd.Flags().String("gcp-project", "", "GCP project ID (required for --provider gcp apply)")
 	deployCmd.Flags().String("azure-subscription", "", "Azure subscription ID (required for --provider azure apply)")
 	deployCmd.Flags().String("do-token", "", "DigitalOcean access token (or set DIGITALOCEAN_ACCESS_TOKEN)")
+	deployCmd.Flags().String("hetzner-token", "", "Hetzner Cloud API token (or set HCLOUD_TOKEN)")
 }
 
 // splitPlanAtDockerBuild separates infrastructure setup from app deployment.

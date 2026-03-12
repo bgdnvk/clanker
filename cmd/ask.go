@@ -28,6 +28,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/k8s"
 	"github.com/bgdnvk/clanker/internal/k8s/plan"
 	"github.com/bgdnvk/clanker/internal/maker"
+	"github.com/bgdnvk/clanker/internal/resourcedb"
 	"github.com/bgdnvk/clanker/internal/routing"
 	tfclient "github.com/bgdnvk/clanker/internal/terraform"
 	"github.com/spf13/cobra"
@@ -283,16 +284,26 @@ Examples:
 				apiKey = viper.GetString("ai.api_key")
 			}
 
+			// Initialize resource tracking
+			resourceStore, rsErr := resourcedb.NewStore("")
+			if rsErr != nil {
+				fmt.Fprintf(os.Stderr, "[ask] warning: resource tracking unavailable: %v\n", rsErr)
+			}
+			if resourceStore != nil {
+				defer resourceStore.Close()
+			}
+
 			return maker.ExecutePlan(ctx, makerPlan, maker.ExecOptions{
-				Profile:    targetProfile,
-				Region:     region,
-				GCPProject: gcpProject,
-				Writer:     os.Stdout,
-				Destroyer:  destroyer,
-				AIProvider: provider,
-				AIAPIKey:   apiKey,
-				AIProfile:  aiProfile,
-				Debug:      debug,
+				Profile:       targetProfile,
+				Region:        region,
+				GCPProject:    gcpProject,
+				Writer:        os.Stdout,
+				Destroyer:     destroyer,
+				AIProvider:    provider,
+				AIAPIKey:      apiKey,
+				AIProfile:     aiProfile,
+				Debug:         debug,
+				ResourceStore: resourceStore,
 			})
 		}
 

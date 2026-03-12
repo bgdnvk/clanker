@@ -18,6 +18,17 @@ var dockerPlatformLineRe = regexp.MustCompile(`(?m)^\s*Platform:\s*(linux/(?:amd
 
 var dockerBuildxDriverLineRe = regexp.MustCompile(`(?m)^\s*Driver:\s*([a-zA-Z0-9_-]+)\s*$`)
 
+// hasBuildxAvailable checks if docker buildx plugin is installed and working
+func hasBuildxAvailable(ctx context.Context) bool {
+	cmd := exec.CommandContext(ctx, "docker", "buildx", "version")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+	// Check output contains version info (not just docker help)
+	return strings.Contains(string(out), "buildx") || strings.Contains(string(out), "github.com/docker/buildx")
+}
+
 // BuildAndPushDockerImage builds a Docker image locally and pushes to ECR.
 // It handles ECR authentication, building the image, tagging, and pushing.
 func BuildAndPushDockerImage(ctx context.Context, clonePath, ecrURI, profile, region, imageTag string, w io.Writer) (string, error) {
@@ -62,39 +73,83 @@ func BuildAndPushDockerImageWithTags(ctx context.Context, clonePath, ecrURI, pro
 		tagArgs = append(tagArgs, "-t", ecrURI+":"+t)
 	}
 
-	if err := ensureDockerBuildxReady(ctx, w); err != nil {
-		return "", err
+	// Check if buildx is available, fall back to regular docker build if not
+	useBuildx := hasBuildxAvailable(ctx)
+
+	if useBuildx {
+		if err := ensureDockerBuildxReady(ctx, w); err != nil {
+			fmt.Fprintf(w, "[docker] buildx setup failed, falling back to regular docker build: %v\n", err)
+			useBuildx = false
+		}
 	}
 
-	// 2. Build+push a multi-arch image. This avoids shipping an arm64-only image when the target is amd64 (or vice versa).
-	fmt.Fprintf(w, "[docker] building multi-arch image (linux/amd64, linux/arm64) from %s...\n", clonePath)
 	buildCtx, cancel := context.WithTimeout(ctx, 25*time.Minute)
 	defer cancel()
-	buildArgs := []string{
-		"buildx", "build",
-		"--builder", "clanker-builder",
-		"--platform", "linux/amd64,linux/arm64",
-		"--progress", "plain",
-		"--provenance=false",
-		"--sbom=false",
-		"--no-cache",
-	}
-	buildArgs = append(buildArgs, tagArgs...)
-	buildArgs = append(buildArgs, "--push", clonePath)
-	buildCmd := exec.CommandContext(buildCtx, "docker", buildArgs...)
-	buildCmd.Stdout = w
-	buildCmd.Stderr = w
-	if err := buildCmd.Run(); err != nil {
-		if buildCtx.Err() != nil {
-			return "", fmt.Errorf("docker buildx build --push timed out after 25m")
-		}
-		return "", fmt.Errorf("docker buildx build --push failed: %w", err)
-	}
-	fmt.Fprintf(w, "[docker] push complete\n")
 
-	// 3. Verify the registry has the expected platforms.
-	if err := verifyRemoteImagePlatforms(ctx, primaryRef, []string{"linux/amd64", "linux/arm64"}); err != nil {
-		return "", err
+	if useBuildx {
+		// 2a. Build+push a multi-arch image using buildx
+		fmt.Fprintf(w, "[docker] building multi-arch image (linux/amd64, linux/arm64) from %s...\n", clonePath)
+		buildArgs := []string{
+			"buildx", "build",
+			"--builder", "clanker-builder",
+			"--platform", "linux/amd64,linux/arm64",
+			"--progress", "plain",
+			"--provenance=false",
+			"--sbom=false",
+			"--no-cache",
+		}
+		buildArgs = append(buildArgs, tagArgs...)
+		buildArgs = append(buildArgs, "--push", clonePath)
+		buildCmd := exec.CommandContext(buildCtx, "docker", buildArgs...)
+		buildCmd.Stdout = w
+		buildCmd.Stderr = w
+		if err := buildCmd.Run(); err != nil {
+			if buildCtx.Err() != nil {
+				return "", fmt.Errorf("docker buildx build --push timed out after 25m")
+			}
+			return "", fmt.Errorf("docker buildx build --push failed: %w", err)
+		}
+		fmt.Fprintf(w, "[docker] push complete\n")
+
+		// 3. Verify the registry has the expected platforms.
+		if err := verifyRemoteImagePlatforms(ctx, primaryRef, []string{"linux/amd64", "linux/arm64"}); err != nil {
+			return "", err
+		}
+	} else {
+		// 2b. Fallback: regular docker build + push (single arch, native platform only)
+		fmt.Fprintf(w, "[docker] buildx not available, using regular docker build (single arch)...\n")
+		fmt.Fprintf(w, "[docker] building image from %s...\n", clonePath)
+
+		// Build with all tags
+		buildArgs := []string{"build", "--no-cache"}
+		buildArgs = append(buildArgs, tagArgs...)
+		buildArgs = append(buildArgs, clonePath)
+		buildCmd := exec.CommandContext(buildCtx, "docker", buildArgs...)
+		buildCmd.Stdout = w
+		buildCmd.Stderr = w
+		if err := buildCmd.Run(); err != nil {
+			if buildCtx.Err() != nil {
+				return "", fmt.Errorf("docker build timed out after 25m")
+			}
+			return "", fmt.Errorf("docker build failed: %w", err)
+		}
+		fmt.Fprintf(w, "[docker] build complete, pushing...\n")
+
+		// Push each tag
+		for _, t := range cleanTags {
+			pushRef := ecrURI + ":" + t
+			pushCmd := exec.CommandContext(buildCtx, "docker", "push", pushRef)
+			pushCmd.Stdout = w
+			pushCmd.Stderr = w
+			if err := pushCmd.Run(); err != nil {
+				if buildCtx.Err() != nil {
+					return "", fmt.Errorf("docker push timed out")
+				}
+				return "", fmt.Errorf("docker push %s failed: %w", pushRef, err)
+			}
+			fmt.Fprintf(w, "[docker] pushed %s\n", pushRef)
+		}
+		fmt.Fprintf(w, "[docker] push complete (single arch)\n")
 	}
 
 	return primaryRef, nil
@@ -207,26 +262,58 @@ func ensureDockerBuildxReady(ctx context.Context, w io.Writer) error {
 	// The Docker Desktop 'docker' driver can hang during export/unpack; docker-container avoids that.
 	name := "clanker-builder"
 
-	// Inspect existing builder (if any) and check driver.
+	// Helper to select an existing builder
+	selectBuilder := func() error {
+		use := exec.CommandContext(ctx, "docker", "buildx", "use", name)
+		return use.Run()
+	}
+
+	// Helper to create and select builder using separate commands for compatibility with all Docker versions.
+	// The --use flag combined with create is not supported in older Docker buildx versions.
+	createAndSelectBuilder := func() error {
+		// First, clean up any existing broken builder
+		_ = exec.CommandContext(ctx, "docker", "buildx", "rm", "-f", name).Run()
+
+		// Create builder using positional argument (compatible with all Docker versions)
+		// The --name flag is not supported in older Docker buildx versions
+		create := exec.CommandContext(ctx, "docker", "buildx", "create", name, "--driver", "docker-container")
+		out, err := create.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("failed to create builder: %w\nOutput: %s", err, strings.TrimSpace(string(out)))
+		}
+
+		// Select the builder in a separate command (compatible with all Docker versions)
+		use := exec.CommandContext(ctx, "docker", "buildx", "use", name)
+		if useOut, useErr := use.CombinedOutput(); useErr != nil {
+			return fmt.Errorf("failed to select builder: %w\nOutput: %s", useErr, strings.TrimSpace(string(useOut)))
+		}
+
+		return nil
+	}
+
+	// Check if builder already exists and is valid
 	inspect := exec.CommandContext(ctx, "docker", "buildx", "inspect", name)
 	out, err := inspect.CombinedOutput()
 	if err == nil {
 		driver := parseBuildxDriver(string(out))
 		if driver == "docker-container" {
-			use := exec.CommandContext(ctx, "docker", "buildx", "use", name)
-			_ = use.Run()
-			return nil
+			// Builder exists with correct driver, just select it
+			if selectErr := selectBuilder(); selectErr == nil {
+				return nil
+			}
+			// Selection failed, recreate
+			fmt.Fprintf(w, "[docker] existing builder invalid, recreating...\n")
+		} else if driver != "" {
+			// Wrong driver type, need to recreate
+			fmt.Fprintf(w, "[docker] builder has wrong driver (%s), recreating...\n", driver)
 		}
-
-		// If it's the wrong driver, recreate.
-		_ = exec.CommandContext(ctx, "docker", "buildx", "rm", "-f", name).Run()
 	}
 
-	create := exec.CommandContext(ctx, "docker", "buildx", "create", "--use", "--name", name, "--driver", "docker-container")
-	out, err = create.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("docker buildx is not ready (failed to create docker-container builder): %w\nOutput: %s", err, strings.TrimSpace(string(out)))
+	// Create new builder
+	if createErr := createAndSelectBuilder(); createErr != nil {
+		return fmt.Errorf("docker buildx is not ready (failed to create docker-container builder): %w", createErr)
 	}
+
 	fmt.Fprintf(w, "[docker] buildx builder ready: %s (driver=docker-container)\n", name)
 	return nil
 }

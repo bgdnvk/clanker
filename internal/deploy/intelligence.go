@@ -126,15 +126,16 @@ type CleanFunc func(response string) string
 
 // IntelligenceResult is the final output of the multi-phase reasoning pipeline
 type IntelligenceResult struct {
-	Exploration  *ExplorationResult `json:"exploration,omitempty"`
-	DeepAnalysis *DeepAnalysis      `json:"deepAnalysis"`
-	Docker       *DockerAnalysis    `json:"docker,omitempty"`
-	Preflight    *PreflightReport   `json:"preflight,omitempty"`
-	InfraSnap    *InfraSnapshot     `json:"infraSnapshot,omitempty"`
-	CFInfraSnap  *CFInfraSnapshot   `json:"cfInfraSnapshot,omitempty"`
-	DOInfraSnap  *DOInfraSnapshot   `json:"doInfraSnapshot,omitempty"`
-	Architecture *ArchitectDecision `json:"architecture"`
-	Validation   *PlanValidation    `json:"validation,omitempty"`
+	Exploration      *ExplorationResult    `json:"exploration,omitempty"`
+	DeepAnalysis     *DeepAnalysis         `json:"deepAnalysis"`
+	Docker           *DockerAnalysis       `json:"docker,omitempty"`
+	Preflight        *PreflightReport      `json:"preflight,omitempty"`
+	InfraSnap        *InfraSnapshot        `json:"infraSnapshot,omitempty"`
+	CFInfraSnap      *CFInfraSnapshot      `json:"cfInfraSnapshot,omitempty"`
+	DOInfraSnap      *DOInfraSnapshot      `json:"doInfraSnapshot,omitempty"`
+	HetznerInfraSnap *HetznerInfraSnapshot `json:"hetznerInfraSnapshot,omitempty"`
+	Architecture     *ArchitectDecision    `json:"architecture"`
+	Validation       *PlanValidation       `json:"validation,omitempty"`
 	// final enriched prompt for maker pipeline
 	EnrichedPrompt string `json:"enrichedPrompt"`
 }
@@ -146,6 +147,7 @@ type DeployOptions struct {
 	NewVPC       bool   // create new VPC instead of using default
 	DeployID     string // run-specific id for unique resource naming
 	DOToken      string // DigitalOcean API token for infra scan
+	HetznerToken string // Hetzner Cloud API token for infra scan
 }
 
 // shouldUseAPIGateway determines whether to use API Gateway or ALB based on app characteristics.
@@ -293,6 +295,7 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 	var infraSnap *InfraSnapshot
 	var cfInfraSnap *CFInfraSnapshot
 	var doInfraSnap *DOInfraSnapshot
+	var hetznerInfraSnap *HetznerInfraSnapshot
 	var deepErr error
 
 	var wg sync.WaitGroup
@@ -345,6 +348,13 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 			} else {
 				logf("[intelligence] phase 1.5: skipping DO scan (no token)")
 			}
+		case "hetzner":
+			if opts != nil && opts.HetznerToken != "" {
+				logf("[intelligence] phase 1.5: scanning Hetzner Cloud infrastructure...")
+				hetznerInfraSnap = ScanHetznerInfra(ctx, opts.HetznerToken, logf)
+			} else {
+				logf("[intelligence] phase 1.5: skipping Hetzner scan (no token)")
+			}
 		case "aws", "":
 			logf("[intelligence] phase 1.5: scanning AWS infrastructure...")
 			infraSnap = ScanInfra(ctx, awsProfile, awsRegion, logf)
@@ -374,6 +384,7 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 	result.InfraSnap = infraSnap
 	result.CFInfraSnap = cfInfraSnap
 	result.DOInfraSnap = doInfraSnap
+	result.HetznerInfraSnap = hetznerInfraSnap
 
 	// Phase 2: Architecture Decision + Cost Estimation
 	logf("[intelligence] phase 2: architecture + cost estimation (target: %s)...", opts.Target)
@@ -394,13 +405,11 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 		}
 	}
 
-	ApplyRulePackArchitectureDefaults(RulePackContext{
-		TargetProvider: targetProvider,
-		Options:        opts,
-		Profile:        profile,
-		Deep:           deep,
-		Docker:         result.Docker,
-	}, arch)
+	// Deterministic override: OpenClaw is stateful + long-lived websocket gateway.
+	// When deploying to AWS and the target is default/unspecified, prefer EC2.
+	ApplyOpenClawArchitectureDefaults(targetProvider, opts, profile, deep, arch)
+	// Deterministic override: WordPress one-click deploy uses EC2 + ALB + Docker Hub images.
+	ApplyWordPressArchitectureDefaults(targetProvider, opts, profile, deep, arch)
 	result.Architecture = arch
 
 	// Deterministic override: static sites should prefer static hosting unless user explicitly requested EC2/EKS.
@@ -437,7 +446,7 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 
 	// build the final enriched prompt with all intelligence + infra context
 	strat := StrategyFromArchitect(arch)
-	result.EnrichedPrompt = buildIntelligentPrompt(profile, deep, result.Docker, arch, strat, infraSnap, cfInfraSnap, doInfraSnap, opts)
+	result.EnrichedPrompt = buildIntelligentPrompt(profile, deep, result.Docker, arch, strat, infraSnap, cfInfraSnap, doInfraSnap, hetznerInfraSnap, opts)
 
 	return result, nil
 }
@@ -450,7 +459,7 @@ func ValidatePlan(ctx context.Context, planJSON string, profile *RepoProfile, de
 
 	// Deterministic checks first: catch hard failures like missing compose-required env vars,
 	// missing onboarding scripts for known repos, and secret inlining.
-	det := runDeterministicPlanValidation(planJSON, profile, deep, docker, profile.EnvVars)
+		det := runDeterministicPlanValidation(planJSON, profile, deep, docker, profile.EnvVars)
 	if len(det.Issues) > 0 {
 		v := &PlanValidation{IsValid: false, Issues: det.Issues, Fixes: det.Fixes, Warnings: det.Warnings}
 		return v, buildFixPrompt(v), nil
@@ -916,8 +925,9 @@ Estimate the MONTHLY cost in USD.
 3. **do-k8s** — Kubernetes (overkill unless explicitly requested)
 
 ## DigitalOcean Services
-- Droplet for always-on runtime (build Docker image on droplet, NOT via DOCR)
+- Droplet for always-on runtime
 - Block storage volume for stateful data (optional)
+- Container Registry (DOCR) for Docker images
 - Cloud Firewall for port restrictions
 - Reserved IP for stable public endpoint
 
@@ -937,20 +947,62 @@ Estimate the MONTHLY cost in USD.
 		{"method": "do-k8s", "why_not": "Unnecessary complexity for this workload"}
 	],
 	"buildSteps": [
+		"Create Container Registry and push Docker image",
 		"Create Cloud Firewall for required ports",
-		"Create Droplet with user-data (clone repo, docker build -t openclaw:local ., compose up)",
-		"Attach firewall and create reserved IP",
+		"Create Droplet with user-data (install Docker, pull image, compose up)",
 		"Verify service health"
 	],
 	"runCmd": "docker compose up -d",
-	"notes": ["Build image on droplet, do NOT use DOCR", "Expose only required ports via Cloud Firewall", "Persist any required state on disk"],
-	"cpuMemory": "s-2vcpu-4gb",
+	"notes": ["Expose only required ports via Cloud Firewall", "Persist any required state on disk"],
+	"cpuMemory": "s-1vcpu-2gb",
 	"needsAlb": false,
 	"useApiGateway": false,
 	"needsDb": false,
 	"dbService": "",
-	"estMonthly": "$24-30",
-	"costBreakdown": ["Droplet s-2vcpu-4gb", "Reserved IP"]
+	"estMonthly": "$12-18",
+	"costBreakdown": ["Droplet", "Container Registry basic", "Reserved IP"]
+}`)
+	case "hetzner":
+		b.WriteString(`
+## Hetzner Cloud Options to Consider
+1. **hetzner-server** — Cloud Server VM + Docker Compose (best for stateful or always-on services) (~$4-20/mo)
+2. **hetzner-k8s** — Kubernetes (overkill unless explicitly requested)
+
+## Hetzner Cloud Services
+- Cloud Server (CX/CPX series) for always-on runtime
+- Volume for persistent block storage (optional)
+- Firewall for port restrictions
+- Floating IP for stable public endpoint
+- Private Network for internal communication
+
+## Deployment CLI
+All commands must use hcloud CLI only.
+
+## Cost Estimation
+Estimate the MONTHLY cost in USD.
+
+## Response Format (JSON only, no markdown fences)
+{
+	"provider": "hetzner",
+	"method": "hetzner-server",
+	"reasoning": "A Cloud Server with Docker Compose is the simplest and cheapest option for this app.",
+	"alternatives": [
+		{"method": "hetzner-k8s", "why_not": "Unnecessary complexity for this workload"}
+	],
+	"buildSteps": [
+		"Create Firewall for required ports",
+		"Create Cloud Server with cloud-init (install Docker, clone repo, compose up)",
+		"Verify service health"
+	],
+	"runCmd": "docker compose up -d",
+	"notes": ["Expose only required ports via Firewall", "Use volume for persistent state if needed"],
+	"cpuMemory": "cx22",
+	"needsAlb": false,
+	"useApiGateway": false,
+	"needsDb": false,
+	"dbService": "",
+	"estMonthly": "$4-12",
+	"costBreakdown": ["Cloud Server", "Volume (optional)", "Floating IP (optional)"]
 }`)
 	default:
 		// Add user's deployment target preference
@@ -1148,7 +1200,7 @@ func buildFixPrompt(v *PlanValidation) string {
 // --- Intelligent Prompt Builder ---
 
 // buildIntelligentPrompt creates the final enriched prompt using all intelligence phases
-func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis, arch *ArchitectDecision, strat DeployStrategy, infraSnap *InfraSnapshot, cfInfraSnap *CFInfraSnapshot, doInfraSnap *DOInfraSnapshot, opts *DeployOptions) string {
+func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis, arch *ArchitectDecision, strat DeployStrategy, infraSnap *InfraSnapshot, cfInfraSnap *CFInfraSnapshot, doInfraSnap *DOInfraSnapshot, hetznerInfraSnap *HetznerInfraSnapshot, opts *DeployOptions) string {
 	var b strings.Builder
 	resourcePrefix := repoResourcePrefix(p.RepoURL, opts.DeployID)
 
@@ -1162,6 +1214,8 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAn
 		providerLabel = "Azure"
 	case "digitalocean":
 		providerLabel = "DigitalOcean"
+	case "hetzner":
+		providerLabel = "Hetzner Cloud"
 	}
 	b.WriteString(fmt.Sprintf("Deploy the application from %s to %s.\n\n", p.RepoURL, providerLabel))
 
@@ -1187,6 +1241,14 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAn
 		if doCtx != "" {
 			b.WriteString("## Existing DigitalOcean Infrastructure\n")
 			b.WriteString(doCtx)
+			b.WriteString("\n\n")
+		}
+	}
+	if hetznerInfraSnap != nil {
+		hzCtx := hetznerInfraSnap.FormatForPrompt()
+		if hzCtx != "" {
+			b.WriteString("## Existing Hetzner Cloud Infrastructure\n")
+			b.WriteString(hzCtx)
 			b.WriteString("\n\n")
 		}
 	}
@@ -1285,13 +1347,8 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAn
 			b.WriteString(fmt.Sprintf("- Prefer Docker runtime command: %s\n", docker.RunCommand))
 		}
 	}
-	AppendRulePackDeploymentRequirements(&b, RulePackContext{
-		TargetProvider: strat.Provider,
-		Options:        opts,
-		Profile:        p,
-		Deep:           deep,
-		Docker:         docker,
-	})
+	AppendOpenClawDeploymentRequirements(&b, p, deep, strat.Provider)
+	AppendWordPressDeploymentRequirements(&b, p, deep)
 	if pf := BuildPreflightReport(p, docker, deep); pf != nil {
 		ctx := pf.FormatForPrompt()
 		if strings.TrimSpace(ctx) != "" {
@@ -1540,22 +1597,18 @@ func doDropletPrompt(p *RepoProfile, deep *DeepAnalysis, opts *DeployOptions) st
 		deployID = opts.DeployID
 	}
 	resourcePrefix := repoResourcePrefix(p.RepoURL, deployID)
-	b.WriteString("Deploy using DigitalOcean Droplet (VM + Docker Compose, build on droplet):\n")
-	b.WriteString(fmt.Sprintf("Naming: use prefix %s for droplet/firewall resources\n", resourcePrefix))
-	b.WriteString("1. Create a Cloud Firewall allowing required inbound ports\n")
-	b.WriteString("2. Create a Droplet (Ubuntu 22.04 Docker image) with user-data script\n")
-	b.WriteString(fmt.Sprintf("3. User-data: clone %s, write .env, 'docker build -t openclaw:local .', run onboarding, docker compose up\n", p.RepoURL))
-	b.WriteString("4. Attach firewall to droplet\n")
-	b.WriteString("5. Create reserved IP for stable endpoint\n")
-	b.WriteString("\nNotes:\n")
-	b.WriteString("- Do NOT use DOCR (Container Registry). Build the image directly on the droplet via user-data.\n")
-	b.WriteString("- No registry create, registry login, docker build (local), or docker push steps in the plan.\n")
-	b.WriteString("- The plan should only have doctl infrastructure commands.\n")
-	b.WriteString("- CRITICAL: If the docker-compose.yml uses 'image: <name>:local' (no build: directive),\n")
-	b.WriteString("  the user-data MUST run 'docker build -t <name>:local .' before 'docker compose up'.\n")
-	b.WriteString("  Do NOT use 'docker compose build' — it will find nothing to build.\n")
-	b.WriteString("- Do NOT run 'cloud-init status --wait' inside user-data. It already runs inside cloud-init and will deadlock.\n")
-	b.WriteString("- Set 'export HOME=/root' in user-data before running any setup/onboarding scripts.\n")
+	b.WriteString("Deploy using DigitalOcean Droplet (VM + Docker Compose):\n")
+	b.WriteString(fmt.Sprintf("Naming: use prefix %s for droplet/firewall/registry resources\n", resourcePrefix))
+	b.WriteString("1. Create a DigitalOcean Container Registry (doctl registry create)\n")
+	b.WriteString("2. Build Docker image locally and push to DOCR\n")
+	b.WriteString("3. Create a Cloud Firewall allowing required inbound ports\n")
+	b.WriteString("4. Create a Droplet (Ubuntu 22.04 Docker image) with user-data script\n")
+	b.WriteString("5. User-data: install Docker Compose, login to DOCR, pull image, write .env, compose up\n")
+	b.WriteString(fmt.Sprintf("6. Clone repository: %s\n", p.RepoURL))
+	b.WriteString("7. Create .env with required env vars and secrets\n")
+	b.WriteString("8. If the app is stateful, create persistent directories on disk\n")
+	b.WriteString("9. Build and start with: docker compose build && docker compose up -d\n")
+	b.WriteString("10. Verify service health and endpoint readiness\n")
 	return b.String()
 }
 

@@ -17,6 +17,19 @@ import (
 	"github.com/bgdnvk/clanker/internal/ai"
 )
 
+// reservedPlaceholders should not be resolved by the subagent because they are
+// handled by the one-click deploy image build process (autoPrepareImageForOneClickDeploy).
+// Allowing the subagent to set these can cause the image build to be skipped.
+var reservedPlaceholders = map[string]bool{
+	"IMAGE_URI": true,
+	"IMAGE_TAG": true,
+}
+
+// isReservedPlaceholder returns true if the placeholder should not be resolved by AI.
+func isReservedPlaceholder(name string) bool {
+	return reservedPlaceholders[strings.ToUpper(strings.TrimSpace(name))]
+}
+
 // placeholderResolution holds AI-resolved bindings.
 type placeholderResolution struct {
 	Bindings map[string]string `json:"bindings"`
@@ -211,9 +224,12 @@ func resolveWithSubagentToolPlan(ctx context.Context, opts ExecOptions, args []s
 	need := make([]string, 0, len(unresolved))
 	for _, raw := range unresolved {
 		n := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(raw, "<"), ">"))
-		if n != "" {
+		if n != "" && !isReservedPlaceholder(n) {
 			need = append(need, n)
 		}
+	}
+	if len(need) == 0 {
+		return nil, nil
 	}
 	sort.Strings(need)
 
@@ -288,6 +304,9 @@ func executeSubagentToolPlan(ctx context.Context, opts ExecOptions, plan *placeh
 		if key == "" || val == "" {
 			continue
 		}
+		if isReservedPlaceholder(key) {
+			continue
+		}
 		if strings.TrimSpace(bindings[key]) != "" {
 			continue
 		}
@@ -307,6 +326,9 @@ func executeSubagentToolPlan(ctx context.Context, opts ExecOptions, plan *placeh
 		cmd := plan.Commands[i]
 		bindName := strings.TrimSpace(strings.ToUpper(cmd.Bind))
 		if bindName == "" {
+			continue
+		}
+		if isReservedPlaceholder(bindName) {
 			continue
 		}
 		if strings.TrimSpace(bindings[bindName]) != "" {
@@ -694,7 +716,134 @@ func autoResolvePlaceholdersWithTools(ctx context.Context, opts ExecOptions, unr
 		}
 	}
 
+	// 4) SECRET_*_ARN placeholders: create secrets in AWS Secrets Manager from env vars.
+	// If we have <SECRET_OPENAI_API_KEY_ARN> and OPENAI_API_KEY env var is set, create the secret.
+	if strings.TrimSpace(opts.Profile) != "" && strings.TrimSpace(opts.Region) != "" {
+		for name := range need {
+			if !strings.HasPrefix(name, "SECRET_") || !strings.HasSuffix(name, "_ARN") {
+				continue
+			}
+			if strings.TrimSpace(bindings[name]) != "" {
+				continue
+			}
+
+			// Extract the env var name from SECRET_OPENAI_API_KEY_ARN -> OPENAI_API_KEY
+			envVarName := strings.TrimSuffix(strings.TrimPrefix(name, "SECRET_"), "_ARN")
+			if envVarName == "" {
+				continue
+			}
+
+			// Check if we have this env var value (either in bindings or os.Getenv)
+			secretValue := strings.TrimSpace(bindings["ENV_"+envVarName])
+			if secretValue == "" {
+				secretValue = strings.TrimSpace(bindings[envVarName])
+			}
+			if secretValue == "" {
+				secretValue = strings.TrimSpace(os.Getenv(envVarName))
+			}
+			if secretValue == "" {
+				continue
+			}
+
+			// Generate a unique secret name based on the project/deploy context
+			projectName := strings.TrimSpace(bindings["PROJECT_NAME"])
+			if projectName == "" {
+				projectName = "clanker"
+			}
+			secretName := fmt.Sprintf("%s-%s", projectName, strings.ToLower(strings.ReplaceAll(envVarName, "_", "-")))
+
+			// Create or update the secret in AWS Secrets Manager
+			arn, err := ensureSecretInSecretsManager(ctx, opts, secretName, secretValue)
+			if err != nil {
+				if opts.Writer != nil {
+					_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to create secret %s: %v\n", secretName, err)
+				}
+				continue
+			}
+
+			bindings[name] = arn
+			changed = true
+			if opts.Writer != nil {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] placeholder tool: created secret %s -> %s\n", name, secretName)
+			}
+		}
+	}
+
 	return changed
+}
+
+// ensureSecretInSecretsManager creates or updates a secret in AWS Secrets Manager.
+func ensureSecretInSecretsManager(ctx context.Context, opts ExecOptions, secretName, secretValue string) (string, error) {
+	// First try to describe the secret to see if it exists
+	descArgs := []string{
+		"secretsmanager", "describe-secret",
+		"--secret-id", secretName,
+		"--output", "json",
+		"--profile", opts.Profile,
+		"--region", opts.Region,
+		"--no-cli-pager",
+	}
+
+	out, err := runAWSCommandStreaming(ctx, descArgs, nil, io.Discard)
+	if err == nil {
+		// Secret exists, update it
+		var resp struct {
+			ARN string `json:"ARN"`
+		}
+		if json.Unmarshal([]byte(out), &resp) == nil && resp.ARN != "" {
+			// Update the secret value
+			putArgs := []string{
+				"secretsmanager", "put-secret-value",
+				"--secret-id", secretName,
+				"--secret-string", secretValue,
+				"--profile", opts.Profile,
+				"--region", opts.Region,
+				"--no-cli-pager",
+			}
+			if _, putErr := runAWSCommandStreaming(ctx, putArgs, nil, io.Discard); putErr != nil {
+				return "", putErr
+			}
+			return resp.ARN, nil
+		}
+	}
+
+	// Secret doesn't exist, create it
+	createArgs := []string{
+		"secretsmanager", "create-secret",
+		"--name", secretName,
+		"--secret-string", secretValue,
+		"--output", "json",
+		"--profile", opts.Profile,
+		"--region", opts.Region,
+		"--no-cli-pager",
+	}
+
+	out, err = runAWSCommandStreaming(ctx, createArgs, nil, io.Discard)
+	if err != nil {
+		// Check if it's "already exists" error
+		if strings.Contains(strings.ToLower(err.Error()), "already exists") || strings.Contains(strings.ToLower(out), "already exists") {
+			// Try to get the ARN
+			out2, err2 := runAWSCommandStreaming(ctx, descArgs, nil, io.Discard)
+			if err2 == nil {
+				var resp struct {
+					ARN string `json:"ARN"`
+				}
+				if json.Unmarshal([]byte(out2), &resp) == nil && resp.ARN != "" {
+					return resp.ARN, nil
+				}
+			}
+		}
+		return "", err
+	}
+
+	var resp struct {
+		ARN string `json:"ARN"`
+	}
+	if json.Unmarshal([]byte(out), &resp) != nil || resp.ARN == "" {
+		return "", fmt.Errorf("failed to parse create-secret response")
+	}
+
+	return resp.ARN, nil
 }
 
 func discoverPublicIP(ctx context.Context) string {
