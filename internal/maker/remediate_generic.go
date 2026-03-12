@@ -254,6 +254,9 @@ func maybeGenericAIRemediation(
 	}
 
 	_, _ = fmt.Fprintf(opts.Writer, "[maker] attempting AI-powered remediation...\n")
+	if opts.PlanLogger != nil {
+		opts.PlanLogger.WriteFix("generic_ai_start", fmt.Sprintf("cmd=%s %s", args0(failedArgs), args1(failedArgs)), "starting generic AI remediation")
+	}
 
 	client := ai.NewClient(opts.AIProvider, opts.AIAPIKey, opts.Debug, opts.AIProfile)
 	resp, err := client.AskPrompt(ctx, genericRemediationPrompt(failedArgs, failedOutput, recentLogs))
@@ -279,6 +282,9 @@ func maybeGenericAIRemediation(
 	}
 
 	_, _ = fmt.Fprintf(opts.Writer, "[maker] AI analysis: %s\n", parsed.Analysis)
+	if opts.PlanLogger != nil {
+		opts.PlanLogger.WriteFix("generic_ai_analysis", fmt.Sprintf("cmd=%s %s", args0(failedArgs), args1(failedArgs)), parsed.Analysis)
+	}
 
 	// Validate ALL commands before executing any
 	for i, cmd := range parsed.Commands {
@@ -311,8 +317,14 @@ func maybeGenericAIRemediation(
 
 	if err == nil {
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] remediation successful\n")
+		if opts.PlanLogger != nil {
+			opts.PlanLogger.WriteFixSuccess("generic_ai", fmt.Sprintf("cmd=%s %s", args0(failedArgs), args1(failedArgs)), "generic AI remediation succeeded")
+		}
 		return true, nil
 	}
 
+	if opts.PlanLogger != nil {
+		opts.PlanLogger.WriteFix("generic_ai_failed", fmt.Sprintf("cmd=%s %s", args0(failedArgs), args1(failedArgs)), err.Error())
+	}
 	return false, err
 }

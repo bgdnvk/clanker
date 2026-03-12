@@ -201,6 +201,56 @@ type Message struct {
 	Content string `json:"content"`
 }
 
+// ConversationContext maintains state across multiple LLM turns for agentic workflows
+type ConversationContext struct {
+	SystemPrompt string    `json:"system_prompt,omitempty"`
+	Messages     []Message `json:"messages"`
+	MaxHistory   int       `json:"-"`
+}
+
+// NewConversationContext creates a new conversation context with a system prompt
+func NewConversationContext(systemPrompt string) *ConversationContext {
+	return &ConversationContext{
+		SystemPrompt: systemPrompt,
+		Messages:     make([]Message, 0),
+		MaxHistory:   20,
+	}
+}
+
+// AddUserMessage adds a user message to the conversation
+func (c *ConversationContext) AddUserMessage(content string) {
+	c.Messages = append(c.Messages, Message{
+		Role:    "user",
+		Content: content,
+	})
+	c.trimHistory()
+}
+
+// AddAssistantMessage adds an assistant response to the conversation
+func (c *ConversationContext) AddAssistantMessage(content string) {
+	c.Messages = append(c.Messages, Message{
+		Role:    "assistant",
+		Content: content,
+	})
+	c.trimHistory()
+}
+
+// trimHistory keeps only the most recent messages
+func (c *ConversationContext) trimHistory() {
+	if len(c.Messages) > c.MaxHistory {
+		// Keep first message (usually important context) and last N-1 messages
+		c.Messages = append(
+			c.Messages[:1],
+			c.Messages[len(c.Messages)-(c.MaxHistory-1):]...,
+		)
+	}
+}
+
+// GetMessages returns all messages for API call
+func (c *ConversationContext) GetMessages() []Message {
+	return c.Messages
+}
+
 type OpenAIResponse struct {
 	Choices []Choice `json:"choices"`
 }
@@ -1340,6 +1390,423 @@ func (c *Client) AskPrompt(ctx context.Context, prompt string) (string, error) {
 	default:
 		return c.askBedrock(ctx, prompt)
 	}
+}
+
+// AskWithContext sends a prompt maintaining conversation context for multi-turn interactions.
+// This is used by agentic workflows that need to maintain state across multiple LLM calls.
+func (c *Client) AskWithContext(ctx context.Context, conv *ConversationContext, prompt string) (string, error) {
+	// Add user message to history
+	conv.AddUserMessage(prompt)
+
+	var response string
+	var err error
+
+	switch c.provider {
+	case "bedrock", "claude":
+		response, err = c.askBedrockWithHistory(ctx, conv)
+	case "anthropic":
+		response, err = c.askAnthropicWithHistory(ctx, conv)
+	case "openai":
+		response, err = c.askOpenAIWithHistory(ctx, conv)
+	case "gemini", "gemini-api":
+		response, err = c.askGeminiWithHistory(ctx, conv)
+	default:
+		response, err = c.askBedrockWithHistory(ctx, conv)
+	}
+
+	if err != nil {
+		return "", err
+	}
+
+	// Add assistant response to history
+	conv.AddAssistantMessage(response)
+
+	return response, nil
+}
+
+// askBedrockWithHistory sends a multi-turn request to Bedrock
+func (c *Client) askBedrockWithHistory(ctx context.Context, conv *ConversationContext) (string, error) {
+	profileLLMCall, err := c.getAIProfile(c.aiProfile)
+	if err != nil {
+		return "", fmt.Errorf("failed to get AI profile: %w", err)
+	}
+
+	// Build messages array from conversation context
+	messages := make([]Message, 0, len(conv.Messages)+1)
+
+	// Add system prompt as first user message if present
+	if conv.SystemPrompt != "" {
+		messages = append(messages, Message{
+			Role:    "user",
+			Content: sanitizeASCII(conv.SystemPrompt),
+		})
+		messages = append(messages, Message{
+			Role:    "assistant",
+			Content: "Understood. I will follow these instructions.",
+		})
+	}
+
+	for _, m := range conv.Messages {
+		messages = append(messages, Message{
+			Role:    m.Role,
+			Content: sanitizeASCII(m.Content),
+		})
+	}
+
+	request := ClaudeRequest{
+		AnthropicVersion: "bedrock-2023-05-31",
+		MaxTokens:        4000,
+		Messages:         messages,
+	}
+
+	requestBody, err := json.Marshal(request)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	bodyFile, err := os.CreateTemp("", "bedrock-conv-*.json")
+	if err != nil {
+		return "", fmt.Errorf("failed to create body temp file: %w", err)
+	}
+	bodyFilePath := bodyFile.Name()
+	if _, err := bodyFile.Write(requestBody); err != nil {
+		bodyFile.Close()
+		os.Remove(bodyFilePath)
+		return "", fmt.Errorf("failed to write body temp file: %w", err)
+	}
+	bodyFile.Close()
+	defer os.Remove(bodyFilePath)
+
+	tmpFile, err := os.CreateTemp("", "bedrock-conv-resp-*.json")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpFilePath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpFilePath)
+
+	cmd := exec.CommandContext(ctx, "aws", "bedrock-runtime", "invoke-model",
+		"--model-id", profileLLMCall.Model,
+		"--body", "fileb://"+bodyFilePath,
+		"--profile", profileLLMCall.AWSProfile,
+		"--region", profileLLMCall.Region,
+		tmpFilePath)
+	cmd.Env = append(os.Environ(), fmt.Sprintf("AWS_PROFILE=%s", profileLLMCall.AWSProfile))
+
+	var output []byte
+	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
+		output, err = cmd.CombinedOutput()
+		if err == nil {
+			break
+		}
+		if attempt == aiRetryMaxAttempts || !isRetryableProviderErrorText(string(output)+" "+err.Error()) {
+			return "", fmt.Errorf("AWS CLI call failed: %w, output: %s", err, string(output))
+		}
+		if wErr := waitForAIRetry(ctx, aiRetryDelay(attempt-1)); wErr != nil {
+			return "", wErr
+		}
+		cmd = exec.CommandContext(ctx, "aws", "bedrock-runtime", "invoke-model",
+			"--model-id", profileLLMCall.Model,
+			"--body", "fileb://"+bodyFilePath,
+			"--profile", profileLLMCall.AWSProfile,
+			"--region", profileLLMCall.Region,
+			tmpFilePath)
+		cmd.Env = append(os.Environ(), fmt.Sprintf("AWS_PROFILE=%s", profileLLMCall.AWSProfile))
+	}
+
+	respData, err := os.ReadFile(tmpFilePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response file: %w", err)
+	}
+
+	var claudeResp ClaudeResponse
+	if err := json.Unmarshal(respData, &claudeResp); err != nil {
+		return "", fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	for _, content := range claudeResp.Content {
+		if strings.TrimSpace(content.Text) != "" {
+			return content.Text, nil
+		}
+	}
+
+	return "", fmt.Errorf("no response content from Bedrock")
+}
+
+// askAnthropicWithHistory sends a multi-turn request to Anthropic API
+func (c *Client) askAnthropicWithHistory(ctx context.Context, conv *ConversationContext) (string, error) {
+	profileLLMCall, err := c.getAIProfile(c.aiProfile)
+	if err != nil {
+		return "", fmt.Errorf("failed to get AI profile: %w", err)
+	}
+
+	if strings.TrimSpace(c.apiKey) == "" {
+		return "", fmt.Errorf("Anthropic API key not configured")
+	}
+
+	model := strings.TrimSpace(profileLLMCall.Model)
+	if model == "" {
+		latest, lErr := c.getLatestAnthropicModelID(ctx)
+		if lErr != nil {
+			return "", lErr
+		}
+		model = latest
+	}
+
+	// Build messages array from conversation context
+	messages := make([]anthropicMessage, 0, len(conv.Messages)+1)
+
+	// Add system prompt as first user message if present
+	if conv.SystemPrompt != "" {
+		messages = append(messages, anthropicMessage{
+			Role:    "user",
+			Content: []map[string]any{{"type": "text", "text": sanitizeASCII(conv.SystemPrompt)}},
+		})
+		messages = append(messages, anthropicMessage{
+			Role:    "assistant",
+			Content: []map[string]any{{"type": "text", "text": "Understood. I will follow these instructions."}},
+		})
+	}
+
+	for _, m := range conv.Messages {
+		messages = append(messages, anthropicMessage{
+			Role:    m.Role,
+			Content: []map[string]any{{"type": "text", "text": sanitizeASCII(m.Content)}},
+		})
+	}
+
+	reqBody := anthropicRequest{
+		Model:       model,
+		MaxTokens:   4000,
+		Temperature: 0.1,
+		Messages:    messages,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	client := &http.Client{}
+	var body []byte
+	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
+		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.baseURL, "/")+"/messages", bytes.NewBuffer(jsonData))
+		if reqErr != nil {
+			return "", fmt.Errorf("failed to create request: %w", reqErr)
+		}
+
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("x-api-key", strings.TrimSpace(c.apiKey))
+		httpReq.Header.Set("anthropic-version", "2023-06-01")
+
+		resp, doErr := client.Do(httpReq)
+		if doErr != nil {
+			if attempt == aiRetryMaxAttempts || !isRetryableProviderErrorText(doErr.Error()) {
+				return "", fmt.Errorf("failed to send request: %w", doErr)
+			}
+			if wErr := waitForAIRetry(ctx, aiRetryDelay(attempt-1)); wErr != nil {
+				return "", wErr
+			}
+			continue
+		}
+
+		body, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return "", fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+
+		if attempt == aiRetryMaxAttempts || !(isRetryableHTTPStatus(resp.StatusCode) || isRetryableProviderErrorText(string(body))) {
+			return "", fmt.Errorf("Anthropic API request failed with status %d: %s", resp.StatusCode, string(body))
+		}
+
+		delay := aiRetryDelay(attempt - 1)
+		if ra, ok := retryAfterDelay(resp.Header); ok {
+			delay = ra
+		}
+		if wErr := waitForAIRetry(ctx, delay); wErr != nil {
+			return "", wErr
+		}
+	}
+
+	var parsed anthropicResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	for _, c := range parsed.Content {
+		if strings.TrimSpace(c.Text) != "" {
+			return c.Text, nil
+		}
+	}
+
+	return "", fmt.Errorf("no response content from Anthropic")
+}
+
+// askOpenAIWithHistory sends a multi-turn request to OpenAI API
+func (c *Client) askOpenAIWithHistory(ctx context.Context, conv *ConversationContext) (string, error) {
+	// Build messages array
+	messages := make([]Message, 0, len(conv.Messages)+1)
+
+	// Add system prompt if present
+	if conv.SystemPrompt != "" {
+		messages = append(messages, Message{
+			Role:    "system",
+			Content: conv.SystemPrompt,
+		})
+	}
+
+	messages = append(messages, conv.Messages...)
+
+	profileLLMCall, err := c.getAIProfile(c.aiProfile)
+	if err != nil {
+		return "", fmt.Errorf("failed to get AI profile: %w", err)
+	}
+
+	model := strings.TrimSpace(profileLLMCall.Model)
+	if model == "" {
+		model = "gpt-4"
+	}
+
+	reqBody := OpenAIRequest{
+		Model:    model,
+		Messages: messages,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	client := &http.Client{}
+	var body []byte
+	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
+		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.baseURL, "/")+"/chat/completions", bytes.NewBuffer(jsonData))
+		if reqErr != nil {
+			return "", fmt.Errorf("failed to create request: %w", reqErr)
+		}
+
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+strings.TrimSpace(c.apiKey))
+
+		resp, doErr := client.Do(httpReq)
+		if doErr != nil {
+			if attempt == aiRetryMaxAttempts || !isRetryableProviderErrorText(doErr.Error()) {
+				return "", fmt.Errorf("failed to send request: %w", doErr)
+			}
+			if wErr := waitForAIRetry(ctx, aiRetryDelay(attempt-1)); wErr != nil {
+				return "", wErr
+			}
+			continue
+		}
+
+		body, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return "", fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+
+		if attempt == aiRetryMaxAttempts || !(isRetryableHTTPStatus(resp.StatusCode) || isRetryableProviderErrorText(string(body))) {
+			return "", fmt.Errorf("OpenAI API request failed with status %d: %s", resp.StatusCode, string(body))
+		}
+
+		delay := aiRetryDelay(attempt - 1)
+		if ra, ok := retryAfterDelay(resp.Header); ok {
+			delay = ra
+		}
+		if wErr := waitForAIRetry(ctx, delay); wErr != nil {
+			return "", wErr
+		}
+	}
+
+	var parsed OpenAIResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	if len(parsed.Choices) > 0 && strings.TrimSpace(parsed.Choices[0].Message.Content) != "" {
+		return parsed.Choices[0].Message.Content, nil
+	}
+
+	return "", fmt.Errorf("no response content from OpenAI")
+}
+
+// askGeminiWithHistory sends a multi-turn request to Gemini
+func (c *Client) askGeminiWithHistory(ctx context.Context, conv *ConversationContext) (string, error) {
+	if c.geminiClient == nil {
+		return "", fmt.Errorf("Gemini client not initialized")
+	}
+
+	// Build combined prompt from conversation history
+	var promptBuilder strings.Builder
+	if conv.SystemPrompt != "" {
+		promptBuilder.WriteString("System: ")
+		promptBuilder.WriteString(conv.SystemPrompt)
+		promptBuilder.WriteString("\n\n")
+	}
+
+	for _, m := range conv.Messages {
+		if m.Role == "user" {
+			promptBuilder.WriteString("User: ")
+		} else {
+			promptBuilder.WriteString("Assistant: ")
+		}
+		promptBuilder.WriteString(m.Content)
+		promptBuilder.WriteString("\n\n")
+	}
+
+	promptBuilder.WriteString("Assistant: ")
+
+	profileLLMCall, err := c.getAIProfile(c.aiProfile)
+	if err != nil {
+		return "", fmt.Errorf("failed to get AI profile: %w", err)
+	}
+
+	model := strings.TrimSpace(profileLLMCall.Model)
+	if model == "" {
+		model = "gemini-2.0-flash"
+	}
+
+	var result *genai.GenerateContentResponse
+	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
+		result, err = c.geminiClient.Models.GenerateContent(ctx, model,
+			genai.Text(promptBuilder.String()), nil)
+		if err == nil {
+			break
+		}
+		if attempt == aiRetryMaxAttempts || !isRetryableProviderErrorText(err.Error()) {
+			return "", fmt.Errorf("Gemini API call failed: %w", err)
+		}
+		if wErr := waitForAIRetry(ctx, aiRetryDelay(attempt-1)); wErr != nil {
+			return "", wErr
+		}
+	}
+
+	if result == nil || len(result.Candidates) == 0 {
+		return "", fmt.Errorf("no response from Gemini")
+	}
+
+	// Extract text from the first candidate
+	var textResult strings.Builder
+	for _, part := range result.Candidates[0].Content.Parts {
+		if part.Text != "" {
+			textResult.WriteString(part.Text)
+		}
+	}
+
+	if textResult.Len() == 0 {
+		return "", fmt.Errorf("no text content in Gemini response")
+	}
+
+	return textResult.String(), nil
 }
 
 // CleanJSONResponse extracts the first JSON object from a response and applies minimal cleanup.

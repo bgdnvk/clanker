@@ -17,6 +17,19 @@ import (
 	"github.com/bgdnvk/clanker/internal/ai"
 )
 
+// reservedPlaceholders should not be resolved by the subagent because they are
+// handled by the one-click deploy image build process (autoPrepareImageForOneClickDeploy).
+// Allowing the subagent to set these can cause the image build to be skipped.
+var reservedPlaceholders = map[string]bool{
+	"IMAGE_URI": true,
+	"IMAGE_TAG": true,
+}
+
+// isReservedPlaceholder returns true if the placeholder should not be resolved by AI.
+func isReservedPlaceholder(name string) bool {
+	return reservedPlaceholders[strings.ToUpper(strings.TrimSpace(name))]
+}
+
 // placeholderResolution holds AI-resolved bindings.
 type placeholderResolution struct {
 	Bindings map[string]string `json:"bindings"`
@@ -211,9 +224,12 @@ func resolveWithSubagentToolPlan(ctx context.Context, opts ExecOptions, args []s
 	need := make([]string, 0, len(unresolved))
 	for _, raw := range unresolved {
 		n := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(raw, "<"), ">"))
-		if n != "" {
+		if n != "" && !isReservedPlaceholder(n) {
 			need = append(need, n)
 		}
+	}
+	if len(need) == 0 {
+		return nil, nil
 	}
 	sort.Strings(need)
 
@@ -288,6 +304,9 @@ func executeSubagentToolPlan(ctx context.Context, opts ExecOptions, plan *placeh
 		if key == "" || val == "" {
 			continue
 		}
+		if isReservedPlaceholder(key) {
+			continue
+		}
 		if strings.TrimSpace(bindings[key]) != "" {
 			continue
 		}
@@ -307,6 +326,9 @@ func executeSubagentToolPlan(ctx context.Context, opts ExecOptions, plan *placeh
 		cmd := plan.Commands[i]
 		bindName := strings.TrimSpace(strings.ToUpper(cmd.Bind))
 		if bindName == "" {
+			continue
+		}
+		if isReservedPlaceholder(bindName) {
 			continue
 		}
 		if strings.TrimSpace(bindings[bindName]) != "" {

@@ -21,6 +21,7 @@ import (
 
 	clankeraws "github.com/bgdnvk/clanker/internal/aws"
 	"github.com/bgdnvk/clanker/internal/openclaw"
+	"github.com/bgdnvk/clanker/internal/resourcedb"
 	"github.com/bgdnvk/clanker/internal/wordpress"
 )
 
@@ -234,6 +235,15 @@ type ExecOptions struct {
 	// OutputBindings is populated by ExecutePlan with the final resource bindings
 	// (e.g., ALB_DNS, INSTANCE_ID, etc.) for the caller to use
 	OutputBindings map[string]string
+
+	// PlanLogger is an optional logger for plan execution (writes to ~/.clanker/logs/plan/)
+	PlanLogger *PlanLogWriter
+
+	// ResourceStore tracks created resources for later cleanup/reference
+	ResourceStore *resourcedb.Store
+
+	// ParentRunID links this execution to a parent run (for nested deployments)
+	ParentRunID string
 }
 
 func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
@@ -248,6 +258,42 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	}
 	if opts.Writer == nil {
 		return fmt.Errorf("missing output writer")
+	}
+
+	// Validate plan sequencing and reorder if needed
+	if warnings := ValidatePlanSequencing(plan); len(warnings) > 0 {
+		for _, w := range warnings {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] WARNING: %s\n", w)
+		}
+		// Reorder plan to fix sequencing issues
+		_, _ = fmt.Fprintf(opts.Writer, "[maker] reordering plan to fix sequencing...\n")
+		plan = ReorderPlanCommands(plan)
+	}
+
+	// Initialize plan logger if not provided (writes to ~/.clanker/logs/plan/<runID>/)
+	var planLogger *PlanLogWriter
+	if opts.PlanLogger != nil {
+		planLogger = opts.PlanLogger
+	} else {
+		var logErr error
+		planLogger, logErr = NewPlanLogWriter("")
+		if logErr != nil {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to create plan logger: %v\n", logErr)
+		}
+	}
+	if planLogger != nil {
+		defer func() {
+			planLogger.Close()
+		}()
+		// Tee output to both original writer and log file
+		originalWriter := opts.Writer
+		opts.Writer = io.MultiWriter(originalWriter, planLogger)
+		// Save the original plan
+		if err := planLogger.WritePlan(plan); err != nil {
+			_, _ = fmt.Fprintf(originalWriter, "[maker] warning: failed to write plan to log: %v\n", err)
+		}
+		planLogger.WriteEvent("start", fmt.Sprintf("Executing plan with %d commands", len(plan.Commands)))
+		_, _ = fmt.Fprintf(originalWriter, "[maker] logging to %s\n", planLogger.GetLogDir())
 	}
 
 	accountID, err := resolveAWSAccountID(ctx, opts)
@@ -434,6 +480,9 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		}
 
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: %s\n", idx+1, len(plan.Commands), formatAWSArgsForLog(awsArgs))
+		if planLogger != nil {
+			planLogger.RecordCommandStart(idx, args0(args), args1(args))
+		}
 
 		out, runErr := runAWSCommandStreaming(ctx, awsArgs, zipBytes, opts.Writer)
 		if runErr != nil {
@@ -455,14 +504,66 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 					_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] warning: failed to persist durable checkpoint: %v\n", persistErr)
 				}
 			}
+			if planLogger != nil {
+				planLogger.RecordCommandFailure(idx, args0(args), args1(args), runErr.Error())
+				planLogger.UpdateBindings(bindings)
+				planLogger.WriteSummary("failed", plan)
+			}
 			return fmt.Errorf("aws command %d failed: %w", idx+1, runErr)
 		}
 
 		// Learn placeholder bindings from successful command outputs.
 		learnPlanBindingsFromProduces(cmdSpec.Produces, out, bindings)
-		learnPlanBindings(args, out, bindings)
+		learnPlanBindings(args, out, bindings, idx)
 		bindings["CHECKPOINT_LAST_SUCCESS_INDEX"] = strconv.Itoa(idx + 1)
 		bindings["CHECKPOINT_LAST_FAILURE_INDEX"] = ""
+		if planLogger != nil {
+			planLogger.RecordCommandSuccess(idx, args0(args), args1(args), out)
+		}
+
+		// Record created resource for tracking/cleanup
+		// This is wrapped in a function with recover to ensure resource tracking
+		// errors never crash the maker process
+		if opts.ResourceStore != nil {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						errMsg := fmt.Sprintf("panic in resource tracking: %v", r)
+						_, _ = fmt.Fprintf(opts.Writer, "[maker][resourcedb] warning: %s\n", errMsg)
+						if planLogger != nil {
+							planLogger.WriteEvent("resourcedb_error", errMsg)
+						}
+					}
+				}()
+
+				runID := ""
+				if planLogger != nil {
+					runID = planLogger.GetRunID()
+				}
+				accountID := bindings["ACCOUNT_ID"]
+				if accountID == "" {
+					accountID = bindings["AWS_ACCOUNT_ID"]
+				}
+
+				resource := resourcedb.ExtractResource(args, out, idx, runID, opts.Region, opts.Profile, accountID, opts.ParentRunID)
+				if resource == nil {
+					return
+				}
+
+				if err := opts.ResourceStore.RecordResource(resource); err != nil {
+					errMsg := fmt.Sprintf("failed to record resource: %v", err)
+					_, _ = fmt.Fprintf(opts.Writer, "[maker][resourcedb] warning: %s\n", errMsg)
+					if planLogger != nil {
+						planLogger.WriteEvent("resourcedb_error", errMsg)
+					}
+				} else {
+					_, _ = fmt.Fprintf(opts.Writer, "[maker][resourcedb] recorded %s\n", resource.String())
+					if planLogger != nil {
+						planLogger.WriteEvent("resourcedb_recorded", resource.String())
+					}
+				}
+			}()
+		}
 
 		// CloudFormation is async. If we just created/updated a stack, wait for it to complete.
 		if len(args) >= 2 && args[0] == "cloudformation" && (args[1] == "create-stack" || args[1] == "update-stack") {
@@ -507,6 +608,41 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		if !opts.DisableDurableCheckpoint {
 			if persistErr := persistDurableCheckpoint(plan, opts, bindings); persistErr != nil {
 				_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] warning: failed to persist durable checkpoint: %v\n", persistErr)
+			}
+		}
+
+		// Service health verification: before ALB commands, verify the service is healthy on the instance
+		if IsTransitionToALB(plan.Commands, idx) {
+			instanceID := bindings["INSTANCE_ID"]
+			if instanceID == "" {
+				// Try alternate bindings
+				for k, v := range bindings {
+					if strings.Contains(strings.ToUpper(k), "INSTANCE") && strings.HasPrefix(v, "i-") {
+						instanceID = v
+						break
+					}
+				}
+			}
+
+			if instanceID != "" {
+				healthCfg := ServiceHealthConfig{
+					InstanceID:    instanceID,
+					Port:          InferServicePort(plan, bindings),
+					HealthPath:    InferHealthPath(plan),
+					MaxRetries:    20,
+					RetryInterval: 15 * time.Second,
+					Profile:       opts.Profile,
+					Region:        opts.Region,
+				}
+
+				WriteHealthCheckpoint(opts.Writer, "SERVICE HEALTH VERIFICATION (before ALB exposure)")
+
+				if err := VerifyServiceHealthViaSSM(ctx, healthCfg, opts); err != nil {
+					WriteHealthCheckpoint(opts.Writer, fmt.Sprintf("SERVICE UNHEALTHY: %v", err))
+					return fmt.Errorf("service unhealthy after all fix attempts, cannot proceed to ALB: %w", err)
+				}
+
+				WriteHealthCheckpoint(opts.Writer, "SERVICE HEALTHY - proceeding to ALB creation")
 			}
 		}
 	}
@@ -585,6 +721,15 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	if !opts.DisableDurableCheckpoint {
 		if clearErr := clearDurableCheckpoint(plan, opts); clearErr != nil {
 			_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] warning: failed to clear durable checkpoint: %v\n", clearErr)
+		}
+	}
+
+	// Write final success summary to plan logger
+	if planLogger != nil {
+		planLogger.UpdateBindings(bindings)
+		planLogger.WriteEvent("complete", fmt.Sprintf("Plan completed successfully: %d commands", len(plan.Commands)))
+		if err := planLogger.WriteSummary("success", plan); err != nil {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to write summary: %v\n", err)
 		}
 	}
 
@@ -788,7 +933,13 @@ func autoPrepareImageForOneClickDeploy(ctx context.Context, question string, run
 				return err
 			}
 			if err := ensureDockerBuildxReady(ctx, opts.Writer); err != nil {
-				return err
+				// Use agentic loop for docker buildx issues
+				retryFunc := func() error {
+					return ensureDockerBuildxReady(ctx, opts.Writer)
+				}
+				if handled, _ := ShellAgenticRemediation(ctx, opts, "docker buildx create clanker-builder", err.Error(), retryFunc); !handled {
+					return err
+				}
 			}
 			if err := verifyRemoteImagePlatforms(ctx, imageRef, requiredPlatforms); err != nil {
 				_, _ = fmt.Fprintf(opts.Writer, "[docker] existing image missing required platform (%s); rebuilding multi-arch...\n", strings.Join(requiredPlatforms, ", "))
@@ -819,7 +970,18 @@ func autoPrepareImageForOneClickDeploy(ctx context.Context, question string, run
 
 	imageURI, err := BuildAndPushDockerImageWithTags(ctx, clonePath, ecrURI, opts.Profile, opts.Region, []string{imageTag, "latest"}, opts.Writer)
 	if err != nil {
-		return err
+		// Use agentic loop for docker build/push issues
+		var retryImageURI string
+		retryFunc := func() error {
+			var retryErr error
+			retryImageURI, retryErr = BuildAndPushDockerImageWithTags(ctx, clonePath, ecrURI, opts.Profile, opts.Region, []string{imageTag, "latest"}, opts.Writer)
+			return retryErr
+		}
+		if handled, _ := ShellAgenticRemediation(ctx, opts, "docker buildx build --push", err.Error(), retryFunc); handled {
+			imageURI = retryImageURI
+		} else {
+			return err
+		}
 	}
 	bindings["IMAGE_URI"] = imageURI
 	_, _ = fmt.Fprintf(opts.Writer, "[docker] one-click: image ready %s\n", imageURI)
@@ -1260,7 +1422,7 @@ func fixRoleNameArg(args []string) []string {
 	return args
 }
 
-func learnPlanBindings(args []string, output string, bindings map[string]string) {
+func learnPlanBindings(args []string, output string, bindings map[string]string, cmdIndex int) {
 	if len(args) < 2 {
 		return
 	}
@@ -1462,10 +1624,18 @@ func learnPlanBindings(args []string, output string, bindings map[string]string)
 				bindings["WEB_SG_ID"] = bindings["SG_WEB_ID"]
 			}
 		case "run-instances":
-			// {"Instances":[{"InstanceId":"i-..."}]}
+			// {"Instances":[{"InstanceId":"i-...", "SubnetId":"subnet-..."}]}
 			inst := deepString(obj, "Instances", "0", "InstanceId")
 			if inst != "" {
 				bindings["INSTANCE_ID"] = inst
+				// Also store with command index for tracking stale IDs on checkpoint resume
+				bindings[fmt.Sprintf("INSTANCE_ID_%d", cmdIndex)] = inst
+				bindings["LAST_RUN_INSTANCES_IDX"] = strconv.Itoa(cmdIndex)
+			}
+			// Capture the subnet the instance was launched in for ALB targeting
+			instSubnet := deepString(obj, "Instances", "0", "SubnetId")
+			if instSubnet != "" {
+				bindings["INSTANCE_SUBNET_ID"] = instSubnet
 			}
 		}
 	case "elbv2":
@@ -1985,7 +2155,58 @@ func handleAWSFailure(
 		}
 	}
 
+	// Final escalation: full agentic ReAct loop with diagnose -> remediate -> verify phases
+	if policy.canAttempt(runtime) && policy.consumeAttempt(runtime) {
+		failure := classifyAWSFailure(args, out)
+		if shouldUseAgenticRemediation(failure, out, true) {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] escalating to agentic remediation loop...\n")
+
+			// Collect recent execution context for the agent
+			recentLogs := collectRecentLogs(plan, idx, bindings)
+
+			if handled, agentErr := AgenticRemediation(ctx, opts, args, awsArgs, stdinBytes, out+"\n"+recentLogs, bindings); handled {
+				remediationAttempted[idx] = true
+				return true, agentErr
+			}
+		}
+	}
+
 	return false, runErr
+}
+
+// collectRecentLogs gathers context from recent commands for the agentic remediation loop
+func collectRecentLogs(plan *Plan, currentIdx int, bindings map[string]string) string {
+	var sb strings.Builder
+	sb.WriteString("Recent execution context:\n")
+
+	// Include last few commands for context
+	start := currentIdx - 3
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i < currentIdx; i++ {
+		if i < len(plan.Commands) {
+			cmdArgs := plan.Commands[i].Args
+			cmdPreview := ""
+			if len(cmdArgs) >= 2 {
+				cmdPreview = fmt.Sprintf("%s %s", cmdArgs[0], cmdArgs[1])
+			} else if len(cmdArgs) == 1 {
+				cmdPreview = cmdArgs[0]
+			}
+			sb.WriteString(fmt.Sprintf("- Command %d: %s\n", i+1, cmdPreview))
+		}
+	}
+
+	// Include relevant bindings
+	sb.WriteString("\nKey bindings:\n")
+	relevantKeys := []string{"VPC_ID", "SUBNET_ID", "SG_ID", "INSTANCE_ID", "TG_ARN", "ALB_ARN", "ROLE_ARN", "INSTANCE_PROFILE_ARN"}
+	for _, key := range relevantKeys {
+		if v := bindings[key]; v != "" {
+			sb.WriteString(fmt.Sprintf("- %s: %s\n", key, v))
+		}
+	}
+
+	return sb.String()
 }
 
 func maybeRetryTransientFailure(
@@ -4216,6 +4437,18 @@ func validateCommand(args []string, allowDestructive bool) error {
 		return fmt.Errorf("non-aws command is not allowed: %q", args[0])
 	}
 
+	// Validate first arg is a known AWS service (or "aws")
+	if err := ValidateAWSService(first); err != nil {
+		return err
+	}
+
+	// If first is "aws", validate second arg is a service
+	if first == "aws" && len(args) > 1 {
+		if err := ValidateAWSService(args[1]); err != nil {
+			return err
+		}
+	}
+
 	for i, a := range args {
 		trimmed := strings.TrimSpace(a)
 		lowerTrimmed := strings.ToLower(trimmed)
@@ -4228,6 +4461,11 @@ func validateCommand(args []string, allowDestructive bool) error {
 		}
 		if strings.HasPrefix(lowerTrimmed, "--user-data=") {
 			continue
+		}
+
+		// Detect multi-line shell scripts embedded in args (outside user-data)
+		if LooksLikeShellScript(a) {
+			return fmt.Errorf("arg %d appears to be a shell script, not an AWS CLI argument", i)
 		}
 
 		// Args are executed via exec.Command(argv...), not a shell.
