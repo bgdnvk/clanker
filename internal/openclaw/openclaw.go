@@ -28,7 +28,7 @@ func ConfigWriteShellCmd(cfDomain string, port int) string {
 	// Single-quote the JSON for shell safety; escape inner single quotes.
 	escaped := strings.ReplaceAll(json, "'", "'\\''")
 	return fmt.Sprintf(
-		`docker run --rm -v openclaw_data:/home/node/.openclaw alpine:3.20 sh -lc 'mkdir -p /home/node/.openclaw/workspace /home/node/.openclaw/devices; printf "%%s\n" '"'"'%s'"'"' > /home/node/.openclaw/openclaw.json; chown -R 1000:1000 /home/node/.openclaw' || true`,
+		`docker run --rm -v openclaw_data:/home/node/.openclaw -v openclaw_data:/root/.openclaw alpine:3.20 sh -lc 'mkdir -p /home/node/.openclaw/workspace /home/node/.openclaw/devices /root/.openclaw/workspace /root/.openclaw/devices; printf "%%s\n" '"'"'%s'"'"' | tee /home/node/.openclaw/openclaw.json > /root/.openclaw/openclaw.json; chown -R 1000:1000 /home/node/.openclaw; chown -R 0:0 /root/.openclaw' || true`,
 		escaped,
 	)
 }

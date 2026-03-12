@@ -189,6 +189,15 @@ Examples:
 				if doToken == "" {
 					return fmt.Errorf("digitalocean api_token is required (set digitalocean.api_token, DO_API_TOKEN, or DIGITALOCEAN_ACCESS_TOKEN)")
 				}
+				if maker.PlanNeedsDigitalOceanRegistryPush(makerPlan) {
+					fmt.Fprintln(os.Stderr, "[maker] prereq: probing DigitalOcean registry push access before apply...")
+					probeCtx, probeCancel := context.WithTimeout(ctx, 3*time.Minute)
+					probeErr := maker.PrepareDigitalOceanRegistryPushPlan(probeCtx, doToken, makerPlan, os.Stdout)
+					probeCancel()
+					if probeErr != nil {
+						return fmt.Errorf("digitalocean registry prereq failed before apply: %w", probeErr)
+					}
+				}
 				return maker.ExecuteDigitalOceanPlan(ctx, makerPlan, maker.ExecOptions{
 					DigitalOceanAPIToken: doToken,
 					Writer:               os.Stdout,

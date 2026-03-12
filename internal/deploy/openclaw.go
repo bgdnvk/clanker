@@ -139,12 +139,14 @@ Estimate the MONTHLY cost in USD.
 func OpenClawArchitectPromptDigitalOcean() string {
 	return `
 ## DigitalOcean Options to Consider
-1. **do-droplet** — Droplet VM + Docker Compose (best for long-running gateway services) (~$6-24/mo)
+1. **do-droplet** — Droplet VM + Docker Compose for OpenClaw runtime, plus App Platform as managed HTTPS front door (~$12-30/mo)
 2. **do-app-platform** — managed containers (good for stateless HTTP apps, no persistent disk)
 3. **do-k8s** — Kubernetes (overkill unless explicitly requested)
 
 ## DigitalOcean Services
-- Droplet for always-on gateway runtime (build Docker image on droplet, NOT via DOCR)
+- Droplet for always-on OpenClaw gateway runtime (build OpenClaw image on droplet, NOT via DOCR)
+- App Platform web service for managed HTTPS on a DigitalOcean-owned ondigitalocean.app hostname
+- DOCR is allowed only for the small App Platform HTTPS proxy image, not for the OpenClaw runtime image
 - Block storage volume for persistent OpenClaw state/workspace
 - Reserved IP only if quota is available and a pinned IP is explicitly needed
 - Cloud Firewall for port restrictions
@@ -159,19 +161,21 @@ Estimate the MONTHLY cost in USD.
 {
 	"provider": "digitalocean",
 	"method": "do-droplet",
-	"reasoning": "OpenClaw is a long-running gateway with persistent state and channel credentials. A Droplet with Docker Compose is the simplest, cheapest, and most reliable path on DigitalOcean.",
+	"reasoning": "OpenClaw stays on a stateful Droplet while App Platform provides managed HTTPS without requiring the user to bring a domain.",
 	"alternatives": [
-		{"method": "do-app-platform", "why_not": "No persistent local disk; OpenClaw needs file-based config/workspace"},
+		{"method": "do-app-platform", "why_not": "OpenClaw itself is stateful and still needs file-based config/workspace on a Droplet"},
 		{"method": "do-k8s", "why_not": "Operationally complex for this use case"}
 	],
 	"buildSteps": [
 		"Create Cloud Firewall for required ports",
 		"Create Droplet with user-data (clone repo, docker build -t openclaw:local ., compose up)",
+		"Create or reuse a DOCR registry, build and push the tiny HTTPS proxy image, and create an App Platform app from that image",
+		"Patch OpenClaw allowedOrigins to the App Platform HTTPS URL after the app is live",
 		"Attach firewall; reserved IP is optional when quota allows",
 		"Verify gateway health"
 	],
 	"runCmd": "docker compose up -d openclaw-gateway",
-	"notes": ["Build image on droplet, do NOT use DOCR", "Expose only required ports via Cloud Firewall (22, 18789, 18790)", "Persist OpenClaw config/workspace on disk or volume", "Do not write DIGITALOCEAN_ACCESS_TOKEN into OpenClaw .env"],
+	"notes": ["Build the OpenClaw runtime image on the droplet, do NOT use DOCR for OpenClaw itself", "Use App Platform as the managed HTTPS front door", "Expose only required ports via Cloud Firewall (22, 18789, 18790)", "Persist OpenClaw config/workspace on disk or volume", "Do not write DIGITALOCEAN_ACCESS_TOKEN into OpenClaw .env", "If building the App Platform proxy image locally, use docker build context __CLANKER_OPENCLAW_DO_PROXY__"],
 	"cpuMemory": "s-2vcpu-4gb",
 	"needsAlb": false,
 	"useApiGateway": false,
@@ -189,13 +193,15 @@ func OpenClawDigitalOceanDropletPrompt(p *RepoProfile, deep *DeepAnalysis, opts 
 		deployID = opts.DeployID
 	}
 	resourcePrefix := repoResourcePrefix(p.RepoURL, deployID)
-	b.WriteString("Deploy OpenClaw using DigitalOcean Droplet (VM + Docker Compose, build on droplet):\n")
-	b.WriteString(fmt.Sprintf("Naming: use prefix %s for droplet/firewall resources\n", resourcePrefix))
+	b.WriteString("Deploy OpenClaw using DigitalOcean Droplet plus App Platform HTTPS proxy:\n")
+	b.WriteString(fmt.Sprintf("Naming: use prefix %s for droplet/firewall/app resources\n", resourcePrefix))
 	b.WriteString("1. Create a Cloud Firewall allowing inbound only on required ports (" + openClawDORequiredPortsText + ") unless a reverse proxy was explicitly requested\n")
 	b.WriteString("2. Create a Droplet (Ubuntu 22.04 Docker image, s-2vcpu-4gb) with user-data script\n")
 	b.WriteString(fmt.Sprintf("3. User-data must: clone %s, write .env, '%s', run onboarding, docker compose up\n", p.RepoURL, openClawDOImageBuildCommand))
-	b.WriteString("4. Attach firewall to droplet\n")
-	b.WriteString("5. Reserved IP is optional; include it only when quota is available and a pinned IP is required\n")
+	b.WriteString("4. Create or reuse a DOCR registry, build the HTTPS proxy image with docker build context __CLANKER_OPENCLAW_DO_PROXY__, push it, and create an App Platform web service from that image\n")
+	b.WriteString("5. Use the App Platform default ingress HTTPS URL as the OpenClaw browser endpoint and patch allowedOrigins to that URL\n")
+	b.WriteString("6. Attach firewall to droplet\n")
+	b.WriteString("7. Reserved IP is optional; include it only when quota is available and a pinned IP is required\n")
 	b.WriteString("\nDigitalOcean-specific notes:\n")
 	writeLines(&b, openClawDODropletPromptNotes()...)
 	return b.String()
@@ -250,11 +256,11 @@ func ApplyOpenClawArchitectureDefaults(targetProvider string, opts *DeployOption
 		return false
 	}
 
-	// DigitalOcean: force do-droplet for OpenClaw (stateful + websocket)
+	// DigitalOcean: force do-droplet for OpenClaw runtime; App Platform is only the HTTPS front door.
 	if provider == "digitalocean" {
 		arch.Provider = "digitalocean"
 		arch.Method = "do-droplet"
-		arch.Reasoning = "OpenClaw is a stateful, long-running gateway; a Droplet with Docker Compose is the simplest path on DigitalOcean"
+		arch.Reasoning = "OpenClaw stays stateful on a Droplet while App Platform supplies managed HTTPS without requiring a user domain"
 		return true
 	}
 

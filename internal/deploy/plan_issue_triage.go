@@ -88,6 +88,9 @@ func classifyIssue(s string) string {
 	if strings.Contains(l, "iam policy arn is malformed") && strings.Contains(l, "arn:aws:iam::aws:policy/") {
 		return "noise"
 	}
+	if strings.Contains(l, "__clanker_openclaw_do_proxy__") && strings.Contains(l, "placeholder") {
+		return "noise"
+	}
 	if strings.Contains(l, "if ") || strings.Contains(l, "depends") || strings.Contains(l, "worth verifying") || strings.Contains(l, "may be") || strings.Contains(l, "might") {
 		return "context"
 	}

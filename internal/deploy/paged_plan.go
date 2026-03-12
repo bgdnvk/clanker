@@ -235,6 +235,11 @@ func BuildPlanPagePrompt(provider string, enrichedPrompt string, currentPlan *ma
 		b.WriteString("You are generating a Cloudflare deployment command plan in small pages.\n")
 		b.WriteString("Only use Cloudflare tooling: wrangler or cloudflared, or Cloudflare API tuples like [\"GET\",\"/zones\"].\n")
 		b.WriteString("Do NOT use npx.\n\n")
+	case "digitalocean":
+		b.WriteString("You are generating a DigitalOcean deployment command plan in small pages.\n")
+		b.WriteString("Use doctl command args WITHOUT the leading 'doctl' program name. Plain Docker steps must start with 'docker'.\n")
+		b.WriteString("For OpenClaw on DigitalOcean, stay inside this deploy schema: compute ssh-key import, compute firewall create, compute droplet create, compute firewall add-droplets, optional compute reserved-ip create, registry create, registry login, docker build, docker push, apps create.\n")
+		b.WriteString("INVALID examples: registry docker-login, registry docker-credential, registry docker-config, registry docker build, registry docker-push, __DOCKER_BUILD__, __DOCKER_PUSH__, __LOCAL_DOCKER_BUILD__, __LOCAL_DOCKER_PUSH__, __docker__, compute ssh-key create, compute droplet create --tag, compute firewall create --tag-names.\n\n")
 	case "gcp":
 		b.WriteString("You are generating a GCP deployment command plan in small pages.\n")
 		b.WriteString("Use gcloud commands; args may start with 'gcloud' or directly with the group (e.g. 'run', 'compute').\n\n")

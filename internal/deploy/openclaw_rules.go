@@ -76,9 +76,17 @@ func writeLines(b *strings.Builder, lines ...string) {
 
 func openClawDODropletPromptNotes() []string {
 	return []string{
-		"- Do NOT use DOCR (Container Registry). Build the image directly on the droplet.",
-		"- No 'registry create', 'registry login', local 'docker build', or 'docker push' steps.",
-		"- The plan should only have doctl infrastructure commands (firewall, droplet, optional reserved-ip).",
+		"- Build the OpenClaw runtime image directly on the droplet. Do NOT use DOCR for the OpenClaw runtime image.",
+		"- The HTTPS front door should be a separate App Platform web service on a DigitalOcean-owned ondigitalocean.app hostname.",
+		"- DOCR is allowed only for the tiny App Platform HTTPS proxy image. If building that proxy locally, use docker build context __CLANKER_OPENCLAW_DO_PROXY__.",
+		"- Build the App Platform proxy image for linux/amd64 so App Platform can run it reliably.",
+		"- The App Platform proxy should be a web service on port 8080 with env UPSTREAM_URL=http://<DROPLET_IP>:18789 and should produce APP_ID plus HTTPS_URL/APP_URL from DefaultIngress.",
+		"- The plan must include both Droplet infrastructure commands and App Platform app creation for the HTTPS proxy.",
+		"- Use compute ssh-key import, not compute ssh-key list. Each deploy should use a fresh deployment-scoped SSH key so SSH_KEY_ID comes from the current import step.",
+		"- Do NOT use --tag-names on compute firewall create for this flow. Create the firewall rules first, then attach it with compute firewall add-droplets after the droplet exists.",
+		"- If using the DigitalOcean Docker 1-click image, open host UFW ports 18789/tcp and 18790/tcp before starting the app.",
+		"- After the App Platform app is live, patch gateway.controlUi.allowedOrigins to include the App Platform HTTPS URL, not the droplet public IP.",
+		"- Build-on-droplet should provision swap before 'docker build -t openclaw:local .' so the TypeScript build does not get OOM-killed.",
 		"- CRITICAL: OpenClaw's docker-compose.yml uses 'image: openclaw:local' (NOT build:).",
 		"  The user-data must run '" + openClawDOImageBuildCommand + "' to build the image FIRST,",
 		"  then '" + openClawDOGatewayComposeCmd + "' which references that local image.",
@@ -93,10 +101,19 @@ func openClawDODropletPromptNotes() []string {
 
 func openClawDODeploymentRequirementLines() []string {
 	return []string{
-		"- Do NOT use DOCR (Container Registry). Build the image directly on the droplet.",
+		"- Build the OpenClaw runtime image directly on the droplet. Do NOT use DOCR for the OpenClaw runtime image.",
+		"- Create a separate App Platform web service to provide managed HTTPS on an ondigitalocean.app hostname.",
+		"- DOCR is allowed only for the tiny App Platform HTTPS proxy image that forwards to the droplet.",
+		"- Use compute ssh-key import, not compute ssh-key list. Each deploy should use a fresh deployment-scoped SSH key so SSH_KEY_ID comes from the current import step.",
+		"- Build the App Platform proxy image for linux/amd64.",
+		"- The App Platform proxy must forward to http://<DROPLET_IP>:18789, listen on port 8080, and produce APP_ID and HTTPS_URL/APP_URL from the default ingress URL.",
+		"- Do NOT use --tag-names on compute firewall create. Attach the firewall explicitly with compute firewall add-droplets after compute droplet create.",
 		"- Create Cloud Firewall BEFORE OR AFTER creating the Droplet (both work, but before is cleaner).",
+		"- If the DigitalOcean Docker 1-click image is used, user-data must also open UFW for 18789/tcp and 18790/tcp because the host firewall blocks them by default.",
+		"- After App Platform is live, patch gateway.controlUi.allowedOrigins with the App Platform HTTPS URL so the Control UI runs in a secure browser context.",
+		"- User-data should create and enable swap before the local Docker build so the OpenClaw image build can finish on smaller droplets.",
 		"- The Droplet user-data script runs at first boot — it must clone the repo, write .env, build with '" + openClawDOImageBuildCommand + "', run onboarding with 'export HOME=/root', and docker compose up.",
-		"- Open only " + openClawDORequiredPortsCIDR + " unless a reverse proxy/load balancer was explicitly requested.",
+		"- Open only " + openClawDORequiredPortsCIDR + " on the droplet firewall; the browser-facing HTTPS endpoint comes from App Platform, not droplet ports 80/443.",
 		"- CRITICAL: OpenClaw's docker-compose.yml uses 'image: openclaw:local' — there is no 'build:' in compose. You MUST run '" + openClawDOImageBuildCommand + "' before '" + openClawDOGatewayComposeCmd + "'.",
 		"- CRITICAL: Do NOT include 'cloud-init status --wait' in user-data. That waits on itself and hangs forever.",
 		"- DO does NOT have IAM roles; app secrets go directly into the .env file written by user-data. Do NOT inject DIGITALOCEAN_ACCESS_TOKEN into that .env file.",
@@ -107,7 +124,10 @@ func openClawDODeploymentRequirementLines() []string {
 func openClawDOSkeletonLines() []string {
 	return []string{
 		"- User-data script should: clone the repo, write .env, " + openClawDOImageBuildCommand + ", docker compose up.",
-		"- For OpenClaw on a plain droplet, firewall ports should be " + openClawDORequiredPortsText + " only. Do NOT add 80/443 unless a reverse proxy/load balancer is explicitly requested.",
+		"- Add an App Platform web service as the managed HTTPS front door, backed by a tiny proxy image stored in DOCR.",
+		"- Use compute ssh-key import rather than compute ssh-key list so the deployment gets a fresh SSH key instead of reusing an existing account key.",
+		"- Create the firewall without --tag-names and attach it later with compute firewall add-droplets once the droplet ID exists.",
+		"- Droplet firewall ports should be " + openClawDORequiredPortsText + " only. Do NOT add 80/443 on the droplet because App Platform owns the public HTTPS endpoint.",
 		"- Do NOT write DIGITALOCEAN_ACCESS_TOKEN into the OpenClaw .env file.",
 		"- Do NOT use shell fallbacks like 'git clone ... || ...' in user-data; clone failure must fail the deployment.",
 	}
@@ -115,7 +135,12 @@ func openClawDOSkeletonLines() []string {
 
 func openClawDOUserDataRepairLines() []string {
 	return []string{
-		"- OpenClaw on DigitalOcean builds directly on the droplet. Do NOT switch to DOCR/local push flows.",
+		"- OpenClaw on DigitalOcean builds directly on the droplet. Do NOT switch the OpenClaw runtime itself to DOCR/local push flows.",
+		"- Use App Platform as the managed HTTPS front door and patch OpenClaw allowedOrigins to the resulting HTTPS URL.",
+		"- DOCR is allowed only for the tiny App Platform HTTPS proxy image.",
+		"- On the Docker 1-click image, open host UFW ports 18789/tcp and 18790/tcp before starting the gateway.",
+		"- After the App Platform app is live, patch gateway.controlUi.allowedOrigins to include the App Platform HTTPS URL.",
+		"- Create and enable swap before the local docker build so the OpenClaw TypeScript build does not get SIGKILL/OOM-killed.",
 		"- Do NOT use shell fallbacks like 'git clone ... || ...' or './docker-setup.sh || ...'. Fail fast on bootstrap errors.",
 		"- Keep outer doctl flags outside the script. The user-data line must be just '" + openClawDOGatewayComposeCmd + "', not '--wait' or '--output json'.",
 	}
@@ -239,7 +264,15 @@ func renderOpenClawDOBootstrapScript(spec openClawDOBootstrapSpec) string {
 		"while fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do sleep 5; done",
 		"",
 		"apt-get update",
-		"apt-get install -y docker-compose",
+		"apt-get install -y git docker-compose-plugin",
+		"if command -v ufw >/dev/null 2>&1; then ufw allow 18789/tcp; ufw allow 18790/tcp; fi",
+		"if ! swapon --show | grep -q '/swapfile'; then",
+		"  fallocate -l 4G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=4096",
+		"  chmod 600 /swapfile",
+		"  mkswap /swapfile",
+		"  swapon /swapfile",
+		"  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab",
+		"fi",
 		"",
 		"rm -rf /opt/openclaw",
 		"git clone "+spec.RepoURL+" /opt/openclaw",
@@ -450,6 +483,11 @@ func rewriteDOFirewallArgs(args []string, spec doFirewallSpec) []string {
 	for i := 0; i < len(args); i++ {
 		trimmed := strings.TrimSpace(args[i])
 		switch {
+		case trimmed == "--tag-names" && i+1 < len(args):
+			i++
+			continue
+		case strings.HasPrefix(trimmed, "--tag-names="):
+			continue
 		case trimmed == "--inbound-rules" && i+1 < len(args):
 			i++
 			continue

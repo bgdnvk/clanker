@@ -108,6 +108,11 @@ func (a *PlanRepairAgent) buildPrompt(planJSON string, v *PlanValidation, c Plan
 	case "cloudflare":
 		b.WriteString("- Commands must be Cloudflare-only: args start with 'wrangler' or 'cloudflared', OR API calls as [METHOD, /endpoint, optional-json-body].\n")
 		b.WriteString("- Do NOT use npx/node/npm/curl or any shell operators/pipes/redirects.\n\n")
+	case "digitalocean":
+		b.WriteString("- Commands must stay inside the DigitalOcean deploy schema for this flow: compute ssh-key import, compute firewall create, compute droplet create, compute firewall add-droplets, optional compute reserved-ip create, registry create, registry login, docker build, docker push, apps create.\n")
+		b.WriteString("- Plain Docker steps must start with 'docker'; registry auth must use 'registry login'.\n")
+		b.WriteString("- NEVER emit registry docker-login, registry docker-credential, registry docker-config, registry docker build, registry docker-push, __DOCKER_BUILD__, __DOCKER_PUSH__, __LOCAL_DOCKER_BUILD__, __LOCAL_DOCKER_PUSH__, __docker__, or compute ssh-key create.\n")
+		b.WriteString("- NEVER emit compute droplet create --tag; use --tag-name. NEVER emit compute firewall create --tag-names.\n\n")
 	case "gcp":
 		b.WriteString("- Commands must be gcloud-only (args may start with 'gcloud' or start at the group like 'compute').\n")
 		b.WriteString("- Do NOT use terraform/curl or any shell operators/pipes/redirects.\n\n")

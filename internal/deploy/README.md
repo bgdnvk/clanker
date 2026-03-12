@@ -31,14 +31,20 @@ Most of the package is still intentionally pragmatic and string-heavy, but a few
   Backend capability step-family matching is centralized now as well, so required/forbidden capability checks and app-specific preflight use the same command-family view.
 - **OpenClaw DO bootstrap canonicalization** in [internal/deploy/openclaw_rules.go](openclaw_rules.go) infers a minimal bootstrap spec from droplet user-data and renders one canonical script shape.
 - **OpenClaw DO firewall canonicalization** in [internal/deploy/openclaw_rules.go](openclaw_rules.go) lifts firewall rule strings into a small typed firewall spec, then re-renders one canonical `doctl compute firewall` rule layout.
+- **DigitalOcean command-schema gating** in [internal/deploy/do_command_schema.go](do_command_schema.go) rejects hallucinated command families early, enforces placeholder production order across paged planning, and blocks strict-schema regressions during repair/review.
 
-Current OpenClaw DigitalOcean firewall invariants:
+Current OpenClaw DigitalOcean invariants:
 
+- OpenClaw runtime image is built on the droplet with `docker build -t openclaw:local .`
+- App Platform provides the managed HTTPS front door on a DigitalOcean-owned hostname
+- DOCR is allowed only for the small App Platform proxy image, not for the OpenClaw runtime image
 - inbound TCP must include `22`, `18789`, and `18790`
 - outbound must include `tcp/all`, `udp/all`, and `icmp/all`
 - empty `address:` fields are normalized to `0.0.0.0/0`
 - repeated `--inbound-rules` / `--outbound-rules` flags are merged into one canonical arg each
-- plain OpenClaw droplet plans strip `80`, `443`, and `8080` unless an explicit reverse-proxy path is introduced later
+- droplet-facing firewall rules stay on the gateway ports only; browser HTTPS comes from App Platform rather than droplet ports `80` or `443`
+- plans must include `compute ssh-key import`, `compute firewall create`, `compute droplet create`, `compute firewall add-droplets`, `registry create`, `registry login`, `docker build`, `docker push`, and `apps create`
+- after `apps create` resolves the managed HTTPS URL, the executor patches `gateway.controlUi.allowedOrigins` over SSH on the droplet
 
 This is the current architecture direction: keep planning broad and non-deterministic, then lower the riskiest execution surfaces into small typed canonical forms.
 
@@ -93,6 +99,7 @@ This is the current architecture direction: keep planning broad and non-determin
         - missing compose-required env vars,
         - secret inlining,
         - AWS wiring sanity checks.
+    - DigitalOcean strict-schema checks now also reject fake command families, enforce placeholder production order during paging/repair, and verify the OpenClaw droplet plus App Platform proxy image flow stays internally consistent.
     - DigitalOcean validation now also reads firewall rules through the typed OpenClaw DO firewall spec so repeated flags, missing required ports, and bad plain-droplet ingress are checked from one normalized view.
     - Provider/app rule packs contribute deterministic validation hooks so provider-specific and app-specific checks are routed from one place.
     - Waiter/order sanity for AWS runtime wiring (`ec2 wait instance-running` before target registration, `elbv2 wait load-balancer-available` before listener creation).
@@ -103,7 +110,7 @@ This is the current architecture direction: keep planning broad and non-determin
         - IAM instance-profile readiness before EC2 launch,
         - user-data quote sanity (detects unterminated quote breakages).
     - **Project overlay invariants:**
-        - OpenClaw: HTTPS pairing URL via CloudFront, onboarding before gateway start.
+        - OpenClaw: provider-appropriate HTTPS pairing URL, onboarding before gateway start.
     - Stuck detection fails fast in `--apply`; in plan-only mode it logs warnings and returns best-effort output.
 
 6. **Deterministic repair + triage**

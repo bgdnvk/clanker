@@ -22,6 +22,139 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+const (
+	doOpenClawProxyBuildContext = "__CLANKER_OPENCLAW_DO_PROXY__"
+	doAppSpecFilePrefix         = "clanker-do-app-spec-*.json"
+	doOpenClawProxyPlatform     = "linux/amd64"
+	doDOCRPushProbeImage        = "alpine:3.20"
+	doDOCRPushProbeRepo         = "clanker-docr-prereq"
+	doDOCRPushFallbackPrefix    = "clanker-docr-proxy"
+)
+
+type doDeploySSHKeyMaterial struct {
+	keyName        string
+	privateKeyPath string
+	publicKeyPath  string
+	cleanup        func()
+}
+
+func PlanNeedsDigitalOceanRegistryPush(plan *Plan) bool {
+	if plan == nil || !strings.EqualFold(strings.TrimSpace(plan.Provider), "digitalocean") {
+		return false
+	}
+	for _, cmd := range plan.Commands {
+		args := cmd.Args
+		if len(args) < 2 {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(args[0]), "docker") && strings.EqualFold(strings.TrimSpace(args[1]), "push") {
+			return true
+		}
+	}
+	return false
+}
+
+func DigitalOceanRegistryPushRepository(plan *Plan) string {
+	if plan == nil || !strings.EqualFold(strings.TrimSpace(plan.Provider), "digitalocean") {
+		return ""
+	}
+	for _, cmd := range plan.Commands {
+		args := cmd.Args
+		if len(args) < 3 || !strings.EqualFold(strings.TrimSpace(args[0]), "docker") || !strings.EqualFold(strings.TrimSpace(args[1]), "push") {
+			continue
+		}
+		if repo := extractDOCRRepositoryFromImageRef(args[2]); repo != "" {
+			return repo
+		}
+	}
+	return ""
+}
+
+func ProbeDigitalOceanRegistryPushPrereq(ctx context.Context, apiToken string, repositoryName string, w io.Writer) error {
+	apiToken = strings.TrimSpace(apiToken)
+	if apiToken == "" {
+		return fmt.Errorf("missing digitalocean API token")
+	}
+	repositoryName = strings.TrimSpace(repositoryName)
+	if repositoryName == "" {
+		repositoryName = doDOCRPushProbeRepo
+	}
+	registryName, err := lookupDORegistryName(ctx, apiToken)
+	if err != nil {
+		return err
+	}
+	if registryName == "" {
+		if w != nil {
+			_, _ = fmt.Fprintf(w, "[maker] DOCR prereq: no existing registry found; skipping local push probe until apply creates one\n")
+		}
+		return nil
+	}
+	configDir, err := os.MkdirTemp("", "clanker-do-docr-prereq-*")
+	if err != nil {
+		return fmt.Errorf("create DOCR prereq Docker config dir: %w", err)
+	}
+	defer os.RemoveAll(configDir)
+	opts := ExecOptions{
+		DigitalOceanAPIToken:        apiToken,
+		DigitalOceanDockerConfigDir: configDir,
+		Writer:                      w,
+	}
+	bindings := map[string]string{"REGISTRY_NAME": registryName}
+	if w != nil {
+		_, _ = fmt.Fprintf(w, "[maker] DOCR prereq: probing push access against registry %s repository %s\n", registryName, repositoryName)
+	}
+	if err := loginDORegistryWithDockerConfig(ctx, bindings, opts, w); err != nil {
+		return fmt.Errorf("prepare DOCR push auth for registry %s: %w", registryName, err)
+	}
+	if _, err := runDockerCommandStreaming(ctx, []string{"docker", "pull", doDOCRPushProbeImage}, opts, "", w); err != nil {
+		return fmt.Errorf("pull DOCR prereq image: %w", err)
+	}
+	probeRef := fmt.Sprintf("registry.digitalocean.com/%s/%s:latest", registryName, repositoryName)
+	if _, err := runDockerCommandStreaming(ctx, []string{"docker", "tag", doDOCRPushProbeImage, probeRef}, opts, "", w); err != nil {
+		return fmt.Errorf("tag DOCR prereq image: %w", err)
+	}
+	if out, err := runDockerCommandStreaming(ctx, []string{"docker", "push", probeRef}, opts, "", w); err != nil {
+		if isDOCRPushAuthFailure([]string{"docker", "push", probeRef}, out) {
+			return fmt.Errorf("DOCR push probe failed for registry %s repository %s: push credentials were accepted for API access but rejected for image upload", registryName, repositoryName)
+		}
+		return fmt.Errorf("DOCR push probe failed for registry %s: %w", registryName, err)
+	}
+	if w != nil {
+		_, _ = fmt.Fprintf(w, "[maker] DOCR prereq: push probe succeeded for registry %s repository %s\n", registryName, repositoryName)
+	}
+	return nil
+}
+
+func PrepareDigitalOceanRegistryPushPlan(ctx context.Context, apiToken string, plan *Plan, w io.Writer) error {
+	if !PlanNeedsDigitalOceanRegistryPush(plan) {
+		return nil
+	}
+	targetRepo := DigitalOceanRegistryPushRepository(plan)
+	if err := ProbeDigitalOceanRegistryPushPrereq(ctx, apiToken, targetRepo, w); err == nil {
+		return nil
+	} else if !strings.Contains(strings.ToLower(err.Error()), "rejected for image upload") || strings.TrimSpace(targetRepo) == "" {
+		return err
+	} else {
+		fallbackRepo, genErr := generateDOCRFallbackRepositoryName()
+		if genErr != nil {
+			return fmt.Errorf("exact DOCR repo %s was rejected and fallback generation failed: %w", targetRepo, genErr)
+		}
+		if w != nil {
+			_, _ = fmt.Fprintf(w, "[maker] DOCR prereq: repository %s was rejected; retrying with fallback repository %s\n", targetRepo, fallbackRepo)
+		}
+		if probeErr := ProbeDigitalOceanRegistryPushPrereq(ctx, apiToken, fallbackRepo, w); probeErr != nil {
+			return fmt.Errorf("exact DOCR repo %s was rejected and fallback repo %s also failed: %w", targetRepo, fallbackRepo, probeErr)
+		}
+		if !rewriteDigitalOceanRegistryPushRepository(plan, fallbackRepo) {
+			return fmt.Errorf("exact DOCR repo %s was rejected, fallback repo %s succeeded, but the plan could not be rewritten", targetRepo, fallbackRepo)
+		}
+		if w != nil {
+			_, _ = fmt.Fprintf(w, "[maker] DOCR prereq: rewrote plan to use fallback repository %s\n", fallbackRepo)
+		}
+		return nil
+	}
+}
+
 // ExecuteDigitalOceanPlan executes a Digital Ocean infrastructure plan
 func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 	if plan == nil {
@@ -32,6 +165,15 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 	}
 	if opts.DigitalOceanAPIToken == "" {
 		return fmt.Errorf("missing digitalocean API token")
+	}
+	if planNeedsDODockerAuthIsolation(plan) {
+		dockerConfigDir, err := os.MkdirTemp("", "clanker-do-docker-config-*")
+		if err != nil {
+			return fmt.Errorf("create DigitalOcean Docker config dir: %w", err)
+		}
+		defer os.RemoveAll(dockerConfigDir)
+		opts.DigitalOceanDockerConfigDir = dockerConfigDir
+		fmt.Fprintf(opts.Writer, "[maker] using isolated Docker auth config for DigitalOcean registry operations: %s\n", dockerConfigDir)
 	}
 
 	// Clone the repo if any step is a docker build — docker needs a build context
@@ -50,6 +192,10 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 	}
 
 	bindings := make(map[string]string)
+	sshPrivateKeyPath := ""
+	var sshKeyMaterial doDeploySSHKeyMaterial
+	sshKeyCleanupDeferred := false
+	registryCreatedThisRun := false
 
 	// Import secret-like env vars into bindings so user-data placeholder substitution works.
 	// Mirrors AWS executor: clanker-cloud passes user-provided env vars to the CLI process.
@@ -73,10 +219,26 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 		}
 		args = applyPlanBindings(args, bindings)
 		args = expandTildeInArgs(args) // doctl doesn't do shell expansion
-		if generatedArgs, err := ensureDOSSHImportKeyMaterial(args, opts.Writer); err != nil {
+		if generatedArgs, err := ensureDOSSHImportKeyMaterial(args, &sshKeyMaterial, opts.Writer); err != nil {
 			return fmt.Errorf("command %d rejected: %w", idx+1, err)
 		} else {
 			args = generatedArgs
+			if sshKeyMaterial.cleanup != nil && !sshKeyCleanupDeferred {
+				defer sshKeyMaterial.cleanup()
+				sshKeyCleanupDeferred = true
+			}
+			if keyPath := detectDOSSHPrivateKeyPath(args); keyPath != "" {
+				sshPrivateKeyPath = keyPath
+				bindings["SSH_PRIVATE_KEY_FILE"] = keyPath
+			}
+		}
+		if generatedArgs, cleanup, err := materializeDOAppSpecArg(args, opts.Writer); err != nil {
+			return fmt.Errorf("command %d rejected: %w", idx+1, err)
+		} else {
+			args = generatedArgs
+			if cleanup != nil {
+				defer cleanup()
+			}
 		}
 		args = normalizeFirewallRuleFlagsAtExec(args)
 		args = stripInvalidICMPPortsAtExec(args)
@@ -103,11 +265,17 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 		if isDockerCommand(args) {
 			_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: docker %s\n", idx+1, len(plan.Commands), strings.Join(dockerArgs(args), " "))
 			out, runErr := runDockerCommandStreaming(ctx, args, opts, cloneDir, opts.Writer)
+			if runErr != nil && shouldRetryFreshRegistryPush(args, out, registryCreatedThisRun) {
+				out, runErr = retryDOCRPushAfterFreshRegistryCreate(ctx, args, opts, cloneDir, bindings, opts.Writer)
+			}
 			if runErr != nil {
 				// "Cannot connect to the Docker daemon" is a local env issue — non-repairable
 				if strings.Contains(out, "Cannot connect to the Docker daemon") ||
 					strings.Contains(out, "docker daemon running") {
 					return fmt.Errorf("docker command %d failed (local-env: Docker Desktop not running): %w", idx+1, runErr)
+				}
+				if isDOCRPushAuthFailure(args, out) {
+					return fmt.Errorf("docker command %d failed (registry-auth: DOCR push authorization failed; verify the active DigitalOcean token/context has registry write access, rerun doctl registry login, and clean up or reuse any partial DigitalOcean resources created earlier in the apply): %w", idx+1, runErr)
 				}
 				return fmt.Errorf("docker command %d failed: %w", idx+1, runErr)
 			}
@@ -115,11 +283,18 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 			// Set produces as literal values (e.g. IMAGE_URI = the -t tag value).
 			learnDockerProducesLiteral(args, cmdSpec.Produces, bindings)
 			learnPlanBindingsFromProduces(cmdSpec.Produces, out, bindings)
+			computeDORuntimeBindings(bindings)
 			continue
 		}
 
 		args = normalizeDoctlOutputFlags(args)
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: doctl %s\n", idx+1, len(plan.Commands), strings.Join(redactDOCommandArgsForLog(args), " "))
+		if isDORegistryLogin(args) && strings.TrimSpace(opts.DigitalOceanDockerConfigDir) != "" {
+			if err := loginDORegistryWithDockerConfig(ctx, bindings, opts, opts.Writer); err != nil {
+				return fmt.Errorf("digitalocean command %d failed (registry-auth): %w", idx+1, err)
+			}
+			continue
+		}
 
 		out, runErr := runDoctlCommandWithRetry(ctx, args, opts, opts.Writer)
 		if runErr != nil {
@@ -139,10 +314,21 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 		}
 
 		learnPlanBindingsFromProduces(cmdSpec.Produces, out, bindings)
+		extractSSHKeyBindingsDirect(args, out, bindings)
+		extractDODropletBindingsDirect(args, out, bindings)
+		extractFirewallBindingsDirect(args, out, bindings)
+		extractDOAppBindingsDirect(args, out, bindings)
 		computeDORuntimeBindings(bindings)
+		if isDORegistryCreate(args) {
+			registryCreatedThisRun = true
+		}
 		if err := postCheckDOCommand(args, out); err != nil {
 			return fmt.Errorf("digitalocean command %d post-check failed: %w", idx+1, err)
 		}
+	}
+
+	if err := maybePatchOpenClawDOHTTPSOriginOverSSH(ctx, bindings, sshPrivateKeyPath, opts); err != nil {
+		_, _ = fmt.Fprintf(opts.Writer, "[openclaw] warning: failed to patch DigitalOcean allowedOrigins for HTTPS URL: %v\n", err)
 	}
 
 	return nil
@@ -237,6 +423,271 @@ func isDockerCommand(args []string) bool {
 	return strings.ToLower(strings.TrimSpace(args[0])) == "docker"
 }
 
+func isDOCRPushAuthFailure(args []string, output string) bool {
+	if !isDockerCommand(args) {
+		return false
+	}
+	dArgs := dockerArgs(args)
+	if len(dArgs) == 0 || !strings.EqualFold(strings.TrimSpace(dArgs[0]), "push") {
+		return false
+	}
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "insufficient_scope") ||
+		strings.Contains(lower, "failed to authorize") ||
+		strings.Contains(lower, "failed to fetch oauth token") ||
+		strings.Contains(lower, "authorization failed") ||
+		strings.Contains(lower, "403 forbidden") ||
+		strings.Contains(lower, "requested access to the resource is denied") ||
+		strings.Contains(lower, "unauthorized")
+}
+
+func shouldRetryFreshRegistryPush(args []string, output string, registryCreatedThisRun bool) bool {
+	return registryCreatedThisRun && isDOCRPushAuthFailure(args, output)
+}
+
+func isDORegistryCreate(args []string) bool {
+	if len(args) < 2 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(args[0]), "registry") && strings.EqualFold(strings.TrimSpace(args[1]), "create")
+}
+
+func isDORegistryLogin(args []string) bool {
+	if len(args) < 2 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(args[0]), "registry") && strings.EqualFold(strings.TrimSpace(args[1]), "login")
+}
+
+func retryDOCRPushAfterFreshRegistryCreate(ctx context.Context, args []string, opts ExecOptions, workDir string, bindings map[string]string, w io.Writer) (string, error) {
+	backoffs := []time.Duration{10 * time.Second, 20 * time.Second}
+	var lastOut string
+	var lastErr error
+	for attempt, backoff := range backoffs {
+		if w != nil {
+			_, _ = fmt.Fprintf(w, "[maker] DOCR push auth failed immediately after registry creation; waiting %s, refreshing registry login, and retrying (%d/%d)\n", backoff, attempt+1, len(backoffs))
+		}
+		select {
+		case <-ctx.Done():
+			return lastOut, ctx.Err()
+		case <-time.After(backoff):
+		}
+		if loginErr := loginDORegistryWithDockerConfig(ctx, bindings, opts, w); loginErr != nil {
+			if w != nil {
+				_, _ = fmt.Fprintf(w, "[maker] warning: DOCR relogin before retry failed: %v\n", loginErr)
+			}
+		}
+		lastOut, lastErr = runDockerCommandStreaming(ctx, args, opts, workDir, w)
+		if lastErr == nil || !isDOCRPushAuthFailure(args, lastOut) {
+			return lastOut, lastErr
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("docker push failed after fresh-registry retry attempts")
+	}
+	return lastOut, lastErr
+}
+
+func loginDORegistryWithDockerConfig(ctx context.Context, bindings map[string]string, opts ExecOptions, w io.Writer) error {
+	registryName := strings.TrimSpace(bindings["REGISTRY_NAME"])
+	if registryName == "" || strings.TrimSpace(opts.DigitalOceanDockerConfigDir) == "" {
+		_, err := runDoctlCommandWithRetry(ctx, []string{"registry", "login"}, opts, w)
+		return err
+	}
+	configJSON, err := fetchDORegistryDockerConfig(ctx, registryName, opts)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(opts.DigitalOceanDockerConfigDir, 0700); err != nil {
+		return fmt.Errorf("create Docker config dir: %w", err)
+	}
+	configPath := filepath.Join(opts.DigitalOceanDockerConfigDir, "config.json")
+	if err := os.WriteFile(configPath, configJSON, 0600); err != nil {
+		return fmt.Errorf("write Docker config: %w", err)
+	}
+	if w != nil {
+		_, _ = fmt.Fprintf(w, "[maker] wrote read-write DOCR auth config for registry %s\n", registryName)
+	}
+	return nil
+}
+
+func fetchDORegistryDockerConfig(ctx context.Context, registryName string, opts ExecOptions) ([]byte, error) {
+	bin, err := exec.LookPath("doctl")
+	if err != nil {
+		return nil, fmt.Errorf("doctl not found in PATH: %w", err)
+	}
+	cmdArgs := []string{"registry", "docker-config", registryName, "--read-write"}
+	fullArgs := append([]string{"--access-token", opts.DigitalOceanAPIToken}, cmdArgs...)
+	cmd := exec.CommandContext(ctx, bin, fullArgs...)
+	cmd.Env = doctlEnvForExec(cmdArgs, opts)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("fetch DOCR docker-config: %w", err)
+	}
+	raw := bytes.TrimSpace(buf.Bytes())
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("empty DOCR docker-config output")
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, fmt.Errorf("invalid DOCR docker-config JSON: %w", err)
+	}
+	return raw, nil
+}
+
+func lookupDORegistryName(ctx context.Context, apiToken string) (string, error) {
+	opts := ExecOptions{DigitalOceanAPIToken: strings.TrimSpace(apiToken)}
+	out, err := runDoctlCommandWithRetry(ctx, []string{"registry", "get", "--output", "json"}, opts, io.Discard)
+	if err != nil {
+		lower := strings.ToLower(out + "\n" + err.Error())
+		if strings.Contains(lower, "not found") || strings.Contains(lower, "404") || strings.Contains(lower, "no registry") {
+			return "", nil
+		}
+		return "", fmt.Errorf("lookup DigitalOcean registry: %w", err)
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &entries); err != nil {
+		return "", fmt.Errorf("parse DigitalOcean registry lookup: %w", err)
+	}
+	if len(entries) == 0 {
+		return "", nil
+	}
+	return doJSONStringValue(entries[0]["name"]), nil
+}
+
+func extractDOCRRepositoryFromImageRef(ref string) string {
+	ref = strings.TrimSpace(ref)
+	const prefix = "registry.digitalocean.com/"
+	if !strings.HasPrefix(ref, prefix) {
+		return ""
+	}
+	remainder := strings.TrimPrefix(ref, prefix)
+	_, repoWithTag, ok := strings.Cut(remainder, "/")
+	if !ok || strings.TrimSpace(repoWithTag) == "" {
+		return ""
+	}
+	if idx := strings.Index(repoWithTag, "@"); idx >= 0 {
+		repoWithTag = repoWithTag[:idx]
+	}
+	if idx := strings.LastIndex(repoWithTag, ":"); idx >= 0 {
+		repoWithTag = repoWithTag[:idx]
+	}
+	return strings.Trim(strings.TrimSpace(repoWithTag), "/")
+}
+
+func rewriteDOCRImageRefRepository(ref string, repositoryName string) string {
+	ref = strings.TrimSpace(ref)
+	repositoryName = strings.Trim(strings.TrimSpace(repositoryName), "/")
+	const prefix = "registry.digitalocean.com/"
+	if repositoryName == "" || !strings.HasPrefix(ref, prefix) {
+		return ref
+	}
+	remainder := strings.TrimPrefix(ref, prefix)
+	registryName, repoWithTag, ok := strings.Cut(remainder, "/")
+	if !ok || strings.TrimSpace(registryName) == "" || strings.TrimSpace(repoWithTag) == "" {
+		return ref
+	}
+	suffix := ""
+	if idx := strings.Index(repoWithTag, "@"); idx >= 0 {
+		suffix = repoWithTag[idx:]
+	} else if idx := strings.LastIndex(repoWithTag, ":"); idx >= 0 {
+		suffix = repoWithTag[idx:]
+	}
+	return prefix + registryName + "/" + repositoryName + suffix
+}
+
+func rewriteDigitalOceanRegistryPushRepository(plan *Plan, repositoryName string) bool {
+	if plan == nil || strings.TrimSpace(repositoryName) == "" {
+		return false
+	}
+	changed := false
+	for idx := range plan.Commands {
+		cmd := &plan.Commands[idx]
+		for argIdx, arg := range cmd.Args {
+			updated := rewriteDOCRImageRefRepository(arg, repositoryName)
+			if updated != arg {
+				cmd.Args[argIdx] = updated
+				changed = true
+			}
+		}
+		if len(cmd.Args) >= 2 && strings.EqualFold(strings.TrimSpace(cmd.Args[0]), "apps") && strings.EqualFold(strings.TrimSpace(cmd.Args[1]), "create") {
+			if rewriteDOAppSpecRepository(cmd, repositoryName) {
+				changed = true
+			}
+		}
+		for key, value := range cmd.Produces {
+			updated := rewriteDOCRImageRefRepository(value, repositoryName)
+			if updated != value {
+				cmd.Produces[key] = updated
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+func rewriteDOAppSpecRepository(cmd *Command, repositoryName string) bool {
+	if cmd == nil || len(cmd.Args) == 0 {
+		return false
+	}
+	for idx := 0; idx < len(cmd.Args); idx++ {
+		arg := strings.TrimSpace(cmd.Args[idx])
+		var specRaw string
+		var valueIdx int
+		switch {
+		case arg == "--spec" && idx+1 < len(cmd.Args):
+			specRaw = cmd.Args[idx+1]
+			valueIdx = idx + 1
+		case strings.HasPrefix(arg, "--spec="):
+			specRaw = strings.TrimPrefix(cmd.Args[idx], "--spec=")
+			valueIdx = idx
+		default:
+			continue
+		}
+		var spec map[string]any
+		if err := json.Unmarshal([]byte(specRaw), &spec); err != nil {
+			return false
+		}
+		services, ok := spec["services"].([]any)
+		if !ok || len(services) == 0 {
+			return false
+		}
+		service, ok := services[0].(map[string]any)
+		if !ok {
+			return false
+		}
+		image, ok := service["image"].(map[string]any)
+		if !ok {
+			return false
+		}
+		if strings.TrimSpace(doJSONStringValue(image["repository"])) == repositoryName {
+			return false
+		}
+		image["repository"] = repositoryName
+		encoded, err := json.Marshal(spec)
+		if err != nil {
+			return false
+		}
+		if valueIdx == idx {
+			cmd.Args[idx] = "--spec=" + string(encoded)
+		} else {
+			cmd.Args[valueIdx] = string(encoded)
+		}
+		return true
+	}
+	return false
+}
+
+func generateDOCRFallbackRepositoryName() (string, error) {
+	suffix := make([]byte, 3)
+	if _, err := rand.Read(suffix); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s-%x", doDOCRPushFallbackPrefix, suffix), nil
+}
+
 // dockerArgs strips the leading "docker" from args
 func dockerArgs(args []string) []string {
 	if len(args) > 1 && strings.ToLower(strings.TrimSpace(args[0])) == "docker" {
@@ -255,6 +706,7 @@ func runDockerCommandStreaming(ctx context.Context, args []string, opts ExecOpti
 	}
 
 	cmdArgs := dockerArgs(args)
+	cmdArgs = ensureDOProxyBuildPlatform(cmdArgs)
 
 	// Apply a 5-min timeout for docker push — DOCR silently stalls when storage quota is exceeded
 	execCtx := ctx
@@ -265,15 +717,25 @@ func runDockerCommandStreaming(ctx context.Context, args []string, opts ExecOpti
 	}
 
 	cmd := exec.CommandContext(execCtx, bin, cmdArgs...)
-	cmd.Env = os.Environ()
+	cmd.Env = dockerEnvForExec(cmdArgs, opts)
 
 	// Set working dir for build/tag — the "." build context needs to point at the repo
 	if workDir != "" && isDockerCommand(args) {
-		dArgs := dockerArgs(args)
-		if len(dArgs) > 0 {
-			sub := strings.ToLower(strings.TrimSpace(dArgs[0]))
+		if len(cmdArgs) > 0 {
+			sub := strings.ToLower(strings.TrimSpace(cmdArgs[0]))
 			if sub == "build" || sub == "tag" {
 				cmd.Dir = workDir
+			}
+		}
+	}
+	if isDockerCommand(args) {
+		if len(cmdArgs) > 0 && strings.EqualFold(strings.TrimSpace(cmdArgs[0]), "build") {
+			if ctxDir, cleanup, ok, err := prepareSpecialDockerBuildContext(cmdArgs, w); err != nil {
+				return "", err
+			} else if ok {
+				defer cleanup()
+				cmd.Dir = ctxDir
+				cmd.Args = append([]string{bin}, rewriteDockerBuildArgsForMaterializedContext(cmdArgs)...)
 			}
 		}
 	}
@@ -399,7 +861,7 @@ func runDoctlCommandStreaming(ctx context.Context, args []string, opts ExecOptio
 	fullArgs := append([]string{"--access-token", opts.DigitalOceanAPIToken}, cmdArgs...)
 
 	cmd := exec.CommandContext(ctx, bin, fullArgs...)
-	cmd.Env = os.Environ()
+	cmd.Env = doctlEnvForExec(cmdArgs, opts)
 
 	var buf bytes.Buffer
 	if shouldSanitizeDOOutputForLog(args) {
@@ -514,10 +976,18 @@ func classifyDOFailure(args []string, output string) DOFailure {
 		return f
 	}
 
+	// Validation / usage errors
+	if strings.Contains(lower, "unknown flag") ||
+		strings.Contains(lower, "invalid value") ||
+		strings.Contains(lower, "accepts ") ||
+		strings.Contains(lower, "help for create") {
+		f.Category = DOFailureValidation
+		return f
+	}
+
 	// Rate limit
 	if strings.Contains(lower, "rate limit") ||
-		strings.Contains(lower, "too many requests") ||
-		strings.Contains(lower, "429") {
+		strings.Contains(lower, "too many requests") {
 		f.Category = DOFailureRateLimit
 		return f
 	}
@@ -740,6 +1210,99 @@ func extractFirewallBindingsDirect(args []string, output string, bindings map[st
 	}
 }
 
+func extractDODropletBindingsDirect(args []string, output string, bindings map[string]string) {
+	if len(args) < 3 || !strings.EqualFold(strings.TrimSpace(args[0]), "compute") || !strings.EqualFold(strings.TrimSpace(args[1]), "droplet") || !strings.EqualFold(strings.TrimSpace(args[2]), "create") {
+		return
+	}
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(output), &entries); err != nil {
+		return
+	}
+	if len(entries) == 0 {
+		return
+	}
+	entry := entries[0]
+	if id := doJSONStringValue(entry["id"]); id != "" && strings.TrimSpace(bindings["DROPLET_ID"]) == "" {
+		bindings["DROPLET_ID"] = id
+	}
+	networks, ok := entry["networks"].(map[string]any)
+	if !ok {
+		return
+	}
+	v4, ok := networks["v4"].([]any)
+	if !ok || len(v4) == 0 {
+		return
+	}
+	fallbackIP := ""
+	for _, raw := range v4 {
+		netEntry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		ip := doJSONStringValue(netEntry["ip_address"])
+		if ip == "" {
+			continue
+		}
+		if fallbackIP == "" {
+			fallbackIP = ip
+		}
+		if strings.EqualFold(doJSONStringValue(netEntry["type"]), "public") {
+			bindings["DROPLET_IP"] = ip
+			return
+		}
+	}
+	if fallbackIP != "" && strings.TrimSpace(bindings["DROPLET_IP"]) == "" {
+		bindings["DROPLET_IP"] = fallbackIP
+	}
+}
+
+func extractDOAppBindingsDirect(args []string, output string, bindings map[string]string) {
+	if len(args) < 2 || !strings.EqualFold(strings.TrimSpace(args[0]), "apps") {
+		return
+	}
+	verb := strings.ToLower(strings.TrimSpace(args[1]))
+	if verb != "create" && verb != "get" && verb != "update" {
+		return
+	}
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return
+	}
+	var obj any
+	if err := json.Unmarshal([]byte(output), &obj); err != nil {
+		return
+	}
+	if arr, ok := obj.([]any); ok && len(arr) > 0 {
+		obj = arr[0]
+	}
+	m, ok := obj.(map[string]any)
+	if !ok {
+		return
+	}
+	if id := doJSONStringValue(m["id"]); id != "" && strings.TrimSpace(bindings["APP_ID"]) == "" {
+		bindings["APP_ID"] = id
+	}
+	ingress := doJSONStringValue(m["default_ingress"])
+	if ingress == "" {
+		ingress = doJSONStringValue(m["DefaultIngress"])
+	}
+	if ingress != "" {
+		if !strings.HasPrefix(ingress, "https://") && !strings.HasPrefix(ingress, "http://") {
+			ingress = "https://" + ingress
+		}
+		if strings.TrimSpace(bindings["APP_URL"]) == "" {
+			bindings["APP_URL"] = ingress
+		}
+		if strings.TrimSpace(bindings["HTTPS_URL"]) == "" {
+			bindings["HTTPS_URL"] = ingress
+		}
+	}
+}
+
 func doJSONStringValue(v any) string {
 	switch x := v.(type) {
 	case nil:
@@ -771,7 +1334,366 @@ func computeDORuntimeBindings(bindings map[string]string) {
 			bindings["REGISTRY_ENDPOINT"] = "registry.digitalocean.com/" + name
 		}
 	}
+	if appURL := strings.TrimSpace(bindings["APP_URL"]); appURL != "" {
+		if !strings.HasPrefix(appURL, "https://") && !strings.HasPrefix(appURL, "http://") {
+			appURL = "https://" + appURL
+		}
+		bindings["APP_URL"] = appURL
+		if strings.TrimSpace(bindings["HTTPS_URL"]) == "" {
+			bindings["HTTPS_URL"] = appURL
+		}
+	}
 }
+
+func dockerEnvForExec(cmdArgs []string, opts ExecOptions) []string {
+	env := os.Environ()
+	if !dockerCommandNeedsIsolatedConfig(cmdArgs) {
+		return env
+	}
+	return envWithDockerConfig(env, opts.DigitalOceanDockerConfigDir)
+}
+
+func doctlEnvForExec(cmdArgs []string, opts ExecOptions) []string {
+	env := os.Environ()
+	if !doctlCommandNeedsIsolatedConfig(cmdArgs) {
+		return env
+	}
+	return envWithDockerConfig(env, opts.DigitalOceanDockerConfigDir)
+}
+
+func envWithDockerConfig(env []string, dockerConfigDir string) []string {
+	if strings.TrimSpace(dockerConfigDir) == "" {
+		return env
+	}
+	filtered := env[:0]
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "DOCKER_CONFIG=") {
+			continue
+		}
+		filtered = append(filtered, kv)
+	}
+	filtered = append(filtered, "DOCKER_CONFIG="+dockerConfigDir)
+	return filtered
+}
+
+func dockerCommandNeedsIsolatedConfig(cmdArgs []string) bool {
+	if len(cmdArgs) == 0 {
+		return false
+	}
+	sub := strings.ToLower(strings.TrimSpace(cmdArgs[0]))
+	return sub == "push" || sub == "login"
+}
+
+func doctlCommandNeedsIsolatedConfig(cmdArgs []string) bool {
+	if len(cmdArgs) < 2 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(cmdArgs[0]), "registry") && strings.EqualFold(strings.TrimSpace(cmdArgs[1]), "login")
+}
+
+func planNeedsDODockerAuthIsolation(plan *Plan) bool {
+	if plan == nil {
+		return false
+	}
+	for _, cmd := range plan.Commands {
+		args := cmd.Args
+		if len(args) >= 2 && strings.EqualFold(strings.TrimSpace(args[0]), "registry") && strings.EqualFold(strings.TrimSpace(args[1]), "login") {
+			return true
+		}
+		if len(args) >= 2 && strings.EqualFold(strings.TrimSpace(args[0]), "docker") {
+			sub := strings.ToLower(strings.TrimSpace(args[1]))
+			if sub == "build" || sub == "push" || sub == "login" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func materializeDOAppSpecArg(args []string, w io.Writer) ([]string, func(), error) {
+	if len(args) < 2 || !strings.EqualFold(strings.TrimSpace(args[0]), "apps") {
+		return args, nil, nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(args[1]), "create") && !strings.EqualFold(strings.TrimSpace(args[1]), "update") {
+		return args, nil, nil
+	}
+	for i := 0; i < len(args); i++ {
+		trimmed := strings.TrimSpace(args[i])
+		var value string
+		valueIndex := -1
+		inlineEquals := false
+		switch {
+		case trimmed == "--spec":
+			if i+1 >= len(args) {
+				return args, nil, fmt.Errorf("DigitalOcean apps command is missing --spec value")
+			}
+			value = strings.TrimSpace(args[i+1])
+			valueIndex = i + 1
+		case strings.HasPrefix(trimmed, "--spec="):
+			value = strings.TrimSpace(strings.TrimPrefix(trimmed, "--spec="))
+			valueIndex = i
+			inlineEquals = true
+		default:
+			continue
+		}
+		if value == "" {
+			return args, nil, fmt.Errorf("DigitalOcean apps command is missing --spec value")
+		}
+		if looksLikeInlineDOAppSpec(value) {
+			file, err := os.CreateTemp("", doAppSpecFilePrefix)
+			if err != nil {
+				return args, nil, fmt.Errorf("create temp App Platform spec: %w", err)
+			}
+			if _, err := file.WriteString(value); err != nil {
+				file.Close()
+				os.Remove(file.Name())
+				return args, nil, fmt.Errorf("write temp App Platform spec: %w", err)
+			}
+			if err := file.Close(); err != nil {
+				os.Remove(file.Name())
+				return args, nil, fmt.Errorf("close temp App Platform spec: %w", err)
+			}
+			if inlineEquals {
+				args[valueIndex] = "--spec=" + file.Name()
+			} else {
+				args[valueIndex] = file.Name()
+			}
+			if w != nil {
+				_, _ = fmt.Fprintf(w, "[maker] materialized inline App Platform spec to %s\n", file.Name())
+			}
+			return args, func() { _ = os.Remove(file.Name()) }, nil
+		}
+	}
+	return args, nil, nil
+}
+
+func looksLikeInlineDOAppSpec(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return false
+	}
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		return true
+	}
+	return strings.Contains(trimmed, "services:") || strings.Contains(trimmed, "name:") || strings.Contains(trimmed, "ingress:")
+}
+
+func prepareSpecialDockerBuildContext(args []string, w io.Writer) (string, func(), bool, error) {
+	if len(args) == 0 {
+		return "", nil, false, nil
+	}
+	contextArg := strings.TrimSpace(args[len(args)-1])
+	if contextArg != doOpenClawProxyBuildContext {
+		return "", nil, false, nil
+	}
+	dir, err := os.MkdirTemp("", "clanker-openclaw-do-proxy-*")
+	if err != nil {
+		return "", nil, false, fmt.Errorf("create temp DigitalOcean proxy build context: %w", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(doOpenClawProxyDockerfile), 0644); err != nil {
+		cleanup()
+		return "", nil, false, fmt.Errorf("write proxy Dockerfile: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(doOpenClawProxyMainGo), 0644); err != nil {
+		cleanup()
+		return "", nil, false, fmt.Errorf("write proxy main.go: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(doOpenClawProxyGoMod), 0644); err != nil {
+		cleanup()
+		return "", nil, false, fmt.Errorf("write proxy go.mod: %w", err)
+	}
+	if w != nil {
+		_, _ = fmt.Fprintf(w, "[maker] prepared OpenClaw DigitalOcean proxy build context: %s\n", dir)
+	}
+	return dir, cleanup, true, nil
+}
+
+func rewriteDockerBuildArgsForMaterializedContext(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	rewritten := append([]string{}, args...)
+	rewritten[len(rewritten)-1] = "."
+	return rewritten
+}
+
+func ensureDOProxyBuildPlatform(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	if !strings.EqualFold(strings.TrimSpace(args[0]), "build") {
+		return args
+	}
+	if strings.TrimSpace(args[len(args)-1]) != doOpenClawProxyBuildContext {
+		return args
+	}
+	for i := 0; i < len(args); i++ {
+		trimmed := strings.TrimSpace(args[i])
+		if trimmed == "--platform" || strings.HasPrefix(trimmed, "--platform=") {
+			return args
+		}
+	}
+	updated := make([]string, 0, len(args)+2)
+	updated = append(updated, args[0], "--platform", doOpenClawProxyPlatform)
+	updated = append(updated, args[1:]...)
+	return updated
+}
+
+func detectDOSSHPrivateKeyPath(args []string) string {
+	if len(args) < 3 {
+		return ""
+	}
+	if !strings.EqualFold(strings.TrimSpace(args[0]), "compute") || !strings.EqualFold(strings.TrimSpace(args[1]), "ssh-key") || !strings.EqualFold(strings.TrimSpace(args[2]), "import") {
+		return ""
+	}
+	for i := 0; i < len(args); i++ {
+		if strings.TrimSpace(args[i]) != "--public-key-file" || i+1 >= len(args) {
+			continue
+		}
+		pubPath := expandHomePath(strings.TrimSpace(args[i+1]))
+		return strings.TrimSuffix(pubPath, ".pub")
+	}
+	return ""
+}
+
+func maybePatchOpenClawDOHTTPSOriginOverSSH(ctx context.Context, bindings map[string]string, sshPrivateKeyPath string, opts ExecOptions) error {
+	httpsURL := strings.TrimSpace(bindings["HTTPS_URL"])
+	dropletIP := strings.TrimSpace(bindings["DROPLET_IP"])
+	if httpsURL == "" || dropletIP == "" {
+		return nil
+	}
+	if sshPrivateKeyPath == "" {
+		sshPrivateKeyPath = strings.TrimSpace(bindings["SSH_PRIVATE_KEY_FILE"])
+	}
+	if sshPrivateKeyPath == "" {
+		return fmt.Errorf("missing SSH private key path")
+	}
+	if _, err := os.Stat(sshPrivateKeyPath); err != nil {
+		return fmt.Errorf("ssh private key unavailable: %w", err)
+	}
+	origin := strings.TrimRight(httpsURL, "/")
+	script := strings.Join([]string{
+		"set -euo pipefail",
+		fmt.Sprintf("export OPENCLAW_ALLOWED_ORIGIN=%s", shellSingleQuoteDO(origin)),
+		"cd /opt/openclaw",
+		`docker compose exec -T -e OPENCLAW_ALLOWED_ORIGIN="$OPENCLAW_ALLOWED_ORIGIN" openclaw-gateway node -e 'const fs=require("fs"); const path="/home/node/.openclaw/openclaw.json"; const origin=process.env.OPENCLAW_ALLOWED_ORIGIN; let cfg={}; try{cfg=JSON.parse(fs.readFileSync(path,"utf8"))}catch{} cfg.gateway=cfg.gateway||{}; cfg.gateway.mode="local"; const ui=cfg.gateway.controlUi=cfg.gateway.controlUi||{}; const origins=Array.isArray(ui.allowedOrigins)?ui.allowedOrigins.filter(Boolean):[]; for (const value of ["http://127.0.0.1:18789", origin]) { if (value && !origins.includes(value)) origins.push(value); } ui.allowedOrigins=origins; ui.dangerouslyAllowHostHeaderOriginFallback=true; fs.writeFileSync(path, JSON.stringify(cfg,null,2)+"\n");'`,
+		"docker compose restart openclaw-gateway",
+	}, "\n")
+	out, err := runDOSSHScript(ctx, dropletIP, sshPrivateKeyPath, script)
+	if opts.Writer != nil {
+		_, _ = fmt.Fprintf(opts.Writer, "[openclaw] patching DigitalOcean allowedOrigins with managed HTTPS URL %s\n", origin)
+		if strings.TrimSpace(out) != "" {
+			_, _ = io.WriteString(opts.Writer, out)
+			if !strings.HasSuffix(out, "\n") {
+				_, _ = io.WriteString(opts.Writer, "\n")
+			}
+		}
+	}
+	return err
+}
+
+func runDOSSHScript(ctx context.Context, host, privateKeyPath, script string) (string, error) {
+	keyBytes, err := os.ReadFile(privateKeyPath)
+	if err != nil {
+		return "", fmt.Errorf("read ssh private key: %w", err)
+	}
+	signer, err := ssh.ParsePrivateKey(keyBytes)
+	if err != nil {
+		return "", fmt.Errorf("parse ssh private key: %w", err)
+	}
+	config := &ssh.ClientConfig{
+		User:            "root",
+		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         30 * time.Second,
+	}
+	dialer := net.Dialer{Timeout: 30 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, "22"))
+	if err != nil {
+		return "", fmt.Errorf("connect ssh: %w", err)
+	}
+	defer conn.Close()
+	clientConn, chans, reqs, err := ssh.NewClientConn(conn, net.JoinHostPort(host, "22"), config)
+	if err != nil {
+		return "", fmt.Errorf("establish ssh client: %w", err)
+	}
+	client := ssh.NewClient(clientConn, chans, reqs)
+	defer client.Close()
+	session, err := client.NewSession()
+	if err != nil {
+		return "", fmt.Errorf("create ssh session: %w", err)
+	}
+	defer session.Close()
+	var buf bytes.Buffer
+	session.Stdout = &buf
+	session.Stderr = &buf
+	command := "bash -lc " + shellSingleQuoteDO(script)
+	if err := session.Run(command); err != nil {
+		return buf.String(), fmt.Errorf("run remote script: %w", err)
+	}
+	return buf.String(), nil
+}
+
+func shellSingleQuoteDO(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+const doOpenClawProxyGoMod = `module clanker/openclawdoproxy
+
+go 1.24
+`
+
+const doOpenClawProxyDockerfile = `FROM golang:1.24 AS build
+WORKDIR /src
+COPY go.mod go.mod
+COPY main.go main.go
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /out/proxy ./main.go
+
+FROM scratch
+COPY --from=build /out/proxy /proxy
+EXPOSE 8080
+ENTRYPOINT ["/proxy"]
+`
+
+const doOpenClawProxyMainGo = `package main
+
+import (
+	"log"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"os"
+	"strings"
+)
+
+func main() {
+	targetRaw := strings.TrimSpace(os.Getenv("UPSTREAM_URL"))
+	if targetRaw == "" {
+		log.Fatal("UPSTREAM_URL is required")
+	}
+	target, err := url.Parse(targetRaw)
+	if err != nil {
+		log.Fatalf("parse UPSTREAM_URL: %v", err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	originalDirector := proxy.Director
+	proxy.Director = func(r *http.Request) {
+		originalDirector(r)
+		r.Header.Set("X-Forwarded-Host", r.Host)
+		r.Header.Set("X-Forwarded-Proto", "https")
+	}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok\n"))
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	})
+	log.Fatal(http.ListenAndServe(":8080", handler))
+}
+`
 
 // learnDockerProducesLiteral sets produces bindings from docker command args.
 // Docker build/push output is NOT JSON so learnPlanBindingsFromProduces won't work.
@@ -863,7 +1785,7 @@ func validateDOUserDataAtExec(args []string) error {
 	return nil
 }
 
-func ensureDOSSHImportKeyMaterial(args []string, w io.Writer) ([]string, error) {
+func ensureDOSSHImportKeyMaterial(args []string, material *doDeploySSHKeyMaterial, w io.Writer) ([]string, error) {
 	if len(args) < 3 {
 		return args, nil
 	}
@@ -872,32 +1794,84 @@ func ensureDOSSHImportKeyMaterial(args []string, w io.Writer) ([]string, error) 
 		!strings.EqualFold(strings.TrimSpace(args[2]), "import") {
 		return args, nil
 	}
-	for i := 0; i < len(args); i++ {
-		if strings.TrimSpace(args[i]) != "--public-key-file" || i+1 >= len(args) {
+	if err := ensureDODeploySSHKeyMaterial(material, w); err != nil {
+		return args, err
+	}
+	return rewriteDOSSHImportArgs(args, material.keyName, material.publicKeyPath), nil
+}
+
+func ensureDODeploySSHKeyMaterial(material *doDeploySSHKeyMaterial, w io.Writer) error {
+	if material == nil {
+		return fmt.Errorf("missing DigitalOcean SSH key material state")
+	}
+	if strings.TrimSpace(material.privateKeyPath) != "" && strings.TrimSpace(material.publicKeyPath) != "" && strings.TrimSpace(material.keyName) != "" {
+		return nil
+	}
+	tmpDir, err := os.MkdirTemp("", "clanker-do-ssh-*")
+	if err != nil {
+		return fmt.Errorf("create DigitalOcean deploy SSH key directory: %w", err)
+	}
+	privateKeyPath := filepath.Join(tmpDir, "id_rsa")
+	if err := generateLocalSSHKeyPair(privateKeyPath); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return fmt.Errorf("generate DigitalOcean SSH key pair: %w", err)
+	}
+	token, err := newDODeploySSHKeyToken()
+	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return err
+	}
+	material.keyName = "clanker-do-" + token
+	material.privateKeyPath = privateKeyPath
+	material.publicKeyPath = privateKeyPath + ".pub"
+	material.cleanup = func() {
+		_ = os.RemoveAll(tmpDir)
+	}
+	if w != nil {
+		_, _ = fmt.Fprintf(w, "[maker] generated fresh deploy-scoped SSH key pair for DigitalOcean import: %s\n", material.publicKeyPath)
+	}
+	return nil
+}
+
+func newDODeploySSHKeyToken() (string, error) {
+	randBytes := make([]byte, 4)
+	if _, err := rand.Read(randBytes); err != nil {
+		return "", fmt.Errorf("generate DigitalOcean SSH key token: %w", err)
+	}
+	return time.Now().UTC().Format("20060102-150405") + fmt.Sprintf("-%x", randBytes), nil
+}
+
+func rewriteDOSSHImportArgs(args []string, keyName, publicKeyPath string) []string {
+	trimmedName := strings.TrimSpace(keyName)
+	trimmedPubPath := strings.TrimSpace(publicKeyPath)
+	if trimmedName == "" || trimmedPubPath == "" {
+		return args
+	}
+	trimmedPubPath = expandHomePath(trimmedPubPath)
+	if filepath.Ext(trimmedPubPath) != ".pub" {
+		trimmedPubPath += ".pub"
+	}
+
+	rewritten := []string{"compute", "ssh-key", "import", trimmedName}
+	start := 3
+	if len(args) > 3 && strings.HasPrefix(strings.TrimSpace(args[3]), "-") {
+		start = 3
+	} else if len(args) > 3 {
+		start = 4
+	}
+	for i := start; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		if arg == "--public-key-file" {
+			i++
 			continue
 		}
-		pubPath := strings.TrimSpace(args[i+1])
-		if pubPath == "" {
-			return args, fmt.Errorf("DigitalOcean ssh-key import is missing --public-key-file path")
+		if strings.HasPrefix(arg, "--public-key-file=") {
+			continue
 		}
-		pubPath = expandHomePath(pubPath)
-		if filepath.Ext(pubPath) != ".pub" {
-			pubPath += ".pub"
-		}
-		args[i+1] = pubPath
-		if _, err := os.Stat(pubPath); err == nil {
-			return args, nil
-		}
-		privPath := strings.TrimSuffix(pubPath, ".pub")
-		if err := generateLocalSSHKeyPair(privPath); err != nil {
-			return args, fmt.Errorf("generate DigitalOcean SSH key pair: %w", err)
-		}
-		if w != nil {
-			_, _ = fmt.Fprintf(w, "[maker] generated dedicated local SSH key pair for DigitalOcean import: %s\n", pubPath)
-		}
-		return args, nil
+		rewritten = append(rewritten, args[i])
 	}
-	return args, nil
+	rewritten = append(rewritten, "--public-key-file", trimmedPubPath)
+	return rewritten
 }
 
 func generateLocalSSHKeyPair(privateKeyPath string) error {

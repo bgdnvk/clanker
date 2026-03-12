@@ -181,17 +181,17 @@ func (s *DOInfraSnapshot) FormatForPrompt() string {
 		}
 		b.WriteString(fmt.Sprintf("- SSH Keys: %s\n", strings.Join(names, ", ")))
 		if s.LocalSSHPubKey != "" {
-			b.WriteString(fmt.Sprintf("  → Prefer importing a dedicated deployment SSH key from local file: %s\n", s.LocalSSHPubKey))
-			b.WriteString("  → Use 'compute ssh-key import <name> --public-key-file <path>' as the FIRST step, then use that produced SSH_KEY_ID in droplet create\n")
+			b.WriteString("  → Prefer a fresh deployment-scoped SSH key import instead of reusing an existing account key or local public key\n")
+			b.WriteString("  → Use 'compute ssh-key import <name> --public-key-file <path>' as the FIRST step; the executor can generate fresh local key material and then bind SSH_KEY_ID into droplet create\n")
 		} else {
-			b.WriteString("  → Prefer creating/importing a dedicated deployment SSH key instead of reusing an unrelated account-wide key\n")
+			b.WriteString("  → Prefer creating/importing a fresh deployment-scoped SSH key instead of reusing an unrelated account-wide key\n")
 		}
 	} else {
 		if s.LocalSSHPubKey != "" {
-			b.WriteString(fmt.Sprintf("- SSH Keys: NONE on DigitalOcean — import from local file: %s\n", s.LocalSSHPubKey))
-			b.WriteString("  → Use 'compute ssh-key import <name> --public-key-file " + s.LocalSSHPubKey + "' as the FIRST step\n")
+			b.WriteString("- SSH Keys: NONE on DigitalOcean — start with compute ssh-key import; a fresh deployment-scoped key can be generated locally even when another local public key already exists\n")
+			b.WriteString("  → Use 'compute ssh-key import <name> --public-key-file <path>' as the FIRST step\n")
 		} else {
-			b.WriteString("- SSH Keys: NONE — no local ~/.ssh/*.pub found either; the plan must generate an SSH key first\n")
+			b.WriteString("- SSH Keys: NONE — no local ~/.ssh/*.pub found either; the deployment should still start with compute ssh-key import because the executor can generate a fresh local key pair first\n")
 		}
 	}
 

@@ -223,7 +223,8 @@ type ExecOptions struct {
 	CloudflareAccountID string
 
 	// Digital Ocean options
-	DigitalOceanAPIToken string
+	DigitalOceanAPIToken        string
+	DigitalOceanDockerConfigDir string
 
 	// Hetzner options
 	HetznerAPIToken string

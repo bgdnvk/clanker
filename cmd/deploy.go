@@ -340,6 +340,18 @@ Examples:
 		case "do-k8s":
 			requiredLaunchOps = []string{"kubernetes cluster create"}
 		}
+		if isOpenClawDeploy && strings.EqualFold(planProvider, "digitalocean") {
+			requiredLaunchOps = []string{"compute droplet create", "apps create"}
+			if strings.TrimSpace(deployOpts.DOToken) != "" {
+				fmt.Fprintf(os.Stderr, "[deploy] prereq: probing DigitalOcean registry push access...\n")
+				probeCtx, probeCancel := context.WithTimeout(ctx, 3*time.Minute)
+				probeErr := maker.ProbeDigitalOceanRegistryPushPrereq(probeCtx, deployOpts.DOToken, "", os.Stderr)
+				probeCancel()
+				if probeErr != nil {
+					return fmt.Errorf("digitalocean prereq failed before plan generation: %w", probeErr)
+				}
+			}
+		}
 
 		// 4. Generate the maker plan via LLM
 		fmt.Fprintf(os.Stderr, "[deploy] phase 3: generating execution plan with %s ...\n", provider)
@@ -424,7 +436,7 @@ Examples:
 		// Deterministic checkpoint validation (AWS only)
 		if strings.EqualFold(strings.TrimSpace(planProvider), "aws") {
 			pJSON, _ := json.MarshalIndent(plan, "", "  ")
-			lastDetValidation = deploy.DeterministicValidatePlan(string(pJSON), rp, intel.DeepAnalysis, intel.Docker)
+			lastDetValidation = deploy.DeterministicValidatePlan(string(pJSON), rp, intel.DeepAnalysis, intel.Docker, rp.EnvVars)
 			if lastDetValidation != nil && !lastDetValidation.IsValid {
 				mustFixIssues = lastDetValidation.Issues
 			}
@@ -449,7 +461,7 @@ Examples:
 					pagedPlan = patched
 				}
 				pJSON2, _ := json.MarshalIndent(pagedPlan, "", "  ")
-				pagedVal := deploy.DeterministicValidatePlan(string(pJSON2), rp, intel.DeepAnalysis, intel.Docker)
+				pagedVal := deploy.DeterministicValidatePlan(string(pJSON2), rp, intel.DeepAnalysis, intel.Docker, rp.EnvVars)
 				pagedIssues := 0
 				if pagedVal != nil && !pagedVal.IsValid {
 					pagedIssues = len(pagedVal.Issues)
@@ -645,7 +657,7 @@ Examples:
 					// Re-validate to see if user-data issues are resolved
 					patchedJSON, _ := json.MarshalIndent(plan, "", "  ")
 					currentPlanJSON = string(patchedJSON)
-					reVal := deploy.DeterministicValidatePlan(currentPlanJSON, rp, intel.DeepAnalysis, intel.Docker)
+					reVal := deploy.DeterministicValidatePlan(currentPlanJSON, rp, intel.DeepAnalysis, intel.Docker, rp.EnvVars)
 					if reVal != nil && len(reVal.Issues) == 0 {
 						logf("[deploy] user-data micro-repair resolved all deterministic issues")
 						currentValidation = &deploy.PlanValidation{IsValid: true}
@@ -709,7 +721,7 @@ Examples:
 				plan = repaired
 
 				repairedJSON, _ := json.MarshalIndent(repaired, "", "  ")
-				invariants := deploy.CheckBulkRepairInvariants(repaired, rp, intel.DeepAnalysis)
+				invariants := deploy.CheckBulkRepairInvariants(repaired, rp, intel.DeepAnalysis, rp.EnvVars)
 				if invariants != nil && !invariants.IsValid {
 					logf("[deploy] bulk invariant check failed after repair round %d (issues=%d)", r, len(invariants.Issues))
 					for i, issue := range invariants.Issues {
@@ -798,7 +810,7 @@ Examples:
 			reviewIssues := make([]string, 0, 24)
 			reviewFixes := make([]string, 0, 24)
 			reviewWarnings := make([]string, 0, 16)
-			if det := deploy.DeterministicValidatePlan(string(currentPlanJSON), rp, intel.DeepAnalysis, intel.Docker); det != nil {
+			if det := deploy.DeterministicValidatePlan(string(currentPlanJSON), rp, intel.DeepAnalysis, intel.Docker, rp.EnvVars); det != nil {
 				reviewIssues = append(reviewIssues, det.Issues...)
 				reviewFixes = append(reviewFixes, det.Fixes...)
 				reviewWarnings = append(reviewWarnings, det.Warnings...)
@@ -1015,7 +1027,7 @@ Examples:
 			plan = patched
 		}
 
-		if finalDet := deploy.ValidatePlanDeterministicFinal(plan, rp, intel.DeepAnalysis, intel.Docker); finalDet != nil {
+		if finalDet := deploy.ValidatePlanDeterministicFinal(plan, rp, intel.DeepAnalysis, intel.Docker, rp.EnvVars); finalDet != nil {
 			for _, warning := range finalDet.Warnings {
 				logf("[deploy] final deterministic warning: %s", warning)
 			}
@@ -1029,6 +1041,9 @@ Examples:
 				}
 				if applyMode {
 					return fmt.Errorf("final deterministic validation failed with %d issue(s); refusing to apply", len(finalDet.Issues))
+				}
+				if isOpenClawDeploy && strings.EqualFold(strings.TrimSpace(planProvider), "digitalocean") {
+					return fmt.Errorf("final deterministic validation failed with %d issue(s); refusing to emit invalid openclaw digitalocean plan", len(finalDet.Issues))
 				}
 			}
 		}
@@ -1153,6 +1168,15 @@ Examples:
 			}
 			if doToken == "" {
 				return fmt.Errorf("digitalocean API token is required (use --do-token or set DIGITALOCEAN_ACCESS_TOKEN)")
+			}
+			if maker.PlanNeedsDigitalOceanRegistryPush(plan) {
+				fmt.Fprintf(os.Stderr, "[deploy] prereq: probing DigitalOcean registry push access before apply...\n")
+				probeCtx, probeCancel := context.WithTimeout(ctx, 3*time.Minute)
+				probeErr := maker.PrepareDigitalOceanRegistryPushPlan(probeCtx, doToken, plan, os.Stderr)
+				probeCancel()
+				if probeErr != nil {
+					return fmt.Errorf("digitalocean registry prereq failed before apply: %w", probeErr)
+				}
 			}
 			fmt.Fprintf(os.Stderr, "[deploy] applying DigitalOcean plan (%d commands)...\n", len(plan.Commands))
 			return maker.ExecuteDigitalOceanPlan(ctx, plan, maker.ExecOptions{
@@ -1571,6 +1595,51 @@ func generatePagedPlan(
 				logf("[deploy] warning: page returned %d commands; clamping to %d", len(page.Commands), maxCommandsPerPage)
 				page.Commands = page.Commands[:maxCommandsPerPage]
 			}
+			if boundaryErr := deploy.ValidatePlanPageBoundary(plan, page, rp.EnvVars); boundaryErr != nil {
+				repairedPage, repairedRaw, rErr := deploy.RepairPlanPageWithLLM(
+					ctx,
+					aiClient.AskPrompt,
+					aiClient.CleanJSONResponse,
+					planProvider,
+					planningContext,
+					projectSummaryForLLM,
+					cleaned,
+					"Last response violated the DigitalOcean command schema or placeholder production order. "+boundaryErr.Error()+". Return only the next valid commands.",
+					logf,
+				)
+				if rErr == nil && repairedPage != nil && len(repairedPage.Commands) > 0 {
+					tmp = &maker.Plan{Provider: planProvider, Question: "", Summary: "", Commands: repairedPage.Commands}
+					tmpJSON, _ = json.Marshal(tmp)
+					normalized, nErr = maker.ParsePlan(string(tmpJSON))
+					if nErr == nil {
+						repairedPage.Commands = normalized.Commands
+						if secondBoundaryErr := deploy.ValidatePlanPageBoundary(plan, repairedPage, rp.EnvVars); secondBoundaryErr == nil {
+							logf("[deploy] plan page boundary auto-repaired via LLM")
+							page = repairedPage
+							cleaned = repairedRaw
+							consecutivePageFailures = 0
+							pageFormatHint = ""
+							goto pageNormalized
+						}
+					}
+				}
+				consecutivePageFailures++
+				pageFormatHint = boundaryErr.Error()
+				logf("[deploy] warning: plan page rejected by boundary checks (%v), retrying (page %d/%d)...", boundaryErr, pageRound, maxPlanPages)
+				if consecutivePageFailures >= earlyRepairAfterFailures && len(plan.Commands) > 0 {
+					logf("[deploy] warning: switching early to deterministic repair after %d consecutive page failures", consecutivePageFailures)
+					break
+				}
+				if consecutivePageFailures >= maxConsecutivePageFailures {
+					if !applyMode && len(plan.Commands) > 0 {
+						logf("[deploy] warning: stopping after %d consecutive page failures; continuing with partial plan (%d command(s))", consecutivePageFailures, len(plan.Commands))
+						break
+					}
+					logf("[deploy] paged plan generation failed: too many page boundary failures (%d)", consecutivePageFailures)
+					return nil
+				}
+				continue
+			}
 		}
 	pageNormalized:
 		consecutivePageFailures = 0
@@ -1606,7 +1675,7 @@ func generatePagedPlan(
 		// Deterministic checkpoint validation (AWS only).
 		if strings.EqualFold(strings.TrimSpace(planProvider), "aws") {
 			planJSON, _ := json.MarshalIndent(plan, "", "  ")
-			lastDetValidation := deploy.DeterministicValidatePlan(string(planJSON), rp, intel.DeepAnalysis, intel.Docker)
+			lastDetValidation := deploy.DeterministicValidatePlan(string(planJSON), rp, intel.DeepAnalysis, intel.Docker, rp.EnvVars)
 			if lastDetValidation != nil && !lastDetValidation.IsValid {
 				mustFixIssues = lastDetValidation.Issues
 			} else {
@@ -1762,6 +1831,9 @@ func enforceStrictPlanRetention(baseline *maker.Plan, candidate *maker.Plan, req
 	}
 	if candidate == nil || len(candidate.Commands) == 0 {
 		return fmt.Errorf("candidate plan has no commands")
+	}
+	if strictErr := deploy.CheckStrictPlanCandidateRegression(baseline, candidate); strictErr != nil {
+		return strictErr
 	}
 
 	removedCount := len(baseline.Commands) - len(candidate.Commands)

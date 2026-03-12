@@ -576,6 +576,17 @@ func detectEnvVars(dir string, p *RepoProfile) {
 			}
 		})
 	}
+	if fileExists(dir, "docker-setup.sh") || fileExists(dir, "openclaw.mjs") {
+		filtered := make([]string, 0, len(p.EnvVars))
+		for _, key := range p.EnvVars {
+			upper := strings.ToUpper(strings.TrimSpace(key))
+			if upper == "DIGITALOCEAN_ACCESS_TOKEN" || upper == "DO_API_TOKEN" {
+				continue
+			}
+			filtered = append(filtered, key)
+		}
+		p.EnvVars = filtered
+	}
 }
 
 func detectDatabase(dir string, p *RepoProfile) {

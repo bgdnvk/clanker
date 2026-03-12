@@ -224,8 +224,13 @@ func buildSkeletonPrompt(provider, enrichedPrompt string, requiredLaunchOps []st
 		b.WriteString("- For user-data on Droplet: embed the boot script in compute droplet create --user-data.\n")
 		b.WriteString("- A typical Droplet deploy needs: ssh-key import, firewall create, droplet create, firewall add-droplets. reserved-ip create is optional when quota allows.\n")
 		b.WriteString("- IMPORTANT: generate ALL infrastructure steps as separate skeleton entries. Do NOT collapse everything into a single droplet create step.\n")
-		b.WriteString("- Do NOT include registry create, registry login, docker build, or docker push steps. The image is built on the droplet itself via user-data.\n")
-		b.WriteString("- Prefer a dedicated deployment SSH key import step over reusing an unrelated existing SSH key.\n")
+		b.WriteString("- INVALID step families for this provider path: compute ssh-key create, registry docker-login, registry docker-credential, registry docker-config, registry docker build, registry docker-push, __DOCKER_BUILD__, __DOCKER_PUSH__.\n")
+		if strings.Contains(strings.ToLower(enrichedPrompt), "openclaw") {
+			b.WriteString("- OpenClaw on DigitalOcean needs both droplet runtime steps and App Platform proxy steps; include registry create, registry login, docker build, docker push, and apps create when HTTPS is required.\n")
+		} else {
+			b.WriteString("- Do NOT include registry create, registry login, docker build, or docker push steps. The image is built on the droplet itself via user-data.\n")
+		}
+		b.WriteString("- Prefer a fresh dedicated deployment SSH key import step over reusing an unrelated existing SSH key.\n")
 		writeLines(&b, openClawDOSkeletonLines()...)
 	} else {
 		b.WriteString("- For user-data on EC2: use ONE 'ssm send-command' or embed in run-instances user-data. Do NOT repeat.\n")
@@ -344,6 +349,7 @@ func buildHydratePrompt(provider, enrichedPrompt, skeletonSummary string, batch 
 		b.WriteString("Use --output json for JSON output (NOT --format json). Use --format for column selection only (e.g. --format ID).\n")
 		b.WriteString("IMPORTANT: 'docker build' and 'docker push' are plain docker CLI commands. Args start with 'docker' (e.g. ['docker','build','-t','<tag>','.']).\n")
 		b.WriteString("Do NOT use 'registry docker build' or 'registry docker-push' — those are NOT valid doctl commands.\n")
+		b.WriteString("INVALID families to never emit: registry docker-login, registry docker-credential, registry docker-config, __DOCKER_BUILD__, __DOCKER_PUSH__, __LOCAL_DOCKER_BUILD__, __LOCAL_DOCKER_PUSH__, __docker__, compute ssh-key create.\n")
 	case "hetzner":
 		b.WriteString("Provider: Hetzner Cloud. Commands use hcloud (e.g. 'server', 'firewall', 'network').\n")
 	default:
@@ -365,6 +371,7 @@ func buildHydratePrompt(provider, enrichedPrompt, skeletonSummary string, batch 
 		b.WriteString("  the user-data MUST pull from 'registry.digitalocean.com/my-app-abc123/...', NOT a different name.\n")
 		b.WriteString("  Use --output json for JSON output (NOT --format json). Use --format for column selection (e.g. --format ID,Name).\n")
 		b.WriteString("  For docker build/push: args=['docker','build','-t','<tag>','.'] and args=['docker','push','<tag>'] — plain docker CLI, NOT doctl subcommands.\n")
+		b.WriteString("  Never emit compute droplet create --tag; use --tag-name if a tag is needed. Never emit compute firewall create --tag-names.\n")
 		b.WriteString("  CRITICAL: docker build and docker push MUST use the EXACT SAME image tag. If build tags 'registry.digitalocean.com/myapp/img:latest', push MUST push that exact tag.\n")
 		b.WriteString("  For DOCR auth in user-data: install doctl via snap/wget, then 'doctl auth init -t $TOKEN && doctl registry login'. Do NOT cat /root/.config/doctl/config.yaml.\n\n")
 	} else {
@@ -667,13 +674,23 @@ func inferSkeletonCapabilities(provider, enrichedPrompt string, requiredLaunchOp
 		switch provider {
 		case "digitalocean":
 			cap.RuntimeModel = "droplet-compose"
-			cap.RequiredSteps = []string{"compute ssh-key import", "compute firewall create", "compute droplet create", "compute firewall add-droplets"}
-			cap.ForbiddenSteps = []string{"registry create", "registry login", "docker build", "docker push"}
+			cap.RequiredSteps = []string{
+				"compute ssh-key import",
+				"compute firewall create",
+				"compute droplet create",
+				"compute firewall add-droplets",
+				"registry create",
+				"registry login",
+				"docker build",
+				"docker push",
+				"apps create",
+			}
 			cap.PreferredPorts = []string{"22", "18789", "18790"}
 			cap.RequiredEnv = []string{"OPENCLAW_GATEWAY_BIND", "OPENCLAW_GATEWAY_TOKEN|OPENCLAW_GATEWAY_PASSWORD", "AI_PROVIDER_KEY"}
 			cap.ExecutionNotes = []string{
-				"Build on the droplet via user-data instead of DOCR",
-				"Keep firewall ingress restricted to the OpenClaw ports unless a reverse proxy is explicit",
+				"Build the OpenClaw runtime on the droplet via user-data",
+				"Use DOCR and App Platform only for the small managed HTTPS proxy front door",
+				"Keep firewall ingress restricted to the OpenClaw ports on the droplet; do not expose 80/443 directly",
 				"Reserved IP is optional and quota-dependent",
 			}
 		default:
@@ -833,9 +850,20 @@ func validateHydratedBatch(batch []SkeletonStep, cmds []maker.Command, cap Skele
 	if len(cmds) != len(batch) {
 		return fmt.Errorf("hydrate returned %d commands for %d skeleton steps", len(cmds), len(batch))
 	}
+	if cap.Provider == "digitalocean" {
+		normalizeHydratedDigitalOceanCommands(cmds)
+	}
 	for i := range batch {
 		if err := validateHydratedCommandForStep(batch[i], cmds[i], cap); err != nil {
 			return fmt.Errorf("step %d: %w", i+1, err)
+		}
+	}
+	if cap.Provider == "digitalocean" {
+		strictOpenClaw := strings.EqualFold(strings.TrimSpace(cap.AppKind), "openclaw")
+		for i, cmd := range cmds {
+			if msg := validateDigitalOceanCommandBoundary(cmd.Args, strictOpenClaw); msg != "" {
+				return fmt.Errorf("step %d: %s", i+1, msg)
+			}
 		}
 	}
 	return nil
@@ -928,12 +956,80 @@ func hydratedCommandMatchesStep(step SkeletonStep, args []string) bool {
 
 func hydratedCommandFamily(args []string) string {
 	parts := make([]string, 0, 3)
-	for i := 0; i < len(args) && i < 3; i++ {
+	for i := 0; i < len(args); i++ {
 		part := strings.ToLower(strings.TrimSpace(args[i]))
 		if part == "" || strings.HasPrefix(part, "-") {
 			break
 		}
 		parts = append(parts, part)
+		if len(parts) >= 3 {
+			break
+		}
 	}
-	return strings.Join(parts, " ")
+	if len(parts) == 0 {
+		return ""
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+
+	switch parts[0] {
+	case "compute":
+		if len(parts) >= 3 {
+			switch parts[1] {
+			case "ssh-key", "droplet", "firewall", "reserved-ip":
+				return strings.Join(parts[:3], " ")
+			}
+		}
+	case "registry":
+		if len(parts) >= 3 && parts[1] == "docker" {
+			return strings.Join(parts[:3], " ")
+		}
+	}
+
+	return strings.Join(parts[:2], " ")
+}
+
+func normalizeHydratedDigitalOceanCommands(cmds []maker.Command) {
+	for i := range cmds {
+		args := cmds[i].Args
+		if len(args) == 0 {
+			continue
+		}
+		s0 := strings.ToLower(strings.TrimSpace(args[0]))
+		s1 := ""
+		s2 := ""
+		if len(args) > 1 {
+			s1 = strings.ToLower(strings.TrimSpace(args[1]))
+		}
+		if len(args) > 2 {
+			s2 = strings.ToLower(strings.TrimSpace(args[2]))
+		}
+		switch {
+		case s0 == "registry" && s1 == "docker-login":
+			cmds[i].Args = []string{"registry", "login"}
+		case s0 == "registry" && s1 == "docker-credential":
+			cmds[i].Args = []string{"registry", "login"}
+		case s0 == "registry" && s1 == "docker-config":
+			cmds[i].Args = []string{"registry", "login"}
+		case s0 == "registry" && s1 == "docker" && (s2 == "build" || s2 == "push"):
+			cmds[i].Args = append([]string{"docker"}, args[2:]...)
+		case s0 == "registry" && s1 == "docker-push":
+			cmds[i].Args = append([]string{"docker", "push"}, args[2:]...)
+		case s0 == "__docker_build__":
+			cmds[i].Args = append([]string{"docker", "build"}, args[1:]...)
+		case s0 == "__docker_push__":
+			cmds[i].Args = append([]string{"docker", "push"}, args[1:]...)
+		case s0 == "__local_docker_build__":
+			cmds[i].Args = append([]string{"docker", "build"}, args[1:]...)
+		case s0 == "__local_docker_push__":
+			cmds[i].Args = append([]string{"docker", "push"}, args[1:]...)
+		case s0 == "__docker__":
+			cmds[i].Args = append([]string{"docker"}, args[1:]...)
+		case s0 == "compute" && s1 == "ssh-key" && s2 == "create":
+			fixed := append([]string(nil), args...)
+			fixed[2] = "import"
+			cmds[i].Args = fixed
+		}
+	}
 }

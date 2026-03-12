@@ -167,6 +167,10 @@ func buildPlanPageJSONRepairPrompt(provider, deploymentIntent, projectSummary, r
 	b.WriteString("- Keep command ordering from input where possible.\n")
 	b.WriteString("- Keep command args as CLI tokens only; no shell wrappers.\n")
 	b.WriteString("- For provider=aws, args must not include leading 'aws'.\n")
+	if provider == "digitalocean" {
+		b.WriteString("- For provider=digitalocean, valid command families are doctl groups without the leading 'doctl' prefix, plus plain docker build/push commands.\n")
+		b.WriteString("- INVALID examples: registry docker-login, registry docker-credential, registry docker-config, registry docker build, registry docker-push, __DOCKER_BUILD__, __DOCKER_PUSH__, __LOCAL_DOCKER_BUILD__, __LOCAL_DOCKER_PUSH__, __docker__, compute ssh-key create, compute droplet create --tag, compute firewall create --tag-names.\n")
+	}
 	b.WriteString("- Keep placeholders in <NAME> format, never ${NAME}.\n")
 	b.WriteString("- If uncertain, keep done=false and include at least one command.\n")
 	b.WriteString("- provider: " + provider + "\n")
@@ -265,6 +269,8 @@ func buildGenericPlanIntegrityPrompt(deploymentIntent, projectSummary, candidate
 	b.WriteString("- For waiters, ensure service wait commands are syntactically valid and not placeholder/fake filters.\n")
 	b.WriteString("- For cloudfront create-distribution, keep --distribution-config as one valid JSON string arg.\n")
 	b.WriteString("- cloudfront create-distribution does not support --tags; if tagging is required use create-distribution-with-tags or a separate tagging command.\n")
+	b.WriteString("- If provider is DigitalOcean, use only real doctl command families and plain docker build/push. Never emit registry docker-login, registry docker-credential, registry docker-config, registry docker build, registry docker-push, __DOCKER_BUILD__, __DOCKER_PUSH__, __LOCAL_DOCKER_BUILD__, __LOCAL_DOCKER_PUSH__, __docker__, or compute ssh-key create.\n")
+	b.WriteString("- If provider is DigitalOcean, never emit compute droplet create --tag; use --tag-name. Never emit compute firewall create --tag-names.\n")
 	b.WriteString("\nAcceptance checklist (MUST satisfy before you return):\n")
 	b.WriteString("- If command args include ec2 run-instances, verify no trailing CLI flags are embedded into user-data script text.\n")
 	b.WriteString("- If any ALB-related SG rule exists (ALB SG or source-group to app SG), ensure ALB chain exists in commands: create-load-balancer + create-target-group + create-listener.\n")

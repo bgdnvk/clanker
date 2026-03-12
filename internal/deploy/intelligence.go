@@ -450,7 +450,7 @@ func ValidatePlan(ctx context.Context, planJSON string, profile *RepoProfile, de
 
 	// Deterministic checks first: catch hard failures like missing compose-required env vars,
 	// missing onboarding scripts for known repos, and secret inlining.
-	det := runDeterministicPlanValidation(planJSON, profile, deep, docker)
+	det := runDeterministicPlanValidation(planJSON, profile, deep, docker, profile.EnvVars)
 	if len(det.Issues) > 0 {
 		v := &PlanValidation{IsValid: false, Issues: det.Issues, Fixes: det.Fixes, Warnings: det.Warnings}
 		return v, buildFixPrompt(v), nil

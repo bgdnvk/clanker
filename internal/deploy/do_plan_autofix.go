@@ -26,10 +26,11 @@ func ApplyDigitalOceanPlanAutofix(plan *maker.Plan, logf func(string, ...any)) *
 		logf("[deploy] do autofix: stripped leading 'doctl' from %d command(s)", prefixFixed)
 	}
 
-	// Strip all DOCR / docker-build / docker-push commands — we build on the droplet now
+	// Strip DOCR / docker-build / docker-push commands for plain droplet plans.
+	// OpenClaw on DigitalOcean now keeps a small App Platform HTTPS proxy image flow.
 	docrStripped := fixDOStripDOCRCommands(plan)
 	if docrStripped > 0 {
-		logf("[deploy] do autofix: stripped %d DOCR/docker-build/docker-push command(s) (build on droplet)", docrStripped)
+		logf("[deploy] do autofix: stripped %d DOCR/docker-build/docker-push command(s)", docrStripped)
 	}
 
 	// Fix "registry docker-credential configure" → "registry login <REGISTRY_NAME>"
@@ -42,6 +43,16 @@ func ApplyDigitalOceanPlanAutofix(plan *maker.Plan, logf func(string, ...any)) *
 	dockerFixed := fixDORegistryDockerHallucination(plan)
 	if dockerFixed > 0 {
 		logf("[deploy] do autofix: replaced %d 'registry docker ...' → 'docker ...'", dockerFixed)
+	}
+
+	malformedFixed := fixDOMalformedCommandPrefixes(plan)
+	if malformedFixed > 0 {
+		logf("[deploy] do autofix: normalized %d malformed DigitalOcean command prefix(es)", malformedFixed)
+	}
+
+	tagFlagFixed := fixDODropletTagFlag(plan)
+	if tagFlagFixed > 0 {
+		logf("[deploy] do autofix: rewrote %d invalid droplet tag flag(s) to --tag-name", tagFlagFixed)
 	}
 
 	// Replace hardcoded DOCR names in user-data with <REGISTRY_NAME> placeholder
@@ -79,10 +90,20 @@ func ApplyDigitalOceanPlanAutofix(plan *maker.Plan, logf func(string, ...any)) *
 		logf("[deploy] do autofix: fixed %d firewall JMESPath produce(s)", fwFixed)
 	}
 
+	sshProdFixed := fixDOSSHKeyProducePaths(plan)
+	if sshProdFixed > 0 {
+		logf("[deploy] do autofix: fixed %d ssh-key produce path(s)", sshProdFixed)
+	}
+
 	// Generic: sanitize all JMESPath produces (strip $ prefix, fix @ syntax)
 	jmesFixed := fixDOProducesJMESPath(plan)
 	if jmesFixed > 0 {
 		logf("[deploy] do autofix: sanitized %d JMESPath produce expression(s)", jmesFixed)
+	}
+
+	outputFixed := fixDOJSONOutputFlags(plan)
+	if outputFixed > 0 {
+		logf("[deploy] do autofix: rewrote %d invalid doctl --format json flag(s) to --output json", outputFixed)
 	}
 
 	// Generic: strip unsupported flags from doctl commands
@@ -245,8 +266,12 @@ func fixDOHardcodedRegistryInUserData(plan *maker.Plan) int {
 // ---------------------------------------------------------------------------
 
 // fixDOStripDOCRCommands removes all DOCR-related commands from the plan.
-// We build on the droplet now — no registry create/login/docker build/push needed.
+// Plain droplet plans do not need local registry/build/push steps, but the
+// OpenClaw DigitalOcean HTTPS proxy flow does keep them.
 func fixDOStripDOCRCommands(plan *maker.Plan) int {
+	if shouldPreserveOpenClawDOProxyImageFlow(plan) {
+		return 0
+	}
 	count := 0
 	kept := make([]maker.Command, 0, len(plan.Commands))
 	for _, cmd := range plan.Commands {
@@ -258,6 +283,33 @@ func fixDOStripDOCRCommands(plan *maker.Plan) int {
 	}
 	plan.Commands = kept
 	return count
+}
+
+func shouldPreserveOpenClawDOProxyImageFlow(plan *maker.Plan) bool {
+	if plan == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(plan.Provider), "digitalocean") {
+		return false
+	}
+	if plan.Capabilities != nil {
+		if strings.EqualFold(strings.TrimSpace(plan.Capabilities.AppKind), "openclaw") && strings.EqualFold(strings.TrimSpace(plan.Capabilities.RuntimeModel), "droplet-compose") {
+			for _, cmd := range plan.Commands {
+				if len(cmd.Args) >= 2 && strings.EqualFold(cmd.Args[0], "apps") && strings.EqualFold(cmd.Args[1], "create") {
+					return true
+				}
+			}
+		}
+	}
+	lowerQ := strings.ToLower(strings.TrimSpace(plan.Question))
+	if strings.Contains(lowerQ, "openclaw") {
+		for _, cmd := range plan.Commands {
+			if len(cmd.Args) >= 2 && strings.EqualFold(cmd.Args[0], "apps") && strings.EqualFold(cmd.Args[1], "create") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isDOCRCommand returns true for registry create/login, docker build, docker push.
@@ -372,6 +424,101 @@ func fixDORegistryDockerHallucination(plan *maker.Plan) int {
 		if s1 == "docker-push" {
 			plan.Commands[ci].Args = append([]string{"docker", "push"}, args[2:]...)
 			count++
+		}
+	}
+	return count
+}
+
+// fixDOMalformedCommandPrefixes repairs a few recurring malformed command families
+// that show up in DigitalOcean plans and should be normalized before validation.
+func fixDOMalformedCommandPrefixes(plan *maker.Plan) int {
+	count := 0
+	for ci := range plan.Commands {
+		args := plan.Commands[ci].Args
+		if len(args) == 0 {
+			continue
+		}
+
+		s0 := strings.ToLower(strings.TrimSpace(args[0]))
+		s1 := ""
+		s2 := ""
+		if len(args) > 1 {
+			s1 = strings.ToLower(strings.TrimSpace(args[1]))
+		}
+		if len(args) > 2 {
+			s2 = strings.ToLower(strings.TrimSpace(args[2]))
+		}
+
+		switch {
+		case s0 == "__docker__":
+			plan.Commands[ci].Args = append([]string{"docker"}, args[1:]...)
+			count++
+		case s0 == "__docker_build__":
+			plan.Commands[ci].Args = append([]string{"docker", "build"}, args[1:]...)
+			count++
+		case s0 == "__docker_push__":
+			plan.Commands[ci].Args = append([]string{"docker", "push"}, args[1:]...)
+			count++
+		case s0 == "__local_docker_build__":
+			plan.Commands[ci].Args = append([]string{"docker", "build"}, args[1:]...)
+			count++
+		case s0 == "__local_docker_push__":
+			plan.Commands[ci].Args = append([]string{"docker", "push"}, args[1:]...)
+			count++
+		case s0 == "registry" && s1 == "docker-login":
+			plan.Commands[ci].Args = []string{"registry", "login"}
+			plan.Commands[ci].Reason = "Authenticate Docker CLI with DigitalOcean Container Registry"
+			count++
+		case s0 == "registry" && s1 == "docker-config":
+			plan.Commands[ci].Args = []string{"registry", "login"}
+			plan.Commands[ci].Reason = "Authenticate Docker CLI with DigitalOcean Container Registry"
+			count++
+		case s0 == "registry" && s1 == "docker-credential":
+			plan.Commands[ci].Args = []string{"registry", "login"}
+			plan.Commands[ci].Reason = "Authenticate Docker CLI with DigitalOcean Container Registry"
+			count++
+		case s0 == "compute" && s1 == "ssh-key" && s2 == "create":
+			hasPublicKeyFile := false
+			for _, arg := range args[3:] {
+				if strings.EqualFold(strings.TrimSpace(arg), "--public-key-file") {
+					hasPublicKeyFile = true
+					break
+				}
+			}
+			if hasPublicKeyFile {
+				fixed := append([]string(nil), args...)
+				fixed[2] = "import"
+				plan.Commands[ci].Args = fixed
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func fixDODropletTagFlag(plan *maker.Plan) int {
+	count := 0
+	for ci := range plan.Commands {
+		args := plan.Commands[ci].Args
+		if len(args) < 3 {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(args[0]), "compute") ||
+			!strings.EqualFold(strings.TrimSpace(args[1]), "droplet") ||
+			!strings.EqualFold(strings.TrimSpace(args[2]), "create") {
+			continue
+		}
+		for ai := range args {
+			trimmed := strings.TrimSpace(args[ai])
+			if strings.EqualFold(trimmed, "--tag") {
+				plan.Commands[ci].Args[ai] = "--tag-name"
+				count++
+				continue
+			}
+			if strings.HasPrefix(strings.ToLower(trimmed), "--tag=") {
+				plan.Commands[ci].Args[ai] = "--tag-name=" + strings.TrimSpace(trimmed[len("--tag="):])
+				count++
+			}
 		}
 	}
 	return count
@@ -550,6 +697,27 @@ func fixDOFirewallJMESPath(plan *maker.Plan) int {
 	return count
 }
 
+func fixDOSSHKeyProducePaths(plan *maker.Plan) int {
+	count := 0
+	for ci := range plan.Commands {
+		args := plan.Commands[ci].Args
+		if len(args) < 3 {
+			continue
+		}
+		if !strings.EqualFold(args[0], "compute") || !strings.EqualFold(args[1], "ssh-key") || !strings.EqualFold(args[2], "import") {
+			continue
+		}
+		for k, v := range plan.Commands[ci].Produces {
+			norm := strings.TrimSpace(v)
+			if strings.EqualFold(strings.TrimSpace(k), "SSH_KEY_ID") && (norm == "ssh_key.id" || norm == "[0].id") {
+				plan.Commands[ci].Produces[k] = "id"
+				count++
+			}
+		}
+	}
+	return count
+}
+
 // jsonPathDollarRe matches JSONPath-style $[0] or $. prefixes that aren't valid JMESPath.
 var jsonPathDollarRe = regexp.MustCompile(`^\$\.?`)
 
@@ -594,6 +762,29 @@ func fixDOProducesJMESPath(plan *maker.Plan) int {
 				count++
 			}
 		}
+	}
+	return count
+}
+
+func fixDOJSONOutputFlags(plan *maker.Plan) int {
+	count := 0
+	for ci := range plan.Commands {
+		args := plan.Commands[ci].Args
+		if len(args) == 0 {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(args[0]), "docker") || strings.EqualFold(strings.TrimSpace(args[0]), "git") {
+			continue
+		}
+		for ai := 0; ai < len(args)-1; ai++ {
+			if !strings.EqualFold(strings.TrimSpace(args[ai]), "--format") || !strings.EqualFold(strings.TrimSpace(args[ai+1]), "json") {
+				continue
+			}
+			args[ai] = "--output"
+			args[ai+1] = "json"
+			count++
+		}
+		plan.Commands[ci].Args = args
 	}
 	return count
 }
@@ -1314,18 +1505,24 @@ func fixDORegistrySubscriptionTier(plan *maker.Plan) int {
 		if !strings.EqualFold(args[0], "registry") || !strings.EqualFold(args[1], "create") {
 			continue
 		}
-		// Check if --subscription-tier is already present
+		updated := append([]string(nil), args...)
 		hasTier := false
-		for _, a := range args {
-			if strings.HasPrefix(strings.TrimSpace(a), "--subscription-tier") {
-				hasTier = true
-				break
+		for ai := 0; ai < len(updated); ai++ {
+			if strings.TrimSpace(updated[ai]) != "--subscription-tier" {
+				continue
 			}
+			hasTier = true
+			if ai+1 < len(updated) && !strings.EqualFold(strings.TrimSpace(updated[ai+1]), "basic") {
+				updated[ai+1] = "basic"
+				count++
+			}
+			break
 		}
 		if !hasTier {
-			plan.Commands[ci].Args = append(args, "--subscription-tier", "basic")
+			updated = append(updated, "--subscription-tier", "basic")
 			count++
 		}
+		plan.Commands[ci].Args = updated
 	}
 	return count
 }
