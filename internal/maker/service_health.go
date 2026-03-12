@@ -401,7 +401,10 @@ func isContainerCommandSafe(cmd string) bool {
 	dangerous := []string{
 		"rm -rf", "rm -r /", "mkfs", "dd if=",
 		"> /dev/", "chmod 777", "curl | sh", "wget | sh",
+		"curl | bash", "wget | bash", "| sh", "| bash",
 		"reboot", "shutdown", "init 0", "halt",
+		"passwd", "useradd", "userdel", "groupadd",
+		"iptables -f", "iptables --flush",
 	}
 	for _, d := range dangerous {
 		if strings.Contains(lower, d) {
@@ -409,10 +412,44 @@ func isContainerCommandSafe(cmd string) bool {
 		}
 	}
 
-	// Allow docker and systemctl commands
-	allowedPrefixes := []string{"docker", "systemctl", "aws ecr", "curl", "cat", "echo", "sleep", "sudo systemctl", "sudo docker"}
+	// Allow diagnostic and remediation commands commonly needed for container fixes
+	allowedPrefixes := []string{
+		// Docker commands
+		"docker", "sudo docker",
+		// System services
+		"systemctl", "sudo systemctl", "service",
+		// AWS CLI (all subcommands, not just ecr)
+		"aws ",
+		// Logging and diagnostics
+		"journalctl", "tail", "head", "cat", "grep", "less",
+		"test ", "[ ", "[[ ",
+		// Cloud-init
+		"cloud-init",
+		// Basic utilities
+		"curl ", "wget ", "echo", "sleep", "true", "false",
+		"ls ", "pwd", "whoami", "id ", "ps ", "ss ", "netstat",
+		// File operations (read-only)
+		"find ", "stat ", "file ", "wc ",
+		// Environment
+		"env", "printenv", "export ",
+		// Conditional/compound
+		"if ", "for ", "while ",
+	}
 	for _, a := range allowedPrefixes {
 		if strings.HasPrefix(lower, a) {
+			return true
+		}
+	}
+
+	// Also allow commands that contain these safe patterns anywhere (for compound commands)
+	safePatterns := []string{
+		"docker pull", "docker run", "docker start", "docker stop",
+		"docker ps", "docker logs", "docker images", "docker inspect",
+		"aws ecr get-login-password", "aws ecr describe",
+		"aws sts get-caller-identity",
+	}
+	for _, p := range safePatterns {
+		if strings.Contains(lower, p) {
 			return true
 		}
 	}
