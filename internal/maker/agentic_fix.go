@@ -111,11 +111,17 @@ func maybeAgenticFix(
 		}
 
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] asking AI to fix failed command (attempt %d/%d)...\n", attempt, maxAttempts)
+		if opts.PlanLogger != nil {
+			opts.PlanLogger.WriteFix("agentic_single_attempt", fmt.Sprintf("attempt=%d cmd=%s %s", attempt, args0(args), args1(args)), "starting")
+		}
 
 		fix, fixErr := getAgenticFix(ctx, opts, args, errorOutput, bindings)
 		if fixErr != nil {
 			lastErr = fixErr
 			_, _ = fmt.Fprintf(opts.Writer, "[maker] AI fix error: %v\n", fixErr)
+			if opts.PlanLogger != nil {
+				opts.PlanLogger.WriteFix("agentic_single_error", fmt.Sprintf("attempt=%d cmd=%s %s", attempt, args0(args), args1(args)), fixErr.Error())
+			}
 			continue
 		}
 
@@ -127,6 +133,9 @@ func maybeAgenticFix(
 		// Handle skip
 		if fix.Skip {
 			_, _ = fmt.Fprintf(opts.Writer, "[maker] AI says: skip this command (already done)\n")
+			if opts.PlanLogger != nil {
+				opts.PlanLogger.WriteFixSuccess("agentic_single_skip", fmt.Sprintf("%s %s", args0(args), args1(args)), "command already done")
+			}
 			return true, nil
 		}
 
@@ -160,7 +169,7 @@ func maybeAgenticFix(
 					continue
 				}
 				// Learn from pre-command output
-				learnPlanBindings(cmd.Args, out, bindings)
+				learnPlanBindings(cmd.Args, out, bindings, -1)
 			}
 		}
 
@@ -182,16 +191,25 @@ func maybeAgenticFix(
 		out, retryErr := runAWSCommandStreaming(ctx, finalArgs, stdinBytes, opts.Writer)
 		if retryErr == nil {
 			// Success! Learn from output
-			learnPlanBindings(retryArgs, out, bindings)
+			learnPlanBindings(retryArgs, out, bindings, -1)
+			if opts.PlanLogger != nil {
+				opts.PlanLogger.WriteFixSuccess("agentic_single", fmt.Sprintf("attempt=%d cmd=%s %s", attempt, args0(retryArgs), args1(retryArgs)), "retry succeeded")
+			}
 			return true, nil
 		}
 
 		// Still failed - update error for next attempt
 		errorOutput = out
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] retry failed: %v\n", retryErr)
+		if opts.PlanLogger != nil {
+			opts.PlanLogger.WriteFix("agentic_single_retry_failed", fmt.Sprintf("attempt=%d cmd=%s %s", attempt, args0(retryArgs), args1(retryArgs)), retryErr.Error())
+		}
 		lastErr = retryErr
 	}
 
+	if opts.PlanLogger != nil {
+		opts.PlanLogger.WriteFix("agentic_single_exhausted", fmt.Sprintf("cmd=%s %s", args0(args), args1(args)), "max attempts reached")
+	}
 	return false, lastErr
 }
 
