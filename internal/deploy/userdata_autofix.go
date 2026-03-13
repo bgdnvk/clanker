@@ -407,6 +407,18 @@ if [ -z "$IMAGE_URI" ]; then
     exit 0
 fi
 
+# Get app name from instance tags for SSM parameter lookup
+APP_NAME=""
+if [ -n "$INSTANCE_ID" ]; then
+    APP_NAME=$(aws ec2 describe-tags --region "$REGION" --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=AppName" --query 'Tags[0].Value' --output text 2>/dev/null || echo "")
+    [ "$APP_NAME" = "None" ] && APP_NAME=""
+    # Fallback to Name tag
+    if [ -z "$APP_NAME" ]; then
+        APP_NAME=$(aws ec2 describe-tags --region "$REGION" --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=Name" --query 'Tags[0].Value' --output text 2>/dev/null || echo "")
+        [ "$APP_NAME" = "None" ] && APP_NAME=""
+    fi
+fi
+
 # Get environment variables from instance tags (ENV_* pattern)
 ENV_FLAGS=""
 if [ -n "$INSTANCE_ID" ]; then
@@ -420,6 +432,64 @@ if [ -n "$INSTANCE_ID" ]; then
             echo "[bootstrap] Loaded env: $ENV_NAME"
         fi
     done <<< "$ENV_TAGS"
+fi
+
+# Load secrets from SSM Parameter Store
+# Tries multiple paths: /clanker/<app>/, /<app>/, /app/<app>/
+echo "[bootstrap] Loading secrets from SSM Parameter Store..."
+for SSM_PATH in "/clanker/${APP_NAME:-app}/" "/${APP_NAME:-app}/" "/app/${APP_NAME:-app}/" "/clanker/"; do
+    PARAMS=$(aws ssm get-parameters-by-path --region "$REGION" --path "$SSM_PATH" --with-decryption --query 'Parameters[*].[Name,Value]' --output text 2>/dev/null || echo "")
+    if [ -n "$PARAMS" ]; then
+        echo "[bootstrap] Found parameters in $SSM_PATH"
+        while IFS=$'\t' read -r PARAM_NAME PARAM_VALUE; do
+            if [ -n "$PARAM_NAME" ]; then
+                # Extract just the parameter name (last part of path)
+                ENV_NAME=$(basename "$PARAM_NAME")
+                # Convert to uppercase and replace dashes with underscores
+                ENV_NAME=$(echo "$ENV_NAME" | tr '[:lower:]-' '[:upper:]_')
+                # Escape special characters for shell
+                ESCAPED_VALUE=$(printf '%s' "$PARAM_VALUE" | sed 's/"/\\"/g; s/\$/\\$/g; s/` + "`" + `/\\` + "`" + `/g')
+                ENV_FLAGS="$ENV_FLAGS -e $ENV_NAME=\"$ESCAPED_VALUE\""
+                echo "[bootstrap] Loaded secret: $ENV_NAME"
+            fi
+        done <<< "$PARAMS"
+        break
+    fi
+done
+
+# Also check Secrets Manager for a secret named after the app
+if [ -n "$APP_NAME" ]; then
+    for SECRET_NAME in "$APP_NAME" "clanker/$APP_NAME" "app/$APP_NAME"; do
+        SECRET_JSON=$(aws secretsmanager get-secret-value --region "$REGION" --secret-id "$SECRET_NAME" --query 'SecretString' --output text 2>/dev/null || echo "")
+        if [ -n "$SECRET_JSON" ] && [ "$SECRET_JSON" != "None" ]; then
+            echo "[bootstrap] Found secret in Secrets Manager: $SECRET_NAME"
+            # Parse JSON and extract key-value pairs (requires jq or python)
+            if command -v jq >/dev/null 2>&1; then
+                for KEY in $(echo "$SECRET_JSON" | jq -r 'keys[]' 2>/dev/null); do
+                    VALUE=$(echo "$SECRET_JSON" | jq -r --arg k "$KEY" '.[$k]' 2>/dev/null)
+                    ENV_NAME=$(echo "$KEY" | tr '[:lower:]-' '[:upper:]_')
+                    ESCAPED_VALUE=$(printf '%s' "$VALUE" | sed 's/"/\\"/g; s/\$/\\$/g; s/` + "`" + `/\\` + "`" + `/g')
+                    ENV_FLAGS="$ENV_FLAGS -e $ENV_NAME=\"$ESCAPED_VALUE\""
+                    echo "[bootstrap] Loaded secret: $ENV_NAME"
+                done
+            elif command -v python3 >/dev/null 2>&1; then
+                python3 -c "
+import json, sys, os
+try:
+    data = json.loads('''$SECRET_JSON''')
+    for k, v in data.items():
+        env_name = k.upper().replace('-', '_')
+        escaped = str(v).replace('\"', '\\\\\"').replace('\$', '\\\\\$')
+        print(f'-e {env_name}=\"{escaped}\"')
+except: pass
+" 2>/dev/null | while read -r FLAG; do
+                    ENV_FLAGS="$ENV_FLAGS $FLAG"
+                    echo "[bootstrap] Loaded secret from Secrets Manager"
+                done
+            fi
+            break
+        fi
+    done
 fi
 
 # Get app port from tags or default to 3000
