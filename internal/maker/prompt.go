@@ -349,11 +349,12 @@ Redshift:
 OpenSearch (Elasticsearch):
 - create-domain: --domain-name mydomain --engine-version OpenSearch_2.11 --cluster-config InstanceType=t3.small.search,InstanceCount=1
 
-IMPORTANT - Reuse existing resources:
-- If context shows existing subnets in the VPC, USE THEM instead of creating new ones.
-- If context shows existing security groups that match the purpose, USE THEM.
+IMPORTANT - Fresh resources vs reuse:
+- Prefer fresh deployment-scoped resources for each new deploy when the provider supports that cleanly.
+- Reuse existing resources only when creating a fresh equivalent is impossible, provider-constrained, explicitly shared infrastructure, or clearly required by the context.
+- Shared foundation resources like existing VPC subnets may be reused when the context indicates the deploy should land inside that foundation.
+- If reusing is not required, avoid duplicating an unrelated existing resource just because it appears in the context.
 - For RDS db-subnet-group, pick 2 subnets from DIFFERENT availability zones.
-- Always prefer using resources already listed in the context over creating duplicates.
 - Before creating a subnet, check the context for available subnets in the target VPC.
 - If you must create subnets, use CIDR blocks that don't conflict with existing ones (check context).
 

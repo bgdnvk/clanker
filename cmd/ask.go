@@ -190,13 +190,19 @@ Examples:
 				if doToken == "" {
 					return fmt.Errorf("digitalocean api_token is required (set digitalocean.api_token, DO_API_TOKEN, or DIGITALOCEAN_ACCESS_TOKEN)")
 				}
+				checkCtx, checkCancel := context.WithTimeout(ctx, 30*time.Second)
+				checkErr := maker.ValidateDigitalOceanAccess(checkCtx, doToken, os.Stderr)
+				checkCancel()
+				if checkErr != nil {
+					return checkErr
+				}
 				if maker.PlanNeedsDigitalOceanRegistryPush(makerPlan) {
 					fmt.Fprintln(os.Stderr, "[maker] prereq: probing DigitalOcean registry push access before apply...")
 					probeCtx, probeCancel := context.WithTimeout(ctx, 3*time.Minute)
 					probeErr := maker.PrepareDigitalOceanRegistryPushPlan(probeCtx, doToken, makerPlan, os.Stdout)
 					probeCancel()
 					if probeErr != nil {
-						return fmt.Errorf("digitalocean registry prereq failed before apply: %w", probeErr)
+						fmt.Fprintf(os.Stderr, "[maker] warning: DigitalOcean registry prereq failed before apply; continuing and deferring exact registry handling to execution: %v\n", probeErr)
 					}
 				}
 				return maker.ExecuteDigitalOceanPlan(ctx, makerPlan, maker.ExecOptions{

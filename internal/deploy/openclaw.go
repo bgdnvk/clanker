@@ -147,6 +147,7 @@ func OpenClawArchitectPromptDigitalOcean() string {
 - Droplet for always-on OpenClaw gateway runtime (build OpenClaw image on droplet, NOT via DOCR)
 - App Platform web service for managed HTTPS on a DigitalOcean-owned ondigitalocean.app hostname
 - DOCR is allowed only for the small App Platform HTTPS proxy image, not for the OpenClaw runtime image
+- DigitalOcean allows only one registry per account/team, so one-click deploy may need to reuse that existing registry while still using a fresh repository name for the proxy image
 - Block storage volume for persistent OpenClaw state/workspace
 - Reserved IP only if quota is available and a pinned IP is explicitly needed
 - Cloud Firewall for port restrictions
@@ -161,7 +162,7 @@ Estimate the MONTHLY cost in USD.
 {
 	"provider": "digitalocean",
 	"method": "do-droplet",
-	"reasoning": "OpenClaw stays on a stateful Droplet while App Platform provides managed HTTPS without requiring the user to bring a domain.",
+	"reasoning": "OpenClaw stays on a stateful Droplet while App Platform provides managed HTTPS without requiring a custom domain; when DigitalOcean forces a single shared registry, reuse that registry but keep deploy-scoped repository names for the proxy image.",
 	"alternatives": [
 		{"method": "do-app-platform", "why_not": "OpenClaw itself is stateful and still needs file-based config/workspace on a Droplet"},
 		{"method": "do-k8s", "why_not": "Operationally complex for this use case"}
@@ -169,7 +170,7 @@ Estimate the MONTHLY cost in USD.
 	"buildSteps": [
 		"Create Cloud Firewall for required ports",
 		"Create Droplet with user-data (clone repo, docker build -t openclaw:local ., compose up)",
-		"Create or reuse a DOCR registry, build and push the tiny HTTPS proxy image, and create an App Platform app from that image",
+		"Create a DOCR registry when the account has none, otherwise reuse the account's existing registry with a fresh proxy repository name for this deploy, then build and push the tiny HTTPS proxy image and create an App Platform app from that image",
 		"Patch OpenClaw allowedOrigins to the App Platform HTTPS URL after the app is live",
 		"Attach firewall; reserved IP is optional when quota allows",
 		"Verify gateway health"
@@ -198,7 +199,7 @@ func OpenClawDigitalOceanDropletPrompt(p *RepoProfile, deep *DeepAnalysis, opts 
 	b.WriteString("1. Create a Cloud Firewall allowing inbound only on required ports (" + openClawDORequiredPortsText + ") unless a reverse proxy was explicitly requested\n")
 	b.WriteString("2. Create a Droplet (Ubuntu 22.04 Docker image, s-2vcpu-4gb) with user-data script\n")
 	b.WriteString(fmt.Sprintf("3. User-data must: clone %s, write .env, '%s', run onboarding, docker compose up\n", p.RepoURL, openClawDOImageBuildCommand))
-	b.WriteString("4. Create or reuse a DOCR registry, build the HTTPS proxy image with docker build context __CLANKER_OPENCLAW_DO_PROXY__, push it, and create an App Platform web service from that image\n")
+	b.WriteString("4. Create a DOCR registry only if the account has none; otherwise reuse the existing account-scoped registry, choose a fresh repository name for this deploy, build the HTTPS proxy image with docker build context __CLANKER_OPENCLAW_DO_PROXY__, push it, and create an App Platform web service from that image\n")
 	b.WriteString("5. Use the App Platform default ingress HTTPS URL as the OpenClaw browser endpoint and patch allowedOrigins to that URL\n")
 	b.WriteString("6. Attach firewall to droplet\n")
 	b.WriteString("7. Reserved IP is optional; include it only when quota is available and a pinned IP is required\n")

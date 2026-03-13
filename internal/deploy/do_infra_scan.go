@@ -206,7 +206,7 @@ func (s *DOInfraSnapshot) FormatForPrompt() string {
 
 	if len(s.Registries) > 0 {
 		b.WriteString(fmt.Sprintf("- Container Registry: %s\n", strings.Join(s.Registries, ", ")))
-		b.WriteString("  → REUSE existing registry; do NOT create a new one\n")
+		b.WriteString("  → DigitalOcean supports only one registry per account/team; reuse this registry when present, but prefer fresh repository names inside it for each deploy\n")
 	}
 
 	if len(s.Firewalls) > 0 {

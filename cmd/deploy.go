@@ -362,7 +362,7 @@ Examples:
 				probeErr := maker.ProbeDigitalOceanRegistryPushPrereq(probeCtx, deployOpts.DOToken, "", os.Stderr)
 				probeCancel()
 				if probeErr != nil {
-					return fmt.Errorf("digitalocean prereq failed before plan generation: %w", probeErr)
+					fmt.Fprintf(os.Stderr, "[deploy] warning: DigitalOcean registry prereq probe failed during planning; continuing and deferring exact registry handling to apply: %v\n", probeErr)
 				}
 			}
 		}
@@ -1144,13 +1144,19 @@ Examples:
 			if doToken == "" {
 				return fmt.Errorf("digitalocean API token is required (use --do-token or set DIGITALOCEAN_ACCESS_TOKEN)")
 			}
+			checkCtx, checkCancel := context.WithTimeout(ctx, 30*time.Second)
+			checkErr := maker.ValidateDigitalOceanAccess(checkCtx, doToken, os.Stderr)
+			checkCancel()
+			if checkErr != nil {
+				return checkErr
+			}
 			if maker.PlanNeedsDigitalOceanRegistryPush(plan) {
 				fmt.Fprintf(os.Stderr, "[deploy] prereq: probing DigitalOcean registry push access before apply...\n")
 				probeCtx, probeCancel := context.WithTimeout(ctx, 3*time.Minute)
 				probeErr := maker.PrepareDigitalOceanRegistryPushPlan(probeCtx, doToken, plan, os.Stderr)
 				probeCancel()
 				if probeErr != nil {
-					return fmt.Errorf("digitalocean registry prereq failed before apply: %w", probeErr)
+					fmt.Fprintf(os.Stderr, "[deploy] warning: DigitalOcean registry prereq failed before apply; continuing and deferring exact registry handling to execution: %v\n", probeErr)
 				}
 			}
 			fmt.Fprintf(os.Stderr, "[deploy] applying DigitalOcean plan (%d commands)...\n", len(plan.Commands))
