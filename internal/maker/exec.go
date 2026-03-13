@@ -455,6 +455,9 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		// Handle EC2 user-data generation for run-instances
 		args = maybeGenerateEC2UserData(args, bindings, opts)
 
+		// Inject ENV_ bindings as instance tags so bootstrap script can read them
+		args = injectEnvVarsAsInstanceTags(args, bindings)
+
 		// For EC2 run-instances, check if subnet can reach SSM and remediate if needed
 		if len(args) >= 2 && args[0] == "ec2" && args[1] == "run-instances" {
 			args, _ = RemediateRunInstancesForSSM(ctx, opts, args, opts.Writer)
@@ -3120,6 +3123,167 @@ func sanitizeRunInstancesBlockDeviceMappings(args []string) []string {
 			setValue(valIdx, "--block-device-mappings="+clean)
 		} else {
 			setValue(valIdx, clean)
+		}
+	}
+
+	return args
+}
+
+// injectEnvVarsAsInstanceTags adds ENV_ bindings as instance tags to run-instances commands.
+// This allows the bootstrap script to read env vars from instance tags if user-data generation fails.
+// Tags are limited to 50 per resource and 256 chars per value, so we only add ENV_ vars that fit.
+// Also adds ImageUri and AppPort tags for the bootstrap script to discover the container config.
+func injectEnvVarsAsInstanceTags(args []string, bindings map[string]string) []string {
+	if len(args) < 2 || args[0] != "ec2" || args[1] != "run-instances" {
+		return args
+	}
+
+	// Collect ENV_ bindings that fit in tags (max 256 chars)
+	var envTags []map[string]string
+
+	// Add ImageUri tag if we have an image reference
+	if imageURI := strings.TrimSpace(bindings["IMAGE_URI"]); imageURI != "" && len(imageURI) <= 256 {
+		envTags = append(envTags, map[string]string{"Key": "ImageUri", "Value": imageURI})
+	}
+
+	// Add AppPort tag
+	if appPort := strings.TrimSpace(bindings["APP_PORT"]); appPort != "" {
+		envTags = append(envTags, map[string]string{"Key": "AppPort", "Value": appPort})
+	} else if port := strings.TrimSpace(bindings["ENV_PORT"]); port != "" {
+		envTags = append(envTags, map[string]string{"Key": "AppPort", "Value": port})
+	}
+
+	// Add AppName tag from various sources
+	if appName := strings.TrimSpace(bindings["APP_NAME"]); appName != "" {
+		envTags = append(envTags, map[string]string{"Key": "AppName", "Value": appName})
+	} else if ecrRepo := strings.TrimSpace(bindings["ECR_REPO"]); ecrRepo != "" {
+		envTags = append(envTags, map[string]string{"Key": "AppName", "Value": ecrRepo})
+	}
+
+	for key, value := range bindings {
+		if !strings.HasPrefix(key, "ENV_") {
+			continue
+		}
+		// Skip empty values
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		// Tag value limit is 256 chars
+		if len(value) > 256 {
+			continue
+		}
+		// Skip values that look like secrets (contain common secret patterns)
+		lower := strings.ToLower(key)
+		if strings.Contains(lower, "password") || strings.Contains(lower, "secret") ||
+			strings.Contains(lower, "token") || strings.Contains(lower, "key") {
+			continue
+		}
+		envTags = append(envTags, map[string]string{"Key": key, "Value": value})
+	}
+
+	if len(envTags) == 0 {
+		return args
+	}
+
+	// Find existing --tag-specifications
+	tagSpecIdx := -1
+	tagSpecInline := false
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--tag-specifications" && i+1 < len(args) {
+			tagSpecIdx = i + 1
+			break
+		}
+		if strings.HasPrefix(args[i], "--tag-specifications=") {
+			tagSpecIdx = i
+			tagSpecInline = true
+			break
+		}
+	}
+
+	// Build tag spec JSON
+	if tagSpecIdx >= 0 {
+		// Parse existing tag spec and add our tags
+		raw := args[tagSpecIdx]
+		if tagSpecInline {
+			raw = strings.TrimPrefix(raw, "--tag-specifications=")
+		}
+		raw = strings.TrimSpace(raw)
+
+		// Handle both array and single object formats
+		var specs []map[string]any
+		if strings.HasPrefix(raw, "[") {
+			_ = json.Unmarshal([]byte(raw), &specs)
+		} else if strings.HasPrefix(raw, "{") {
+			var single map[string]any
+			if err := json.Unmarshal([]byte(raw), &single); err == nil {
+				specs = []map[string]any{single}
+			}
+		}
+
+		// Find instance resource type and add tags
+		found := false
+		for i, spec := range specs {
+			rt, _ := spec["ResourceType"].(string)
+			if rt == "instance" {
+				tags, _ := spec["Tags"].([]any)
+				for _, et := range envTags {
+					tags = append(tags, map[string]any{"Key": et["Key"], "Value": et["Value"]})
+				}
+				specs[i]["Tags"] = tags
+				found = true
+				break
+			}
+		}
+
+		// If no instance spec found, add one
+		if !found {
+			var tagList []any
+			for _, et := range envTags {
+				tagList = append(tagList, map[string]any{"Key": et["Key"], "Value": et["Value"]})
+			}
+			specs = append(specs, map[string]any{
+				"ResourceType": "instance",
+				"Tags":         tagList,
+			})
+		}
+
+		// Serialize back
+		b, err := json.Marshal(specs)
+		if err == nil {
+			newArgs := make([]string, len(args))
+			copy(newArgs, args)
+			if tagSpecInline {
+				newArgs[tagSpecIdx] = "--tag-specifications=" + string(b)
+			} else {
+				newArgs[tagSpecIdx] = string(b)
+			}
+			return newArgs
+		}
+	} else {
+		// No existing tag-specifications, add new one
+		var tagList []any
+		for _, et := range envTags {
+			tagList = append(tagList, map[string]any{"Key": et["Key"], "Value": et["Value"]})
+		}
+		spec := []map[string]any{{
+			"ResourceType": "instance",
+			"Tags":         tagList,
+		}}
+		b, err := json.Marshal(spec)
+		if err == nil {
+			// Insert before --profile if present, or at end
+			insertIdx := len(args)
+			for i, arg := range args {
+				if arg == "--profile" {
+					insertIdx = i
+					break
+				}
+			}
+			newArgs := make([]string, 0, len(args)+2)
+			newArgs = append(newArgs, args[:insertIdx]...)
+			newArgs = append(newArgs, "--tag-specifications", string(b))
+			newArgs = append(newArgs, args[insertIdx:]...)
+			return newArgs
 		}
 	}
 
