@@ -346,10 +346,12 @@ fi
 systemctl enable docker
 systemctl start docker
 
-# ECR authentication
+# Get instance metadata
 REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "` + region + `")
+INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "")
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")
 
+# ECR authentication
 if [ -n "$ACCOUNT" ]; then
     echo "[bootstrap] Authenticating with ECR in $REGION"
     for i in 1 2 3 4 5; do
@@ -362,6 +364,75 @@ if [ -n "$ACCOUNT" ]; then
     done
 fi
 
-echo '[bootstrap] Docker ready, waiting for image deployment...'
+# Try to discover image URI from instance tags
+IMAGE_URI=""
+if [ -n "$INSTANCE_ID" ]; then
+    IMAGE_URI=$(aws ec2 describe-tags --region "$REGION" --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=ImageUri" --query 'Tags[0].Value' --output text 2>/dev/null || echo "")
+    [ "$IMAGE_URI" = "None" ] && IMAGE_URI=""
+fi
+
+# If no tag, try to find latest image in clanker-app repo
+if [ -z "$IMAGE_URI" ] && [ -n "$ACCOUNT" ]; then
+    echo "[bootstrap] No ImageUri tag found, discovering from ECR..."
+    for REPO in clanker-app app; do
+        LATEST=$(aws ecr describe-images --region "$REGION" --repository-name "$REPO" --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]' --output text 2>/dev/null || echo "")
+        if [ -n "$LATEST" ] && [ "$LATEST" != "None" ]; then
+            IMAGE_URI="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/$REPO:$LATEST"
+            echo "[bootstrap] Discovered image: $IMAGE_URI"
+            break
+        fi
+    done
+fi
+
+# If still no image, wait for one to appear (max 10 minutes)
+if [ -z "$IMAGE_URI" ] && [ -n "$ACCOUNT" ]; then
+    echo "[bootstrap] Waiting for image to be pushed to ECR..."
+    for attempt in $(seq 1 20); do
+        for REPO in clanker-app app; do
+            LATEST=$(aws ecr describe-images --region "$REGION" --repository-name "$REPO" --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]' --output text 2>/dev/null || echo "")
+            if [ -n "$LATEST" ] && [ "$LATEST" != "None" ]; then
+                IMAGE_URI="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/$REPO:$LATEST"
+                echo "[bootstrap] Found image after waiting: $IMAGE_URI"
+                break 2
+            fi
+        done
+        echo "[bootstrap] No image yet (attempt $attempt/20), waiting 30s..."
+        sleep 30
+    done
+fi
+
+if [ -z "$IMAGE_URI" ]; then
+    echo "[bootstrap] ERROR: No image found in ECR after waiting. Container not started."
+    echo "[bootstrap] To start manually: docker pull <IMAGE_URI> && docker run -d -p 3000:3000 <IMAGE_URI>"
+    exit 0
+fi
+
+# Get environment variables from instance tags (ENV_* pattern)
+ENV_FLAGS=""
+if [ -n "$INSTANCE_ID" ]; then
+    echo "[bootstrap] Loading environment variables from instance tags..."
+    ENV_TAGS=$(aws ec2 describe-tags --region "$REGION" --filters "Name=resource-id,Values=$INSTANCE_ID" --query 'Tags[?starts_with(Key, ` + "`ENV_`" + `)].{Key:Key,Value:Value}' --output text 2>/dev/null || echo "")
+    while IFS=$'\t' read -r KEY VALUE; do
+        if [ -n "$KEY" ]; then
+            # Strip ENV_ prefix
+            ENV_NAME="${KEY#ENV_}"
+            ENV_FLAGS="$ENV_FLAGS -e $ENV_NAME=\"$VALUE\""
+            echo "[bootstrap] Loaded env: $ENV_NAME"
+        fi
+    done <<< "$ENV_TAGS"
+fi
+
+# Get app port from tags or default to 3000
+APP_PORT=$(aws ec2 describe-tags --region "$REGION" --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=AppPort" --query 'Tags[0].Value' --output text 2>/dev/null || echo "3000")
+[ "$APP_PORT" = "None" ] && APP_PORT="3000"
+
+echo "[bootstrap] Pulling image: $IMAGE_URI"
+docker pull "$IMAGE_URI"
+
+echo "[bootstrap] Starting container on port $APP_PORT"
+eval "docker run -d --restart unless-stopped -p $APP_PORT:$APP_PORT $ENV_FLAGS $IMAGE_URI"
+
+echo "[bootstrap] Container started successfully"
+docker ps
 `
 }
