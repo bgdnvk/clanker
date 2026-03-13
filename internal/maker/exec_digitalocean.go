@@ -551,9 +551,17 @@ func runOpenClawDOProxyBuildAndPush(ctx context.Context, args []string, opts Exe
 	}
 	defer cleanup()
 	rewritten := rewriteDockerBuildArgsForMaterializedContext(dArgs)
-	if !hasBuildxAvailable(ctx) {
+	requiredPlatforms := []string{doOpenClawProxyPlatform}
+	needBuildx, buildxReason, buildxErr := dockerBuildNeedsBuildx(ctx, requiredPlatforms)
+	if buildxErr != nil {
+		return "", buildxErr
+	}
+	if needBuildx && !hasBuildxAvailableWithConfig(ctx, opts.DigitalOceanDockerConfigDir) {
+		return "", fmt.Errorf("docker buildx is required for the OpenClaw proxy image because %s", buildxReason)
+	}
+	if !needBuildx {
 		if w != nil {
-			_, _ = fmt.Fprintln(w, "[maker] docker buildx not available; falling back to plain docker build + push for the OpenClaw proxy image")
+			_, _ = fmt.Fprintln(w, "[maker] OpenClaw proxy target matches the local Docker platform; using plain docker build + push")
 		}
 		buildArgs := append([]string{"docker"}, rewritten...)
 		buildOut, buildErr := runDockerCommandStreaming(ctx, buildArgs, opts, ctxDir, w)
@@ -567,7 +575,7 @@ func runOpenClawDOProxyBuildAndPush(ctx context.Context, args []string, opts Exe
 		pushOut, pushErr := runDockerCommandStreaming(ctx, []string{"docker", "push", imageRef}, opts, "", w)
 		return buildOut + pushOut, pushErr
 	}
-	if err := ensureDockerBuildxReady(ctx, w); err != nil {
+	if err := ensureDockerBuildxReadyWithConfig(ctx, w, opts.DigitalOceanDockerConfigDir); err != nil {
 		return "", err
 	}
 	buildxArgs := make([]string, 0, len(rewritten)+6)
@@ -575,7 +583,7 @@ func runOpenClawDOProxyBuildAndPush(ctx context.Context, args []string, opts Exe
 	buildxArgs = append(buildxArgs, rewritten[1:]...)
 	cmd := exec.CommandContext(ctx, bin, buildxArgs...)
 	cmd.Dir = ctxDir
-	cmd.Env = envWithDockerConfig(os.Environ(), opts.DigitalOceanDockerConfigDir)
+	cmd.Env = dockerBuildxEnv(os.Environ(), opts.DigitalOceanDockerConfigDir)
 	var buf bytes.Buffer
 	mw := io.MultiWriter(w, &buf)
 	cmd.Stdout = mw
@@ -758,6 +766,9 @@ func loginDORegistryWithDockerConfig(ctx context.Context, bindings map[string]st
 	configPath := filepath.Join(opts.DigitalOceanDockerConfigDir, "config.json")
 	if err := os.WriteFile(configPath, configJSON, 0600); err != nil {
 		return fmt.Errorf("write Docker config: %w", err)
+	}
+	if err := ensureDockerConfigPluginDirs(opts.DigitalOceanDockerConfigDir); err != nil {
+		return fmt.Errorf("augment Docker config with plugin dirs: %w", err)
 	}
 	if w != nil {
 		_, _ = fmt.Fprintf(w, "[maker] wrote read-write DOCR auth config for registry %s\n", registryName)
@@ -1714,6 +1725,7 @@ func envWithDockerConfig(env []string, dockerConfigDir string) []string {
 	if strings.TrimSpace(dockerConfigDir) == "" {
 		return env
 	}
+	_ = ensureDockerConfigPluginDirs(dockerConfigDir)
 	filtered := env[:0]
 	for _, kv := range env {
 		if strings.HasPrefix(kv, "DOCKER_CONFIG=") {

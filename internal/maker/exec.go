@@ -969,13 +969,13 @@ func autoPrepareImageForOneClickDeploy(ctx context.Context, question string, run
 	}
 	defer cleanup()
 
-	imageURI, err := BuildAndPushDockerImageWithTags(ctx, clonePath, ecrURI, opts.Profile, opts.Region, []string{imageTag, "latest"}, opts.Writer)
+	imageURI, err := BuildAndPushDockerImageWithRequirements(ctx, clonePath, ecrURI, opts.Profile, opts.Region, []string{imageTag, "latest"}, requiredPlatforms, opts.Writer)
 	if err != nil {
 		// Use agentic loop for docker build/push issues
 		var retryImageURI string
 		retryFunc := func() error {
 			var retryErr error
-			retryImageURI, retryErr = BuildAndPushDockerImageWithTags(ctx, clonePath, ecrURI, opts.Profile, opts.Region, []string{imageTag, "latest"}, opts.Writer)
+			retryImageURI, retryErr = BuildAndPushDockerImageWithRequirements(ctx, clonePath, ecrURI, opts.Profile, opts.Region, []string{imageTag, "latest"}, requiredPlatforms, opts.Writer)
 			return retryErr
 		}
 		if handled, _ := ShellAgenticRemediation(ctx, opts, "docker buildx build --push", err.Error(), retryFunc); handled {
