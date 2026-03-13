@@ -319,7 +319,12 @@ func generateDockerBootstrapScript(region string) string {
 set -e
 exec > /var/log/user-data.log 2>&1
 
-echo '[bootstrap] Docker bootstrap script (auto-generated)'
+# Structured logging functions
+log() { echo "[bootstrap] $(date '+%Y-%m-%d %H:%M:%S') $*"; }
+err() { echo "[bootstrap] $(date '+%Y-%m-%d %H:%M:%S') ERROR: $*" >&2; }
+
+log "Docker bootstrap script (auto-generated) starting"
+log "Script version: 2.0"
 
 # Install AWS CLI if needed
 if ! command -v aws >/dev/null 2>&1; then
@@ -402,9 +407,9 @@ if [ -z "$IMAGE_URI" ] && [ -n "$ACCOUNT" ]; then
 fi
 
 if [ -z "$IMAGE_URI" ]; then
-    echo "[bootstrap] ERROR: No image found in ECR after waiting. Container not started."
-    echo "[bootstrap] To start manually: docker pull <IMAGE_URI> && docker run -d -p 3000:3000 <IMAGE_URI>"
-    exit 0
+    err "No image found in ECR after waiting 10 minutes. Deployment incomplete."
+    err "Manual intervention required: docker pull <IMAGE_URI> && docker run -d -p 3000:3000 <IMAGE_URI>"
+    exit 1
 fi
 
 # Get app name from instance tags for SSM parameter lookup
@@ -541,7 +546,36 @@ docker pull "$IMAGE_URI"
 echo "[bootstrap] Starting container on port $APP_PORT"
 eval "docker run -d --restart unless-stopped -p $APP_PORT:$APP_PORT $ENV_FLAGS $IMAGE_URI"
 
-echo "[bootstrap] Container started successfully"
+log "Container started, verifying health..."
+
+# Health check: wait for container to be running
+sleep 10
+CONTAINER_ID=$(docker ps -q --filter "ancestor=$IMAGE_URI" 2>/dev/null | head -1)
+
+if [ -z "$CONTAINER_ID" ]; then
+    err "Container failed to start or exited immediately"
+    err "Recent container logs:"
+    LAST_CONTAINER=$(docker ps -aq | head -1)
+    if [ -n "$LAST_CONTAINER" ]; then
+        docker logs "$LAST_CONTAINER" 2>&1 | tail -50
+    fi
+    err "Manual intervention required"
+    exit 1
+fi
+
+log "Container running: $CONTAINER_ID"
 docker ps
+
+# Additional health check: verify port is listening
+sleep 5
+if command -v curl >/dev/null 2>&1; then
+    if curl -sf "http://localhost:$APP_PORT/health" >/dev/null 2>&1 || curl -sf "http://localhost:$APP_PORT/" >/dev/null 2>&1; then
+        log "Health check passed: app responding on port $APP_PORT"
+    else
+        log "Warning: app not yet responding on port $APP_PORT (may still be starting)"
+    fi
+fi
+
+log "Bootstrap complete"
 `
 }

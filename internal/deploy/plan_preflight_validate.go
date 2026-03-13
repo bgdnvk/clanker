@@ -576,6 +576,9 @@ func validateAWSPlanCommands(plan *maker.Plan, appPorts []int, deep *DeepAnalysi
 	waitLBAvailableIndex := -1
 	createListenerIndex := -1
 	registerTargetsIndex := -1
+	createTargetGroupIndex := -1
+	ecrCreateRepoIndex := -1
+	runInstancesReferencesECR := false
 	hasSSHAdminCIDRPlaceholder := false
 	for idx := range plan.Commands {
 		cmd := plan.Commands[idx]
@@ -596,6 +599,18 @@ func validateAWSPlanCommands(plan *maker.Plan, appPorts []int, deep *DeepAnalysi
 			if runInstancesIndex < 0 {
 				runInstancesIndex = idx
 			}
+			// Check if user-data references ECR
+			userData := extractEC2UserDataScript(args)
+			if strings.Contains(strings.ToLower(userData), ".dkr.ecr.") ||
+				strings.Contains(strings.ToLower(userData), "<ecr_") ||
+				strings.Contains(strings.ToLower(userData), "<image_uri>") {
+				runInstancesReferencesECR = true
+			}
+		}
+		if service == "ecr" && op == "create-repository" {
+			if ecrCreateRepoIndex < 0 {
+				ecrCreateRepoIndex = idx
+			}
 		}
 		if service == "ec2" && op == "wait" && len(args) >= 3 && strings.EqualFold(strings.TrimSpace(args[2]), "instance-running") {
 			if instanceWaitIndex < 0 {
@@ -615,6 +630,9 @@ func validateAWSPlanCommands(plan *maker.Plan, appPorts []int, deep *DeepAnalysi
 			// If using ip-permissions, we can't reliably parse; ignore.
 		}
 		if service == "elbv2" && op == "create-target-group" {
+			if createTargetGroupIndex < 0 {
+				createTargetGroupIndex = idx
+			}
 			if port := parseFlagInt(args, "--port"); port > 0 {
 				tgPort = port
 			}
@@ -660,14 +678,42 @@ func validateAWSPlanCommands(plan *maker.Plan, appPorts []int, deep *DeepAnalysi
 	if hasAddRoleToProfile && seenRunInstances && !hasGetInstanceProfileBeforeRun {
 		out.Warnings = append(out.Warnings, "suggestion: add iam get-instance-profile before ec2 run-instances to reduce IAM propagation race risk")
 	}
+
+	// HARD: Instance wait must exist between run-instances and register-targets
 	if runInstancesIndex >= 0 && registerTargetsIndex >= 0 {
 		if instanceWaitIndex < 0 || instanceWaitIndex <= runInstancesIndex || instanceWaitIndex > registerTargetsIndex {
-			out.Warnings = append(out.Warnings, "suggestion: add ec2 wait instance-running between run-instances and register-targets")
+			out.Issues = append(out.Issues, "[HARD] missing ec2 wait instance-running between run-instances and register-targets")
+			out.Fixes = append(out.Fixes, "Add 'ec2 wait instance-running --instance-ids <INSTANCE_ID>' after run-instances and before register-targets")
 		}
 	}
+
+	// HARD: ALB wait must exist between create-load-balancer and create-listener
 	if createLBIndex >= 0 && createListenerIndex >= 0 {
 		if waitLBAvailableIndex < 0 || waitLBAvailableIndex <= createLBIndex || waitLBAvailableIndex > createListenerIndex {
-			out.Warnings = append(out.Warnings, "suggestion: add elbv2 wait load-balancer-available between create-load-balancer and create-listener")
+			out.Issues = append(out.Issues, "[HARD] missing elbv2 wait load-balancer-available between create-load-balancer and create-listener")
+			out.Fixes = append(out.Fixes, "Add 'elbv2 wait load-balancer-available --load-balancer-arns <ALB_ARN>' after create-load-balancer and before create-listener")
+		}
+	}
+
+	// HARD: Target group must exist before listener
+	if createListenerIndex >= 0 {
+		if createTargetGroupIndex < 0 {
+			out.Issues = append(out.Issues, "[HARD] elbv2 create-listener without prior create-target-group")
+			out.Fixes = append(out.Fixes, "Add 'elbv2 create-target-group' before create-listener")
+		} else if createTargetGroupIndex > createListenerIndex {
+			out.Issues = append(out.Issues, "[HARD] elbv2 create-target-group appears AFTER create-listener")
+			out.Fixes = append(out.Fixes, "Move create-target-group before create-listener")
+		}
+	}
+
+	// HARD: ECR repository must exist before run-instances that references ECR
+	if runInstancesReferencesECR && runInstancesIndex >= 0 {
+		if ecrCreateRepoIndex < 0 {
+			out.Issues = append(out.Issues, "[HARD] ec2 run-instances references ECR but no ecr create-repository in plan")
+			out.Fixes = append(out.Fixes, "Add 'ecr create-repository' before run-instances, or use existing ECR repository")
+		} else if ecrCreateRepoIndex > runInstancesIndex {
+			out.Issues = append(out.Issues, "[HARD] ecr create-repository appears AFTER ec2 run-instances")
+			out.Fixes = append(out.Fixes, "Move ecr create-repository before run-instances")
 		}
 	}
 	if hasSSHAdminCIDRPlaceholder {

@@ -76,6 +76,13 @@ func GeneratePlanSkeleton(
 		return nil, fmt.Errorf("skeleton missing required launch operation(s): %s", strings.Join(missingOps, ", "))
 	}
 
+	// Apply topological sort to ensure correct ordering based on produces/depends_on.
+	// This provides algorithmic enforcement even if LLM generated out-of-order steps.
+	skeleton, sortErr := TopologicalSortSkeleton(skeleton)
+	if sortErr != nil {
+		logf("[deploy] warning: topological sort failed: %v, using LLM order", sortErr)
+	}
+
 	logf("[deploy] skeleton: %d steps, %d unique placeholders", len(skeleton.Steps), countUniquePlaceholders(skeleton))
 	return skeleton, nil
 }
@@ -562,6 +569,75 @@ func validateSkeleton(skeleton *PlanSkeleton, requiredLaunchOps []string) error 
 		return fmt.Errorf("%d issue(s): %s", len(issues), strings.Join(issues, "; "))
 	}
 	return nil
+}
+
+// TopologicalSortSkeleton reorders skeleton steps to satisfy dependency constraints.
+// Uses Kahn's algorithm to ensure steps that produce placeholders come before
+// steps that depend on those placeholders. Returns error if cycle detected.
+func TopologicalSortSkeleton(skeleton *PlanSkeleton) (*PlanSkeleton, error) {
+	if skeleton == nil || len(skeleton.Steps) <= 1 {
+		return skeleton, nil
+	}
+
+	n := len(skeleton.Steps)
+
+	// Build map of placeholder -> step index that produces it
+	producedBy := make(map[string]int)
+	for i, step := range skeleton.Steps {
+		for _, p := range step.Produces {
+			producedBy[strings.ToUpper(strings.TrimSpace(p))] = i
+		}
+	}
+
+	// Build adjacency list and in-degree map
+	// Edge: step A -> step B if B depends on something A produces
+	inDegree := make([]int, n)
+	graph := make([][]int, n)
+	for i := range graph {
+		graph[i] = make([]int, 0)
+	}
+
+	for i, step := range skeleton.Steps {
+		for _, dep := range step.DependsOn {
+			dep = strings.ToUpper(strings.TrimSpace(dep))
+			if producer, ok := producedBy[dep]; ok && producer != i {
+				graph[producer] = append(graph[producer], i)
+				inDegree[i]++
+			}
+		}
+	}
+
+	// Kahn's algorithm: start with nodes that have no dependencies
+	queue := make([]int, 0, n)
+	for i := 0; i < n; i++ {
+		if inDegree[i] == 0 {
+			queue = append(queue, i)
+		}
+	}
+
+	sorted := make([]SkeletonStep, 0, n)
+	for len(queue) > 0 {
+		// Pop from front
+		curr := queue[0]
+		queue = queue[1:]
+		sorted = append(sorted, skeleton.Steps[curr])
+
+		// Reduce in-degree for all dependents
+		for _, next := range graph[curr] {
+			inDegree[next]--
+			if inDegree[next] == 0 {
+				queue = append(queue, next)
+			}
+		}
+	}
+
+	// If we couldn't sort all steps, there's a cycle
+	if len(sorted) != n {
+		return skeleton, fmt.Errorf("dependency cycle detected in skeleton (%d of %d steps sorted)", len(sorted), n)
+	}
+
+	skeleton.Steps = sorted
+	return skeleton, nil
 }
 
 // checkMissingLaunchOps returns a list of required launch operations that are missing from the skeleton.
