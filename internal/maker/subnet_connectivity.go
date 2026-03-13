@@ -157,15 +157,15 @@ func RemediateRunInstancesForSSM(ctx context.Context, opts ExecOptions, args []s
 // ValidateArgsNoConsecutiveFlags checks that flag arguments have values
 func ValidateArgsNoConsecutiveFlags(args []string) error {
 	flagsRequiringValues := map[string]bool{
-		"--user-data":            true,
-		"--subnet-id":            true,
-		"--security-group-ids":   true,
-		"--iam-instance-profile": true,
-		"--image-id":             true,
-		"--instance-type":        true,
-		"--key-name":             true,
+		"--user-data":             true,
+		"--subnet-id":             true,
+		"--security-group-ids":    true,
+		"--iam-instance-profile":  true,
+		"--image-id":              true,
+		"--instance-type":         true,
+		"--key-name":              true,
 		"--block-device-mappings": true,
-		"--tag-specifications":   true,
+		"--tag-specifications":    true,
 	}
 
 	for i := 0; i < len(args)-1; i++ {
