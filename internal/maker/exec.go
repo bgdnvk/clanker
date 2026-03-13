@@ -455,6 +455,11 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		// Handle EC2 user-data generation for run-instances
 		args = maybeGenerateEC2UserData(args, bindings, opts)
 
+		// For EC2 run-instances, check if subnet can reach SSM and remediate if needed
+		if len(args) >= 2 && args[0] == "ec2" && args[1] == "run-instances" {
+			args, _ = RemediateRunInstancesForSSM(ctx, opts, args, opts.Writer)
+		}
+
 		if err := maybeSyncSecretsForRunInstances(ctx, args, opts); err != nil {
 			_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to sync secrets for user-data: %v\n", err)
 		}
@@ -2674,8 +2679,23 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 		}
 	}
 
-	// If we still don't have an imageRef, we can't generate a runnable startup script.
+	// If we still don't have an imageRef, generate a fallback Docker-ready script.
+	// This ensures the instance has Docker running and ECR auth even if the image
+	// isn't known yet (e.g., one-click deploy where build happens after plan hydration).
 	if imageRef == "" {
+		// Check if this looks like a Docker deployment that needs user-data
+		if needsDockerUserData(args, bindings, checkUserData) {
+			fallbackScript := generateFallbackDockerUserData(bindings, opts.Region)
+			encoded := base64.StdEncoding.EncodeToString([]byte(fallbackScript))
+			newArgs := make([]string, len(args))
+			copy(newArgs, args)
+			if userDataIdx >= 0 {
+				newArgs[userDataIdx] = encoded
+			} else if userDataInlineIdx >= 0 {
+				newArgs[userDataInlineIdx] = "--user-data=" + encoded
+			}
+			return newArgs
+		}
 		return args
 	}
 
@@ -3164,6 +3184,116 @@ func looksLikeUserDataScript(script string) bool {
 		return true
 	}
 	return false
+}
+
+// needsDockerUserData checks if this is a Docker deployment that needs user-data generated.
+func needsDockerUserData(args []string, bindings map[string]string, currentUserData string) bool {
+	// Check if ECR is involved
+	if bindings["ECR_URI"] != "" || bindings["ECR_REPO"] != "" {
+		return true
+	}
+
+	// Check if current user-data is empty or a placeholder
+	trimmed := strings.TrimSpace(currentUserData)
+	if trimmed == "" || isUserDataPlaceholderValue(trimmed) {
+		// Look for indicators this is a Docker/container deployment
+		question := strings.ToLower(bindings["PLAN_QUESTION"])
+		if strings.Contains(question, "docker") || strings.Contains(question, "container") {
+			return true
+		}
+
+		// Check if IAM profile suggests container deployment
+		for _, arg := range args {
+			lower := strings.ToLower(arg)
+			if strings.Contains(lower, "ec2containerregistry") || strings.Contains(lower, "ecr") {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// generateFallbackDockerUserData creates a user-data script that sets up Docker
+// and ECR auth even when the image URI isn't known yet. This ensures the instance
+// is ready to pull and run containers once the image is built and pushed.
+func generateFallbackDockerUserData(bindings map[string]string, region string) string {
+	if region == "" {
+		region = bindings["REGION"]
+	}
+	if region == "" {
+		region = bindings["AWS_REGION"]
+	}
+	if region == "" {
+		region = "us-east-1"
+	}
+
+	// Build environment variable exports
+	var envExports strings.Builder
+	for key, value := range bindings {
+		if strings.HasPrefix(key, "ENV_") {
+			envName := strings.TrimPrefix(key, "ENV_")
+			escaped := strings.ReplaceAll(value, `"`, `\"`)
+			escaped = strings.ReplaceAll(escaped, `$`, `\$`)
+			escaped = strings.ReplaceAll(escaped, "`", "\\`")
+			envExports.WriteString(fmt.Sprintf("export %s=\"%s\"\n", envName, escaped))
+		}
+	}
+
+	script := fmt.Sprintf(`#!/bin/bash
+set -e
+exec > /var/log/user-data.log 2>&1
+
+echo '[bootstrap] fallback Docker setup - image URI will be provided later'
+
+# Environment variables
+%s
+
+echo '[bootstrap] ensuring aws cli'
+if ! command -v aws >/dev/null 2>&1; then
+	. /etc/os-release || true
+	if [ "${ID:-}" = "amzn" ]; then
+		if command -v dnf >/dev/null 2>&1; then dnf install -y awscli; else yum install -y awscli; fi
+	elif command -v apt-get >/dev/null 2>&1; then
+		apt-get update -y && apt-get install -y awscli
+	fi
+fi
+
+echo '[bootstrap] installing docker'
+. /etc/os-release || true
+if [ "${ID:-}" = "amzn" ]; then
+	if command -v dnf >/dev/null 2>&1; then
+		dnf install -y docker
+	else
+		yum install -y docker
+	fi
+elif command -v apt-get >/dev/null 2>&1; then
+	apt-get update -y && apt-get install -y docker.io
+fi
+
+systemctl enable docker
+systemctl start docker
+
+echo '[bootstrap] authenticating with ECR'
+REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "%s")
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")
+
+if [ -n "$ACCOUNT" ]; then
+	for i in 1 2 3 4 5; do
+		if aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com" 2>/dev/null; then
+			echo "[bootstrap] ECR login succeeded (attempt=$i)"
+			break
+		fi
+		echo "[bootstrap] ECR login attempt $i failed; retrying..."
+		sleep $((i*3))
+	done
+fi
+
+echo '[bootstrap] Docker ready, waiting for image deployment...'
+echo '[bootstrap] When image is pushed to ECR, run: docker pull <image> && docker run ...'
+`, envExports.String(), region)
+
+	return script
 }
 
 func findUnresolvedExecutionTokens(args []string) []string {

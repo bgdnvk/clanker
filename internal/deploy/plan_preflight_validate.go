@@ -238,8 +238,20 @@ func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepA
 
 			script := extractEC2UserDataScript(args)
 			if strings.TrimSpace(script) == "" {
-				out.Warnings = append(out.Warnings, "ec2 run-instances has no user-data; workload likely will not start")
+				// Check if this is a Docker/container deployment that requires user-data
+				if isDockerDeploymentPlan(&plan) {
+					out.Issues = append(out.Issues, "[HARD] ec2 run-instances has empty user-data but deployment requires Docker bootstrapping")
+					out.Fixes = append(out.Fixes, "Ensure user-data includes Docker installation, ECR login, and container startup commands")
+				} else {
+					out.Warnings = append(out.Warnings, "ec2 run-instances has no user-data; workload likely will not start")
+				}
 				continue
+			}
+
+			// Validate that --user-data flag has a value (not followed by another flag)
+			if err := maker.ValidateArgsNoConsecutiveFlags(args); err != nil {
+				out.Issues = append(out.Issues, fmt.Sprintf("[HARD] run-instances args malformed: %v", err))
+				out.Fixes = append(out.Fixes, "Fix plan generation to ensure all flags have proper values")
 			}
 
 			if containsSecretLikeText(script) {
@@ -1243,6 +1255,40 @@ func crossCheckUserDataVsPlan(plan *maker.Plan) deterministicValidation {
 	}
 
 	return out
+}
+
+// isDockerDeploymentPlan checks if the plan involves Docker/container deployment.
+// This is used to determine whether empty user-data should be a hard error.
+func isDockerDeploymentPlan(plan *maker.Plan) bool {
+	if plan == nil || len(plan.Commands) == 0 {
+		return false
+	}
+
+	for _, cmd := range plan.Commands {
+		if len(cmd.Args) < 2 {
+			continue
+		}
+		argsJoined := strings.ToLower(strings.Join(cmd.Args, " "))
+
+		// ECR commands indicate Docker deployment
+		if cmd.Args[0] == "ecr" || (cmd.Args[0] == "aws" && len(cmd.Args) > 1 && cmd.Args[1] == "ecr") {
+			return true
+		}
+
+		// IAM policies for ECR indicate Docker deployment
+		if strings.Contains(argsJoined, "ec2containerregistry") || strings.Contains(argsJoined, "ecr:") {
+			return true
+		}
+
+		// Check if user-data references Docker
+		if strings.Contains(argsJoined, "--user-data") {
+			if strings.Contains(argsJoined, "docker") || strings.Contains(argsJoined, ".dkr.ecr.") {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // joinMapKeys concatenates map keys as comma-separated string.
