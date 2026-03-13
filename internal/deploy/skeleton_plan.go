@@ -378,9 +378,9 @@ func buildHydratePrompt(provider, enrichedPrompt, skeletonSummary string, batch 
 
 // batchSkeletonSteps groups consecutive steps that can be hydrated together.
 // Independent steps (no overlapping dependencies) get batched; dependent chains stay separate.
-// Max batch size is 5 to keep LLM focus tight.
+// Max batch size is 10 to reduce API calls while keeping LLM focus reasonable.
 func batchSkeletonSteps(skeleton *PlanSkeleton) [][]SkeletonStep {
-	const maxBatchSize = 5
+	const maxBatchSize = 10
 	if skeleton == nil || len(skeleton.Steps) == 0 {
 		return nil
 	}

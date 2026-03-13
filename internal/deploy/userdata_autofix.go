@@ -196,3 +196,172 @@ func buildECRLoginLine(region, account string) string {
 		" | docker login --username AWS --password-stdin " +
 		account + ".dkr.ecr." + region + ".amazonaws.com"
 }
+
+// GenerateMissingUserData adds user-data to ec2 run-instances commands that have
+// empty or placeholder user-data but are part of a Docker/ECR deployment.
+// This prevents validation failures that would trigger expensive paged fallback.
+func GenerateMissingUserData(plan *maker.Plan, logf func(string, ...any)) *maker.Plan {
+	if plan == nil || len(plan.Commands) == 0 {
+		return plan
+	}
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+
+	// Check if this is a Docker/ECR deployment
+	hasECR := false
+	region := "us-east-1"
+	for _, cmd := range plan.Commands {
+		argsJoined := strings.ToLower(strings.Join(cmd.Args, " "))
+		if strings.Contains(argsJoined, "ecr") {
+			hasECR = true
+		}
+		// Extract region from any command
+		for i, arg := range cmd.Args {
+			if arg == "--region" && i+1 < len(cmd.Args) {
+				region = cmd.Args[i+1]
+			}
+		}
+	}
+
+	if !hasECR {
+		return plan
+	}
+
+	generated := 0
+	for ci := range plan.Commands {
+		cmd := &plan.Commands[ci]
+		if len(cmd.Args) < 2 {
+			continue
+		}
+		if strings.TrimSpace(cmd.Args[0]) != "ec2" || strings.TrimSpace(cmd.Args[1]) != "run-instances" {
+			continue
+		}
+
+		// Find user-data argument
+		userDataIdx := -1
+		userDataVal := ""
+		for ai := 0; ai < len(cmd.Args); ai++ {
+			arg := strings.TrimSpace(cmd.Args[ai])
+			if arg == "--user-data" && ai+1 < len(cmd.Args) {
+				userDataIdx = ai + 1
+				userDataVal = cmd.Args[ai+1]
+				break
+			}
+			if strings.HasPrefix(arg, "--user-data=") {
+				userDataIdx = ai
+				userDataVal = strings.TrimPrefix(arg, "--user-data=")
+				break
+			}
+		}
+
+		// Check if user-data is empty or a placeholder
+		needsGeneration := false
+		if userDataIdx < 0 {
+			// No user-data flag at all - need to add one
+			needsGeneration = true
+		} else {
+			decoded, _ := tryDecodeBase64UserData(userDataVal)
+			trimmed := strings.TrimSpace(decoded)
+			if trimmed == "" || isUserDataPlaceholder(trimmed) || isUserDataPlaceholder(userDataVal) {
+				needsGeneration = true
+			}
+		}
+
+		if !needsGeneration {
+			continue
+		}
+
+		// Generate a fallback Docker bootstrap script
+		script := generateDockerBootstrapScript(region)
+		encoded := base64.StdEncoding.EncodeToString([]byte(script))
+
+		if userDataIdx < 0 {
+			// Insert --user-data before --profile (or at end)
+			insertIdx := len(cmd.Args)
+			for ai, arg := range cmd.Args {
+				if arg == "--profile" {
+					insertIdx = ai
+					break
+				}
+			}
+			newArgs := make([]string, 0, len(cmd.Args)+2)
+			newArgs = append(newArgs, cmd.Args[:insertIdx]...)
+			newArgs = append(newArgs, "--user-data", encoded)
+			newArgs = append(newArgs, cmd.Args[insertIdx:]...)
+			cmd.Args = newArgs
+		} else if strings.HasPrefix(cmd.Args[userDataIdx], "--user-data=") {
+			cmd.Args[userDataIdx] = "--user-data=" + encoded
+		} else {
+			cmd.Args[userDataIdx] = encoded
+		}
+		generated++
+	}
+
+	if generated > 0 {
+		logf("[deploy] user-data autofix: generated Docker bootstrap script for %d run-instances command(s)", generated)
+	}
+	return plan
+}
+
+func isUserDataPlaceholder(s string) bool {
+	s = strings.TrimSpace(strings.ToUpper(s))
+	return s == "" ||
+		s == "<USER_DATA>" ||
+		s == "$USER_DATA" ||
+		s == "<USER-DATA>" ||
+		strings.Contains(s, "<USER_DATA>") ||
+		strings.Contains(s, "$USER_DATA")
+}
+
+func generateDockerBootstrapScript(region string) string {
+	return `#!/bin/bash
+set -e
+exec > /var/log/user-data.log 2>&1
+
+echo '[bootstrap] Docker bootstrap script (auto-generated)'
+
+# Install AWS CLI if needed
+if ! command -v aws >/dev/null 2>&1; then
+    . /etc/os-release || true
+    if [ "${ID:-}" = "amzn" ]; then
+        if command -v dnf >/dev/null 2>&1; then dnf install -y awscli; else yum install -y awscli; fi
+    elif command -v apt-get >/dev/null 2>&1; then
+        apt-get update -y && apt-get install -y awscli
+    fi
+fi
+
+# Install Docker
+. /etc/os-release || true
+if [ "${ID:-}" = "amzn" ]; then
+    if command -v dnf >/dev/null 2>&1; then
+        dnf install -y docker
+    else
+        yum install -y docker
+    fi
+elif command -v apt-get >/dev/null 2>&1; then
+    apt-get update -y && apt-get install -y docker.io
+fi
+
+systemctl enable docker
+systemctl start docker
+
+# ECR authentication
+REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "` + region + `")
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")
+
+if [ -n "$ACCOUNT" ]; then
+    echo "[bootstrap] Authenticating with ECR in $REGION"
+    for i in 1 2 3 4 5; do
+        if aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com" 2>/dev/null; then
+            echo "[bootstrap] ECR login succeeded (attempt=$i)"
+            break
+        fi
+        echo "[bootstrap] ECR login attempt $i failed; retrying..."
+        sleep $((i*3))
+    done
+fi
+
+echo '[bootstrap] Docker ready, waiting for image deployment...'
+`
+}
