@@ -457,13 +457,66 @@ for SSM_PATH in "/clanker/${APP_NAME:-app}/" "/${APP_NAME:-app}/" "/app/${APP_NA
     fi
 done
 
-# Also check Secrets Manager for a secret named after the app
-if [ -n "$APP_NAME" ]; then
-    for SECRET_NAME in "$APP_NAME" "clanker/$APP_NAME" "app/$APP_NAME"; do
+# Load secrets from AWS Secrets Manager
+# The LLM creates individual secrets with names like: <app>/DATABASE_URL, <app>/API_KEY
+# We need to list all secrets with the app prefix and fetch each one
+echo "[bootstrap] Loading secrets from AWS Secrets Manager..."
+
+# Derive app prefix from Name tag (e.g., "myapp-server" -> "myapp")
+SECRET_PREFIX="${APP_NAME%%-*}"
+[ -z "$SECRET_PREFIX" ] && SECRET_PREFIX="$APP_NAME"
+
+# List and fetch secrets with matching prefixes
+for PREFIX in "$SECRET_PREFIX" "$APP_NAME" "clanker-app"; do
+    if [ -z "$PREFIX" ]; then continue; fi
+
+    echo "[bootstrap] Checking for secrets with prefix: $PREFIX/"
+    SECRET_LIST=$(aws secretsmanager list-secrets --region "$REGION" --filters "Key=name,Values=$PREFIX/" --query 'SecretList[*].Name' --output text 2>/dev/null || echo "")
+
+    if [ -n "$SECRET_LIST" ] && [ "$SECRET_LIST" != "None" ]; then
+        echo "[bootstrap] Found secrets with prefix $PREFIX/"
+        for SECRET_NAME in $SECRET_LIST; do
+            [ -z "$SECRET_NAME" ] && continue
+            [ "$SECRET_NAME" = "None" ] && continue
+
+            # Fetch the secret value
+            SECRET_VALUE=$(aws secretsmanager get-secret-value --region "$REGION" --secret-id "$SECRET_NAME" --query 'SecretString' --output text 2>/dev/null || echo "")
+            if [ -n "$SECRET_VALUE" ] && [ "$SECRET_VALUE" != "None" ]; then
+                # Extract env var name from secret name (e.g., "myapp/DATABASE_URL" -> "DATABASE_URL")
+                ENV_NAME=$(basename "$SECRET_NAME")
+                ENV_NAME=$(echo "$ENV_NAME" | tr '[:lower:]-' '[:upper:]_')
+
+                # Check if secret is JSON (starts with {) or plain string
+                if echo "$SECRET_VALUE" | grep -q '^{'; then
+                    # JSON secret - extract all key-value pairs
+                    if command -v jq >/dev/null 2>&1; then
+                        for KEY in $(echo "$SECRET_VALUE" | jq -r 'keys[]' 2>/dev/null); do
+                            VALUE=$(echo "$SECRET_VALUE" | jq -r --arg k "$KEY" '.[$k]' 2>/dev/null)
+                            K_ENV=$(echo "$KEY" | tr '[:lower:]-' '[:upper:]_')
+                            ESCAPED=$(printf '%s' "$VALUE" | sed 's/"/\\"/g; s/\$/\\$/g; s/` + "`" + `/\\` + "`" + `/g')
+                            ENV_FLAGS="$ENV_FLAGS -e $K_ENV=\"$ESCAPED\""
+                            echo "[bootstrap] Loaded secret (json): $K_ENV"
+                        done
+                    fi
+                else
+                    # Plain string secret
+                    ESCAPED_VALUE=$(printf '%s' "$SECRET_VALUE" | sed 's/"/\\"/g; s/\$/\\$/g; s/` + "`" + `/\\` + "`" + `/g')
+                    ENV_FLAGS="$ENV_FLAGS -e $ENV_NAME=\"$ESCAPED_VALUE\""
+                    echo "[bootstrap] Loaded secret: $ENV_NAME"
+                fi
+            fi
+        done
+        break
+    fi
+done
+
+# Fallback: check for a single JSON secret named after the app (legacy pattern)
+if [ -z "$ENV_FLAGS" ] && [ -n "$APP_NAME" ]; then
+    for SECRET_NAME in "$APP_NAME" "clanker/$APP_NAME" "$SECRET_PREFIX"; do
+        [ -z "$SECRET_NAME" ] && continue
         SECRET_JSON=$(aws secretsmanager get-secret-value --region "$REGION" --secret-id "$SECRET_NAME" --query 'SecretString' --output text 2>/dev/null || echo "")
-        if [ -n "$SECRET_JSON" ] && [ "$SECRET_JSON" != "None" ]; then
-            echo "[bootstrap] Found secret in Secrets Manager: $SECRET_NAME"
-            # Parse JSON and extract key-value pairs (requires jq or python)
+        if [ -n "$SECRET_JSON" ] && [ "$SECRET_JSON" != "None" ] && echo "$SECRET_JSON" | grep -q '^{'; then
+            echo "[bootstrap] Found JSON secret: $SECRET_NAME"
             if command -v jq >/dev/null 2>&1; then
                 for KEY in $(echo "$SECRET_JSON" | jq -r 'keys[]' 2>/dev/null); do
                     VALUE=$(echo "$SECRET_JSON" | jq -r --arg k "$KEY" '.[$k]' 2>/dev/null)
@@ -471,20 +524,6 @@ if [ -n "$APP_NAME" ]; then
                     ESCAPED_VALUE=$(printf '%s' "$VALUE" | sed 's/"/\\"/g; s/\$/\\$/g; s/` + "`" + `/\\` + "`" + `/g')
                     ENV_FLAGS="$ENV_FLAGS -e $ENV_NAME=\"$ESCAPED_VALUE\""
                     echo "[bootstrap] Loaded secret: $ENV_NAME"
-                done
-            elif command -v python3 >/dev/null 2>&1; then
-                python3 -c "
-import json, sys, os
-try:
-    data = json.loads('''$SECRET_JSON''')
-    for k, v in data.items():
-        env_name = k.upper().replace('-', '_')
-        escaped = str(v).replace('\"', '\\\\\"').replace('\$', '\\\\\$')
-        print(f'-e {env_name}=\"{escaped}\"')
-except: pass
-" 2>/dev/null | while read -r FLAG; do
-                    ENV_FLAGS="$ENV_FLAGS $FLAG"
-                    echo "[bootstrap] Loaded secret from Secrets Manager"
                 done
             fi
             break
