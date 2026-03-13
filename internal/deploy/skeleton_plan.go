@@ -67,7 +67,13 @@ func GeneratePlanSkeleton(
 	// Validate the skeleton
 	if err := validateSkeleton(skeleton, requiredLaunchOps); err != nil {
 		logf("[deploy] skeleton validation warning: %v", err)
-		// Don't fail — harden downstream
+		// Don't fail for minor issues — harden downstream
+	}
+
+	// Critical check: missing required launch ops means the skeleton is fundamentally incomplete.
+	// This MUST cause a fallback to paged plan generation.
+	if missingOps := checkMissingLaunchOps(skeleton, requiredLaunchOps); len(missingOps) > 0 {
+		return nil, fmt.Errorf("skeleton missing required launch operation(s): %s", strings.Join(missingOps, ", "))
 	}
 
 	logf("[deploy] skeleton: %d steps, %d unique placeholders", len(skeleton.Steps), countUniquePlaceholders(skeleton))
@@ -556,6 +562,31 @@ func validateSkeleton(skeleton *PlanSkeleton, requiredLaunchOps []string) error 
 		return fmt.Errorf("%d issue(s): %s", len(issues), strings.Join(issues, "; "))
 	}
 	return nil
+}
+
+// checkMissingLaunchOps returns a list of required launch operations that are missing from the skeleton.
+// This is used to detect fundamentally incomplete plans that should trigger fallback to paged generation.
+func checkMissingLaunchOps(skeleton *PlanSkeleton, requiredLaunchOps []string) []string {
+	if skeleton == nil || len(skeleton.Steps) == 0 {
+		return requiredLaunchOps
+	}
+
+	var missing []string
+	for _, req := range requiredLaunchOps {
+		req = strings.ToLower(strings.TrimSpace(req))
+		found := false
+		for _, step := range skeleton.Steps {
+			key := strings.ToLower(step.Service + " " + step.Operation)
+			if strings.Contains(key, req) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, req)
+		}
+	}
+	return missing
 }
 
 // countUniquePlaceholders counts unique placeholder names in the skeleton.
