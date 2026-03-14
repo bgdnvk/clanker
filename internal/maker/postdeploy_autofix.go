@@ -566,6 +566,7 @@ func ssmRerunUserDataCommands(port int, region, accountID, image string, isOpenC
 			"cat > /opt/openclaw/.env << 'ENVEOF'"+
 				"\nOPENCLAW_CONFIG_DIR=/opt/openclaw/data"+
 				"\nOPENCLAW_WORKSPACE_DIR=/opt/openclaw/workspace"+
+				"\nOPENCLAW_GATEWAY_BIND=lan"+
 				"\nENVEOF",
 		)
 		// Re-fetch secrets from Secrets Manager into .env if they exist.

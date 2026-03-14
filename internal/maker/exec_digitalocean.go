@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bgdnvk/clanker/internal/openclaw"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -295,6 +297,7 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 			fmt.Fprintf(opts.Writer, "[maker] cloned %s for docker build context\n", repoURL)
 		}
 	}
+	isOpenClaw := openclaw.Detect(strings.TrimSpace(plan.Question), extractRepoURLFromQuestion(plan.Question))
 
 	bindings := make(map[string]string)
 	sshPrivateKeyPath := ""
@@ -302,6 +305,7 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 	sshKeyCleanupDeferred := false
 	registryCreatedThisRun := false
 	skippedDockerPushRefs := map[string]struct{}{}
+	openClawGatewayWaitDone := false
 
 	// Import secret-like env vars into bindings so user-data placeholder substitution works.
 	// Mirrors AWS executor: clanker-cloud passes user-provided env vars to the CLI process.
@@ -348,6 +352,11 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 		args = normalizeFirewallRuleFlagsAtExec(args)
 		args = stripInvalidICMPPortsAtExec(args)
 		args = fixFirewallEmptyAddressAtExec(args)
+		if resolvedArgs, err := normalizeDODropletVPCUUIDAtExec(ctx, args, opts, opts.Writer); err != nil {
+			return fmt.Errorf("command %d rejected: %w", idx+1, err)
+		} else {
+			args = resolvedArgs
+		}
 		if err := validateDOFirewallRulesAtExec(args); err != nil {
 			return fmt.Errorf("command %d rejected: %w", idx+1, err)
 		}
@@ -370,6 +379,9 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 				_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: docker %s\n", idx+1, len(plan.Commands), strings.Join(dockerArgs(args), " "))
 				imageRef := dockerBuildImageRef(args)
 				out, runErr := runOpenClawDOProxyBuildAndPush(ctx, args, opts, opts.Writer)
+				if runErr != nil && registryCreatedThisRun && outputLooksLikeDOCRPushAuthFailure(out) {
+					out, runErr = retryOpenClawDOProxyBuildAndPushAfterFreshRegistryCreate(ctx, args, opts, bindings, opts.Writer)
+				}
 				if runErr != nil {
 					if strings.Contains(out, "Cannot connect to the Docker daemon") || strings.Contains(out, "docker daemon running") {
 						return fmt.Errorf("docker command %d failed (local-env: Docker Desktop not running): %w", idx+1, runErr)
@@ -422,6 +434,12 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 			}
 			continue
 		}
+		if isOpenClaw && !openClawGatewayWaitDone && isDOAppsCreate(args) {
+			if err := waitForOpenClawDOGatewayReady(ctx, bindings, opts.Writer); err != nil {
+				return fmt.Errorf("digitalocean command %d pre-check failed (openclaw-gateway): %w", idx+1, err)
+			}
+			openClawGatewayWaitDone = true
+		}
 
 		out, runErr := runDoctlCommandWithRetry(ctx, args, opts, opts.Writer)
 		if runErr != nil {
@@ -453,8 +471,8 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 		computeDORuntimeBindings(bindings)
 		if isDORegistryCreate(args) {
 			registryCreatedThisRun = true
-			if prepErr := prepareDigitalOceanRegistryPushPlanForExistingRegistry(ctx, opts.DigitalOceanAPIToken, bindings["REGISTRY_NAME"], plan, opts.Writer); prepErr != nil {
-				_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: DigitalOcean registry preparation failed after create; continuing and deferring to the actual docker push: %v\n", prepErr)
+			if opts.Writer != nil {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] DOCR prereq: skipping immediate push probe after fresh registry creation; continuing to the actual image push step\n")
 			}
 		}
 		if err := postCheckDOCommand(args, out); err != nil {
@@ -721,6 +739,67 @@ func isDORegistryLogin(args []string) bool {
 	return strings.EqualFold(strings.TrimSpace(args[0]), "registry") && strings.EqualFold(strings.TrimSpace(args[1]), "login")
 }
 
+func isDOAppsCreate(args []string) bool {
+	if len(args) < 2 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(args[0]), "apps") && strings.EqualFold(strings.TrimSpace(args[1]), "create")
+}
+
+func waitForOpenClawDOGatewayReady(ctx context.Context, bindings map[string]string, w io.Writer) error {
+	dropletIP := strings.TrimSpace(bindings["DROPLET_IP"])
+	if dropletIP == "" {
+		return fmt.Errorf("missing DROPLET_IP before App Platform create")
+	}
+	port := openclaw.DefaultPort
+	if rawPort := strings.TrimSpace(bindings["APP_PORT"]); rawPort != "" {
+		if parsedPort, err := strconv.Atoi(rawPort); err == nil && parsedPort > 0 {
+			port = parsedPort
+		}
+	}
+	targetURL := fmt.Sprintf("http://%s:%d/", dropletIP, port)
+	deadline := time.Now().Add(12 * time.Minute)
+	client := &http.Client{Timeout: 3 * time.Second}
+	var lastErr error
+	for attempt := 1; time.Now().Before(deadline); attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if w != nil {
+			_, _ = fmt.Fprintf(w, "[openclaw] waiting for droplet gateway to become reachable at %s (attempt %d)\n", targetURL, attempt)
+		}
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", dropletIP, port), 3*time.Second)
+		if err == nil {
+			_ = conn.Close()
+			req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+			if reqErr == nil {
+				resp, respErr := client.Do(req)
+				if respErr == nil {
+					_ = resp.Body.Close()
+					if w != nil {
+						_, _ = fmt.Fprintf(w, "[openclaw] droplet gateway is reachable at %s (status=%d); continuing to App Platform create\n", targetURL, resp.StatusCode)
+					}
+					return nil
+				}
+				lastErr = respErr
+			} else {
+				lastErr = reqErr
+			}
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Second):
+		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("gateway at %s did not become reachable within 12m: %w", targetURL, lastErr)
+	}
+	return fmt.Errorf("gateway at %s did not become reachable within 12m", targetURL)
+}
+
 func retryDOCRPushAfterFreshRegistryCreate(ctx context.Context, args []string, opts ExecOptions, workDir string, bindings map[string]string, w io.Writer) (string, error) {
 	backoffs := []time.Duration{10 * time.Second, 20 * time.Second}
 	var lastOut string
@@ -746,6 +825,35 @@ func retryDOCRPushAfterFreshRegistryCreate(ctx context.Context, args []string, o
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("docker push failed after fresh-registry retry attempts")
+	}
+	return lastOut, lastErr
+}
+
+func retryOpenClawDOProxyBuildAndPushAfterFreshRegistryCreate(ctx context.Context, args []string, opts ExecOptions, bindings map[string]string, w io.Writer) (string, error) {
+	backoffs := []time.Duration{10 * time.Second, 20 * time.Second}
+	var lastOut string
+	var lastErr error
+	for attempt, backoff := range backoffs {
+		if w != nil {
+			_, _ = fmt.Fprintf(w, "[maker] DOCR buildx push auth failed immediately after registry creation; waiting %s, refreshing registry login, and retrying (%d/%d)\n", backoff, attempt+1, len(backoffs))
+		}
+		select {
+		case <-ctx.Done():
+			return lastOut, ctx.Err()
+		case <-time.After(backoff):
+		}
+		if loginErr := loginDORegistryWithDockerConfig(ctx, bindings, opts, w); loginErr != nil {
+			if w != nil {
+				_, _ = fmt.Fprintf(w, "[maker] warning: DOCR relogin before buildx retry failed: %v\n", loginErr)
+			}
+		}
+		lastOut, lastErr = runOpenClawDOProxyBuildAndPush(ctx, args, opts, w)
+		if lastErr == nil || !outputLooksLikeDOCRPushAuthFailure(lastOut) {
+			return lastOut, lastErr
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("docker buildx push failed after fresh-registry retry attempts")
 	}
 	return lastOut, lastErr
 }
@@ -1620,6 +1728,93 @@ func extractDODropletBindingsDirect(args []string, output string, bindings map[s
 	}
 }
 
+type doVPCInfo struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Region  string `json:"region"`
+	Default bool   `json:"default"`
+}
+
+func normalizeDODropletVPCUUIDAtExec(ctx context.Context, args []string, opts ExecOptions, w io.Writer) ([]string, error) {
+	if len(args) < 3 || !strings.EqualFold(strings.TrimSpace(args[0]), "compute") || !strings.EqualFold(strings.TrimSpace(args[1]), "droplet") || !strings.EqualFold(strings.TrimSpace(args[2]), "create") {
+		return args, nil
+	}
+	vpcValue := strings.TrimSpace(flagValue(args, "--vpc-uuid"))
+	if vpcValue == "" || strings.Contains(vpcValue, "<") || isDigitalOceanUUID(vpcValue) {
+		return args, nil
+	}
+	vpcs, err := listDigitalOceanVPCs(ctx, opts)
+	if err != nil {
+		return args, fmt.Errorf("resolve digitalocean vpc %q: %w", vpcValue, err)
+	}
+	region := strings.TrimSpace(flagValue(args, "--region"))
+	resolvedID, ok := resolveDigitalOceanVPCID(vpcValue, region, vpcs)
+	if !ok {
+		return args, fmt.Errorf("resolve digitalocean vpc %q: no matching VPC found in account%s", vpcValue, formatDORegionSuffix(region))
+	}
+	if w != nil {
+		_, _ = fmt.Fprintf(w, "[maker] normalized DigitalOcean VPC %s -> %s for droplet create\n", vpcValue, resolvedID)
+	}
+	return setFlagValue(args, "--vpc-uuid", resolvedID), nil
+}
+
+func listDigitalOceanVPCs(ctx context.Context, opts ExecOptions) ([]doVPCInfo, error) {
+	out, err := runDoctlCommandWithRetry(ctx, []string{"vpcs", "list", "--output", "json"}, opts, io.Discard)
+	if err != nil {
+		return nil, err
+	}
+	var vpcs []doVPCInfo
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &vpcs); err != nil {
+		return nil, fmt.Errorf("parse digitalocean vpcs list: %w", err)
+	}
+	return vpcs, nil
+}
+
+func resolveDigitalOceanVPCID(rawValue string, region string, vpcs []doVPCInfo) (string, bool) {
+	value := strings.TrimSpace(rawValue)
+	region = strings.TrimSpace(region)
+	if value == "" {
+		return "", false
+	}
+	matchRegion := func(vpc doVPCInfo) bool {
+		return region == "" || strings.EqualFold(strings.TrimSpace(vpc.Region), region)
+	}
+	for _, vpc := range vpcs {
+		if strings.EqualFold(strings.TrimSpace(vpc.ID), value) {
+			return strings.TrimSpace(vpc.ID), true
+		}
+	}
+	for _, vpc := range vpcs {
+		if matchRegion(vpc) && strings.EqualFold(strings.TrimSpace(vpc.Name), value) {
+			return strings.TrimSpace(vpc.ID), true
+		}
+	}
+	if strings.EqualFold(value, "default") || strings.HasPrefix(strings.ToLower(value), "default-") {
+		for _, vpc := range vpcs {
+			if matchRegion(vpc) && vpc.Default {
+				return strings.TrimSpace(vpc.ID), true
+			}
+		}
+	}
+	if len(vpcs) == 1 && strings.EqualFold(strings.TrimSpace(vpcs[0].Name), value) {
+		return strings.TrimSpace(vpcs[0].ID), true
+	}
+	return "", false
+}
+
+func isDigitalOceanUUID(value string) bool {
+	matched, _ := regexp.MatchString("(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", strings.TrimSpace(value))
+	return matched
+}
+
+func formatDORegionSuffix(region string) string {
+	region = strings.TrimSpace(region)
+	if region == "" {
+		return ""
+	}
+	return fmt.Sprintf(" for region %s", region)
+}
+
 func extractDOAppBindingsDirect(args []string, output string, bindings map[string]string) {
 	if len(args) < 2 || !strings.EqualFold(strings.TrimSpace(args[0]), "apps") {
 		return
@@ -1945,11 +2140,28 @@ func maybePatchOpenClawDOHTTPSOriginOverSSH(ctx context.Context, bindings map[st
 		return fmt.Errorf("ssh private key unavailable: %w", err)
 	}
 	origin := strings.TrimRight(httpsURL, "/")
+	port := openclaw.DefaultPort
+	if rawPort := strings.TrimSpace(bindings["APP_PORT"]); rawPort != "" {
+		if parsedPort, err := strconv.Atoi(rawPort); err == nil && parsedPort > 0 {
+			port = parsedPort
+		}
+	}
+	allowedOriginsJSON, err := json.Marshal([]string{
+		fmt.Sprintf("http://localhost:%d", port),
+		fmt.Sprintf("http://127.0.0.1:%d", port),
+		origin,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal OpenClaw allowed origins: %w", err)
+	}
 	script := strings.Join([]string{
 		"set -euo pipefail",
-		fmt.Sprintf("export OPENCLAW_ALLOWED_ORIGIN=%s", shellSingleQuoteDO(origin)),
+		fmt.Sprintf("export OPENCLAW_ORIGIN=%s", shellSingleQuoteDO(origin)),
+		fmt.Sprintf("export OPENCLAW_ALLOWED_ORIGINS=%s", shellSingleQuoteDO(string(allowedOriginsJSON))),
 		"cd /opt/openclaw",
-		`docker compose exec -T -e OPENCLAW_ALLOWED_ORIGIN="$OPENCLAW_ALLOWED_ORIGIN" openclaw-gateway node -e 'const fs=require("fs"); const path="/home/node/.openclaw/openclaw.json"; const origin=process.env.OPENCLAW_ALLOWED_ORIGIN; let cfg={}; try{cfg=JSON.parse(fs.readFileSync(path,"utf8"))}catch{} cfg.gateway=cfg.gateway||{}; cfg.gateway.mode="local"; const ui=cfg.gateway.controlUi=cfg.gateway.controlUi||{}; const origins=Array.isArray(ui.allowedOrigins)?ui.allowedOrigins.filter(Boolean):[]; for (const value of ["http://127.0.0.1:18789", origin]) { if (value && !origins.includes(value)) origins.push(value); } ui.allowedOrigins=origins; ui.dangerouslyAllowHostHeaderOriginFallback=true; fs.writeFileSync(path, JSON.stringify(cfg,null,2)+"\n");'`,
+		`docker compose run --rm openclaw-cli config set gateway.mode local >/dev/null`,
+		`docker compose run --rm -e OPENCLAW_ALLOWED_ORIGINS="$OPENCLAW_ALLOWED_ORIGINS" openclaw-cli config set gateway.controlUi.allowedOrigins "$OPENCLAW_ALLOWED_ORIGINS" --strict-json >/dev/null`,
+		`docker compose run --rm openclaw-cli config get gateway.controlUi.allowedOrigins | grep -F "$OPENCLAW_ORIGIN" >/dev/null`,
 		"docker compose restart openclaw-gateway",
 	}, "\n")
 	out, err := runDOSSHScript(ctx, dropletIP, sshPrivateKeyPath, script)

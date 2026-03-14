@@ -503,6 +503,9 @@ func normalizeOpenClawDOAppSpec(cmd *maker.Command, registryName, region string)
 		image["tag"] = "latest"
 		changed = true
 	}
+	if ensureOpenClawProxyHealthCheck(service) {
+		changed = true
+	}
 	if ensureOpenClawProxyEnv(service) {
 		changed = true
 	}
@@ -516,6 +519,51 @@ func normalizeOpenClawDOAppSpec(cmd *maker.Command, registryName, region string)
 		}
 	}
 	return appName, repositoryName, registryOut, changed
+}
+
+func ensureOpenClawProxyHealthCheck(service map[string]any) bool {
+	changed := false
+	healthCheck, ok := service["health_check"].(map[string]any)
+	if !ok {
+		healthCheck = map[string]any{}
+		service["health_check"] = healthCheck
+		changed = true
+	}
+	if stringMapValue(healthCheck, "http_path") != "/healthz" {
+		healthCheck["http_path"] = "/healthz"
+		changed = true
+	}
+	if intMapValue(healthCheck, "initial_delay_seconds") != 30 {
+		healthCheck["initial_delay_seconds"] = 30
+		changed = true
+	}
+	if intMapValue(healthCheck, "period_seconds") != 15 {
+		healthCheck["period_seconds"] = 15
+		changed = true
+	}
+	return changed
+}
+
+func intMapValue(m map[string]any, key string) int {
+	if m == nil {
+		return 0
+	}
+	v, ok := m[key]
+	if !ok {
+		return 0
+	}
+	switch x := v.(type) {
+	case int:
+		return x
+	case int32:
+		return int(x)
+	case int64:
+		return int(x)
+	case float64:
+		return int(x)
+	default:
+		return 0
+	}
 }
 
 func ensureOpenClawProxyEnv(service map[string]any) bool {
