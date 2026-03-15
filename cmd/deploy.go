@@ -356,19 +356,10 @@ Examples:
 		}
 		if isOpenClawDeploy && strings.EqualFold(planProvider, "digitalocean") {
 			requiredLaunchOps = []string{"compute droplet create", "apps create"}
-			if strings.TrimSpace(deployOpts.DOToken) != "" {
-				fmt.Fprintf(os.Stderr, "[deploy] prereq: probing DigitalOcean registry push access...\n")
-				probeCtx, probeCancel := context.WithTimeout(ctx, 3*time.Minute)
-				probeErr := maker.ProbeDigitalOceanRegistryPushPrereq(probeCtx, deployOpts.DOToken, "", os.Stderr)
-				probeCancel()
-				if probeErr != nil {
-					fmt.Fprintf(os.Stderr, "[deploy] warning: DigitalOcean registry prereq probe failed during planning; continuing and deferring exact registry handling to apply: %v\n", probeErr)
-				}
-			}
 		}
 
 		// 4. Generate the maker plan via LLM
-		fmt.Fprintf(os.Stderr, "[deploy] phase 3: generating execution plan with %s ...\n", provider)
+		fmt.Fprintf(os.Stderr, "[deploy] phase 3: generating deployment plan with %s ...\n", provider)
 
 		var plan *maker.Plan
 		var mustFixIssues []string

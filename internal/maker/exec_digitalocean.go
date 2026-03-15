@@ -31,6 +31,7 @@ const (
 	doOpenClawProxyPlatform     = "linux/amd64"
 	doDOCRPushProbePrefix       = "clanker-docr-probe"
 	doDOCRPushFallbackPrefix    = "clanker-docr-proxy"
+	doPartialStateErrorMarker   = "partial-state:"
 )
 
 type doDeploySSHKeyMaterial struct {
@@ -38,6 +39,38 @@ type doDeploySSHKeyMaterial struct {
 	privateKeyPath string
 	publicKeyPath  string
 	cleanup        func()
+}
+
+type doExecutionState struct {
+	hasMutableState bool
+	mutationPoints  []string
+}
+
+func (s *doExecutionState) noteMutation(args []string) {
+	if !isDOMutatingCommandBoundary(args) {
+		return
+	}
+	s.hasMutableState = true
+	summary := summarizeDOMutation(args)
+	if summary == "" {
+		return
+	}
+	for _, existing := range s.mutationPoints {
+		if existing == summary {
+			return
+		}
+	}
+	s.mutationPoints = append(s.mutationPoints, summary)
+	if len(s.mutationPoints) > 8 {
+		s.mutationPoints = s.mutationPoints[len(s.mutationPoints)-8:]
+	}
+}
+
+func (s *doExecutionState) summary() string {
+	if s == nil || len(s.mutationPoints) == 0 {
+		return "mutable DigitalOcean resources already exist"
+	}
+	return strings.Join(s.mutationPoints, ", ")
 }
 
 func PlanNeedsDigitalOceanRegistryPush(plan *Plan) bool {
@@ -306,6 +339,7 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 	registryCreatedThisRun := false
 	skippedDockerPushRefs := map[string]struct{}{}
 	openClawGatewayWaitDone := false
+	execState := &doExecutionState{}
 
 	// Import secret-like env vars into bindings so user-data placeholder substitution works.
 	// Mirrors AWS executor: clanker-cloud passes user-provided env vars to the CLI process.
@@ -387,9 +421,9 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 						return fmt.Errorf("docker command %d failed (local-env: Docker Desktop not running): %w", idx+1, runErr)
 					}
 					if outputLooksLikeDOCRPushAuthFailure(out) {
-						return fmt.Errorf("docker command %d failed (registry-auth: DOCR push authorization failed during buildx --push; verify the active DigitalOcean token/context has registry write access): %w", idx+1, runErr)
+						return wrapDOPartialStateError(ctx, execState, bindings, sshPrivateKeyPath, opts, fmt.Errorf("docker command %d failed (registry-auth: DOCR push authorization failed during buildx --push; verify the active DigitalOcean token/context has registry write access): %w", idx+1, runErr))
 					}
-					return fmt.Errorf("docker command %d failed: %w", idx+1, runErr)
+					return wrapDOPartialStateError(ctx, execState, bindings, sshPrivateKeyPath, opts, fmt.Errorf("docker command %d failed: %w", idx+1, runErr))
 				}
 				if imageRef != "" {
 					skippedDockerPushRefs[imageRef] = struct{}{}
@@ -415,9 +449,9 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 					return fmt.Errorf("docker command %d failed (local-env: Docker Desktop not running): %w", idx+1, runErr)
 				}
 				if isDOCRPushAuthFailure(args, out) {
-					return fmt.Errorf("docker command %d failed (registry-auth: DOCR push authorization failed; verify the active DigitalOcean token/context has registry write access, rerun doctl registry login, and clean up or reuse any partial DigitalOcean resources created earlier in the apply): %w", idx+1, runErr)
+					return wrapDOPartialStateError(ctx, execState, bindings, sshPrivateKeyPath, opts, fmt.Errorf("docker command %d failed (registry-auth: DOCR push authorization failed; verify the active DigitalOcean token/context has registry write access, rerun doctl registry login, and clean up or reuse any partial DigitalOcean resources created earlier in the apply): %w", idx+1, runErr))
 				}
-				return fmt.Errorf("docker command %d failed: %w", idx+1, runErr)
+				return wrapDOPartialStateError(ctx, execState, bindings, sshPrivateKeyPath, opts, fmt.Errorf("docker command %d failed: %w", idx+1, runErr))
 			}
 			learnDockerProducesLiteral(args, cmdSpec.Produces, bindings)
 			learnPlanBindingsFromProduces(cmdSpec.Produces, out, bindings)
@@ -426,19 +460,19 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 		}
 
 		args = normalizeDoctlOutputFlags(args)
+		if isOpenClaw && !openClawGatewayWaitDone && isDOAppsCreate(args) {
+			if err := waitForOpenClawDOGatewayReady(ctx, bindings, opts.Writer); err != nil {
+				return wrapDOPartialStateError(ctx, execState, bindings, sshPrivateKeyPath, opts, fmt.Errorf("digitalocean command %d pre-check failed (openclaw-gateway): %w", idx+1, err))
+			}
+			openClawGatewayWaitDone = true
+		}
 		logDOResourceStrategy(args, opts.Writer)
 		_, _ = fmt.Fprintf(opts.Writer, "[maker] running %d/%d: doctl %s\n", idx+1, len(plan.Commands), strings.Join(redactDOCommandArgsForLog(args), " "))
 		if isDORegistryLogin(args) && strings.TrimSpace(opts.DigitalOceanDockerConfigDir) != "" {
 			if err := loginDORegistryWithDockerConfig(ctx, bindings, opts, opts.Writer); err != nil {
-				return fmt.Errorf("digitalocean command %d failed (registry-auth): %w", idx+1, err)
+				return wrapDOPartialStateError(ctx, execState, bindings, sshPrivateKeyPath, opts, fmt.Errorf("digitalocean command %d failed (registry-auth): %w", idx+1, err))
 			}
 			continue
-		}
-		if isOpenClaw && !openClawGatewayWaitDone && isDOAppsCreate(args) {
-			if err := waitForOpenClawDOGatewayReady(ctx, bindings, opts.Writer); err != nil {
-				return fmt.Errorf("digitalocean command %d pre-check failed (openclaw-gateway): %w", idx+1, err)
-			}
-			openClawGatewayWaitDone = true
 		}
 
 		out, runErr := runDoctlCommandWithRetry(ctx, args, opts, opts.Writer)
@@ -452,6 +486,7 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 				// Error output won't have useful data — recover bindings via GET
 				recoverDOBindingsAfterSkip(ctx, args, cmdSpec.Produces, bindings, opts, opts.Writer)
 				computeDORuntimeBindings(bindings)
+				execState.noteMutation(args)
 				if isDORegistryCreate(args) {
 					if prepErr := prepareDigitalOceanRegistryPushPlanForExistingRegistry(ctx, opts.DigitalOceanAPIToken, bindings["REGISTRY_NAME"], plan, opts.Writer); prepErr != nil {
 						_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: DigitalOcean registry reuse preparation failed; continuing and deferring to the actual docker push: %v\n", prepErr)
@@ -460,7 +495,7 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 				continue
 			}
 
-			return fmt.Errorf("digitalocean command %d failed (%s): %w", idx+1, failure.Category, runErr)
+			return wrapDOPartialStateError(ctx, execState, bindings, sshPrivateKeyPath, opts, fmt.Errorf("digitalocean command %d failed (%s): %w", idx+1, failure.Category, runErr))
 		}
 
 		learnPlanBindingsFromProduces(cmdSpec.Produces, out, bindings)
@@ -468,7 +503,11 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 		extractDODropletBindingsDirect(args, out, bindings)
 		extractFirewallBindingsDirect(args, out, bindings)
 		extractDOAppBindingsDirect(args, out, bindings)
+		if isDOAppsCreate(args) {
+			recoverDOAppBindingsAfterCreate(ctx, bindings, opts, opts.Writer)
+		}
 		computeDORuntimeBindings(bindings)
+		execState.noteMutation(args)
 		if isDORegistryCreate(args) {
 			registryCreatedThisRun = true
 			if opts.Writer != nil {
@@ -476,12 +515,25 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 			}
 		}
 		if err := postCheckDOCommand(args, out); err != nil {
-			return fmt.Errorf("digitalocean command %d post-check failed: %w", idx+1, err)
+			return wrapDOPartialStateError(ctx, execState, bindings, sshPrivateKeyPath, opts, fmt.Errorf("digitalocean command %d post-check failed: %w", idx+1, err))
 		}
 	}
 
-	if err := maybePatchOpenClawDOHTTPSOriginOverSSH(ctx, bindings, sshPrivateKeyPath, opts); err != nil {
-		_, _ = fmt.Fprintf(opts.Writer, "[openclaw] warning: failed to patch DigitalOcean allowedOrigins for HTTPS URL: %v\n", err)
+	if isOpenClaw {
+		if err := ensureOpenClawDOHTTPSURL(ctx, bindings, opts); err != nil {
+			return wrapDOPartialStateError(ctx, execState, bindings, sshPrivateKeyPath, opts, fmt.Errorf("openclaw post-deploy failed (https-url): %w", err))
+		}
+		if err := maybePatchOpenClawDOHTTPSOriginOverSSH(ctx, bindings, sshPrivateKeyPath, opts); err != nil {
+			return wrapDOPartialStateError(ctx, execState, bindings, sshPrivateKeyPath, opts, fmt.Errorf("openclaw post-deploy failed (allowed-origins): %w", err))
+		}
+		if err := maybeEnforceOpenClawDOSecretOverSSH(ctx, bindings, sshPrivateKeyPath, opts); err != nil {
+			return wrapDOPartialStateError(ctx, execState, bindings, sshPrivateKeyPath, opts, fmt.Errorf("openclaw post-deploy failed (gateway-secret): %w", err))
+		}
+	}
+	if isOpenClaw {
+		if err := maybeStartOpenClawDOPairApproveWindowOverSSH(ctx, bindings, sshPrivateKeyPath, opts); err != nil {
+			_, _ = fmt.Fprintf(opts.Writer, "[openclaw] warning: failed to start DigitalOcean auto-pair approval window: %v\n", err)
+		}
 	}
 
 	return nil
@@ -504,6 +556,131 @@ func logDOResourceStrategy(args []string, w io.Writer) {
 	case strings.HasPrefix(joined, "apps create"):
 		_, _ = fmt.Fprintln(w, "[maker] strategy: create a fresh App Platform app for this deploy")
 	}
+}
+
+func isDOMutatingCommandBoundary(args []string) bool {
+	if len(args) < 2 {
+		return false
+	}
+	joined := strings.ToLower(strings.TrimSpace(strings.Join(args, " ")))
+	switch {
+	case strings.HasPrefix(joined, "compute ssh-key import"):
+		return true
+	case strings.HasPrefix(joined, "compute firewall create"):
+		return true
+	case strings.HasPrefix(joined, "compute firewall update"):
+		return true
+	case strings.HasPrefix(joined, "compute firewall add-"):
+		return true
+	case strings.HasPrefix(joined, "compute droplet create"):
+		return true
+	case strings.HasPrefix(joined, "compute reserved-ip create"):
+		return true
+	case strings.HasPrefix(joined, "compute reserved-ip-action assign"):
+		return true
+	case strings.HasPrefix(joined, "registry create"):
+		return true
+	case strings.HasPrefix(joined, "apps create"):
+		return true
+	case strings.HasPrefix(joined, "apps update"):
+		return true
+	default:
+		return false
+	}
+}
+
+func summarizeDOMutation(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	redacted := redactDOCommandArgsForLog(args)
+	limit := len(redacted)
+	if limit > 4 {
+		limit = 4
+	}
+	return strings.Join(redacted[:limit], " ")
+}
+
+func wrapDOPartialStateError(ctx context.Context, execState *doExecutionState, bindings map[string]string, sshPrivateKeyPath string, opts ExecOptions, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	if execState == nil || !execState.hasMutableState {
+		return cause
+	}
+	if opts.Writer != nil {
+		_, _ = fmt.Fprintf(opts.Writer, "[maker] partial-state: DigitalOcean apply already mutated remote resources; automatic full-plan retry is unsafe\n")
+		_, _ = fmt.Fprintf(opts.Writer, "[maker] partial-state: mutation boundary: %s\n", execState.summary())
+		if snapshot := formatDOPartialStateBindings(bindings); snapshot != "" {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] partial-state: bindings snapshot: %s\n", snapshot)
+		}
+		if diag := collectDOPartialStateDiagnostics(ctx, bindings, sshPrivateKeyPath); diag != "" {
+			_, _ = io.WriteString(opts.Writer, diag)
+			if !strings.HasSuffix(diag, "\n") {
+				_, _ = io.WriteString(opts.Writer, "\n")
+			}
+		}
+	}
+	return fmt.Errorf("%s DigitalOcean resources already exist after successful mutable steps (%s); inspect or clean up partial state before retrying: %w", doPartialStateErrorMarker, execState.summary(), cause)
+}
+
+func formatDOPartialStateBindings(bindings map[string]string) string {
+	if len(bindings) == 0 {
+		return ""
+	}
+	keys := []string{"SSH_KEY_ID", "FIREWALL_ID", "DROPLET_ID", "DROPLET_IP", "REGISTRY_NAME", "APP_ID", "HTTPS_URL"}
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if value := strings.TrimSpace(bindings[key]); value != "" {
+			parts = append(parts, fmt.Sprintf("%s=%s", key, value))
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func collectDOPartialStateDiagnostics(ctx context.Context, bindings map[string]string, sshPrivateKeyPath string) string {
+	dropletIP := strings.TrimSpace(bindings["DROPLET_IP"])
+	if dropletIP == "" {
+		return ""
+	}
+	if sshPrivateKeyPath == "" {
+		sshPrivateKeyPath = strings.TrimSpace(bindings["SSH_PRIVATE_KEY_FILE"])
+	}
+	if sshPrivateKeyPath == "" {
+		return "[maker] partial-state: droplet diagnostics skipped (missing SSH private key path)"
+	}
+	if _, err := os.Stat(sshPrivateKeyPath); err != nil {
+		return fmt.Sprintf("[maker] partial-state: droplet diagnostics skipped (ssh key unavailable: %v)", err)
+	}
+	diagCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
+	defer cancel()
+	script := strings.Join([]string{
+		"set +e",
+		`echo "[maker] partial-state: collecting droplet bootstrap diagnostics"`,
+		`echo "== cloud-init status =="`,
+		`cloud-init status 2>/dev/null || true`,
+		`echo "== recent user-data log =="`,
+		`tail -n 120 /var/log/user-data.log 2>/dev/null || true`,
+		`echo "== docker ps =="`,
+		`docker ps --format '{{.Names}}\t{{.Status}}\t{{.Ports}}' 2>/dev/null || true`,
+		`echo "== listening ports 18789/18790 =="`,
+		`ss -ltnp 2>/dev/null | grep -E ':(18789|18790)\b' || true`,
+		`if [ -d /opt/openclaw ]; then`,
+		`  echo "== openclaw compose ps =="`,
+		`  cd /opt/openclaw && docker compose ps 2>/dev/null || true`,
+		`  echo "== openclaw gateway logs =="`,
+		`  cd /opt/openclaw && docker compose logs --tail=120 openclaw-gateway 2>/dev/null || true`,
+		`fi`,
+	}, "\n")
+	out, err := runDOSSHScript(diagCtx, dropletIP, sshPrivateKeyPath, script)
+	if err != nil {
+		trimmed := strings.TrimSpace(out)
+		if trimmed == "" {
+			return fmt.Sprintf("[maker] partial-state: droplet diagnostics failed: %v", err)
+		}
+		return fmt.Sprintf("[maker] partial-state: droplet diagnostics failed: %v\n%s", err, trimmed)
+	}
+	return strings.TrimSpace(out)
 }
 
 func buildLocalDOCRProbeImage(ctx context.Context, probeRef string, opts ExecOptions, w io.Writer) error {
@@ -730,6 +907,13 @@ func isDORegistryCreate(args []string) bool {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(args[0]), "registry") && strings.EqualFold(strings.TrimSpace(args[1]), "create")
+}
+
+func isDORegistryGet(args []string) bool {
+	if len(args) < 2 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(args[0]), "registry") && strings.EqualFold(strings.TrimSpace(args[1]), "get")
 }
 
 func isDORegistryLogin(args []string) bool {
@@ -1438,6 +1622,9 @@ func classifyDOFailure(args []string, output string) DOFailure {
 
 	// Not found
 	if strings.Contains(lower, "not found") ||
+		strings.Contains(lower, "404") ||
+		strings.Contains(lower, "does not exist") ||
+		strings.Contains(lower, "no registry") ||
 		strings.Contains(lower, "no such file") ||
 		strings.Contains(lower, "could not find") {
 		f.Category = DOFailureNotFound
@@ -1492,6 +1679,9 @@ func classifyDOFailure(args []string, output string) DOFailure {
 // shouldIgnoreDOFailure returns true for non-fatal errors on create commands.
 func shouldIgnoreDOFailure(args []string, failure DOFailure) bool {
 	if failure.Category == DOFailureQuota && len(args) >= 3 && strings.EqualFold(args[0], "compute") && strings.EqualFold(args[1], "reserved-ip") && strings.EqualFold(args[2], "create") {
+		return true
+	}
+	if failure.Category == DOFailureNotFound && isDORegistryGet(args) {
 		return true
 	}
 	if failure.Category != DOFailureAlreadyExists {
@@ -1550,6 +1740,8 @@ func recoverDOBindingsAfterSkip(ctx context.Context, args []string, produces map
 	switch {
 	case strings.HasPrefix(lower, "registry create"):
 		getArgs = []string{"registry", "get", "--output", "json"}
+	case strings.HasPrefix(lower, "apps create"):
+		getArgs = []string{"apps", "list", "--output", "json"}
 	case strings.Contains(lower, "ssh-key import"):
 		getArgs = []string{"compute", "ssh-key", "list", "--output", "json"}
 	case strings.Contains(lower, "firewall create"):
@@ -1575,6 +1767,10 @@ func recoverDOBindingsAfterSkip(ctx context.Context, args []string, produces map
 		extractRegistryBindingsDirect(out, bindings)
 		return
 	}
+	if strings.HasPrefix(lower, "apps create") {
+		extractDOAppBindingsFromList(args, out, bindings)
+		return
+	}
 	if strings.Contains(lower, "ssh-key import") {
 		extractSSHKeyBindingsDirect(args, out, bindings)
 		return
@@ -1590,6 +1786,9 @@ func extractRegistryBindingsDirect(output string, bindings map[string]string) {
 	output = strings.TrimSpace(output)
 	if output == "" {
 		return
+	}
+	if extracted := extractLeadingJSONPayload(output); extracted != "" {
+		output = extracted
 	}
 
 	var obj any
@@ -1615,6 +1814,13 @@ func extractRegistryBindingsDirect(output string, bindings map[string]string) {
 }
 
 func extractSSHKeyBindingsDirect(args []string, output string, bindings map[string]string) {
+	if len(args) < 3 || !strings.EqualFold(strings.TrimSpace(args[0]), "compute") || !strings.EqualFold(strings.TrimSpace(args[1]), "ssh-key") {
+		return
+	}
+	verb := strings.ToLower(strings.TrimSpace(args[2]))
+	if verb != "import" && verb != "list" && verb != "get" {
+		return
+	}
 	output = strings.TrimSpace(output)
 	if output == "" {
 		return
@@ -1827,6 +2033,9 @@ func extractDOAppBindingsDirect(args []string, output string, bindings map[strin
 	if output == "" {
 		return
 	}
+	if extracted := extractLeadingJSONPayload(output); extracted != "" {
+		output = extracted
+	}
 	var obj any
 	if err := json.Unmarshal([]byte(output), &obj); err != nil {
 		return
@@ -1841,9 +2050,16 @@ func extractDOAppBindingsDirect(args []string, output string, bindings map[strin
 	if id := doJSONStringValue(m["id"]); id != "" && strings.TrimSpace(bindings["APP_ID"]) == "" {
 		bindings["APP_ID"] = id
 	}
-	ingress := doJSONStringValue(m["default_ingress"])
+	ingress := firstNonEmptyDOJSONString(
+		m["default_ingress"],
+		m["DefaultIngress"],
+		m["live_url"],
+		m["LiveURL"],
+	)
 	if ingress == "" {
-		ingress = doJSONStringValue(m["DefaultIngress"])
+		if domain := firstNonEmptyDOJSONString(m["live_domain"], m["LiveDomain"]); domain != "" {
+			ingress = domain
+		}
 	}
 	if ingress != "" {
 		if !strings.HasPrefix(ingress, "https://") && !strings.HasPrefix(ingress, "http://") {
@@ -1856,6 +2072,146 @@ func extractDOAppBindingsDirect(args []string, output string, bindings map[strin
 			bindings["HTTPS_URL"] = ingress
 		}
 	}
+}
+
+func extractDOAppBindingsFromList(args []string, output string, bindings map[string]string) {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return
+	}
+	if extracted := extractLeadingJSONPayload(output); extracted != "" {
+		output = extracted
+	}
+	appName := strings.TrimSpace(flagValue(args, "--name"))
+	if appName == "" && len(args) >= 4 && strings.EqualFold(strings.TrimSpace(args[0]), "apps") && strings.EqualFold(strings.TrimSpace(args[1]), "create") {
+		for i := 0; i < len(args)-1; i++ {
+			if strings.TrimSpace(args[i]) == "--spec" {
+				var spec struct {
+					Name string `json:"name"`
+				}
+				if err := json.Unmarshal([]byte(args[i+1]), &spec); err == nil {
+					appName = strings.TrimSpace(spec.Name)
+				}
+				break
+			}
+		}
+	}
+	if appName == "" {
+		return
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(output), &entries); err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := doJSONStringValue(entry["name"])
+		if name == "" {
+			if spec, ok := entry["spec"].(map[string]any); ok {
+				name = doJSONStringValue(spec["name"])
+			}
+		}
+		if strings.TrimSpace(name) != appName {
+			continue
+		}
+		blob, err := json.Marshal(entry)
+		if err != nil {
+			return
+		}
+		extractDOAppBindingsDirect([]string{"apps", "get"}, string(blob), bindings)
+		return
+	}
+}
+
+func extractLeadingJSONPayload(output string) string {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return ""
+	}
+	if json.Valid([]byte(trimmed)) {
+		return trimmed
+	}
+	for idx, r := range trimmed {
+		if r != '{' && r != '[' {
+			continue
+		}
+		candidate := strings.TrimSpace(trimmed[idx:])
+		if json.Valid([]byte(candidate)) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func firstNonEmptyDOJSONString(values ...any) string {
+	for _, value := range values {
+		if s := doJSONStringValue(value); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func recoverDOAppBindingsAfterCreate(ctx context.Context, bindings map[string]string, opts ExecOptions, w io.Writer) {
+	if strings.TrimSpace(bindings["APP_URL"]) != "" || strings.TrimSpace(bindings["HTTPS_URL"]) != "" {
+		return
+	}
+	appID := strings.TrimSpace(bindings["APP_ID"])
+	if appID == "" {
+		return
+	}
+	getArgs := []string{"apps", "get", appID, "--output", "json"}
+	_, _ = fmt.Fprintf(w, "[maker] recovering app URL via: doctl %s\n", strings.Join(getArgs, " "))
+	out, err := runDoctlCommandWithRetry(ctx, getArgs, opts, w)
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "[maker] warning: app URL recovery failed: %v\n", err)
+		return
+	}
+	extractDOAppBindingsDirect([]string{"apps", "get"}, out, bindings)
+}
+
+func ensureOpenClawDOHTTPSURL(ctx context.Context, bindings map[string]string, opts ExecOptions) error {
+	if strings.TrimSpace(bindings["HTTPS_URL"]) != "" {
+		return nil
+	}
+	appID := strings.TrimSpace(bindings["APP_ID"])
+	if appID == "" {
+		return fmt.Errorf("missing DigitalOcean APP_ID; cannot resolve managed HTTPS URL")
+	}
+	const maxAttempts = 24
+	const retryDelay = 5 * time.Second
+	getArgs := []string{"apps", "get", appID, "--output", "json"}
+	var lastErr error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if opts.Writer != nil {
+			_, _ = fmt.Fprintf(opts.Writer, "[openclaw] resolving managed HTTPS URL for app %s (attempt %d/%d)\n", appID, attempt, maxAttempts)
+		}
+		out, err := runDoctlCommandWithRetry(ctx, getArgs, opts, io.Discard)
+		if err != nil {
+			lastErr = err
+		} else {
+			extractDOAppBindingsDirect([]string{"apps", "get"}, out, bindings)
+			computeDORuntimeBindings(bindings)
+			if httpsURL := strings.TrimSpace(bindings["HTTPS_URL"]); httpsURL != "" {
+				if opts.Writer != nil {
+					_, _ = fmt.Fprintf(opts.Writer, "[openclaw] managed HTTPS URL resolved: %s\n", httpsURL)
+				}
+				return nil
+			}
+		}
+		if attempt == maxAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryDelay):
+		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("timed out waiting for DigitalOcean managed HTTPS URL: %w", lastErr)
+	}
+	return fmt.Errorf("timed out waiting for DigitalOcean managed HTTPS URL")
 }
 
 func doJSONStringValue(v any) string {
@@ -2167,6 +2523,166 @@ func maybePatchOpenClawDOHTTPSOriginOverSSH(ctx context.Context, bindings map[st
 	out, err := runDOSSHScript(ctx, dropletIP, sshPrivateKeyPath, script)
 	if opts.Writer != nil {
 		_, _ = fmt.Fprintf(opts.Writer, "[openclaw] patching DigitalOcean allowedOrigins with managed HTTPS URL %s\n", origin)
+		if strings.TrimSpace(out) != "" {
+			_, _ = io.WriteString(opts.Writer, out)
+			if !strings.HasSuffix(out, "\n") {
+				_, _ = io.WriteString(opts.Writer, "\n")
+			}
+		}
+	}
+	return err
+}
+
+func maybeEnforceOpenClawDOSecretOverSSH(ctx context.Context, bindings map[string]string, sshPrivateKeyPath string, opts ExecOptions) error {
+	dropletIP := strings.TrimSpace(bindings["DROPLET_IP"])
+	if dropletIP == "" {
+		return nil
+	}
+	if sshPrivateKeyPath == "" {
+		sshPrivateKeyPath = strings.TrimSpace(bindings["SSH_PRIVATE_KEY_FILE"])
+	}
+	if sshPrivateKeyPath == "" {
+		return fmt.Errorf("missing SSH private key path")
+	}
+	if _, err := os.Stat(sshPrivateKeyPath); err != nil {
+		return fmt.Errorf("ssh private key unavailable: %w", err)
+	}
+
+	secretKey := ""
+	secretValue := ""
+	for _, candidate := range []string{"OPENCLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_PASSWORD"} {
+		if value := strings.TrimSpace(bindings[candidate]); value != "" {
+			secretKey = candidate
+			secretValue = value
+			break
+		}
+	}
+	if secretKey == "" || secretValue == "" {
+		return nil
+	}
+
+	script := strings.Join([]string{
+		"set -euo pipefail",
+		fmt.Sprintf("export OPENCLAW_SECRET_KEY=%s", shellSingleQuoteDO(secretKey)),
+		fmt.Sprintf("export OPENCLAW_SECRET_VALUE=%s", shellSingleQuoteDO(secretValue)),
+		"cd /opt/openclaw",
+		"mkdir -p /opt/openclaw",
+		"touch /opt/openclaw/.env",
+		`CURRENT_ENV=$(awk -F= -v k="$OPENCLAW_SECRET_KEY" '$1==k {sub(/^[^=]*=/, ""); print; exit}' /opt/openclaw/.env || true)`,
+		`CURRENT_ENV_HASH=$(printf %s "$CURRENT_ENV" | sha256sum | awk '{print substr($1,1,8)}')`,
+		`EXPECTED_HASH=$(printf %s "$OPENCLAW_SECRET_VALUE" | sha256sum | awk '{print substr($1,1,8)}')`,
+		`if [ "$CURRENT_ENV_HASH" != "$EXPECTED_HASH" ]; then echo "[openclaw] droplet .env secret hash mismatch: current=${CURRENT_ENV_HASH:-missing} expected=$EXPECTED_HASH; rewriting"; else echo "[openclaw] droplet .env secret already matches requested value (hash=$EXPECTED_HASH)"; fi`,
+		`awk -F= -v k="$OPENCLAW_SECRET_KEY" -v v="$OPENCLAW_SECRET_VALUE" 'BEGIN{done=0} $1==k{print k"="v; done=1; next} {print} END{if(!done) print k"="v}' /opt/openclaw/.env > /opt/openclaw/.env.clanker.tmp`,
+		"mv /opt/openclaw/.env.clanker.tmp /opt/openclaw/.env",
+		"chmod 600 /opt/openclaw/.env",
+		"docker compose up -d --force-recreate openclaw-gateway >/dev/null",
+		`ACTUAL_CONTAINER=$(docker compose exec -T openclaw-gateway env 2>/dev/null | awk -F= -v k="$OPENCLAW_SECRET_KEY" '$1==k {sub(/^[^=]*=/, ""); print; exit}' || true)`,
+		`ACTUAL_HASH=$(printf %s "$ACTUAL_CONTAINER" | sha256sum | awk '{print substr($1,1,8)}')`,
+		`if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then echo "[openclaw] warning: running container secret hash differs after recreate: actual=${ACTUAL_HASH:-missing} expected=$EXPECTED_HASH"; exit 1; fi`,
+		`echo "[openclaw] enforced requested gateway secret on droplet and running container (hash=$EXPECTED_HASH)"`,
+	}, "\n")
+	out, err := runDOSSHScript(ctx, dropletIP, sshPrivateKeyPath, script)
+	if opts.Writer != nil && strings.TrimSpace(out) != "" {
+		_, _ = io.WriteString(opts.Writer, out)
+		if !strings.HasSuffix(out, "\n") {
+			_, _ = io.WriteString(opts.Writer, "\n")
+		}
+	}
+	return err
+}
+
+func maybeStartOpenClawDOPairApproveWindowOverSSH(ctx context.Context, bindings map[string]string, sshPrivateKeyPath string, opts ExecOptions) error {
+	dropletIP := strings.TrimSpace(bindings["DROPLET_IP"])
+	if dropletIP == "" {
+		return nil
+	}
+	if sshPrivateKeyPath == "" {
+		sshPrivateKeyPath = strings.TrimSpace(bindings["SSH_PRIVATE_KEY_FILE"])
+	}
+	if sshPrivateKeyPath == "" {
+		return fmt.Errorf("missing SSH private key path")
+	}
+	if _, err := os.Stat(sshPrivateKeyPath); err != nil {
+		return fmt.Errorf("ssh private key unavailable: %w", err)
+	}
+
+	script := strings.Join([]string{
+		"set -euo pipefail",
+		"cd /opt/openclaw",
+		"mkdir -p /var/log",
+		`PAIR_SCRIPT=/tmp/clanker-openclaw-do-pair-window.sh`,
+		`cat > "$PAIR_SCRIPT" <<'SCRIPT'`,
+		`#!/bin/bash
+set +e
+echo "[openclaw] auto-pair approval window started for 20 minutes"
+for _w in 1 2 3 4 5 6 7 8 9 10 11 12; do
+	if docker compose ps --status running openclaw-gateway >/dev/null 2>&1; then
+		break
+	fi
+	sleep 5
+done
+END=$(( $(date +%s) + 1200 ))
+while [ $(date +%s) -lt $END ]; do
+	if ! docker compose ps --status running openclaw-gateway >/dev/null 2>&1; then
+		sleep 5
+		continue
+	fi
+	JS=$(cat <<'JS'
+const fs = require("fs");
+const path = require("path");
+const pendingPath = "/home/node/.openclaw/devices/pending.json";
+const pairedPath = "/home/node/.openclaw/devices/paired.json";
+
+function readJSON(filePath) {
+	try {
+		return JSON.parse(fs.readFileSync(filePath, "utf8") || "{}");
+	} catch (error) {
+		return {};
+	}
+}
+
+const pending = readJSON(pendingPath);
+const paired = readJSON(pairedPath);
+const requestIds = Object.keys(pending || {});
+
+if (requestIds.length === 0) {
+	console.log("DEPLOY_PAIR_NONE");
+	process.exit(0);
+}
+
+let approved = 0;
+for (const requestId of requestIds) {
+	const request = pending[requestId];
+	if (!request || !request.deviceId) continue;
+	paired[String(request.deviceId)] = request;
+	delete pending[requestId];
+	approved++;
+}
+
+fs.mkdirSync(path.dirname(pendingPath), { recursive: true });
+fs.writeFileSync(pairedPath, JSON.stringify(paired, null, 2));
+fs.writeFileSync(pendingPath, JSON.stringify(pending, null, 2));
+console.log("DEPLOY_PAIR_APPROVED=" + approved);
+JS
+)
+	OUT=$(docker compose exec -T openclaw-gateway node -e "$JS" 2>/dev/null || true)
+	APPROVED=$(echo "$OUT" | sed -n 's/^.*DEPLOY_PAIR_APPROVED=\([0-9][0-9]*\).*$/\1/p')
+	if [ -n "$APPROVED" ] && [ "$APPROVED" -gt 0 ] 2>/dev/null; then
+		echo "[openclaw] approved $APPROVED pending pair request(s)"
+		docker compose restart openclaw-gateway >/dev/null 2>&1 || true
+		sleep 2
+	fi
+	sleep 3
+done
+echo "[openclaw] auto-pair approval window finished"`,
+		`SCRIPT`,
+		`chmod +x "$PAIR_SCRIPT"`,
+		`pkill -f "$PAIR_SCRIPT" >/dev/null 2>&1 || true`,
+		`nohup "$PAIR_SCRIPT" >/var/log/openclaw-auto-pair.log 2>&1 & echo $!`,
+	}, "\n")
+	out, err := runDOSSHScript(ctx, dropletIP, sshPrivateKeyPath, script)
+	if opts.Writer != nil {
+		_, _ = fmt.Fprintf(opts.Writer, "[openclaw] starting DigitalOcean auto-pair approval window for 20 minutes\n")
 		if strings.TrimSpace(out) != "" {
 			_, _ = io.WriteString(opts.Writer, out)
 			if !strings.HasSuffix(out, "\n") {

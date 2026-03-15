@@ -27,6 +27,7 @@ import (
 
 var awsErrorCodeRe = regexp.MustCompile(`(?i)an error occurred \(([^)]+)\)`)
 var planPlaceholderTokenRe = regexp.MustCompile(`<([A-Z0-9_]+)>`)
+var jsonEscapedPlanPlaceholderTokenRe = regexp.MustCompile(`\\u003[cC]([A-Z0-9_]+)\\u003[eE]`)
 var shellStylePlaceholderTokenRe = regexp.MustCompile(`^\$[A-Z][A-Z0-9_]*$`)
 var awsARNRegionHintRe = regexp.MustCompile(`arn:aws[a-zA-Z-]*:[a-z0-9-]+:([a-z0-9-]+):\d{12}:[^,\s"']+`)
 
@@ -1395,11 +1396,37 @@ func applyPlanBindings(args []string, bindings map[string]string) []string {
 	out := make([]string, 0, len(args))
 	for _, a := range args {
 		if !strings.Contains(a, "<") || !strings.Contains(a, ">") {
+			if strings.Contains(strings.ToLower(a), `\u003c`) && strings.Contains(strings.ToLower(a), `\u003e`) {
+				rewritten := jsonEscapedPlanPlaceholderTokenRe.ReplaceAllStringFunc(a, func(m string) string {
+					parts := jsonEscapedPlanPlaceholderTokenRe.FindStringSubmatch(m)
+					if len(parts) != 2 {
+						return m
+					}
+					key := strings.TrimSpace(parts[1])
+					if v, ok := bindings[key]; ok && strings.TrimSpace(v) != "" {
+						return v
+					}
+					return m
+				})
+				out = append(out, rewritten)
+				continue
+			}
 			out = append(out, a)
 			continue
 		}
 		rewritten := planPlaceholderTokenRe.ReplaceAllStringFunc(a, func(m string) string {
 			key := strings.TrimSuffix(strings.TrimPrefix(m, "<"), ">")
+			if v, ok := bindings[key]; ok && strings.TrimSpace(v) != "" {
+				return v
+			}
+			return m
+		})
+		rewritten = jsonEscapedPlanPlaceholderTokenRe.ReplaceAllStringFunc(rewritten, func(m string) string {
+			parts := jsonEscapedPlanPlaceholderTokenRe.FindStringSubmatch(m)
+			if len(parts) != 2 {
+				return m
+			}
+			key := strings.TrimSpace(parts[1])
 			if v, ok := bindings[key]; ok && strings.TrimSpace(v) != "" {
 				return v
 			}

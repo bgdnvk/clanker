@@ -1465,21 +1465,13 @@ func fixDORegistryEndpointHallucination(plan *maker.Plan) int {
 		}
 	}
 
-	// Also strip any "registry get" command that produces REGISTRY_ENDPOINT
-	// (doctl registry get doesn't have server_url or endpoint field)
+	// Strip any "registry get" step from apply plans.
+	// It is a planning/probe operation, not a mutating apply step, and a 404 here
+	// simply means the later registry create should proceed.
 	var cleaned []maker.Command
 	for _, cmd := range plan.Commands {
-		hasEndpoint := false
 		if len(cmd.Args) >= 2 && strings.EqualFold(cmd.Args[0], "registry") &&
 			strings.EqualFold(cmd.Args[1], "get") {
-			for k := range cmd.Produces {
-				if strings.Contains(strings.ToUpper(k), "ENDPOINT") {
-					hasEndpoint = true
-					break
-				}
-			}
-		}
-		if hasEndpoint {
 			count++
 			continue // drop this command
 		}
