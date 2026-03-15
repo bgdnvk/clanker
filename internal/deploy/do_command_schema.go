@@ -102,7 +102,7 @@ func ValidatePlanPageBoundary(currentPlan *maker.Plan, page *PlanPage, envVars [
 	}
 
 	if issues := ValidateCommandBindingSequence(currentPlan, page.Commands, envVars); len(issues) > 0 {
-		return fmt.Errorf(strings.TrimSpace(issues[0]))
+		return fmt.Errorf("%s", strings.TrimSpace(issues[0]))
 	}
 	return nil
 }

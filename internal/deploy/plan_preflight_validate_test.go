@@ -90,8 +90,8 @@ func TestValidatePlanDeterministicFinalRejectsOpenClawDOComposeInstallMismatch(t
 		t.Fatalf("expected deterministic validation to reject compose install mismatch, got %+v", v)
 	}
 	joined := strings.Join(v.Issues, "\n")
-	if !strings.Contains(joined, "runs 'docker compose' but installs only the standalone docker-compose package") {
-		t.Fatalf("expected compose install mismatch issue, got %q", joined)
+	if !strings.Contains(joined, "still uses a local source-build flow") {
+		t.Fatalf("expected local source-build issue, got %q", joined)
 	}
 	if !strings.Contains(strings.Join(v.Warnings, "\n"), "git clone without explicitly installing git") {
 		t.Fatalf("expected git install warning, got %+v", v.Warnings)

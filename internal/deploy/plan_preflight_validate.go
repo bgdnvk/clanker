@@ -431,27 +431,28 @@ func checkOpenClawProjectInvariants(plan *maker.Plan) ([]string, []string) {
 			usesCompose := strings.Contains(lower, "docker compose") || strings.Contains(lower, "docker-compose")
 			usesDockerRun := strings.Contains(lower, "docker run")
 			hasECRRef := strings.Contains(lower, ".dkr.ecr.") || strings.Contains(lower, "<image_uri>") || strings.Contains(lower, "<ecr_uri>")
+			hasNonInteractiveBootstrap := hasOpenClawNonInteractiveBootstrap(script)
 			onboardIdx := strings.Index(lower, "docker-setup.sh")
 			if onboardIdx < 0 {
 				onboardIdx = strings.Index(lower, "openclaw-cli onboard")
 			}
 			startIdx := strings.Index(lower, "up -d openclaw-gateway")
-			if startIdx >= 0 && (onboardIdx < 0 || onboardIdx > startIdx) {
-				issues = append(issues, "[HARD] OpenClaw invariant failed: onboarding must run before starting openclaw-gateway")
-				fixes = append(fixes, "Run docker-setup.sh or openclaw-cli onboard before docker compose up -d openclaw-gateway")
+			if startIdx >= 0 && !hasNonInteractiveBootstrap && (onboardIdx < 0 || onboardIdx > startIdx) {
+				issues = append(issues, "[HARD] OpenClaw invariant failed: bootstrap initialization must run before starting openclaw-gateway")
+				fixes = append(fixes, "Seed a minimal openclaw.json before docker compose up -d openclaw-gateway, or run onboarding first in an interactive environment")
 			}
 			if usesCompose {
 				missing := missingEnvVarsInScript(script, OpenClawComposeHardEnvVars())
-				if len(missing) == 0 && startIdx >= 0 && onboardIdx >= 0 && onboardIdx < startIdx {
+				if len(missing) == 0 && startIdx >= 0 && ((onboardIdx >= 0 && onboardIdx < startIdx) || hasNonInteractiveBootstrap) {
 					hasRunnableOpenClawRuntimePath = true
 				}
 			}
 			if usesDockerRun && hasECRRef {
-				if onboardIdx >= 0 {
+				if onboardIdx >= 0 || hasNonInteractiveBootstrap {
 					hasRunnableOpenClawRuntimePath = true
 				} else {
-					issues = append(issues, "[HARD] OpenClaw invariant failed: onboarding must run before starting openclaw-gateway")
-					fixes = append(fixes, "Run docker-setup.sh or openclaw-cli onboard before docker run")
+					issues = append(issues, "[HARD] OpenClaw invariant failed: bootstrap initialization must run before starting openclaw-gateway")
+					fixes = append(fixes, "Seed a minimal openclaw.json before docker run, or run onboarding first in an interactive environment")
 				}
 			}
 		}
@@ -641,14 +642,14 @@ func validateOpenClawPlanCommands(plan *maker.Plan) awsPlanChecks {
 			hasECRRef := strings.Contains(script, ".dkr.ecr.") || strings.Contains(script, "<image_uri>") || strings.Contains(script, "<ecr_uri>")
 			if usesCompose {
 				missing := missingEnvVarsInScript(script, OpenClawComposeHardEnvVars())
-				onboarded := strings.Contains(script, "docker-setup.sh") || strings.Contains(script, "openclaw-cli onboard")
+				onboarded := strings.Contains(script, "docker-setup.sh") || strings.Contains(script, "openclaw-cli onboard") || hasOpenClawNonInteractiveBootstrap(script)
 				started := strings.Contains(script, "up -d openclaw-gateway")
 				if len(missing) == 0 && onboarded && started {
 					hasRunnableOpenClawRuntimePath = true
 				}
 			}
 			if usesDockerRun && hasECRRef {
-				onboarded := strings.Contains(script, "docker-setup.sh") || strings.Contains(script, "openclaw-cli onboard")
+				onboarded := strings.Contains(script, "docker-setup.sh") || strings.Contains(script, "openclaw-cli onboard") || hasOpenClawNonInteractiveBootstrap(script)
 				if onboarded {
 					hasRunnableOpenClawRuntimePath = true
 				}
@@ -737,7 +738,6 @@ func validateDigitalOceanPlanCommands(plan *maker.Plan, appPorts []int, isOpenCl
 	}
 	if isOpenClaw {
 		requiredInboundPorts["18789"] = true
-		requiredInboundPorts["18790"] = true
 	}
 
 	for _, cmd := range plan.Commands {
@@ -826,7 +826,7 @@ func validateDigitalOceanPlanCommands(plan *maker.Plan, appPorts []int, isOpenCl
 				for _, forbidden := range []string{"80", "443", "8080"} {
 					if doFirewallSpecHasInboundPort(firewallSpec, "tcp", forbidden) {
 						out.Issues = append(out.Issues, fmt.Sprintf("[HARD] DigitalOcean firewall create exposes TCP port %s for OpenClaw without an explicit reverse proxy requirement", forbidden))
-						out.Fixes = append(out.Fixes, fmt.Sprintf("Remove inbound TCP port %s from compute firewall create; plain OpenClaw droplet needs only 22, 18789, and 18790", forbidden))
+						out.Fixes = append(out.Fixes, fmt.Sprintf("Remove inbound TCP port %s from compute firewall create; the OpenClaw droplet should expose only 22 and 18789 publicly", forbidden))
 					}
 				}
 			}
@@ -1038,8 +1038,16 @@ func validateDigitalOceanPlanCommands(plan *maker.Plan, appPorts []int, isOpenCl
 				out.Warnings = append(out.Warnings, "OpenClaw DigitalOcean user-data runs git clone without explicitly installing git")
 			}
 			if runtimeSpec.HasComposeBuild {
-				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data uses 'docker compose build' even though compose references image: openclaw:local")
-				out.Fixes = append(out.Fixes, "Replace 'docker compose build ...' with 'docker build -t openclaw:local .' before docker compose up")
+				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data uses 'docker compose build' in the DigitalOcean cloud-init flow")
+				out.Fixes = append(out.Fixes, "Set OPENCLAW_IMAGE='"+openClawDOImageRef+"', run '"+openClawDOImagePullCommand+"', then '"+openClawDOGatewayComposeCmd+"'")
+			}
+			if runtimeSpec.HasDockerBuild {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw DigitalOcean user-data still uses a local source-build flow instead of the upstream GHCR image")
+				out.Fixes = append(out.Fixes, "Remove local 'docker build -t openclaw:local ...' steps, set OPENCLAW_IMAGE='"+openClawDOImageRef+"' in .env, and pull the image before docker compose up")
+			}
+			if !strings.Contains(lower, "openclaw_image="+strings.ToLower(openClawDOImageRef)) {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw DigitalOcean user-data does not pin OPENCLAW_IMAGE to the upstream GHCR image")
+				out.Fixes = append(out.Fixes, "Write OPENCLAW_IMAGE='"+openClawDOImageRef+"' into the .env heredoc before starting the gateway")
 			}
 			if hasRuntime && !runtimeSpec.HasComposeUp && !runtimeSpec.HasDockerRun {
 				out.Issues = append(out.Issues, "[HARD] DigitalOcean droplet user-data does not start OpenClaw (missing docker compose up or docker run)")

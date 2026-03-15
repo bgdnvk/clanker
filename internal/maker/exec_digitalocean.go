@@ -2517,8 +2517,11 @@ func maybePatchOpenClawDOHTTPSOriginOverSSH(ctx context.Context, bindings map[st
 		"cd /opt/openclaw",
 		`docker compose run --rm openclaw-cli config set gateway.mode local >/dev/null`,
 		`docker compose run --rm -e OPENCLAW_ALLOWED_ORIGINS="$OPENCLAW_ALLOWED_ORIGINS" openclaw-cli config set gateway.controlUi.allowedOrigins "$OPENCLAW_ALLOWED_ORIGINS" --strict-json >/dev/null`,
-		`docker compose run --rm openclaw-cli config get gateway.controlUi.allowedOrigins | grep -F "$OPENCLAW_ORIGIN" >/dev/null`,
-		"docker compose restart openclaw-gateway",
+		`grep -F "$OPENCLAW_ORIGIN" /opt/openclaw/data/openclaw.json >/dev/null`,
+		`for _w in 1 2 3 4 5 6 7 8 9 10 11 12; do if docker compose ps --status running openclaw-gateway >/dev/null 2>&1; then exit 0; fi; sleep 5; done`,
+		`echo "[openclaw] allowedOrigins patch did not converge; recent gateway logs:"`,
+		`docker compose logs --tail=60 openclaw-gateway || true`,
+		`exit 1`,
 	}, "\n")
 	out, err := runDOSSHScript(ctx, dropletIP, sshPrivateKeyPath, script)
 	if opts.Writer != nil {
@@ -2611,6 +2614,7 @@ func maybeStartOpenClawDOPairApproveWindowOverSSH(ctx context.Context, bindings 
 		"cd /opt/openclaw",
 		"mkdir -p /var/log",
 		`PAIR_SCRIPT=/tmp/clanker-openclaw-do-pair-window.sh`,
+		`PAIR_PID_FILE=/var/run/clanker-openclaw-auto-pair.pid`,
 		`cat > "$PAIR_SCRIPT" <<'SCRIPT'`,
 		`#!/bin/bash
 set +e
@@ -2677,8 +2681,11 @@ done
 echo "[openclaw] auto-pair approval window finished"`,
 		`SCRIPT`,
 		`chmod +x "$PAIR_SCRIPT"`,
-		`pkill -f "$PAIR_SCRIPT" >/dev/null 2>&1 || true`,
-		`nohup "$PAIR_SCRIPT" >/var/log/openclaw-auto-pair.log 2>&1 & echo $!`,
+		`if [ -f "$PAIR_PID_FILE" ]; then OLD_PID=$(cat "$PAIR_PID_FILE" 2>/dev/null || true); if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" >/dev/null 2>&1; then kill "$OLD_PID" >/dev/null 2>&1 || true; fi; rm -f "$PAIR_PID_FILE"; fi`,
+		`nohup "$PAIR_SCRIPT" >/var/log/openclaw-auto-pair.log 2>&1 </dev/null & PAIR_PID=$!`,
+		`echo "$PAIR_PID" > "$PAIR_PID_FILE"`,
+		`disown "$PAIR_PID" >/dev/null 2>&1 || true`,
+		`echo "$PAIR_PID"`,
 	}, "\n")
 	out, err := runDOSSHScript(ctx, dropletIP, sshPrivateKeyPath, script)
 	if opts.Writer != nil {
@@ -2854,7 +2861,13 @@ func validateDOUserDataAtExec(args []string) error {
 		return fmt.Errorf("OpenClaw user-data must not run 'cloud-init status --wait' inside cloud-init")
 	}
 	if strings.Contains(lower, "docker compose build") || strings.Contains(lower, "docker-compose build") {
-		return fmt.Errorf("OpenClaw user-data must use 'docker build -t openclaw:local .' instead of 'docker compose build'")
+		return fmt.Errorf("OpenClaw user-data must use OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:latest plus 'docker compose pull openclaw-gateway' instead of 'docker compose build'")
+	}
+	if strings.Contains(lower, "docker build -t openclaw:local") || strings.Contains(lower, "openclaw_image=openclaw:local") {
+		return fmt.Errorf("OpenClaw user-data must use the upstream GHCR image ghcr.io/openclaw/openclaw:latest instead of a local openclaw:local build")
+	}
+	if !strings.Contains(lower, "openclaw_image=ghcr.io/openclaw/openclaw:latest") {
+		return fmt.Errorf("OpenClaw user-data must pin OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:latest in .env")
 	}
 	if !strings.Contains(lower, "openclaw_gateway_token") && !strings.Contains(lower, "openclaw_gateway_password") {
 		return fmt.Errorf("OpenClaw user-data is missing OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_PASSWORD in .env")

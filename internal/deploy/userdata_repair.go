@@ -203,7 +203,7 @@ func buildUserDataRepairPrompt(script string, issues, fixes []string, provider s
 		b.WriteString("- Docker is pre-installed on docker-20-04 images. Do NOT reinstall.\n")
 		writeLines(&b, openClawDOUserDataRepairLines()...)
 		if runtimeSpec.HasBootstrap || runtimeSpec.HasComposeUp || runtimeSpec.HasOnboarding {
-			b.WriteString("- Keep the existing OpenClaw runtime shape intact: build on the droplet, run onboarding, then start the gateway.\n")
+			b.WriteString("- Keep the existing OpenClaw runtime shape intact: clone the repo for Compose files, set OPENCLAW_IMAGE to the upstream GHCR image, seed config non-interactively, pull the image, then start the gateway.\n")
 		}
 		b.WriteString("\n")
 	} else {

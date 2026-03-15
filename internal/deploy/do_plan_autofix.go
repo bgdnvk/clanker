@@ -142,11 +142,10 @@ func ApplyDigitalOceanPlanAutofix(plan *maker.Plan, logf func(string, ...any)) *
 		logf("[deploy] do autofix: fixed %d user-data compose issue(s)", udFixed)
 	}
 
-	// OpenClaw: replace 'docker compose build' with 'docker build -t openclaw:local .'
-	// because compose file uses 'image: openclaw:local' (no build: directive)
+	// OpenClaw: replace source-build bootstraps with the upstream GHCR image flow.
 	ocBuildFixed := fixDOOpenClawComposeBuild(plan)
 	if ocBuildFixed > 0 {
-		logf("[deploy] do autofix: replaced %d 'docker compose build' → 'docker build -t openclaw:local .' in user-data", ocBuildFixed)
+		logf("[deploy] do autofix: rewrote %d OpenClaw user-data build step(s) to the upstream GHCR image pull flow", ocBuildFixed)
 	}
 
 	// OpenClaw: remove DO token leakage and masked clone failures from user-data
@@ -1094,10 +1093,8 @@ func fixDOUserDataScript(plan *maker.Plan) int {
 	return count
 }
 
-// fixDOOpenClawComposeBuild replaces 'docker compose build ...' with
-// 'docker build -t openclaw:local .' in user-data scripts.
-// OpenClaw's docker-compose.yml uses 'image: openclaw:local' (no build: directive),
-// so 'docker compose build' silently does nothing — we need a direct docker build.
+// fixDOOpenClawComposeBuild rewrites stale OpenClaw DigitalOcean bootstraps to
+// the upstream GHCR image flow used for unattended VPS installs.
 func fixDOOpenClawComposeBuild(plan *maker.Plan) int {
 	count := 0
 	for ci := range plan.Commands {
@@ -1113,20 +1110,33 @@ func fixDOOpenClawComposeBuild(plan *maker.Plan) int {
 					continue
 				}
 				newScript := script
-				// Replace 'docker compose build ...' with 'docker build -t openclaw:local .'
-				// Handles: docker compose build, docker compose build openclaw-gateway, docker-compose build, etc.
+				imageLineRe := regexp.MustCompile(`(?m)^\s*OPENCLAW_IMAGE=openclaw:local\s*$`)
+				if imageLineRe.MatchString(newScript) {
+					newScript = imageLineRe.ReplaceAllString(newScript, "OPENCLAW_IMAGE="+openClawDOImageRef)
+					count++
+				}
+				// Replace 'docker compose build ...' with an explicit pull of the upstream image.
 				composeBuildRe := regexp.MustCompile(`docker[\s-]+compose\s+build\s*[^\n]*`)
 				if composeBuildRe.MatchString(newScript) {
-					newScript = composeBuildRe.ReplaceAllString(newScript, "docker build -t openclaw:local .")
+					newScript = composeBuildRe.ReplaceAllString(newScript, openClawDOImagePullCommand)
 					count++
 				}
-				// Also fix 'docker pull openclaw:local' or 'docker pull <IMAGE_URI>' → remove (we build locally)
-				pullLocalRe := regexp.MustCompile(`(?m)^.*docker\s+pull\s+openclaw:local.*\n?`)
+				buildLocalRe := regexp.MustCompile(`(?m)^.*docker\s+build\s+-t\s+openclaw:local\s+.*\n?`)
+				if buildLocalRe.MatchString(newScript) {
+					newScript = buildLocalRe.ReplaceAllString(newScript, "")
+					count++
+				}
+				pullLocalRe := regexp.MustCompile(`(?m)^\s*docker\s+pull\s+openclaw:local\s*$`)
 				if pullLocalRe.MatchString(newScript) {
-					newScript = pullLocalRe.ReplaceAllString(newScript, "")
+					newScript = pullLocalRe.ReplaceAllString(newScript, "docker pull "+openClawDOImageRef)
 					count++
 				}
-				// Fix 'docker tag <IMAGE_URI> openclaw:latest' → remove (we build locally as openclaw:local)
+				pullMissingRe := regexp.MustCompile(`(?m)^\s*docker\s+compose\s+up\s+-d\s+openclaw-gateway\s*$`)
+				if strings.Contains(newScript, "OPENCLAW_IMAGE="+openClawDOImageRef) && !strings.Contains(newScript, openClawDOImagePullCommand) && pullMissingRe.MatchString(newScript) {
+					newScript = pullMissingRe.ReplaceAllString(newScript, openClawDOImagePullCommand+"\n"+openClawDOGatewayComposeCmd)
+					count++
+				}
+				// Remove legacy local-tagging lines from the old source-build flow.
 				tagLocalRe := regexp.MustCompile(`(?m)^.*docker\s+tag\s+\S+\s+openclaw:(local|latest).*\n?`)
 				if tagLocalRe.MatchString(newScript) {
 					newScript = tagLocalRe.ReplaceAllString(newScript, "")

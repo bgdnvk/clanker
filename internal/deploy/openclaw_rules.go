@@ -7,10 +7,11 @@ import (
 )
 
 const (
-	openClawDOImageBuildCommand   = "docker build -t openclaw:local ."
+	openClawDOImageRef            = "ghcr.io/openclaw/openclaw:latest"
+	openClawDOImagePullCommand    = "docker compose pull openclaw-gateway"
 	openClawDOGatewayComposeCmd   = "docker compose up -d openclaw-gateway"
-	openClawDORequiredPortsText   = "22, 18789, 18790"
-	openClawDORequiredPortsCIDR   = "22/tcp, 18789/tcp, and 18790/tcp"
+	openClawDORequiredPortsText   = "22, 18789"
+	openClawDORequiredPortsCIDR   = "22/tcp and 18789/tcp"
 	openClawDORequiredBindSetting = "OPENCLAW_GATEWAY_BIND=lan"
 )
 
@@ -76,7 +77,7 @@ func writeLines(b *strings.Builder, lines ...string) {
 
 func openClawDODropletPromptNotes() []string {
 	return []string{
-		"- Build the OpenClaw runtime image directly on the droplet. Do NOT use DOCR for the OpenClaw runtime image.",
+		"- Keep the OpenClaw runtime on the droplet, but use the upstream prebuilt image '" + openClawDOImageRef + "' instead of building from source during cloud-init.",
 		"- The HTTPS front door should be a separate App Platform web service on a DigitalOcean-owned ondigitalocean.app hostname.",
 		"- DOCR is allowed only for the tiny App Platform HTTPS proxy image. If building that proxy locally, use docker build context __CLANKER_OPENCLAW_DO_PROXY__.",
 		"- DigitalOcean allows only one registry per account/team. Reuse that registry when it already exists, but choose a fresh repository name for the proxy image on each deploy.",
@@ -85,15 +86,14 @@ func openClawDODropletPromptNotes() []string {
 		"- The plan must include both Droplet infrastructure commands and App Platform app creation for the HTTPS proxy.",
 		"- Use compute ssh-key import, not compute ssh-key list. Each deploy should use a fresh deployment-scoped SSH key so SSH_KEY_ID comes from the current import step.",
 		"- Do NOT use --tag-names on compute firewall create for this flow. Create the firewall rules first, then attach it with compute firewall add-droplets after the droplet exists.",
-		"- If using the DigitalOcean Docker 1-click image, open host UFW ports 18789/tcp and 18790/tcp before starting the app.",
+		"- If using the DigitalOcean Docker 1-click image, open host UFW ports needed by the compose stack before starting the app; the public cloud firewall should expose only 22/tcp and 18789/tcp.",
 		"- After the App Platform app is live, patch gateway.controlUi.allowedOrigins to include the App Platform HTTPS URL, not the droplet public IP.",
-		"- Build-on-droplet should provision swap before 'docker build -t openclaw:local .' so the TypeScript build does not get OOM-killed.",
-		"- CRITICAL: OpenClaw's docker-compose.yml uses 'image: openclaw:local' (NOT build:).",
-		"  The user-data must run '" + openClawDOImageBuildCommand + "' to build the image FIRST,",
-		"  then '" + openClawDOGatewayComposeCmd + "' which references that local image.",
-		"  Do NOT use 'docker compose build' — it will find nothing to build.",
+		"- Upstream Docker docs support pinning OPENCLAW_IMAGE to a prebuilt remote image for headless VPS installs. Use '" + openClawDOImageRef + "' in .env for this DigitalOcean flow.",
+		"- CRITICAL: DigitalOcean user-data should not build OpenClaw from source on first boot. Set OPENCLAW_IMAGE='" + openClawDOImageRef + "', run '" + openClawDOImagePullCommand + "', then '" + openClawDOGatewayComposeCmd + "'.",
+		"- CRITICAL: Do NOT use 'docker compose build' for this flow — use the upstream image pull path instead.",
 		"- CRITICAL: Do NOT run 'cloud-init status --wait' inside user-data. User-data already runs inside cloud-init, so that causes a deadlock.",
-		"- CRITICAL: Set 'export HOME=/root' before running docker-setup.sh (it uses $HOME internally).",
+		"- CRITICAL: DigitalOcean user-data runs without a TTY. Do NOT rely on interactive onboarding such as './docker-setup.sh' or 'openclaw-cli onboard' inside cloud-init.",
+		"- CRITICAL: Seed a minimal openclaw.json with gateway.mode=local, gateway.bind=lan, and localhost Control UI allowedOrigins before starting the gateway.",
 		"- CRITICAL: Do NOT write DIGITALOCEAN_ACCESS_TOKEN into the OpenClaw .env file.",
 		"- CRITICAL: Do NOT use shell fallbacks like 'git clone ... || ...' in user-data. Repository checkout must fail fast.",
 		"- .env MUST include " + openClawDORequiredBindSetting + " (required for gateway to accept external connections).",
@@ -102,7 +102,7 @@ func openClawDODropletPromptNotes() []string {
 
 func openClawDODeploymentRequirementLines() []string {
 	return []string{
-		"- Build the OpenClaw runtime image directly on the droplet. Do NOT use DOCR for the OpenClaw runtime image.",
+		"- Keep the OpenClaw runtime on the droplet, but use the upstream prebuilt image '" + openClawDOImageRef + "' instead of building from source during cloud-init.",
 		"- Create a separate App Platform web service to provide managed HTTPS on an ondigitalocean.app hostname.",
 		"- DOCR is allowed only for the tiny App Platform HTTPS proxy image that forwards to the droplet.",
 		"- DigitalOcean allows only one registry per account/team. Reuse that registry when required, but use a fresh repository name for the proxy image on each deploy.",
@@ -111,12 +111,11 @@ func openClawDODeploymentRequirementLines() []string {
 		"- The App Platform proxy must forward to http://<DROPLET_IP>:18789, listen on port 8080, and produce APP_ID and HTTPS_URL/APP_URL from the default ingress URL.",
 		"- Do NOT use --tag-names on compute firewall create. Attach the firewall explicitly with compute firewall add-droplets after compute droplet create.",
 		"- Create Cloud Firewall BEFORE OR AFTER creating the Droplet (both work, but before is cleaner).",
-		"- If the DigitalOcean Docker 1-click image is used, user-data must also open UFW for 18789/tcp and 18790/tcp because the host firewall blocks them by default.",
+		"- If the DigitalOcean Docker 1-click image is used, user-data must open the required host UFW ports before startup, but the public cloud firewall should expose only 22/tcp and 18789/tcp.",
 		"- After App Platform is live, patch gateway.controlUi.allowedOrigins with the App Platform HTTPS URL so the Control UI runs in a secure browser context.",
-		"- User-data should create and enable swap before the local Docker build so the OpenClaw image build can finish on smaller droplets.",
-		"- The Droplet user-data script runs at first boot — it must clone the repo, write .env, build with '" + openClawDOImageBuildCommand + "', run onboarding with 'export HOME=/root', and docker compose up.",
+		"- The Droplet user-data script runs at first boot — it must clone the repo, write .env, set OPENCLAW_IMAGE='" + openClawDOImageRef + "', seed minimal gateway config non-interactively, pull with '" + openClawDOImagePullCommand + "', and docker compose up.",
 		"- Open only " + openClawDORequiredPortsCIDR + " on the droplet firewall; the browser-facing HTTPS endpoint comes from App Platform, not droplet ports 80/443.",
-		"- CRITICAL: OpenClaw's docker-compose.yml uses 'image: openclaw:local' — there is no 'build:' in compose. You MUST run '" + openClawDOImageBuildCommand + "' before '" + openClawDOGatewayComposeCmd + "'.",
+		"- CRITICAL: This DigitalOcean flow should use OPENCLAW_IMAGE='" + openClawDOImageRef + "'. Pull with '" + openClawDOImagePullCommand + "' before '" + openClawDOGatewayComposeCmd + "'.",
 		"- CRITICAL: Do NOT include 'cloud-init status --wait' in user-data. That waits on itself and hangs forever.",
 		"- DO does NOT have IAM roles; app secrets go directly into the .env file written by user-data. Do NOT inject DIGITALOCEAN_ACCESS_TOKEN into that .env file.",
 		"- Reserved IP is optional. Do not require it by default because account quota may block deployment.",
@@ -125,7 +124,7 @@ func openClawDODeploymentRequirementLines() []string {
 
 func openClawDOSkeletonLines() []string {
 	return []string{
-		"- User-data script should: clone the repo, write .env, " + openClawDOImageBuildCommand + ", docker compose up.",
+		"- User-data script should: clone the repo, write .env with OPENCLAW_IMAGE='" + openClawDOImageRef + "', seed config, run '" + openClawDOImagePullCommand + "', then docker compose up.",
 		"- Add an App Platform web service as the managed HTTPS front door, backed by a tiny proxy image stored in DOCR.",
 		"- If the account already has a DOCR registry, reuse that registry and switch only the proxy repository name for this deploy.",
 		"- Use compute ssh-key import rather than compute ssh-key list so the deployment gets a fresh SSH key instead of reusing an existing account key.",
@@ -138,16 +137,31 @@ func openClawDOSkeletonLines() []string {
 
 func openClawDOUserDataRepairLines() []string {
 	return []string{
-		"- OpenClaw on DigitalOcean builds directly on the droplet. Do NOT switch the OpenClaw runtime itself to DOCR/local push flows.",
+		"- OpenClaw on DigitalOcean should run on the droplet using the upstream prebuilt image '" + openClawDOImageRef + "'. Do NOT switch the OpenClaw runtime itself to DOCR/local push flows.",
 		"- Use App Platform as the managed HTTPS front door and patch OpenClaw allowedOrigins to the resulting HTTPS URL.",
 		"- DOCR is allowed only for the tiny App Platform HTTPS proxy image.",
 		"- If the account already has a DOCR registry, keep that registry and rotate only the repository name used for the proxy image.",
-		"- On the Docker 1-click image, open host UFW ports 18789/tcp and 18790/tcp before starting the gateway.",
+		"- On the Docker 1-click image, open the required host UFW ports before starting the gateway, but keep the public cloud firewall limited to 22/tcp and 18789/tcp.",
 		"- After the App Platform app is live, patch gateway.controlUi.allowedOrigins to include the App Platform HTTPS URL.",
-		"- Create and enable swap before the local docker build so the OpenClaw TypeScript build does not get SIGKILL/OOM-killed.",
+		"- Set OPENCLAW_IMAGE='" + openClawDOImageRef + "' in .env and use '" + openClawDOImagePullCommand + "' before '" + openClawDOGatewayComposeCmd + "'.",
+		"- Prefer non-interactive bootstrap in user-data: seed openclaw.json directly instead of invoking interactive onboarding scripts.",
 		"- Do NOT use shell fallbacks like 'git clone ... || ...' or './docker-setup.sh || ...'. Fail fast on bootstrap errors.",
 		"- Keep outer doctl flags outside the script. The user-data line must be just '" + openClawDOGatewayComposeCmd + "', not '--wait' or '--output json'.",
 	}
+}
+
+func hasOpenClawNonInteractiveBootstrap(script string) bool {
+	lower := strings.ToLower(script)
+	if strings.Contains(lower, "openclaw.json") && strings.Contains(lower, "\"gateway\"") && strings.Contains(lower, "\"mode\": \"local\"") {
+		return true
+	}
+	if strings.Contains(lower, "cat > /opt/openclaw/data/openclaw.json") && strings.Contains(lower, "\"bind\": \"lan\"") {
+		return true
+	}
+	if strings.Contains(lower, "config set gateway.mode local") && strings.Contains(lower, "config set gateway.bind") {
+		return true
+	}
+	return false
 }
 
 func hasOpenClawCloneSoftFail(script string) bool {
@@ -226,7 +240,7 @@ func inferOpenClawDORuntimeSpec(script string) (openClawDORuntimeSpec, bool) {
 	return openClawDORuntimeSpec{
 		Bootstrap:              bootstrap,
 		HasBootstrap:           hasBootstrap,
-		HasDockerBuild:         strings.Contains(lower, strings.ToLower(openClawDOImageBuildCommand)),
+		HasDockerBuild:         strings.Contains(lower, "docker build -t openclaw:local") || strings.Contains(lower, "openclaw_image=openclaw:local"),
 		HasComposeUp:           strings.Contains(lower, "docker compose up") || strings.Contains(lower, "docker-compose up"),
 		HasDockerRun:           strings.Contains(lower, "docker run") && strings.Contains(lower, "openclaw"),
 		HasOnboarding:          strings.Contains(lower, "docker-setup.sh") || strings.Contains(lower, "openclaw-cli onboard") || strings.Contains(lower, "openclaw-cli\" onboard"),
@@ -283,13 +297,15 @@ func renderOpenClawDOBootstrapScript(spec openClawDOBootstrapSpec) string {
 		"cd /opt/openclaw",
 		"",
 		"mkdir -p /opt/openclaw/data /opt/openclaw/workspace",
-		"chown -R 1000:1000 /opt/openclaw/data /opt/openclaw/workspace",
-		"chmod -R 755 /opt/openclaw/data /opt/openclaw/workspace",
+		"mkdir -p /opt/openclaw/data/identity /opt/openclaw/data/agents/main/agent /opt/openclaw/data/agents/main/sessions /opt/openclaw/data/canvas /opt/openclaw/data/cron",
 		"",
 		"cat > /opt/openclaw/.env << 'ENVEOF'",
 		"OPENCLAW_CONFIG_DIR=/opt/openclaw/data",
 		"OPENCLAW_WORKSPACE_DIR=/opt/openclaw/workspace",
+		"OPENCLAW_GATEWAY_PORT=18789",
+		"OPENCLAW_BRIDGE_PORT=18790",
 		openClawDORequiredBindSetting,
+		"OPENCLAW_IMAGE="+openClawDOImageRef,
 		spec.GatewaySecretKey+"=<"+spec.GatewaySecretKey+">",
 	)
 	if spec.IncludeAnthropic {
@@ -310,14 +326,24 @@ func renderOpenClawDOBootstrapScript(spec openClawDOBootstrapSpec) string {
 	writeLines(&b,
 		"ENVEOF",
 		"",
-		openClawDOImageBuildCommand,
+		"cat > /opt/openclaw/data/openclaw.json << 'JSONEOF'",
+		"{",
+		"  \"gateway\": {",
+		"    \"mode\": \"local\",",
+		"    \"bind\": \"lan\",",
+		"    \"controlUi\": {",
+		"      \"allowedOrigins\": [\"http://127.0.0.1:18789\"]",
+		"    }",
+		"  }",
+		"}",
+		"JSONEOF",
 		"",
-		"export HOME=/root",
-		"set -a",
-		". /opt/openclaw/.env",
-		"set +a",
-		"chmod +x docker-setup.sh",
-		"./docker-setup.sh",
+		"chown -R 1000:1000 /opt/openclaw/data /opt/openclaw/workspace",
+		"chmod 700 /opt/openclaw/data /opt/openclaw/workspace",
+		"chmod 600 /opt/openclaw/data/openclaw.json",
+		"",
+		openClawDOImagePullCommand,
+		"",
 		openClawDOGatewayComposeCmd,
 		"",
 		"echo \"[$(date)] User-data script completed\"",
