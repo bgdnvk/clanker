@@ -207,10 +207,34 @@ func validateDigitalOceanCommandBoundary(args []string, strictOpenClaw bool) str
 	if family == "compute droplet create" && countDOFlagOccurrences(args, "--tag") > 0 {
 		return "compute droplet create does not support --tag; use --tag-name"
 	}
+	if family == "compute firewall create" && !hasDOFlagValue(args, "--name") {
+		return "compute firewall create must use --name <FIREWALL_NAME>; positional firewall names are not allowed"
+	}
 	if family == "compute firewall create" && countDOFlagOccurrences(args, "--tag-names") > 0 {
 		return "compute firewall create does not support --tag-names; attach the firewall with compute firewall add-droplets"
 	}
 	return ""
+}
+
+func hasDOFlagValue(args []string, flag string) bool {
+	flag = strings.TrimSpace(flag)
+	if flag == "" {
+		return false
+	}
+	for i := 0; i < len(args); i++ {
+		trimmed := strings.TrimSpace(args[i])
+		switch {
+		case trimmed == flag:
+			if i+1 < len(args) && strings.TrimSpace(args[i+1]) != "" {
+				return true
+			}
+		case strings.HasPrefix(trimmed, flag+"="):
+			if strings.TrimSpace(strings.TrimPrefix(trimmed, flag+"=")) != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func missingCommandBindings(args []string, available map[string]struct{}, providedEnv map[string]struct{}) []string {

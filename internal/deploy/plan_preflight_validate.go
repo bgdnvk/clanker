@@ -45,6 +45,23 @@ func ValidatePlanDeterministicFinal(plan *maker.Plan, p *RepoProfile, deep *Deep
 	return normalizeValidation(v)
 }
 
+func doFlagValueLocal(args []string, flagName string) string {
+	flagName = strings.TrimSpace(flagName)
+	if flagName == "" {
+		return ""
+	}
+	for i := 0; i < len(args); i++ {
+		trimmed := strings.TrimSpace(args[i])
+		switch {
+		case trimmed == flagName && i+1 < len(args):
+			return strings.TrimSpace(args[i+1])
+		case strings.HasPrefix(trimmed, flagName+"="):
+			return strings.TrimSpace(strings.TrimPrefix(trimmed, flagName+"="))
+		}
+	}
+	return ""
+}
+
 func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis, runtimeEnvKeys []string) deterministicValidation {
 	var out deterministicValidation
 
@@ -803,6 +820,10 @@ func validateDigitalOceanPlanCommands(plan *maker.Plan, appPorts []int, isOpenCl
 			inboundCount := countDOFlagOccurrences(args, "--inbound-rules")
 			outboundCount := countDOFlagOccurrences(args, "--outbound-rules")
 			firewallSpec := extractDOFirewallSpec(args)
+			if strings.TrimSpace(doFlagValueLocal(args, "--name")) == "" {
+				out.Issues = append(out.Issues, "[HARD] DigitalOcean firewall create is missing --name <FIREWALL_NAME>")
+				out.Fixes = append(out.Fixes, "Rewrite compute firewall create to use --name <FIREWALL_NAME> instead of a positional firewall name")
+			}
 			if isOpenClaw && countDOFlagOccurrences(args, "--tag-names") > 0 {
 				out.Issues = append(out.Issues, "[HARD] OpenClaw DigitalOcean firewall create uses --tag-names before the droplet exists")
 				out.Fixes = append(out.Fixes, "Remove --tag-names from compute firewall create and attach the firewall later with compute firewall add-droplets <FIREWALL_ID> --droplet-ids <DROPLET_ID>")

@@ -383,6 +383,7 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 				defer cleanup()
 			}
 		}
+		args = normalizeDOFirewallCreateNameAtExec(args)
 		args = normalizeFirewallRuleFlagsAtExec(args)
 		args = stripInvalidICMPPortsAtExec(args)
 		args = fixFirewallEmptyAddressAtExec(args)
@@ -1433,6 +1434,27 @@ func normalizeDoctlOutputFlags(args []string) []string {
 		}
 	}
 	return args
+}
+
+func normalizeDOFirewallCreateNameAtExec(args []string) []string {
+	if len(args) < 4 {
+		return args
+	}
+	if !strings.EqualFold(strings.TrimSpace(args[0]), "compute") || !strings.EqualFold(strings.TrimSpace(args[1]), "firewall") || !strings.EqualFold(strings.TrimSpace(args[2]), "create") {
+		return args
+	}
+	if strings.TrimSpace(flagValue(args, "--name")) != "" {
+		return args
+	}
+	positionalName := strings.TrimSpace(args[3])
+	if positionalName == "" || strings.HasPrefix(positionalName, "-") {
+		return args
+	}
+	updated := make([]string, 0, len(args)+1)
+	updated = append(updated, args[:3]...)
+	updated = append(updated, "--name", positionalName)
+	updated = append(updated, args[4:]...)
+	return updated
 }
 
 // normalizeFirewallRuleFlagsAtExec merges repeated --inbound-rules/--outbound-rules
