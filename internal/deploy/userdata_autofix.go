@@ -2,11 +2,30 @@ package deploy
 
 import (
 	"encoding/base64"
+	"fmt"
 	"regexp"
 	"strings"
 
 	"github.com/bgdnvk/clanker/internal/maker"
 )
+
+// wrapUserDataInMIME wraps a shell script in MIME multipart format so cloud-init
+// explicitly recognizes it as a script to execute. This fixes issues with Amazon Linux 2023
+// and other AMIs where cloud-init may not execute raw scripts passed via user-data.
+func wrapUserDataInMIME(script string) string {
+	const boundary = "==CLANKER_USERDATA_BOUNDARY=="
+	return fmt.Sprintf(`Content-Type: multipart/mixed; boundary="%s"
+MIME-Version: 1.0
+
+--%s
+Content-Type: text/x-shellscript; charset="utf-8"
+Content-Disposition: attachment; filename="userdata.sh"
+
+%s
+
+--%s--
+`, boundary, boundary, script, boundary)
+}
 
 // FixEC2UserDataScripts decodes base64 user-data in ec2 run-instances,
 // applies common LLM-generated path and command typo corrections,
@@ -41,7 +60,8 @@ func FixEC2UserDataScripts(plan *maker.Plan, logf func(string, ...any)) *maker.P
 				}
 				fixed, n := fixUserDataScript(script)
 				if n > 0 {
-					cmd.Args[ai+1] = base64.StdEncoding.EncodeToString([]byte(fixed))
+					mimeWrapped := wrapUserDataInMIME(fixed)
+					cmd.Args[ai+1] = base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 					totalFixes += n
 				}
 			} else if isEquals {
@@ -52,7 +72,8 @@ func FixEC2UserDataScripts(plan *maker.Plan, logf func(string, ...any)) *maker.P
 				}
 				fixed, n := fixUserDataScript(script)
 				if n > 0 {
-					cmd.Args[ai] = "--user-data=" + base64.StdEncoding.EncodeToString([]byte(fixed))
+					mimeWrapped := wrapUserDataInMIME(fixed)
+					cmd.Args[ai] = "--user-data=" + base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 					totalFixes += n
 				}
 			}
@@ -274,7 +295,8 @@ func GenerateMissingUserData(plan *maker.Plan, logf func(string, ...any)) *maker
 
 		// Generate a fallback Docker bootstrap script
 		script := generateDockerBootstrapScript(region)
-		encoded := base64.StdEncoding.EncodeToString([]byte(script))
+		mimeWrapped := wrapUserDataInMIME(script)
+		encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 
 		if userDataIdx < 0 {
 			// Insert --user-data before --profile (or at end)

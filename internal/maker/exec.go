@@ -2574,7 +2574,8 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 	repoURLForDetect := extractRepoURLFromQuestion(questionForDetect)
 	if wordpress.Detect(questionForDetect, repoURLForDetect) {
 		script := generateWordPressOneClickUserData(bindings)
-		encoded := base64.StdEncoding.EncodeToString([]byte(script))
+		mimeWrapped := wrapUserDataInMIME(script)
+		encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 		newArgs := make([]string, len(args))
 		copy(newArgs, args)
 		if userDataIdx >= 0 {
@@ -2613,10 +2614,11 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 	needsInjection := isTrivial || (hasDocker && !startsContainer) || brokenAL2023DockerInstall || usesWrongImage ||
 		(startsContainer && (mentionsDockerHubOpenClaw || (!mentionsECR && strings.TrimSpace(bindings["ECR_URI"]) != "") || missingEnvInScript))
 
-	// If the plan provided a literal user-data script (not base64), base64-encode it so the AWS CLI
-	// receives it reliably (and EC2 will execute it).
+	// If the plan provided a literal user-data script (not base64), wrap in MIME and base64-encode
+	// so the AWS CLI receives it reliably and cloud-init recognizes it as a script.
 	if !userDataWasBase64 && looksLikeScript && !needsInjection {
-		encoded := base64.StdEncoding.EncodeToString([]byte(checkUserData))
+		mimeWrapped := wrapUserDataInMIME(checkUserData)
+		encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 		newArgs := make([]string, len(args))
 		copy(newArgs, args)
 		if userDataIdx >= 0 {
@@ -2637,7 +2639,8 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 	if deployMode == "native" {
 		// Use pre-generated Node.js user-data script
 		if script := bindings["NODEJS_USER_DATA"]; script != "" {
-			encoded := base64.StdEncoding.EncodeToString([]byte(script))
+			mimeWrapped := wrapUserDataInMIME(script)
+			encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 			newArgs := make([]string, len(args))
 			copy(newArgs, args)
 			newArgs[userDataIdx] = encoded
@@ -2690,7 +2693,8 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 		// Check if this looks like a Docker deployment that needs user-data
 		if needsDockerUserData(args, bindings, checkUserData) {
 			fallbackScript := generateFallbackDockerUserData(bindings, opts.Region)
-			encoded := base64.StdEncoding.EncodeToString([]byte(fallbackScript))
+			mimeWrapped := wrapUserDataInMIME(fallbackScript)
+			encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 			newArgs := make([]string, len(args))
 			copy(newArgs, args)
 			if userDataIdx >= 0 {
@@ -2970,8 +2974,9 @@ echo '[bootstrap] login/pull'
 echo 'Deployment complete!'
 `, loginLine, pullLine, preRun, dockerRunCmd, postRun)
 
-	// Base64 encode the script
-	encoded := base64.StdEncoding.EncodeToString([]byte(script))
+	// Wrap in MIME multipart and base64 encode so cloud-init recognizes it as a script
+	mimeWrapped := wrapUserDataInMIME(script)
+	encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 
 	// Replace the user-data argument
 	newArgs := make([]string, len(args))
@@ -3041,7 +3046,8 @@ func sanitizeCommandArgsForExecution(args []string, bindings map[string]string) 
 
 	trimmed = strings.ReplaceAll(trimmed, "\r\n", "\n")
 	if looksLikeUserDataScript(trimmed) {
-		trimmed = base64.StdEncoding.EncodeToString([]byte(trimmed))
+		mimeWrapped := wrapUserDataInMIME(trimmed)
+		trimmed = base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 	}
 
 	if valueIdx >= 0 {
@@ -3349,6 +3355,24 @@ func looksLikeUserDataScript(script string) bool {
 		return true
 	}
 	return false
+}
+
+// wrapUserDataInMIME wraps a shell script in MIME multipart format so cloud-init
+// explicitly recognizes it as a script to execute. This fixes issues with Amazon Linux 2023
+// and other AMIs where cloud-init may not execute raw scripts passed via user-data.
+func wrapUserDataInMIME(script string) string {
+	const boundary = "==CLANKER_USERDATA_BOUNDARY=="
+	return fmt.Sprintf(`Content-Type: multipart/mixed; boundary="%s"
+MIME-Version: 1.0
+
+--%s
+Content-Type: text/x-shellscript; charset="utf-8"
+Content-Disposition: attachment; filename="userdata.sh"
+
+%s
+
+--%s--
+`, boundary, boundary, script, boundary)
 }
 
 // needsDockerUserData checks if this is a Docker deployment that needs user-data generated.
