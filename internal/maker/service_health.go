@@ -14,13 +14,14 @@ import (
 
 // ServiceHealthConfig defines health check parameters
 type ServiceHealthConfig struct {
-	InstanceID    string        // EC2 instance ID for SSM
-	Port          int           // Port the service listens on
-	HealthPath    string        // Health endpoint path (e.g., "/healthz")
-	MaxRetries    int           // Max health check attempts
-	RetryInterval time.Duration // Time between retries
-	Profile       string        // AWS profile
-	Region        string        // AWS region
+	InstanceID    string            // EC2 instance ID for SSM
+	Port          int               // Port the service listens on
+	HealthPath    string            // Health endpoint path (e.g., "/healthz")
+	MaxRetries    int               // Max health check attempts
+	RetryInterval time.Duration     // Time between retries
+	Profile       string            // AWS profile
+	Region        string            // AWS region
+	Bindings      map[string]string // Plan bindings (IMAGE_URI, ECR_URI, etc.)
 }
 
 // SSM agent startup grace period delays (exponential backoff)
@@ -344,12 +345,43 @@ func agenticContainerFix(ctx context.Context, cfg ServiceHealthConfig, opts Exec
 }
 
 func buildContainerFixPrompt(cfg ServiceHealthConfig, diagnostics map[string]string) string {
+	// Extract useful bindings for the LLM
+	imageURI := ""
+	ecrURI := ""
+	appPort := ""
+	if cfg.Bindings != nil {
+		imageURI = strings.TrimSpace(cfg.Bindings["IMAGE_URI"])
+		ecrURI = strings.TrimSpace(cfg.Bindings["ECR_URI"])
+		if imageURI == "" && ecrURI != "" {
+			tag := strings.TrimSpace(cfg.Bindings["IMAGE_TAG"])
+			if tag == "" {
+				tag = "latest"
+			}
+			imageURI = ecrURI + ":" + tag
+		}
+		appPort = strings.TrimSpace(cfg.Bindings["APP_PORT"])
+	}
+	if appPort == "" {
+		appPort = fmt.Sprintf("%d", cfg.Port)
+	}
+
+	// Build deployment info section if we have image details
+	deploymentInfo := ""
+	if imageURI != "" {
+		deploymentInfo = fmt.Sprintf(`
+DEPLOYMENT INFO:
+IMAGE URI: %s
+APP PORT: %s
+Use this exact image URI in docker pull and docker run commands!
+`, imageURI, appPort)
+	}
+
 	return fmt.Sprintf(`You are diagnosing why a containerized service is not starting on an EC2 instance.
 
 INSTANCE ID: %s
 SERVICE PORT: %d
 HEALTH PATH: %s
-
+%s
 DIAGNOSTIC OUTPUT:
 
 === docker ps -a ===
@@ -366,8 +398,8 @@ DIAGNOSTIC OUTPUT:
 
 Common issues and fixes:
 1. Container exited -> docker start <container_id>
-2. No containers -> re-run user-data script or manually docker run
-3. Image not found -> docker pull and run
+2. No containers -> authenticate to ECR, pull the image, and docker run
+3. Image not found -> docker pull <image_uri> and run
 4. ECR auth failed -> aws ecr get-login-password | docker login
 5. Port conflict -> docker stop conflicting container
 6. OOM killed -> check docker inspect, increase memory
@@ -386,8 +418,9 @@ RULES:
 - Maximum 5 commands
 - Do NOT include sudo for docker commands (already has permissions)
 - Do NOT include dangerous commands (rm -rf, etc.)
+- If pulling/running an image, use the EXACT image URI provided above (do NOT use placeholders)
 `,
-		cfg.InstanceID, cfg.Port, cfg.HealthPath,
+		cfg.InstanceID, cfg.Port, cfg.HealthPath, deploymentInfo,
 		truncateForLog(diagnostics["docker_ps"], 500),
 		truncateForLog(diagnostics["docker_logs"], 1000),
 		truncateForLog(diagnostics["docker_images"], 300),
@@ -422,18 +455,23 @@ func isContainerCommandSafe(cmd string) bool {
 		"aws ",
 		// Logging and diagnostics
 		"journalctl", "tail", "head", "cat", "grep", "less",
+		"sudo tail", "sudo cat", "sudo head",
 		"test ", "[ ", "[[ ",
 		// Cloud-init
-		"cloud-init",
+		"cloud-init", "sudo cloud-init",
+		// Shell for running user-data scripts
+		"bash ", "sh ", "sudo bash ", "sudo sh ",
 		// Basic utilities
 		"curl ", "wget ", "echo", "sleep", "true", "false",
 		"ls ", "pwd", "whoami", "id ", "ps ", "ss ", "netstat",
 		// File operations (read-only)
-		"find ", "stat ", "file ", "wc ",
+		"find ", "stat ", "file ", "wc ", "sed ",
 		// Environment
 		"env", "printenv", "export ",
 		// Conditional/compound
 		"if ", "for ", "while ",
+		// Variable assignment/subshell
+		"token=", "region=", "account=", "image=",
 	}
 	for _, a := range allowedPrefixes {
 		if strings.HasPrefix(lower, a) {
@@ -446,7 +484,10 @@ func isContainerCommandSafe(cmd string) bool {
 		"docker pull", "docker run", "docker start", "docker stop",
 		"docker ps", "docker logs", "docker images", "docker inspect",
 		"aws ecr get-login-password", "aws ecr describe",
-		"aws sts get-caller-identity",
+		"aws sts get-caller-identity", "aws ec2 describe-tags",
+		// User-data script paths (for re-running deployment)
+		"/var/lib/cloud/instance/user-data",
+		"/var/log/user-data.log", "/var/log/cloud-init",
 	}
 	for _, p := range safePatterns {
 		if strings.Contains(lower, p) {

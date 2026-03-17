@@ -641,6 +641,7 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 					RetryInterval: 15 * time.Second,
 					Profile:       opts.Profile,
 					Region:        opts.Region,
+					Bindings:      bindings,
 				}
 
 				WriteHealthCheckpoint(opts.Writer, "SERVICE HEALTH VERIFICATION (before ALB exposure)")
