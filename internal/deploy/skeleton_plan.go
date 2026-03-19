@@ -70,6 +70,13 @@ func GeneratePlanSkeleton(
 		// Don't fail for minor issues — harden downstream
 	}
 
+	// Fast-fail: a skeleton with fewer than 2 steps is not viable for any
+	// real deploy. Fall back to paged generation immediately instead of
+	// wasting LLM calls on hydration and validation.
+	if len(skeleton.Steps) < 2 {
+		return nil, fmt.Errorf("skeleton too small (%d steps); falling back to paged generation", len(skeleton.Steps))
+	}
+
 	// Critical check: missing required launch ops means the skeleton is fundamentally incomplete.
 	// This MUST cause a fallback to paged plan generation.
 	if missingOps := checkMissingLaunchOps(skeleton, requiredLaunchOps); len(missingOps) > 0 {
