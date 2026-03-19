@@ -436,14 +436,25 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 			}
 		}
 
+		// Deterministic alias resolution before falling back to AI
+		args = resolveBindingAliases(args, bindings)
+
 		// AI-powered placeholder resolution with exponential backoff
 		if hasUnresolvedPlaceholders(args) {
+			before := extractUnresolvedPlaceholders(args)
 			resolved, resolveErr := maybeResolvePlaceholdersWithAI(ctx, opts, args, bindings, "")
 			if resolveErr != nil {
 				_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: placeholder resolution failed: %v\n", resolveErr)
 			}
 			if resolved != nil {
 				args = resolved
+			}
+			// Re-apply bindings and aliases in case AI resolution added new ones
+			args = applyPlanBindings(args, bindings)
+			args = resolveBindingAliases(args, bindings)
+			after := extractUnresolvedPlaceholders(args)
+			if len(before) > len(after) {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] resolved %d/%d placeholders at exec time\n", len(before)-len(after), len(before))
 			}
 		}
 
@@ -460,6 +471,10 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 				return fmt.Errorf("command %d image preparation failed: %w", idx+1, err)
 			}
 			autoImagePrepared = true
+			// Validate IMAGE_URI is populated after image prep
+			if strings.TrimSpace(bindings["IMAGE_URI"]) == "" {
+				return fmt.Errorf("image preparation succeeded but IMAGE_URI binding is empty")
+			}
 		}
 
 		// Handle EC2 user-data generation for run-instances
@@ -533,6 +548,15 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		// Learn placeholder bindings from successful command outputs.
 		learnPlanBindingsFromProduces(cmdSpec.Produces, out, bindings)
 		learnPlanBindings(args, out, bindings, idx)
+
+		// IAM role/instance profile propagation wait: newly created roles take
+		// 1-10s to propagate. Subsequent commands (run-instances) may fail without this.
+		if len(args) >= 2 && args[0] == "iam" &&
+			(args[1] == "create-role" || args[1] == "create-instance-profile" ||
+				args[1] == "add-role-to-instance-profile") {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] waiting 8s for IAM propagation...\n")
+			time.Sleep(8 * time.Second)
+		}
 		bindings["CHECKPOINT_LAST_SUCCESS_INDEX"] = strconv.Itoa(idx + 1)
 		bindings["CHECKPOINT_LAST_FAILURE_INDEX"] = ""
 		if planLogger != nil {
@@ -1444,6 +1468,62 @@ func fixRoleNameArg(args []string) []string {
 		}
 	}
 	return args
+}
+
+// bindingAliases maps canonical binding names to common alternatives that LLM plans
+// might use. This enables deterministic resolution before falling back to AI.
+var bindingAliases = map[string][]string{
+	"ACCOUNT_ID":  {"AWS_ACCOUNT_ID", "ACCOUNT"},
+	"REGION":      {"AWS_REGION", "AWS_DEFAULT_REGION"},
+	"VPC_ID":      {"VPC", "DEFAULT_VPC_ID"},
+	"AMI_ID":      {"IMAGE_ID", "AMI"},
+	"SG_ID":       {"SECURITY_GROUP_ID", "SG"},
+	"SUBNET_ID":   {"SUBNET", "SUBNET_1"},
+	"INSTANCE_ID": {"EC2_INSTANCE_ID"},
+	"TG_ARN":      {"TARGET_GROUP_ARN"},
+	"ALB_ARN":     {"LOAD_BALANCER_ARN"},
+	"ROLE_ARN":    {"IAM_ROLE_ARN", "EC2_ROLE_ARN"},
+	"ECR_URI":     {"ECR_REPO_URI", "REPOSITORY_URI", "ECR_REPOSITORY_URI"},
+	"ECR_REPO":    {"ECR_REPO_NAME", "REPO_NAME"},
+}
+
+// resolveBindingAliases attempts to resolve placeholder tokens by checking common
+// alias names in the bindings map. This runs before AI resolution to handle simple
+// naming mismatches deterministically.
+func resolveBindingAliases(args []string, bindings map[string]string) []string {
+	out := make([]string, len(args))
+	copy(out, args)
+	for i, arg := range out {
+		if !strings.Contains(arg, "<") || !strings.Contains(arg, ">") {
+			continue
+		}
+		out[i] = planPlaceholderTokenRe.ReplaceAllStringFunc(arg, func(m string) string {
+			key := strings.TrimSuffix(strings.TrimPrefix(m, "<"), ">")
+			if v := strings.TrimSpace(bindings[key]); v != "" {
+				return v
+			}
+			// Try aliases: check if key is a canonical name with aliases
+			for canonical, aliases := range bindingAliases {
+				if key == canonical {
+					for _, alias := range aliases {
+						if v := strings.TrimSpace(bindings[alias]); v != "" {
+							return v
+						}
+					}
+				}
+				// Check if key is an alias name
+				for _, alias := range aliases {
+					if key == alias {
+						if v := strings.TrimSpace(bindings[canonical]); v != "" {
+							return v
+						}
+					}
+				}
+			}
+			return m
+		})
+	}
+	return out
 }
 
 func learnPlanBindings(args []string, output string, bindings map[string]string, cmdIndex int) {
@@ -5070,6 +5150,7 @@ func inferECRBindings(name, uri, arn string, bindings map[string]string) {
 		bindings["ECR_URI"] = uri
 		bindings["ECR_REPO_URI"] = uri
 		bindings["REPOSITORY_URI"] = uri
+		bindings["ECR_REPOSITORY_URI"] = uri
 	}
 	if arn != "" {
 		bindings["ECR_ARN"] = arn
