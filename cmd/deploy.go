@@ -406,6 +406,13 @@ Examples:
 					plan.Question = fmt.Sprintf("Deploy %s to %s (%s)", rp.RepoURL, planProvider, intel.Architecture.Method)
 					plan.Summary = "Generated via skeleton+hydrate pipeline"
 					plan.CreatedAt = time.Now().UTC()
+					if len(hydratedPlan.Notes) > 0 {
+						for _, note := range hydratedPlan.Notes {
+							if strings.Contains(note, "partial hydration") {
+								logf("[deploy] warning: %s; paged fallback may supplement missing commands", note)
+							}
+						}
+					}
 					if strings.TrimSpace(intel.Architecture.Provider) != "" {
 						plan.Provider = strings.TrimSpace(intel.Architecture.Provider)
 					}
