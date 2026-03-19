@@ -155,6 +155,7 @@ Examples:
 		}
 
 		// 4. Run multi-phase intelligence pipeline (explore → deep analysis → infra scan → architecture)
+		phaseStart := time.Now()
 		intel, err := deploy.RunIntelligence(ctx, rp,
 			aiClient.AskPrompt,
 			aiClient.CleanJSONResponse,
@@ -163,6 +164,7 @@ Examples:
 		if err != nil {
 			return fmt.Errorf("intelligence pipeline failed: %w", err)
 		}
+		logf("[deploy] intelligence pipeline completed in %s", time.Since(phaseStart))
 
 		// 4.5. Prompt user for required configuration (Node.js apps)
 		// Only prompt in apply mode because plan generation can run in non-interactive contexts
@@ -356,6 +358,7 @@ Examples:
 		}
 
 		// 4. Generate the maker plan via LLM
+		planGenStart := time.Now()
 		fmt.Fprintf(os.Stderr, "[deploy] phase 3: generating execution plan with %s ...\n", provider)
 
 		var plan *maker.Plan
@@ -481,6 +484,7 @@ Examples:
 			}
 		}
 		_ = mustFixIssues // used downstream
+		logf("[deploy] plan generation completed in %s", time.Since(planGenStart))
 
 		if lastDetValidation != nil {
 			intel.Validation = lastDetValidation
@@ -510,6 +514,7 @@ Examples:
 		}
 
 		// Final validation (LLM) + optional repair pass.
+		validationStart := time.Now()
 		plan = deploy.SanitizePlanConservative(plan, rp, intel.DeepAnalysis, intel.Docker, logf)
 		planJSON, _ := json.MarshalIndent(plan, "", "  ")
 		validation, _, err := deploy.ValidatePlan(ctx,
@@ -935,6 +940,8 @@ Examples:
 			}
 		}
 
+		logf("[deploy] validation and repair completed in %s", time.Since(validationStart))
+
 		// 6. Enrich w/ existing infra context (AWS only)
 		if strings.EqualFold(strings.TrimSpace(targetProvider), "aws") {
 			_ = maker.EnrichPlan(ctx, plan, maker.ExecOptions{
@@ -955,8 +962,11 @@ Examples:
 		}
 
 		// Full placeholder resolution (AWS only, skip --new-vpc since those use 'produces' chaining)
+		placeholderStart := time.Now()
 		if strings.EqualFold(strings.TrimSpace(targetProvider), "aws") && !newVPC {
-			const maxPlaceholderRounds = 5
+			const maxPlaceholderRounds = 8
+			prevUnresolved := -1
+			stalls := 0
 			for round := 1; round <= maxPlaceholderRounds; round++ {
 				unresolvedNow := deploy.GetUnresolvedPlaceholders(plan)
 				if len(unresolvedNow) == 0 {
@@ -983,12 +993,27 @@ Examples:
 					break
 				}
 
+				// Stall detection: if two consecutive rounds make no progress, stop early
+				currentUnresolved := len(unresolved)
+				if currentUnresolved == prevUnresolved {
+					stalls++
+					if stalls >= 2 {
+						logf("[deploy] placeholder resolution stalled after %d rounds with %d unresolved: %v", round, currentUnresolved, unresolved)
+						break
+					}
+				} else {
+					stalls = 0
+				}
+				prevUnresolved = currentUnresolved
+
 				if round == maxPlaceholderRounds {
 					logf("[deploy] warning: %d placeholders remain unresolved after %d rounds: %v",
 						len(unresolved), maxPlaceholderRounds, unresolved)
 				}
 			}
 		}
+
+		logf("[deploy] placeholder resolution completed in %s", time.Since(placeholderStart))
 
 		if reviewedPlan, err := deploy.RunGenericPlanIntegrityPassWithLLM(
 			ctx,
@@ -1215,14 +1240,17 @@ Examples:
 		}
 
 		// Phase 1: Create infrastructure (ECR repo, VPC, security groups, IAM)
+		execInfraStart := time.Now()
 		if len(infraPlan.Commands) > 0 {
 			fmt.Fprintf(os.Stderr, "[deploy] phase 1: creating infrastructure (%d commands)...\n", len(infraPlan.Commands))
 			if err := maker.ExecutePlan(ctx, infraPlan, execOpts); err != nil {
 				return fmt.Errorf("infrastructure creation failed: %w", err)
 			}
+			logf("[deploy] infrastructure creation completed in %s", time.Since(execInfraStart))
 		}
 
 		// Phase 2: Build and push Docker image (if applicable, skip for native deployment)
+		execDockerStart := time.Now()
 		isNativeDeployment := userConfig != nil && userConfig.DeployMode == "native"
 		if !isNativeDeployment && rp.HasDocker && outputBindings["ECR_URI"] != "" && strings.EqualFold(strings.TrimSpace(targetProvider), "aws") {
 			if !maker.HasDockerInstalled() {
@@ -1238,16 +1266,19 @@ Examples:
 			}
 			outputBindings["IMAGE_URI"] = imageURI
 			fmt.Fprintf(os.Stderr, "[deploy] image pushed: %s\n", imageURI)
+			logf("[deploy] docker build/push completed in %s", time.Since(execDockerStart))
 		} else if isNativeDeployment {
 			fmt.Fprintf(os.Stderr, "[deploy] phase 2: skipping Docker build (native Node.js deployment)\n")
 		}
 
 		// Phase 3: Launch application (EC2, ALB, etc.)
+		execAppStart := time.Now()
 		if len(appPlan.Commands) > 0 {
 			fmt.Fprintf(os.Stderr, "[deploy] phase 3: launching application (%d commands)...\n", len(appPlan.Commands))
 			if err := maker.ExecutePlan(ctx, appPlan, execOpts); err != nil {
 				return fmt.Errorf("application deployment failed: %w", err)
 			}
+			logf("[deploy] application launch completed in %s", time.Since(execAppStart))
 		}
 
 		// Phase 4: Verify deployment is working
