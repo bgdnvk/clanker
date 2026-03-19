@@ -1617,8 +1617,10 @@ func learnPlanBindings(args []string, output string, bindings map[string]string,
 				bindings["SG_WEB"] = gid
 			}
 
-			// Fill first empty slot in common placeholders
-			for _, k := range []string{"SG_ID", "SG_1", "SG_ALB_ID", "SG_WEB_ID", "SG_RDS_ID", "SG_LAMBDA_ID", "SG_CLIENT_ID"} {
+			// Fill first empty slot in generic placeholders only.
+			// Named SG placeholders (SG_ALB_ID, SG_WEB_ID, etc.) are handled
+			// by inferSGBindings and the switch block above.
+			for _, k := range []string{"SG_ID", "SG_1"} {
 				if strings.TrimSpace(bindings[k]) == "" {
 					bindings[k] = gid
 					break
