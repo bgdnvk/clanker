@@ -393,12 +393,16 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		args = substituteAccountID(args, accountID)
 		args = applyPlanBindings(args, bindings)
 
-		// One-click deploy: infer the app port from the target group (when present) so user-data publishes the right port.
+		// One-click deploy: infer the app port and health check path from the target group.
 		if len(args) >= 2 && args[0] == "elbv2" && args[1] == "create-target-group" {
-			if strings.TrimSpace(bindings["APP_PORT"]) == "" {
-				if p := strings.TrimSpace(flagValue(args, "--port")); p != "" {
+			if p := strings.TrimSpace(flagValue(args, "--port")); p != "" {
+				bindings["TG_PORT"] = p
+				if strings.TrimSpace(bindings["APP_PORT"]) == "" {
 					bindings["APP_PORT"] = p
 				}
+			}
+			if p := strings.TrimSpace(flagValue(args, "--health-check-path")); p != "" {
+				bindings["TG_HEALTH_PATH"] = p
 			}
 		}
 
@@ -420,6 +424,12 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 				if p := strings.TrimSpace(flagValue(args, "--health-check-path")); p == "" || p == "/" {
 					args = setFlagValue(args, "--health-check-path", "/wp-login.php")
 				}
+				if m := strings.TrimSpace(flagValue(args, "--matcher")); m == "" {
+					args = setFlagValue(args, "--matcher", "HttpCode=200-399")
+				}
+			}
+			// For ALL generic apps: ensure matcher accepts common startup codes
+			if !isOpenClaw && !isWordPress {
 				if m := strings.TrimSpace(flagValue(args, "--matcher")); m == "" {
 					args = setFlagValue(args, "--matcher", "HttpCode=200-399")
 				}
@@ -633,10 +643,15 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 			}
 
 			if instanceID != "" {
+				healthPath := InferHealthPath(plan)
+				// Override: use the target group's actual health-check-path if set in bindings
+				if tgHealthPath := strings.TrimSpace(bindings["TG_HEALTH_PATH"]); tgHealthPath != "" {
+					healthPath = tgHealthPath
+				}
 				healthCfg := ServiceHealthConfig{
 					InstanceID:    instanceID,
 					Port:          InferServicePort(plan, bindings),
-					HealthPath:    InferHealthPath(plan),
+					HealthPath:    healthPath,
 					MaxRetries:    20,
 					RetryInterval: 15 * time.Second,
 					Profile:       opts.Profile,
