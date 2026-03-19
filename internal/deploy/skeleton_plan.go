@@ -85,10 +85,13 @@ func GeneratePlanSkeleton(
 
 	// Apply topological sort to ensure correct ordering based on produces/depends_on.
 	// This provides algorithmic enforcement even if LLM generated out-of-order steps.
-	skeleton, sortErr := TopologicalSortSkeleton(skeleton)
+	sorted, sortErr := TopologicalSortSkeleton(skeleton)
 	if sortErr != nil {
-		logf("[deploy] warning: topological sort failed: %v, using LLM order", sortErr)
+		// Cycle detected means the skeleton has circular dependencies and is broken.
+		// Fall back to paged generation instead of proceeding with broken order.
+		return nil, fmt.Errorf("skeleton has circular dependencies: %w", sortErr)
 	}
+	skeleton = sorted
 
 	logf("[deploy] skeleton: %d steps, %d unique placeholders", len(skeleton.Steps), countUniquePlaceholders(skeleton))
 	return skeleton, nil
@@ -136,6 +139,11 @@ func HydrateSkeleton(
 		prompt := buildHydratePrompt(provider, enrichedPrompt, skeletonSummary, batch, generatedSoFar)
 		resp, err := ask(ctx, prompt)
 		if err != nil {
+			logf("[deploy] hydrate batch %d LLM call failed; keeping %d commands from prior batches", bi+1, len(plan.Commands))
+			if len(plan.Commands) > 0 {
+				plan.Notes = append(plan.Notes, fmt.Sprintf("partial hydration: batches %d-%d failed", bi+1, len(batches)))
+				return plan, nil
+			}
 			return nil, fmt.Errorf("hydrate batch %d failed: %w", bi+1, err)
 		}
 
@@ -147,11 +155,21 @@ func HydrateSkeleton(
 			retryPrompt := prompt + "\n\nIMPORTANT: Return ONLY a JSON array of command objects. No markdown, no prose."
 			resp2, err2 := ask(ctx, retryPrompt)
 			if err2 != nil {
+				logf("[deploy] hydrate batch %d retry failed; keeping %d commands from prior batches", bi+1, len(plan.Commands))
+				if len(plan.Commands) > 0 {
+					plan.Notes = append(plan.Notes, fmt.Sprintf("partial hydration: batches %d-%d failed", bi+1, len(batches)))
+					return plan, nil
+				}
 				return nil, fmt.Errorf("hydrate batch %d retry failed: %w", bi+1, err2)
 			}
 			cleaned2 := strings.TrimSpace(clean(resp2))
 			cmds, err = parseHydrateResponse(cleaned2, len(batch))
 			if err != nil {
+				logf("[deploy] hydrate batch %d failed after retry; keeping %d commands from prior batches", bi+1, len(plan.Commands))
+				if len(plan.Commands) > 0 {
+					plan.Notes = append(plan.Notes, fmt.Sprintf("partial hydration: batches %d-%d failed", bi+1, len(batches)))
+					return plan, nil
+				}
 				return nil, fmt.Errorf("hydrate batch %d unparseable after retry: %w", bi+1, err)
 			}
 		}
