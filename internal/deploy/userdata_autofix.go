@@ -386,6 +386,16 @@ fi
 systemctl enable docker
 systemctl start docker
 
+# Install jq for JSON secret parsing
+if ! command -v jq >/dev/null 2>&1; then
+    . /etc/os-release || true
+    if [ "${ID:-}" = "amzn" ]; then
+        if command -v dnf >/dev/null 2>&1; then dnf install -y jq; else yum install -y jq; fi
+    elif command -v apt-get >/dev/null 2>&1; then
+        apt-get install -y jq 2>/dev/null || true
+    fi
+fi
+
 # Get instance metadata via IMDSv2 (required on newer AMIs)
 IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300" 2>/dev/null || echo "")
 if [ -n "$IMDS_TOKEN" ]; then
@@ -480,6 +490,7 @@ fi
 
 # Write env vars to a file instead of building shell string for docker -e flags
 ENV_FILE=$(mktemp)
+chmod 600 "$ENV_FILE"
 trap "rm -f $ENV_FILE" EXIT
 
 # Get environment variables from instance tags (ENV_* pattern)
