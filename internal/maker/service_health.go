@@ -135,9 +135,9 @@ func VerifyServiceHealthViaSSM(ctx context.Context, cfg ServiceHealthConfig, opt
 			continue
 		}
 
-		// Step 4: Container is running, verify with local curl
+		// Step 4: Container is running, verify with local curl (multi-path, 15s timeout)
+		curlCmd := fmt.Sprintf(`STATUS=000; for path in "%s" "/" "/health" "/healthz"; do CODE=$(curl -s -o /dev/null -w '%%{http_code}' --connect-timeout 15 "http://localhost:%d${path}" 2>/dev/null || echo 000); if [ "$CODE" != "000" ] && [ "$CODE" != "404" ]; then STATUS=$CODE; break; fi; done; echo $STATUS`, cfg.HealthPath, cfg.Port)
 		healthURL := fmt.Sprintf("http://localhost:%d%s", cfg.Port, cfg.HealthPath)
-		curlCmd := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' --connect-timeout 5 %s 2>/dev/null || echo 000", healthURL)
 		curlOutput, err := runSSMCommand(ctx, cfg, curlCmd)
 		if err != nil {
 			lastErr = fmt.Errorf("curl failed: %w", err)
@@ -563,7 +563,7 @@ func InferHealthPath(plan *Plan) string {
 			}
 		}
 	}
-	return "/healthz" // Default
+	return "/" // Default - most universally served path
 }
 
 func parsePort(s string) int {
