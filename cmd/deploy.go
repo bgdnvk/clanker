@@ -1060,6 +1060,21 @@ Examples:
 			}
 		}
 
+		// For all deploys (not just OpenClaw): attempt one more resolution round
+		// if non-runtime placeholders remain. This catches generic EC2 deploys that
+		// would otherwise proceed with literal <ECR_REPO_URI> in user-data.
+		if !isOpenClawDeploy {
+			if unresolved := deploy.GetUnresolvedPlaceholders(plan); len(unresolved) > 0 {
+				if !deploy.AllPlaceholdersAreProduced(plan, unresolved) {
+					logf("[deploy] warning: plan has %d unresolved non-runtime placeholders: %v", len(unresolved), unresolved)
+					resolved, _, rErr := deploy.ResolvePlanPlaceholders(ctx, plan, intel.InfraSnap, aiClient.AskPrompt, aiClient.CleanJSONResponse, logf)
+					if rErr == nil {
+						plan = resolved
+					}
+				}
+			}
+		}
+
 		// 8. Output plan JSON (or apply)
 		normalized := normalizeShellStylePlaceholdersForExecution(plan)
 		if normalized > 0 {
