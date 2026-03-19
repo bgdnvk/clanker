@@ -244,8 +244,15 @@ func maybeAutoFixUnhealthyALBTargets(ctx context.Context, bindings map[string]st
 	}
 
 	// Decide whether to apply.
-	if !loopbackOnly && !cfg.Aggressive {
-		return fmt.Errorf("auto-fix skipped: loopback-only bind not detected")
+	if !loopbackOnly && !cfg.Aggressive && curlOK {
+		// Container is running, reachable, and responding - nothing to fix
+		return nil
+	}
+	// If container is running but not responding, or not running at all,
+	// always attempt remediation regardless of loopback detection
+	if !curlOK || noContainers {
+		cfg.Aggressive = true
+		_, _ = fmt.Fprintf(opts.Writer, "[health] container unhealthy (curlOK=%v noContainers=%v); forcing remediation\n", curlOK, noContainers)
 	}
 
 	_, _ = fmt.Fprintf(opts.Writer, "[health] applying container restart with bind-to-0.0.0.0 env fix (loopbackOnly=%v curlOK=%v openclaw=%v)\n", loopbackOnly, curlOK, isOpenClaw)
@@ -488,12 +495,25 @@ func remediateUserDataCrashAndRebootstrap(ctx context.Context, instanceID string
 		}
 	}
 
-	// Wait for IAM propagation.
-	_, _ = fmt.Fprintf(opts.Writer, "[health] step 3: waiting 15s for IAM propagation...\n")
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(15 * time.Second):
+	// Wait for IAM propagation with exponential backoff and verification.
+	_, _ = fmt.Fprintf(opts.Writer, "[health] step 3: waiting for IAM policy propagation...\n")
+	for attempt := 0; attempt < 6; attempt++ {
+		wait := time.Duration(5*(1<<uint(attempt))) * time.Second // 5, 10, 20, 40, 80, 160
+		if wait > 60*time.Second {
+			wait = 60 * time.Second
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+		// Verify ECR access works
+		testCmd := []string{"ecr", "describe-repositories", "--max-items", "1",
+			"--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+		if _, err := runAWSCommandStreaming(ctx, testCmd, nil, io.Discard); err == nil {
+			_, _ = fmt.Fprintf(opts.Writer, "[health] IAM policies propagated after %ds\n", 5*(1<<uint(attempt)))
+			break
+		}
 	}
 
 	// Re-run user-data script via SSM.
