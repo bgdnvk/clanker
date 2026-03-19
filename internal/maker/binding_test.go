@@ -132,6 +132,37 @@ func TestLearnPlanBindings_SGFillOrder(t *testing.T) {
 		}
 	})
 
+	t.Run("fill-order does not clobber named SG bindings", func(t *testing.T) {
+		// This test verifies the fix: the generic fill-order loop only fills
+		// SG_ID and SG_1, not SG_ALB_ID/SG_WEB_ID/SG_RDS_ID. Previously,
+		// the first SG would fill SG_ID, SG_1, then SG_ALB_ID (clobbering
+		// the value that inferSGBindings/switch was supposed to set).
+		bindings := make(map[string]string)
+
+		// First: alb-sg
+		args1 := []string{"ec2", "create-security-group", "--group-name", "alb-sg"}
+		learnPlanBindings(args1, sgCreateOutput("sg-alb"), bindings, 0)
+
+		// Second: web-sg
+		args2 := []string{"ec2", "create-security-group", "--group-name", "web-sg"}
+		learnPlanBindings(args2, sgCreateOutput("sg-web"), bindings, 1)
+
+		// Third: rds-sg
+		args3 := []string{"ec2", "create-security-group", "--group-name", "rds-sg"}
+		learnPlanBindings(args3, sgCreateOutput("sg-rds"), bindings, 2)
+
+		// Named bindings must each hold the correct SG ID
+		if bindings["SG_ALB_ID"] != "sg-alb" {
+			t.Errorf("SG_ALB_ID = %q, want sg-alb (fill-order clobbered it)", bindings["SG_ALB_ID"])
+		}
+		if bindings["SG_WEB_ID"] != "sg-web" {
+			t.Errorf("SG_WEB_ID = %q, want sg-web (fill-order clobbered it)", bindings["SG_WEB_ID"])
+		}
+		if bindings["SG_RDS_ID"] != "sg-rds" {
+			t.Errorf("SG_RDS_ID = %q, want sg-rds (fill-order clobbered it)", bindings["SG_RDS_ID"])
+		}
+	})
+
 	t.Run("generic SG does not clobber named bindings", func(t *testing.T) {
 		bindings := make(map[string]string)
 

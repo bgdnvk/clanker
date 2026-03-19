@@ -37,9 +37,9 @@ func TestClassifyIssue(t *testing.T) {
 		{"required field", "The required field InstanceType is empty", "hard"},
 
 		// Edge case: issue has BOTH hard and context patterns
-		// "if the security group doesn't exist, the deploy will fail"
-		// Current behavior: context wins because it is checked first
-		{"hard with if prefix", "if the security group doesn't exist, the deploy will fail", "context"},
+		// Hard patterns are now checked before context patterns, so this
+		// is correctly classified as hard (contains "fail").
+		{"hard with if prefix", "if the security group doesn't exist, the deploy will fail", "hard"},
 	}
 
 	for _, tt := range tests {
