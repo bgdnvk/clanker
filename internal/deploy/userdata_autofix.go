@@ -338,15 +338,28 @@ func isUserDataPlaceholder(s string) bool {
 
 func generateDockerBootstrapScript(region string) string {
 	return `#!/bin/bash
-set -e
 exec > /var/log/user-data.log 2>&1
 
 # Structured logging functions
 log() { echo "[bootstrap] $(date '+%Y-%m-%d %H:%M:%S') $*"; }
 err() { echo "[bootstrap] $(date '+%Y-%m-%d %H:%M:%S') ERROR: $*" >&2; }
 
+# Retry helper: retry "COMMAND" MAX_ATTEMPTS DELAY_SECONDS
+retry() {
+    local cmd="$1" max="${2:-3}" delay="${3:-5}"
+    local attempt=1
+    while [ $attempt -le $max ]; do
+        if eval "$cmd"; then return 0; fi
+        err "Attempt $attempt/$max failed, retrying in ${delay}s..."
+        sleep $delay
+        attempt=$((attempt+1))
+        delay=$((delay*2))
+    done
+    return 1
+}
+
 log "Docker bootstrap script (auto-generated) starting"
-log "Script version: 2.0"
+log "Script version: 3.0"
 
 # Install AWS CLI if needed
 if ! command -v aws >/dev/null 2>&1; then
@@ -373,68 +386,34 @@ fi
 systemctl enable docker
 systemctl start docker
 
-# Get instance metadata
-REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "` + region + `")
-INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "")
+# Get instance metadata via IMDSv2 (required on newer AMIs)
+IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300" 2>/dev/null || echo "")
+if [ -n "$IMDS_TOKEN" ]; then
+    REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "")
+    INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "")
+else
+    # Fallback to IMDSv1
+    REGION=$(curl -s --max-time 5 http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "")
+    INSTANCE_ID=$(curl -s --max-time 5 http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "")
+fi
+# Use deployment region as fallback only if metadata service failed
+[ -z "$REGION" ] && REGION="` + region + `"
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")
 
 # ECR authentication
 if [ -n "$ACCOUNT" ]; then
-    echo "[bootstrap] Authenticating with ECR in $REGION"
+    log "Authenticating with ECR in $REGION"
     for i in 1 2 3 4 5; do
         if aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com" 2>/dev/null; then
-            echo "[bootstrap] ECR login succeeded (attempt=$i)"
+            log "ECR login succeeded (attempt=$i)"
             break
         fi
-        echo "[bootstrap] ECR login attempt $i failed; retrying..."
+        log "ECR login attempt $i failed; retrying..."
         sleep $((i*3))
     done
 fi
 
-# Try to discover image URI from instance tags
-IMAGE_URI=""
-if [ -n "$INSTANCE_ID" ]; then
-    IMAGE_URI=$(aws ec2 describe-tags --region "$REGION" --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=ImageUri" --query 'Tags[0].Value' --output text 2>/dev/null || echo "")
-    [ "$IMAGE_URI" = "None" ] && IMAGE_URI=""
-fi
-
-# If no tag, try to find latest image in clanker-app repo
-if [ -z "$IMAGE_URI" ] && [ -n "$ACCOUNT" ]; then
-    echo "[bootstrap] No ImageUri tag found, discovering from ECR..."
-    for REPO in clanker-app app; do
-        LATEST=$(aws ecr describe-images --region "$REGION" --repository-name "$REPO" --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]' --output text 2>/dev/null || echo "")
-        if [ -n "$LATEST" ] && [ "$LATEST" != "None" ]; then
-            IMAGE_URI="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/$REPO:$LATEST"
-            echo "[bootstrap] Discovered image: $IMAGE_URI"
-            break
-        fi
-    done
-fi
-
-# If still no image, wait for one to appear (max 10 minutes)
-if [ -z "$IMAGE_URI" ] && [ -n "$ACCOUNT" ]; then
-    echo "[bootstrap] Waiting for image to be pushed to ECR..."
-    for attempt in $(seq 1 20); do
-        for REPO in clanker-app app; do
-            LATEST=$(aws ecr describe-images --region "$REGION" --repository-name "$REPO" --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]' --output text 2>/dev/null || echo "")
-            if [ -n "$LATEST" ] && [ "$LATEST" != "None" ]; then
-                IMAGE_URI="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/$REPO:$LATEST"
-                echo "[bootstrap] Found image after waiting: $IMAGE_URI"
-                break 2
-            fi
-        done
-        echo "[bootstrap] No image yet (attempt $attempt/20), waiting 30s..."
-        sleep 30
-    done
-fi
-
-if [ -z "$IMAGE_URI" ]; then
-    err "No image found in ECR after waiting 10 minutes. Deployment incomplete."
-    err "Manual intervention required: docker pull <IMAGE_URI> && docker run -d -p 3000:3000 <IMAGE_URI>"
-    exit 1
-fi
-
-# Get app name from instance tags for SSM parameter lookup
+# Get app name from instance tags (needed for ECR repo discovery)
 APP_NAME=""
 if [ -n "$INSTANCE_ID" ]; then
     APP_NAME=$(aws ec2 describe-tags --region "$REGION" --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=AppName" --query 'Tags[0].Value' --output text 2>/dev/null || echo "")
@@ -446,38 +425,92 @@ if [ -n "$INSTANCE_ID" ]; then
     fi
 fi
 
-# Get environment variables from instance tags (ENV_* pattern)
-ENV_FLAGS=""
+# Try to discover image URI from instance tags
+IMAGE_URI=""
 if [ -n "$INSTANCE_ID" ]; then
-    echo "[bootstrap] Loading environment variables from instance tags..."
+    IMAGE_URI=$(aws ec2 describe-tags --region "$REGION" --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=ImageUri" --query 'Tags[0].Value' --output text 2>/dev/null || echo "")
+    [ "$IMAGE_URI" = "None" ] && IMAGE_URI=""
+fi
+
+# If no tag, try to find latest image in ECR (use APP_NAME first, then fallbacks)
+if [ -z "$IMAGE_URI" ] && [ -n "$ACCOUNT" ]; then
+    log "No ImageUri tag found, discovering from ECR..."
+    REPOS_TO_CHECK=""
+    if [ -n "$APP_NAME" ]; then
+        REPOS_TO_CHECK="$APP_NAME"
+    fi
+    REPOS_TO_CHECK="$REPOS_TO_CHECK clanker-app app"
+    for REPO in $REPOS_TO_CHECK; do
+        LATEST=$(aws ecr describe-images --region "$REGION" --repository-name "$REPO" --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]' --output text 2>/dev/null || echo "")
+        if [ -n "$LATEST" ] && [ "$LATEST" != "None" ]; then
+            IMAGE_URI="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/$REPO:$LATEST"
+            log "Discovered image: $IMAGE_URI"
+            break
+        fi
+    done
+fi
+
+# If still no image, wait for one to appear (max 10 minutes)
+if [ -z "$IMAGE_URI" ] && [ -n "$ACCOUNT" ]; then
+    log "Waiting for image to be pushed to ECR..."
+    REPOS_TO_CHECK=""
+    if [ -n "$APP_NAME" ]; then
+        REPOS_TO_CHECK="$APP_NAME"
+    fi
+    REPOS_TO_CHECK="$REPOS_TO_CHECK clanker-app app"
+    for attempt in $(seq 1 20); do
+        for REPO in $REPOS_TO_CHECK; do
+            LATEST=$(aws ecr describe-images --region "$REGION" --repository-name "$REPO" --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]' --output text 2>/dev/null || echo "")
+            if [ -n "$LATEST" ] && [ "$LATEST" != "None" ]; then
+                IMAGE_URI="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com/$REPO:$LATEST"
+                log "Found image after waiting: $IMAGE_URI"
+                break 2
+            fi
+        done
+        log "No image yet (attempt $attempt/20), waiting 30s..."
+        sleep 30
+    done
+fi
+
+if [ -z "$IMAGE_URI" ]; then
+    err "No image found in ECR after waiting 10 minutes. Deployment incomplete."
+    err "Manual intervention required: docker pull <IMAGE_URI> && docker run -d -p 3000:3000 <IMAGE_URI>"
+    exit 1
+fi
+
+# Write env vars to a file instead of building shell string for docker -e flags
+ENV_FILE=$(mktemp)
+trap "rm -f $ENV_FILE" EXIT
+
+# Get environment variables from instance tags (ENV_* pattern)
+if [ -n "$INSTANCE_ID" ]; then
+    log "Loading environment variables from instance tags..."
     ENV_TAGS=$(aws ec2 describe-tags --region "$REGION" --filters "Name=resource-id,Values=$INSTANCE_ID" --query 'Tags[?starts_with(Key, ` + "`ENV_`" + `)].{Key:Key,Value:Value}' --output text 2>/dev/null || echo "")
     while IFS=$'\t' read -r KEY VALUE; do
         if [ -n "$KEY" ]; then
             # Strip ENV_ prefix
             ENV_NAME="${KEY#ENV_}"
-            ENV_FLAGS="$ENV_FLAGS -e $ENV_NAME=\"$VALUE\""
-            echo "[bootstrap] Loaded env: $ENV_NAME"
+            echo "$ENV_NAME=$VALUE" >> "$ENV_FILE"
+            log "Loaded env: $ENV_NAME"
         fi
     done <<< "$ENV_TAGS"
 fi
 
 # Load secrets from SSM Parameter Store
 # Tries multiple paths: /clanker/<app>/, /<app>/, /app/<app>/
-echo "[bootstrap] Loading secrets from SSM Parameter Store..."
+log "Loading secrets from SSM Parameter Store..."
 for SSM_PATH in "/clanker/${APP_NAME:-app}/" "/${APP_NAME:-app}/" "/app/${APP_NAME:-app}/" "/clanker/"; do
     PARAMS=$(aws ssm get-parameters-by-path --region "$REGION" --path "$SSM_PATH" --with-decryption --query 'Parameters[*].[Name,Value]' --output text 2>/dev/null || echo "")
     if [ -n "$PARAMS" ]; then
-        echo "[bootstrap] Found parameters in $SSM_PATH"
+        log "Found parameters in $SSM_PATH"
         while IFS=$'\t' read -r PARAM_NAME PARAM_VALUE; do
             if [ -n "$PARAM_NAME" ]; then
                 # Extract just the parameter name (last part of path)
                 ENV_NAME=$(basename "$PARAM_NAME")
                 # Convert to uppercase and replace dashes with underscores
                 ENV_NAME=$(echo "$ENV_NAME" | tr '[:lower:]-' '[:upper:]_')
-                # Escape special characters for shell
-                ESCAPED_VALUE=$(printf '%s' "$PARAM_VALUE" | sed 's/"/\\"/g; s/\$/\\$/g; s/` + "`" + `/\\` + "`" + `/g')
-                ENV_FLAGS="$ENV_FLAGS -e $ENV_NAME=\"$ESCAPED_VALUE\""
-                echo "[bootstrap] Loaded secret: $ENV_NAME"
+                echo "$ENV_NAME=$PARAM_VALUE" >> "$ENV_FILE"
+                log "Loaded secret: $ENV_NAME"
             fi
         done <<< "$PARAMS"
         break
@@ -487,7 +520,7 @@ done
 # Load secrets from AWS Secrets Manager
 # The LLM creates individual secrets with names like: <app>/DATABASE_URL, <app>/API_KEY
 # We need to list all secrets with the app prefix and fetch each one
-echo "[bootstrap] Loading secrets from AWS Secrets Manager..."
+log "Loading secrets from AWS Secrets Manager..."
 
 # Derive app prefix from Name tag (e.g., "myapp-server" -> "myapp")
 SECRET_PREFIX="${APP_NAME%%-*}"
@@ -497,11 +530,11 @@ SECRET_PREFIX="${APP_NAME%%-*}"
 for PREFIX in "$SECRET_PREFIX" "$APP_NAME" "clanker-app"; do
     if [ -z "$PREFIX" ]; then continue; fi
 
-    echo "[bootstrap] Checking for secrets with prefix: $PREFIX/"
+    log "Checking for secrets with prefix: $PREFIX/"
     SECRET_LIST=$(aws secretsmanager list-secrets --region "$REGION" --filters "Key=name,Values=$PREFIX/" --query 'SecretList[*].Name' --output text 2>/dev/null || echo "")
 
     if [ -n "$SECRET_LIST" ] && [ "$SECRET_LIST" != "None" ]; then
-        echo "[bootstrap] Found secrets with prefix $PREFIX/"
+        log "Found secrets with prefix $PREFIX/"
         for SECRET_NAME in $SECRET_LIST; do
             [ -z "$SECRET_NAME" ] && continue
             [ "$SECRET_NAME" = "None" ] && continue
@@ -520,16 +553,14 @@ for PREFIX in "$SECRET_PREFIX" "$APP_NAME" "clanker-app"; do
                         for KEY in $(echo "$SECRET_VALUE" | jq -r 'keys[]' 2>/dev/null); do
                             VALUE=$(echo "$SECRET_VALUE" | jq -r --arg k "$KEY" '.[$k]' 2>/dev/null)
                             K_ENV=$(echo "$KEY" | tr '[:lower:]-' '[:upper:]_')
-                            ESCAPED=$(printf '%s' "$VALUE" | sed 's/"/\\"/g; s/\$/\\$/g; s/` + "`" + `/\\` + "`" + `/g')
-                            ENV_FLAGS="$ENV_FLAGS -e $K_ENV=\"$ESCAPED\""
-                            echo "[bootstrap] Loaded secret (json): $K_ENV"
+                            echo "$K_ENV=$VALUE" >> "$ENV_FILE"
+                            log "Loaded secret (json): $K_ENV"
                         done
                     fi
                 else
                     # Plain string secret
-                    ESCAPED_VALUE=$(printf '%s' "$SECRET_VALUE" | sed 's/"/\\"/g; s/\$/\\$/g; s/` + "`" + `/\\` + "`" + `/g')
-                    ENV_FLAGS="$ENV_FLAGS -e $ENV_NAME=\"$ESCAPED_VALUE\""
-                    echo "[bootstrap] Loaded secret: $ENV_NAME"
+                    echo "$ENV_NAME=$SECRET_VALUE" >> "$ENV_FILE"
+                    log "Loaded secret: $ENV_NAME"
                 fi
             fi
         done
@@ -538,19 +569,19 @@ for PREFIX in "$SECRET_PREFIX" "$APP_NAME" "clanker-app"; do
 done
 
 # Fallback: check for a single JSON secret named after the app (legacy pattern)
-if [ -z "$ENV_FLAGS" ] && [ -n "$APP_NAME" ]; then
+ENV_FILE_SIZE=$(wc -c < "$ENV_FILE" 2>/dev/null || echo "0")
+if [ "$ENV_FILE_SIZE" -le 1 ] && [ -n "$APP_NAME" ]; then
     for SECRET_NAME in "$APP_NAME" "clanker/$APP_NAME" "$SECRET_PREFIX"; do
         [ -z "$SECRET_NAME" ] && continue
         SECRET_JSON=$(aws secretsmanager get-secret-value --region "$REGION" --secret-id "$SECRET_NAME" --query 'SecretString' --output text 2>/dev/null || echo "")
         if [ -n "$SECRET_JSON" ] && [ "$SECRET_JSON" != "None" ] && echo "$SECRET_JSON" | grep -q '^{'; then
-            echo "[bootstrap] Found JSON secret: $SECRET_NAME"
+            log "Found JSON secret: $SECRET_NAME"
             if command -v jq >/dev/null 2>&1; then
                 for KEY in $(echo "$SECRET_JSON" | jq -r 'keys[]' 2>/dev/null); do
                     VALUE=$(echo "$SECRET_JSON" | jq -r --arg k "$KEY" '.[$k]' 2>/dev/null)
                     ENV_NAME=$(echo "$KEY" | tr '[:lower:]-' '[:upper:]_')
-                    ESCAPED_VALUE=$(printf '%s' "$VALUE" | sed 's/"/\\"/g; s/\$/\\$/g; s/` + "`" + `/\\` + "`" + `/g')
-                    ENV_FLAGS="$ENV_FLAGS -e $ENV_NAME=\"$ESCAPED_VALUE\""
-                    echo "[bootstrap] Loaded secret: $ENV_NAME"
+                    echo "$ENV_NAME=$VALUE" >> "$ENV_FILE"
+                    log "Loaded secret: $ENV_NAME"
                 done
             fi
             break
@@ -562,11 +593,23 @@ fi
 APP_PORT=$(aws ec2 describe-tags --region "$REGION" --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=AppPort" --query 'Tags[0].Value' --output text 2>/dev/null || echo "3000")
 [ "$APP_PORT" = "None" ] && APP_PORT="3000"
 
-echo "[bootstrap] Pulling image: $IMAGE_URI"
-docker pull "$IMAGE_URI"
+# Pull image with retry (3 attempts, exponential backoff)
+log "Pulling image: $IMAGE_URI"
+if ! retry "docker pull '$IMAGE_URI'" 3 10; then
+    err "Docker pull failed after 3 attempts"
+    log "Attempting ECR re-login and pull..."
+    aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com" 2>/dev/null
+    if ! retry "docker pull '$IMAGE_URI'" 2 15; then
+        err "Docker pull failed even after re-login"
+        exit 1
+    fi
+fi
 
-echo "[bootstrap] Starting container on port $APP_PORT"
-eval "docker run -d --restart unless-stopped -p $APP_PORT:$APP_PORT $ENV_FLAGS $IMAGE_URI"
+log "Starting container on port $APP_PORT"
+docker run -d --restart unless-stopped \
+    -p "$APP_PORT:$APP_PORT" \
+    --env-file "$ENV_FILE" \
+    "$IMAGE_URI"
 
 log "Container started, verifying health..."
 
@@ -588,14 +631,17 @@ fi
 log "Container running: $CONTAINER_ID"
 docker ps
 
-# Additional health check: verify port is listening
-sleep 5
+# Health check with retries and timeout
+log "Checking health..."
 if command -v curl >/dev/null 2>&1; then
-    if curl -sf "http://localhost:$APP_PORT/health" >/dev/null 2>&1 || curl -sf "http://localhost:$APP_PORT/" >/dev/null 2>&1; then
-        log "Health check passed: app responding on port $APP_PORT"
-    else
-        log "Warning: app not yet responding on port $APP_PORT (may still be starting)"
-    fi
+    for i in 1 2 3 4 5 6; do
+        sleep 5
+        if curl -sf --max-time 10 "http://localhost:$APP_PORT/" >/dev/null 2>&1; then
+            log "Health check passed: app responding on port $APP_PORT"
+            break
+        fi
+        log "Health check attempt $i: app not yet responding (may still be starting)"
+    done
 fi
 
 log "Bootstrap complete"
