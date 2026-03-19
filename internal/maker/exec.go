@@ -327,6 +327,9 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		}
 	}
 
+	// Import user-provided env vars (from deploy UI) into bindings via CLANKER_USER_ENV_NAMES manifest
+	importUserProvidedEnvVars(bindings)
+
 	// Import secret-like env vars into bindings so EC2 user-data injection can pass them
 	// into `docker run` via ENV_*. (clanker-cloud passes user-provided env vars to the CLI process.)
 	importSecretLikeEnvVarsIntoBindings(bindings)
@@ -483,8 +486,9 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		// Inject ENV_ bindings as instance tags so bootstrap script can read them
 		args = injectEnvVarsAsInstanceTags(args, bindings)
 
-		// For EC2 run-instances, check if subnet can reach SSM and remediate if needed
+		// For EC2 run-instances, store env vars in SSM and check SSM connectivity
 		if len(args) >= 2 && args[0] == "ec2" && args[1] == "run-instances" {
+			storeEnvVarsInSSM(ctx, bindings, opts)
 			args, _ = RemediateRunInstancesForSSM(ctx, opts, args, opts.Writer)
 		}
 
@@ -812,6 +816,38 @@ func prebindAppPortFromPlan(plan *Plan, bindings map[string]string) {
 	}
 	if wordpress.Detect(q, repoURL) {
 		bindings["APP_PORT"] = strconv.Itoa(wordpress.DefaultPort)
+	}
+}
+
+// importUserProvidedEnvVars reads the CLANKER_USER_ENV_NAMES env var (comma-separated list
+// of env var names explicitly set by the deploy UI) and imports each into bindings with
+// an ENV_ prefix so they are forwarded to the container via instance tags and SSM.
+func importUserProvidedEnvVars(bindings map[string]string) {
+	if bindings == nil {
+		return
+	}
+	manifest := strings.TrimSpace(os.Getenv("CLANKER_USER_ENV_NAMES"))
+	if manifest == "" {
+		return
+	}
+	for _, name := range strings.Split(manifest, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		val := os.Getenv(name)
+		if val == "" {
+			continue
+		}
+		bindingKey := "ENV_" + strings.ToUpper(name)
+		if strings.TrimSpace(bindings[bindingKey]) == "" {
+			bindings[bindingKey] = val
+		}
+		// Also store unprefixed so placeholder resolution works
+		upperName := strings.ToUpper(name)
+		if strings.TrimSpace(bindings[upperName]) == "" {
+			bindings[upperName] = val
+		}
 	}
 }
 
@@ -3276,12 +3312,8 @@ func injectEnvVarsAsInstanceTags(args []string, bindings map[string]string) []st
 		if len(value) > 256 {
 			continue
 		}
-		// Skip values that look like secrets (contain common secret patterns)
-		lower := strings.ToLower(key)
-		if strings.Contains(lower, "password") || strings.Contains(lower, "secret") ||
-			strings.Contains(lower, "token") || strings.Contains(lower, "key") {
-			continue
-		}
+		// With SSM as the primary encrypted channel for env vars, tags serve as a
+		// best-effort fallback. No longer filter out secret-patterned names here.
 		envTags = append(envTags, map[string]string{"Key": key, "Value": value})
 	}
 
@@ -3392,6 +3424,47 @@ func injectEnvVarsAsInstanceTags(args []string, bindings map[string]string) []st
 	}
 
 	return args
+}
+
+// storeEnvVarsInSSM stores all ENV_ bindings as SSM SecureString parameters
+// under /clanker/<appName>/ so the bootstrap and remediation scripts can read them.
+// This supplements instance tags (which have a 256-char value limit).
+func storeEnvVarsInSSM(ctx context.Context, bindings map[string]string, opts ExecOptions) {
+	appName := strings.TrimSpace(bindings["APP_NAME"])
+	if appName == "" {
+		appName = strings.TrimSpace(bindings["ECR_REPO"])
+	}
+	if appName == "" {
+		appName = "app"
+	}
+	ssmPath := "/clanker/" + appName + "/"
+
+	for key, val := range bindings {
+		if !strings.HasPrefix(key, "ENV_") {
+			continue
+		}
+		if strings.TrimSpace(val) == "" {
+			continue
+		}
+		envName := strings.TrimPrefix(key, "ENV_")
+		paramName := ssmPath + envName
+
+		args := []string{
+			"ssm", "put-parameter",
+			"--name", paramName,
+			"--value", val,
+			"--type", "SecureString",
+			"--overwrite",
+			"--region", opts.Region,
+			"--no-cli-pager",
+		}
+		if opts.Profile != "" {
+			args = append(args, "--profile", opts.Profile)
+		}
+		if _, err := runAWSCommandStreaming(ctx, args, nil, opts.Writer); err != nil {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to store env var %s in SSM: %v\n", envName, err)
+		}
+	}
 }
 
 func isUserDataPlaceholderValue(v string) bool {
