@@ -150,6 +150,10 @@ func ApplyGenericPlanAutofix(plan *maker.Plan, logf func(string, ...any), extern
 	// Run FIRST so downstream validation/repair never sees these issues.
 	plan = FixEC2UserDataScripts(plan, logf)
 
+	// Generate missing user-data for Docker/ECR deployments to prevent
+	// validation failures that would trigger expensive paged fallback.
+	plan = GenerateMissingUserData(plan, logf)
+
 	// Normalize creative USER_DATA variants (e.g. <USER_DATA_OPENCLAW_DOCKER_COMPOSE>)
 	// to <USER_DATA> so the maker's placeholder resolution can handle them.
 	udFixed := normalizeUserDataPlaceholders(plan)

@@ -67,8 +67,31 @@ func GeneratePlanSkeleton(
 	// Validate the skeleton
 	if err := validateSkeleton(skeleton, requiredLaunchOps); err != nil {
 		logf("[deploy] skeleton validation warning: %v", err)
-		// Don't fail — harden downstream
+		// Don't fail for minor issues — harden downstream
 	}
+
+	// Fast-fail: a skeleton with fewer than 2 steps is not viable for any
+	// real deploy. Fall back to paged generation immediately instead of
+	// wasting LLM calls on hydration and validation.
+	if len(skeleton.Steps) < 2 {
+		return nil, fmt.Errorf("skeleton too small (%d steps); falling back to paged generation", len(skeleton.Steps))
+	}
+
+	// Critical check: missing required launch ops means the skeleton is fundamentally incomplete.
+	// This MUST cause a fallback to paged plan generation.
+	if missingOps := checkMissingLaunchOps(skeleton, requiredLaunchOps); len(missingOps) > 0 {
+		return nil, fmt.Errorf("skeleton missing required launch operation(s): %s", strings.Join(missingOps, ", "))
+	}
+
+	// Apply topological sort to ensure correct ordering based on produces/depends_on.
+	// This provides algorithmic enforcement even if LLM generated out-of-order steps.
+	sorted, sortErr := TopologicalSortSkeleton(skeleton)
+	if sortErr != nil {
+		// Cycle detected means the skeleton has circular dependencies and is broken.
+		// Fall back to paged generation instead of proceeding with broken order.
+		return nil, fmt.Errorf("skeleton has circular dependencies: %w", sortErr)
+	}
+	skeleton = sorted
 
 	logf("[deploy] skeleton: %d steps, %d unique placeholders", len(skeleton.Steps), countUniquePlaceholders(skeleton))
 	return skeleton, nil
@@ -116,6 +139,11 @@ func HydrateSkeleton(
 		prompt := buildHydratePrompt(provider, enrichedPrompt, skeletonSummary, batch, generatedSoFar)
 		resp, err := ask(ctx, prompt)
 		if err != nil {
+			logf("[deploy] hydrate batch %d LLM call failed; keeping %d commands from prior batches", bi+1, len(plan.Commands))
+			if len(plan.Commands) > 0 {
+				plan.Notes = append(plan.Notes, fmt.Sprintf("partial hydration: batches %d-%d failed", bi+1, len(batches)))
+				return plan, nil
+			}
 			return nil, fmt.Errorf("hydrate batch %d failed: %w", bi+1, err)
 		}
 
@@ -127,11 +155,21 @@ func HydrateSkeleton(
 			retryPrompt := prompt + "\n\nIMPORTANT: Return ONLY a JSON array of command objects. No markdown, no prose."
 			resp2, err2 := ask(ctx, retryPrompt)
 			if err2 != nil {
+				logf("[deploy] hydrate batch %d retry failed; keeping %d commands from prior batches", bi+1, len(plan.Commands))
+				if len(plan.Commands) > 0 {
+					plan.Notes = append(plan.Notes, fmt.Sprintf("partial hydration: batches %d-%d failed", bi+1, len(batches)))
+					return plan, nil
+				}
 				return nil, fmt.Errorf("hydrate batch %d retry failed: %w", bi+1, err2)
 			}
 			cleaned2 := strings.TrimSpace(clean(resp2))
 			cmds, err = parseHydrateResponse(cleaned2, len(batch))
 			if err != nil {
+				logf("[deploy] hydrate batch %d failed after retry; keeping %d commands from prior batches", bi+1, len(plan.Commands))
+				if len(plan.Commands) > 0 {
+					plan.Notes = append(plan.Notes, fmt.Sprintf("partial hydration: batches %d-%d failed", bi+1, len(batches)))
+					return plan, nil
+				}
 				return nil, fmt.Errorf("hydrate batch %d unparseable after retry: %w", bi+1, err)
 			}
 		}
@@ -372,9 +410,9 @@ func buildHydratePrompt(provider, enrichedPrompt, skeletonSummary string, batch 
 
 // batchSkeletonSteps groups consecutive steps that can be hydrated together.
 // Independent steps (no overlapping dependencies) get batched; dependent chains stay separate.
-// Max batch size is 5 to keep LLM focus tight.
+// Max batch size is 10 to reduce API calls while keeping LLM focus reasonable.
 func batchSkeletonSteps(skeleton *PlanSkeleton) [][]SkeletonStep {
-	const maxBatchSize = 5
+	const maxBatchSize = 10
 	if skeleton == nil || len(skeleton.Steps) == 0 {
 		return nil
 	}
@@ -556,6 +594,100 @@ func validateSkeleton(skeleton *PlanSkeleton, requiredLaunchOps []string) error 
 		return fmt.Errorf("%d issue(s): %s", len(issues), strings.Join(issues, "; "))
 	}
 	return nil
+}
+
+// TopologicalSortSkeleton reorders skeleton steps to satisfy dependency constraints.
+// Uses Kahn's algorithm to ensure steps that produce placeholders come before
+// steps that depend on those placeholders. Returns error if cycle detected.
+func TopologicalSortSkeleton(skeleton *PlanSkeleton) (*PlanSkeleton, error) {
+	if skeleton == nil || len(skeleton.Steps) <= 1 {
+		return skeleton, nil
+	}
+
+	n := len(skeleton.Steps)
+
+	// Build map of placeholder -> step index that produces it
+	producedBy := make(map[string]int)
+	for i, step := range skeleton.Steps {
+		for _, p := range step.Produces {
+			producedBy[strings.ToUpper(strings.TrimSpace(p))] = i
+		}
+	}
+
+	// Build adjacency list and in-degree map
+	// Edge: step A -> step B if B depends on something A produces
+	inDegree := make([]int, n)
+	graph := make([][]int, n)
+	for i := range graph {
+		graph[i] = make([]int, 0)
+	}
+
+	for i, step := range skeleton.Steps {
+		for _, dep := range step.DependsOn {
+			dep = strings.ToUpper(strings.TrimSpace(dep))
+			if producer, ok := producedBy[dep]; ok && producer != i {
+				graph[producer] = append(graph[producer], i)
+				inDegree[i]++
+			}
+		}
+	}
+
+	// Kahn's algorithm: start with nodes that have no dependencies
+	queue := make([]int, 0, n)
+	for i := 0; i < n; i++ {
+		if inDegree[i] == 0 {
+			queue = append(queue, i)
+		}
+	}
+
+	sorted := make([]SkeletonStep, 0, n)
+	for len(queue) > 0 {
+		// Pop from front
+		curr := queue[0]
+		queue = queue[1:]
+		sorted = append(sorted, skeleton.Steps[curr])
+
+		// Reduce in-degree for all dependents
+		for _, next := range graph[curr] {
+			inDegree[next]--
+			if inDegree[next] == 0 {
+				queue = append(queue, next)
+			}
+		}
+	}
+
+	// If we couldn't sort all steps, there's a cycle
+	if len(sorted) != n {
+		return skeleton, fmt.Errorf("dependency cycle detected in skeleton (%d of %d steps sorted)", len(sorted), n)
+	}
+
+	skeleton.Steps = sorted
+	return skeleton, nil
+}
+
+// checkMissingLaunchOps returns a list of required launch operations that are missing from the skeleton.
+// This is used to detect fundamentally incomplete plans that should trigger fallback to paged generation.
+func checkMissingLaunchOps(skeleton *PlanSkeleton, requiredLaunchOps []string) []string {
+	if skeleton == nil || len(skeleton.Steps) == 0 {
+		return requiredLaunchOps
+	}
+
+	var missing []string
+	for _, req := range requiredLaunchOps {
+		req = strings.ToLower(strings.TrimSpace(req))
+		found := false
+		for _, step := range skeleton.Steps {
+			key := strings.ToLower(step.Service + " " + step.Operation)
+			if strings.Contains(key, req) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, req)
+		}
+	}
+	return missing
 }
 
 // countUniquePlaceholders counts unique placeholder names in the skeleton.

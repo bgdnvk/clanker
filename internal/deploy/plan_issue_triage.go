@@ -88,6 +88,14 @@ func classifyIssue(s string) string {
 	if strings.Contains(l, "iam policy arn is malformed") && strings.Contains(l, "arn:aws:iam::aws:policy/") {
 		return "noise"
 	}
+	// Hard patterns: check before context patterns so that issues like
+	// "if the security group doesn't exist, the deploy will fail" are
+	// classified as hard rather than context.
+	for _, p := range []string{"missing", "fail", "error", "invalid", "not found", "denied", "wrong", "mismatch", "required"} {
+		if strings.Contains(l, p) {
+			return "hard"
+		}
+	}
 	if strings.Contains(l, "if ") || strings.Contains(l, "depends") || strings.Contains(l, "worth verifying") || strings.Contains(l, "may be") || strings.Contains(l, "might") {
 		return "context"
 	}
