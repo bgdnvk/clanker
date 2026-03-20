@@ -443,7 +443,8 @@ func isCommandAllowedForPhase(args []string, policy PhaseCommandPolicy) bool {
 
 // generateSessionID creates a short unique session identifier
 func generateSessionID() string {
-	return fmt.Sprintf("%x", time.Now().UnixNano()&0xFFFFFFFF)[:8]
+	// Use %08x to ensure exactly 8 hex digits (zero-padded)
+	return fmt.Sprintf("%08x", time.Now().UnixNano()&0xFFFFFFFF)
 }
 
 // minInt returns the minimum of two ints

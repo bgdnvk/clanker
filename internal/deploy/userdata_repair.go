@@ -75,7 +75,8 @@ func RepairUserDataWithLLM(
 	if provider == "digitalocean" {
 		replacement = fixedScript // doctl --user-data accepts plain scripts
 	} else {
-		replacement = base64.StdEncoding.EncodeToString([]byte(fixedScript))
+		mimeWrapped := wrapUserDataInMIME(fixedScript)
+		replacement = base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 	}
 	patched := clonePlanShallow(plan)
 	isEquals := strings.HasPrefix(strings.TrimSpace(patched.Commands[cmdIdx].Args[argIdx]), "--user-data=")

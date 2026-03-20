@@ -244,8 +244,15 @@ func maybeAutoFixUnhealthyALBTargets(ctx context.Context, bindings map[string]st
 	}
 
 	// Decide whether to apply.
-	if !loopbackOnly && !cfg.Aggressive {
-		return fmt.Errorf("auto-fix skipped: loopback-only bind not detected")
+	if !loopbackOnly && !cfg.Aggressive && curlOK {
+		// Container is running, reachable, and responding - nothing to fix
+		return nil
+	}
+	// If container is running but not responding, or not running at all,
+	// always attempt remediation regardless of loopback detection
+	if !curlOK || noContainers {
+		cfg.Aggressive = true
+		_, _ = fmt.Fprintf(opts.Writer, "[health] container unhealthy (curlOK=%v noContainers=%v); forcing remediation\n", curlOK, noContainers)
 	}
 
 	_, _ = fmt.Fprintf(opts.Writer, "[health] applying container restart with bind-to-0.0.0.0 env fix (loopbackOnly=%v curlOK=%v openclaw=%v)\n", loopbackOnly, curlOK, isOpenClaw)
@@ -399,20 +406,36 @@ func ssmRestartCommands(port int, region, accountID, image string) []string {
 		img = "<missing-image>"
 	}
 	// Keep it self-contained and non-interactive.
-	cmds := make([]string, 0, 32)
+	cmds := make([]string, 0, 48)
 	cmds = append(cmds, ssmEnsureDockerCommands()...)
 	cmds = append(cmds, ssmEnsureAWSCLICommands()...)
 	cmds = append(cmds, ssmEnsureECRLoginAndPullCommands(region, accountID, img)...)
+
+	// Re-read env vars from instance tags and SSM before restarting the container
+	cmds = append(cmds,
+		"ENV_FILE=/tmp/deploy.env",
+		"rm -f $ENV_FILE; touch $ENV_FILE; chmod 600 $ENV_FILE",
+		// Get instance ID via IMDSv2 with v1 fallback
+		`INSTANCE_ID=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null | xargs -I{} curl -s -H "X-aws-ec2-metadata-token: {}" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "")`,
+		// Read ENV_* tags into env file
+		fmt.Sprintf(`if [ -n "$INSTANCE_ID" ]; then aws ec2 describe-tags --region %q --filters "Name=resource-id,Values=$INSTANCE_ID" --query 'Tags[?starts_with(Key, `+"`ENV_`"+`)].{Key:Key,Value:Value}' --output text 2>/dev/null | while IFS=$'\t' read -r KEY VALUE; do if [ -n "$KEY" ]; then echo "${KEY#ENV_}=$VALUE" >> $ENV_FILE; fi; done; fi`, region),
+		// Get AppName tag for SSM path lookup
+		fmt.Sprintf(`APP_NAME=""; if [ -n "$INSTANCE_ID" ]; then APP_NAME=$(aws ec2 describe-tags --region %q --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=AppName" --query 'Tags[0].Value' --output text 2>/dev/null || echo ""); [ "$APP_NAME" = "None" ] && APP_NAME=""; fi`, region),
+		// Read SSM parameters and append to env file
+		fmt.Sprintf(`for SSM_PATH in "/clanker/${APP_NAME:-app}/" "/${APP_NAME:-app}/"; do PARAMS=$(aws ssm get-parameters-by-path --region %q --path "$SSM_PATH" --with-decryption --query 'Parameters[*].[Name,Value]' --output text 2>/dev/null || echo ""); if [ -n "$PARAMS" ]; then while IFS=$'\t' read -r PNAME PVAL; do [ -n "$PNAME" ] && echo "$(basename "$PNAME" | tr '[:lower:]-' '[:upper:]_')=$PVAL" >> $ENV_FILE; done <<< "$PARAMS"; break; fi; done`, region),
+	)
+
 	cmds = append(cmds,
 		"PORT="+p,
 		"IMAGE=\""+strings.ReplaceAll(img, "\"", "\\\"")+"\"",
 		"CID=$(docker ps --format '{{.ID}} {{.Ports}}' | awk -v p=\":$PORT->\" '$0 ~ p {print $1; exit}'); if [ -z \"${CID}\" ]; then CID=$(docker ps -q | head -n 1 || true); fi",
-		// If no container at all, start fresh instead of bailing out.
-		"if [ -z \"${CID:-}\" ]; then echo '[restart] no running container; starting fresh'; touch /tmp/deploy.env; docker run -d --restart unless-stopped --name app -p \"$PORT:$PORT\" --env-file /tmp/deploy.env --env PORT=\"$PORT\" --env HOST=0.0.0.0 --env BIND=0.0.0.0 \"$IMAGE\"; sleep 2; docker ps --format '{{.ID}} {{.Image}} {{.Ports}} {{.Names}}' | sed 's/^/[ps] /' || true; exit 0; fi",
+		// If no container at all, start fresh using the loaded env file
+		"if [ -z \"${CID:-}\" ]; then echo '[restart] no running container; starting fresh'; docker run -d --restart unless-stopped --name app -p \"$PORT:$PORT\" --env-file $ENV_FILE --env PORT=\"$PORT\" --env HOST=0.0.0.0 --env BIND=0.0.0.0 \"$IMAGE\"; sleep 2; docker ps --format '{{.ID}} {{.Image}} {{.Ports}} {{.Names}}' | sed 's/^/[ps] /' || true; exit 0; fi",
 		"NAME=$(docker inspect --format '{{.Name}}' \"$CID\" 2>/dev/null | sed 's#^/##' || true); if [ -z \"${NAME:-}\" ]; then NAME=app; fi",
-		"docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \"$CID\" | grep -vE '^(HOST|BIND|PORT)=' > /tmp/deploy.env || true",
+		// Merge existing container env with freshly loaded env (fresh takes precedence via later lines)
+		"docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \"$CID\" | grep -vE '^(HOST|BIND|PORT)=' >> $ENV_FILE || true",
 		"docker rm -f \"$CID\" || true",
-		"docker run -d --restart unless-stopped --name \"$NAME\" -p \"$PORT:$PORT\" --env-file /tmp/deploy.env --env PORT=\"$PORT\" --env HOST=0.0.0.0 --env BIND=0.0.0.0 \"$IMAGE\"",
+		"docker run -d --restart unless-stopped --name \"$NAME\" -p \"$PORT:$PORT\" --env-file $ENV_FILE --env PORT=\"$PORT\" --env HOST=0.0.0.0 --env BIND=0.0.0.0 \"$IMAGE\"",
 		"sleep 2",
 		"docker ps --format '{{.ID}} {{.Image}} {{.Ports}} {{.Names}}' | sed 's/^/[ps] /' || true",
 	)
@@ -488,12 +511,25 @@ func remediateUserDataCrashAndRebootstrap(ctx context.Context, instanceID string
 		}
 	}
 
-	// Wait for IAM propagation.
-	_, _ = fmt.Fprintf(opts.Writer, "[health] step 3: waiting 15s for IAM propagation...\n")
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(15 * time.Second):
+	// Wait for IAM propagation with exponential backoff and verification.
+	_, _ = fmt.Fprintf(opts.Writer, "[health] step 3: waiting for IAM policy propagation...\n")
+	for attempt := 0; attempt < 6; attempt++ {
+		wait := time.Duration(5*(1<<uint(attempt))) * time.Second // 5, 10, 20, 40, 80, 160
+		if wait > 60*time.Second {
+			wait = 60 * time.Second
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+		// Verify ECR access works
+		testCmd := []string{"ecr", "describe-repositories", "--max-items", "1",
+			"--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager"}
+		if _, err := runAWSCommandStreaming(ctx, testCmd, nil, io.Discard); err == nil {
+			_, _ = fmt.Fprintf(opts.Writer, "[health] IAM policies propagated after %ds\n", 5*(1<<uint(attempt)))
+			break
+		}
 	}
 
 	// Re-run user-data script via SSM.
