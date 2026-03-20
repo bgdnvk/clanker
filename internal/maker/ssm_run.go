@@ -69,8 +69,9 @@ func runSSMShellScript(ctx context.Context, instanceID, profile, region string, 
 		return "", fmt.Errorf("ssm send-command returned empty command id")
 	}
 
-	deadline := time.Now().Add(5 * time.Minute)
+	deadline := time.Now().Add(7 * time.Minute)
 	status := ""
+	pollInterval := 4 * time.Second
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
@@ -92,7 +93,10 @@ func runSSMShellScript(ctx context.Context, instanceID, profile, region string, 
 		stOut, stErr := runAWSCommandStreaming(ctx, getStatus, nil, io.Discard)
 		if stErr != nil {
 			// Transient while invocation isn't ready.
-			time.Sleep(4 * time.Second)
+			time.Sleep(pollInterval)
+			if pollInterval < 30*time.Second {
+				pollInterval = time.Duration(float64(pollInterval) * 1.5)
+			}
 			continue
 		}
 		status = strings.TrimSpace(stOut)
@@ -103,7 +107,10 @@ func runSSMShellScript(ctx context.Context, instanceID, profile, region string, 
 		if lower == "failed" || lower == "timedout" || lower == "cancelled" {
 			break
 		}
-		time.Sleep(4 * time.Second)
+		time.Sleep(pollInterval)
+		if pollInterval < 30*time.Second {
+			pollInterval = time.Duration(float64(pollInterval) * 1.5)
+		}
 	}
 
 	getOut := []string{

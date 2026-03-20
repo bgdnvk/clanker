@@ -196,6 +196,15 @@ Rules:
 		cmdArgs := append(cmd.Args, "--profile", opts.Profile, "--region", opts.Region, "--no-cli-pager")
 		out, err := runAWSCommandStreaming(ctx, cmdArgs, nil, opts.Writer)
 		if err != nil {
+			svc := ""
+			op := ""
+			if len(cmd.Args) >= 1 {
+				svc = cmd.Args[0]
+			}
+			if len(cmd.Args) >= 2 {
+				op = cmd.Args[1]
+			}
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] subagent discover %s %s failed: %v\n", svc, op, err)
 			continue
 		}
 

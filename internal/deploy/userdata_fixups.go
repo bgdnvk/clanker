@@ -100,7 +100,8 @@ func Base64EncodeEC2UserDataScripts(plan *maker.Plan) *maker.Plan {
 				}
 				if looksLikeScript(val) {
 					clone()
-					out.Commands[ci].Args[ai+1] = base64.StdEncoding.EncodeToString([]byte(strings.ReplaceAll(val, "\r\n", "\n")))
+					mimeWrapped := wrapUserDataInMIME(strings.ReplaceAll(val, "\r\n", "\n"))
+					out.Commands[ci].Args[ai+1] = base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 				}
 				continue
 			}
@@ -111,7 +112,8 @@ func Base64EncodeEC2UserDataScripts(plan *maker.Plan) *maker.Plan {
 				}
 				if looksLikeScript(val) {
 					clone()
-					out.Commands[ci].Args[ai] = "--user-data=" + base64.StdEncoding.EncodeToString([]byte(strings.ReplaceAll(val, "\r\n", "\n")))
+					mimeWrapped := wrapUserDataInMIME(strings.ReplaceAll(val, "\r\n", "\n"))
+					out.Commands[ci].Args[ai] = "--user-data=" + base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 				}
 				continue
 			}

@@ -327,6 +327,9 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		}
 	}
 
+	// Import user-provided env vars (from deploy UI) into bindings via CLANKER_USER_ENV_NAMES manifest
+	importUserProvidedEnvVars(bindings)
+
 	// Import secret-like env vars into bindings so EC2 user-data injection can pass them
 	// into `docker run` via ENV_*. (clanker-cloud passes user-provided env vars to the CLI process.)
 	importSecretLikeEnvVarsIntoBindings(bindings)
@@ -393,12 +396,16 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		args = substituteAccountID(args, accountID)
 		args = applyPlanBindings(args, bindings)
 
-		// One-click deploy: infer the app port from the target group (when present) so user-data publishes the right port.
+		// One-click deploy: infer the app port and health check path from the target group.
 		if len(args) >= 2 && args[0] == "elbv2" && args[1] == "create-target-group" {
-			if strings.TrimSpace(bindings["APP_PORT"]) == "" {
-				if p := strings.TrimSpace(flagValue(args, "--port")); p != "" {
+			if p := strings.TrimSpace(flagValue(args, "--port")); p != "" {
+				bindings["TG_PORT"] = p
+				if strings.TrimSpace(bindings["APP_PORT"]) == "" {
 					bindings["APP_PORT"] = p
 				}
+			}
+			if p := strings.TrimSpace(flagValue(args, "--health-check-path")); p != "" {
+				bindings["TG_HEALTH_PATH"] = p
 			}
 		}
 
@@ -424,16 +431,33 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 					args = setFlagValue(args, "--matcher", "HttpCode=200-399")
 				}
 			}
+			// For ALL generic apps: ensure matcher accepts common startup codes
+			if !isOpenClaw && !isWordPress {
+				if m := strings.TrimSpace(flagValue(args, "--matcher")); m == "" {
+					args = setFlagValue(args, "--matcher", "HttpCode=200-399")
+				}
+			}
 		}
+
+		// Deterministic alias resolution before falling back to AI
+		args = resolveBindingAliases(args, bindings)
 
 		// AI-powered placeholder resolution with exponential backoff
 		if hasUnresolvedPlaceholders(args) {
+			before := extractUnresolvedPlaceholders(args)
 			resolved, resolveErr := maybeResolvePlaceholdersWithAI(ctx, opts, args, bindings, "")
 			if resolveErr != nil {
 				_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: placeholder resolution failed: %v\n", resolveErr)
 			}
 			if resolved != nil {
 				args = resolved
+			}
+			// Re-apply bindings and aliases in case AI resolution added new ones
+			args = applyPlanBindings(args, bindings)
+			args = resolveBindingAliases(args, bindings)
+			after := extractUnresolvedPlaceholders(args)
+			if len(before) > len(after) {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] resolved %d/%d placeholders at exec time\n", len(before)-len(after), len(before))
 			}
 		}
 
@@ -450,10 +474,23 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 				return fmt.Errorf("command %d image preparation failed: %w", idx+1, err)
 			}
 			autoImagePrepared = true
+			// Validate IMAGE_URI is populated after image prep
+			if strings.TrimSpace(bindings["IMAGE_URI"]) == "" {
+				return fmt.Errorf("image preparation succeeded but IMAGE_URI binding is empty")
+			}
 		}
 
 		// Handle EC2 user-data generation for run-instances
 		args = maybeGenerateEC2UserData(args, bindings, opts)
+
+		// Inject ENV_ bindings as instance tags so bootstrap script can read them
+		args = injectEnvVarsAsInstanceTags(args, bindings)
+
+		// For EC2 run-instances, store env vars in SSM and check SSM connectivity
+		if len(args) >= 2 && args[0] == "ec2" && args[1] == "run-instances" {
+			storeEnvVarsInSSM(ctx, bindings, opts)
+			args, _ = RemediateRunInstancesForSSM(ctx, opts, args, opts.Writer)
+		}
 
 		if err := maybeSyncSecretsForRunInstances(ctx, args, opts); err != nil {
 			_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to sync secrets for user-data: %v\n", err)
@@ -515,6 +552,15 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		// Learn placeholder bindings from successful command outputs.
 		learnPlanBindingsFromProduces(cmdSpec.Produces, out, bindings)
 		learnPlanBindings(args, out, bindings, idx)
+
+		// IAM role/instance profile propagation wait: newly created roles take
+		// 1-10s to propagate. Subsequent commands (run-instances) may fail without this.
+		if len(args) >= 2 && args[0] == "iam" &&
+			(args[1] == "create-role" || args[1] == "create-instance-profile" ||
+				args[1] == "add-role-to-instance-profile") {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] waiting 8s for IAM propagation...\n")
+			time.Sleep(8 * time.Second)
+		}
 		bindings["CHECKPOINT_LAST_SUCCESS_INDEX"] = strconv.Itoa(idx + 1)
 		bindings["CHECKPOINT_LAST_FAILURE_INDEX"] = ""
 		if planLogger != nil {
@@ -625,14 +671,20 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 			}
 
 			if instanceID != "" {
+				healthPath := InferHealthPath(plan)
+				// Override: use the target group's actual health-check-path if set in bindings
+				if tgHealthPath := strings.TrimSpace(bindings["TG_HEALTH_PATH"]); tgHealthPath != "" {
+					healthPath = tgHealthPath
+				}
 				healthCfg := ServiceHealthConfig{
 					InstanceID:    instanceID,
 					Port:          InferServicePort(plan, bindings),
-					HealthPath:    InferHealthPath(plan),
+					HealthPath:    healthPath,
 					MaxRetries:    20,
 					RetryInterval: 15 * time.Second,
 					Profile:       opts.Profile,
 					Region:        opts.Region,
+					Bindings:      bindings,
 				}
 
 				WriteHealthCheckpoint(opts.Writer, "SERVICE HEALTH VERIFICATION (before ALB exposure)")
@@ -764,6 +816,38 @@ func prebindAppPortFromPlan(plan *Plan, bindings map[string]string) {
 	}
 	if wordpress.Detect(q, repoURL) {
 		bindings["APP_PORT"] = strconv.Itoa(wordpress.DefaultPort)
+	}
+}
+
+// importUserProvidedEnvVars reads the CLANKER_USER_ENV_NAMES env var (comma-separated list
+// of env var names explicitly set by the deploy UI) and imports each into bindings with
+// an ENV_ prefix so they are forwarded to the container via instance tags and SSM.
+func importUserProvidedEnvVars(bindings map[string]string) {
+	if bindings == nil {
+		return
+	}
+	manifest := strings.TrimSpace(os.Getenv("CLANKER_USER_ENV_NAMES"))
+	if manifest == "" {
+		return
+	}
+	for _, name := range strings.Split(manifest, ",") {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		val := os.Getenv(name)
+		if val == "" {
+			continue
+		}
+		bindingKey := "ENV_" + strings.ToUpper(name)
+		if strings.TrimSpace(bindings[bindingKey]) == "" {
+			bindings[bindingKey] = val
+		}
+		// Also store unprefixed so placeholder resolution works
+		upperName := strings.ToUpper(name)
+		if strings.TrimSpace(bindings[upperName]) == "" {
+			bindings[upperName] = val
+		}
 	}
 }
 
@@ -1422,6 +1506,62 @@ func fixRoleNameArg(args []string) []string {
 	return args
 }
 
+// bindingAliases maps canonical binding names to common alternatives that LLM plans
+// might use. This enables deterministic resolution before falling back to AI.
+var bindingAliases = map[string][]string{
+	"ACCOUNT_ID":  {"AWS_ACCOUNT_ID", "ACCOUNT"},
+	"REGION":      {"AWS_REGION", "AWS_DEFAULT_REGION"},
+	"VPC_ID":      {"VPC", "DEFAULT_VPC_ID"},
+	"AMI_ID":      {"IMAGE_ID", "AMI"},
+	"SG_ID":       {"SECURITY_GROUP_ID", "SG"},
+	"SUBNET_ID":   {"SUBNET", "SUBNET_1"},
+	"INSTANCE_ID": {"EC2_INSTANCE_ID"},
+	"TG_ARN":      {"TARGET_GROUP_ARN"},
+	"ALB_ARN":     {"LOAD_BALANCER_ARN"},
+	"ROLE_ARN":    {"IAM_ROLE_ARN", "EC2_ROLE_ARN"},
+	"ECR_URI":     {"ECR_REPO_URI", "REPOSITORY_URI", "ECR_REPOSITORY_URI"},
+	"ECR_REPO":    {"ECR_REPO_NAME", "REPO_NAME"},
+}
+
+// resolveBindingAliases attempts to resolve placeholder tokens by checking common
+// alias names in the bindings map. This runs before AI resolution to handle simple
+// naming mismatches deterministically.
+func resolveBindingAliases(args []string, bindings map[string]string) []string {
+	out := make([]string, len(args))
+	copy(out, args)
+	for i, arg := range out {
+		if !strings.Contains(arg, "<") || !strings.Contains(arg, ">") {
+			continue
+		}
+		out[i] = planPlaceholderTokenRe.ReplaceAllStringFunc(arg, func(m string) string {
+			key := strings.TrimSuffix(strings.TrimPrefix(m, "<"), ">")
+			if v := strings.TrimSpace(bindings[key]); v != "" {
+				return v
+			}
+			// Try aliases: check if key is a canonical name with aliases
+			for canonical, aliases := range bindingAliases {
+				if key == canonical {
+					for _, alias := range aliases {
+						if v := strings.TrimSpace(bindings[alias]); v != "" {
+							return v
+						}
+					}
+				}
+				// Check if key is an alias name
+				for _, alias := range aliases {
+					if key == alias {
+						if v := strings.TrimSpace(bindings[canonical]); v != "" {
+							return v
+						}
+					}
+				}
+			}
+			return m
+		})
+	}
+	return out
+}
+
 func learnPlanBindings(args []string, output string, bindings map[string]string, cmdIndex int) {
 	if len(args) < 2 {
 		return
@@ -1608,8 +1748,10 @@ func learnPlanBindings(args []string, output string, bindings map[string]string,
 				bindings["SG_WEB"] = gid
 			}
 
-			// Fill first empty slot in common placeholders
-			for _, k := range []string{"SG_ID", "SG_1", "SG_ALB_ID", "SG_WEB_ID", "SG_RDS_ID", "SG_LAMBDA_ID", "SG_CLIENT_ID"} {
+			// Fill first empty slot in generic placeholders only.
+			// Named SG placeholders (SG_ALB_ID, SG_WEB_ID, etc.) are handled
+			// by inferSGBindings and the switch block above.
+			for _, k := range []string{"SG_ID", "SG_1"} {
 				if strings.TrimSpace(bindings[k]) == "" {
 					bindings[k] = gid
 					break
@@ -2565,7 +2707,8 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 	repoURLForDetect := extractRepoURLFromQuestion(questionForDetect)
 	if wordpress.Detect(questionForDetect, repoURLForDetect) {
 		script := generateWordPressOneClickUserData(bindings)
-		encoded := base64.StdEncoding.EncodeToString([]byte(script))
+		mimeWrapped := wrapUserDataInMIME(script)
+		encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 		newArgs := make([]string, len(args))
 		copy(newArgs, args)
 		if userDataIdx >= 0 {
@@ -2604,10 +2747,11 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 	needsInjection := isTrivial || (hasDocker && !startsContainer) || brokenAL2023DockerInstall || usesWrongImage ||
 		(startsContainer && (mentionsDockerHubOpenClaw || (!mentionsECR && strings.TrimSpace(bindings["ECR_URI"]) != "") || missingEnvInScript))
 
-	// If the plan provided a literal user-data script (not base64), base64-encode it so the AWS CLI
-	// receives it reliably (and EC2 will execute it).
+	// If the plan provided a literal user-data script (not base64), wrap in MIME and base64-encode
+	// so the AWS CLI receives it reliably and cloud-init recognizes it as a script.
 	if !userDataWasBase64 && looksLikeScript && !needsInjection {
-		encoded := base64.StdEncoding.EncodeToString([]byte(checkUserData))
+		mimeWrapped := wrapUserDataInMIME(checkUserData)
+		encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 		newArgs := make([]string, len(args))
 		copy(newArgs, args)
 		if userDataIdx >= 0 {
@@ -2628,7 +2772,8 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 	if deployMode == "native" {
 		// Use pre-generated Node.js user-data script
 		if script := bindings["NODEJS_USER_DATA"]; script != "" {
-			encoded := base64.StdEncoding.EncodeToString([]byte(script))
+			mimeWrapped := wrapUserDataInMIME(script)
+			encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 			newArgs := make([]string, len(args))
 			copy(newArgs, args)
 			newArgs[userDataIdx] = encoded
@@ -2674,8 +2819,24 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 		}
 	}
 
-	// If we still don't have an imageRef, we can't generate a runnable startup script.
+	// If we still don't have an imageRef, generate a fallback Docker-ready script.
+	// This ensures the instance has Docker running and ECR auth even if the image
+	// isn't known yet (e.g., one-click deploy where build happens after plan hydration).
 	if imageRef == "" {
+		// Check if this looks like a Docker deployment that needs user-data
+		if needsDockerUserData(args, bindings, checkUserData) {
+			fallbackScript := generateFallbackDockerUserData(bindings, opts.Region)
+			mimeWrapped := wrapUserDataInMIME(fallbackScript)
+			encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
+			newArgs := make([]string, len(args))
+			copy(newArgs, args)
+			if userDataIdx >= 0 {
+				newArgs[userDataIdx] = encoded
+			} else if userDataInlineIdx >= 0 {
+				newArgs[userDataInlineIdx] = "--user-data=" + encoded
+			}
+			return newArgs
+		}
 		return args
 	}
 
@@ -2946,8 +3107,9 @@ echo '[bootstrap] login/pull'
 echo 'Deployment complete!'
 `, loginLine, pullLine, preRun, dockerRunCmd, postRun)
 
-	// Base64 encode the script
-	encoded := base64.StdEncoding.EncodeToString([]byte(script))
+	// Wrap in MIME multipart and base64 encode so cloud-init recognizes it as a script
+	mimeWrapped := wrapUserDataInMIME(script)
+	encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 
 	// Replace the user-data argument
 	newArgs := make([]string, len(args))
@@ -3017,7 +3179,8 @@ func sanitizeCommandArgsForExecution(args []string, bindings map[string]string) 
 
 	trimmed = strings.ReplaceAll(trimmed, "\r\n", "\n")
 	if looksLikeUserDataScript(trimmed) {
-		trimmed = base64.StdEncoding.EncodeToString([]byte(trimmed))
+		mimeWrapped := wrapUserDataInMIME(trimmed)
+		trimmed = base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 	}
 
 	if valueIdx >= 0 {
@@ -3106,6 +3269,204 @@ func sanitizeRunInstancesBlockDeviceMappings(args []string) []string {
 	return args
 }
 
+// injectEnvVarsAsInstanceTags adds ENV_ bindings as instance tags to run-instances commands.
+// This allows the bootstrap script to read env vars from instance tags if user-data generation fails.
+// Tags are limited to 50 per resource and 256 chars per value, so we only add ENV_ vars that fit.
+// Also adds ImageUri and AppPort tags for the bootstrap script to discover the container config.
+func injectEnvVarsAsInstanceTags(args []string, bindings map[string]string) []string {
+	if len(args) < 2 || args[0] != "ec2" || args[1] != "run-instances" {
+		return args
+	}
+
+	// Collect ENV_ bindings that fit in tags (max 256 chars)
+	var envTags []map[string]string
+
+	// Add ImageUri tag if we have an image reference
+	if imageURI := strings.TrimSpace(bindings["IMAGE_URI"]); imageURI != "" && len(imageURI) <= 256 {
+		envTags = append(envTags, map[string]string{"Key": "ImageUri", "Value": imageURI})
+	}
+
+	// Add AppPort tag
+	if appPort := strings.TrimSpace(bindings["APP_PORT"]); appPort != "" {
+		envTags = append(envTags, map[string]string{"Key": "AppPort", "Value": appPort})
+	} else if port := strings.TrimSpace(bindings["ENV_PORT"]); port != "" {
+		envTags = append(envTags, map[string]string{"Key": "AppPort", "Value": port})
+	}
+
+	// Add AppName tag from various sources
+	if appName := strings.TrimSpace(bindings["APP_NAME"]); appName != "" {
+		envTags = append(envTags, map[string]string{"Key": "AppName", "Value": appName})
+	} else if ecrRepo := strings.TrimSpace(bindings["ECR_REPO"]); ecrRepo != "" {
+		envTags = append(envTags, map[string]string{"Key": "AppName", "Value": ecrRepo})
+	}
+
+	for key, value := range bindings {
+		if !strings.HasPrefix(key, "ENV_") {
+			continue
+		}
+		// Skip empty values
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		// Tag value limit is 256 chars
+		if len(value) > 256 {
+			continue
+		}
+		// With SSM as the primary encrypted channel for env vars, tags serve as a
+		// best-effort fallback. No longer filter out secret-patterned names here.
+		envTags = append(envTags, map[string]string{"Key": key, "Value": value})
+	}
+
+	if len(envTags) == 0 {
+		return args
+	}
+
+	// Find existing --tag-specifications
+	tagSpecIdx := -1
+	tagSpecInline := false
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--tag-specifications" && i+1 < len(args) {
+			tagSpecIdx = i + 1
+			break
+		}
+		if strings.HasPrefix(args[i], "--tag-specifications=") {
+			tagSpecIdx = i
+			tagSpecInline = true
+			break
+		}
+	}
+
+	// Build tag spec JSON
+	if tagSpecIdx >= 0 {
+		// Parse existing tag spec and add our tags
+		raw := args[tagSpecIdx]
+		if tagSpecInline {
+			raw = strings.TrimPrefix(raw, "--tag-specifications=")
+		}
+		raw = strings.TrimSpace(raw)
+
+		// Handle both array and single object formats
+		var specs []map[string]any
+		if strings.HasPrefix(raw, "[") {
+			_ = json.Unmarshal([]byte(raw), &specs)
+		} else if strings.HasPrefix(raw, "{") {
+			var single map[string]any
+			if err := json.Unmarshal([]byte(raw), &single); err == nil {
+				specs = []map[string]any{single}
+			}
+		}
+
+		// Find instance resource type and add tags
+		found := false
+		for i, spec := range specs {
+			rt, _ := spec["ResourceType"].(string)
+			if rt == "instance" {
+				tags, _ := spec["Tags"].([]any)
+				for _, et := range envTags {
+					tags = append(tags, map[string]any{"Key": et["Key"], "Value": et["Value"]})
+				}
+				specs[i]["Tags"] = tags
+				found = true
+				break
+			}
+		}
+
+		// If no instance spec found, add one
+		if !found {
+			var tagList []any
+			for _, et := range envTags {
+				tagList = append(tagList, map[string]any{"Key": et["Key"], "Value": et["Value"]})
+			}
+			specs = append(specs, map[string]any{
+				"ResourceType": "instance",
+				"Tags":         tagList,
+			})
+		}
+
+		// Serialize back
+		b, err := json.Marshal(specs)
+		if err == nil {
+			newArgs := make([]string, len(args))
+			copy(newArgs, args)
+			if tagSpecInline {
+				newArgs[tagSpecIdx] = "--tag-specifications=" + string(b)
+			} else {
+				newArgs[tagSpecIdx] = string(b)
+			}
+			return newArgs
+		}
+	} else {
+		// No existing tag-specifications, add new one
+		var tagList []any
+		for _, et := range envTags {
+			tagList = append(tagList, map[string]any{"Key": et["Key"], "Value": et["Value"]})
+		}
+		spec := []map[string]any{{
+			"ResourceType": "instance",
+			"Tags":         tagList,
+		}}
+		b, err := json.Marshal(spec)
+		if err == nil {
+			// Insert before --profile if present, or at end
+			insertIdx := len(args)
+			for i, arg := range args {
+				if arg == "--profile" {
+					insertIdx = i
+					break
+				}
+			}
+			newArgs := make([]string, 0, len(args)+2)
+			newArgs = append(newArgs, args[:insertIdx]...)
+			newArgs = append(newArgs, "--tag-specifications", string(b))
+			newArgs = append(newArgs, args[insertIdx:]...)
+			return newArgs
+		}
+	}
+
+	return args
+}
+
+// storeEnvVarsInSSM stores all ENV_ bindings as SSM SecureString parameters
+// under /clanker/<appName>/ so the bootstrap and remediation scripts can read them.
+// This supplements instance tags (which have a 256-char value limit).
+func storeEnvVarsInSSM(ctx context.Context, bindings map[string]string, opts ExecOptions) {
+	appName := strings.TrimSpace(bindings["APP_NAME"])
+	if appName == "" {
+		appName = strings.TrimSpace(bindings["ECR_REPO"])
+	}
+	if appName == "" {
+		appName = "app"
+	}
+	ssmPath := "/clanker/" + appName + "/"
+
+	for key, val := range bindings {
+		if !strings.HasPrefix(key, "ENV_") {
+			continue
+		}
+		if strings.TrimSpace(val) == "" {
+			continue
+		}
+		envName := strings.TrimPrefix(key, "ENV_")
+		paramName := ssmPath + envName
+
+		args := []string{
+			"ssm", "put-parameter",
+			"--name", paramName,
+			"--value", val,
+			"--type", "SecureString",
+			"--overwrite",
+			"--region", opts.Region,
+			"--no-cli-pager",
+		}
+		if opts.Profile != "" {
+			args = append(args, "--profile", opts.Profile)
+		}
+		if _, err := runAWSCommandStreaming(ctx, args, nil, opts.Writer); err != nil {
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to store env var %s in SSM: %v\n", envName, err)
+		}
+	}
+}
+
 func isUserDataPlaceholderValue(v string) bool {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -3164,6 +3525,134 @@ func looksLikeUserDataScript(script string) bool {
 		return true
 	}
 	return false
+}
+
+// wrapUserDataInMIME wraps a shell script in MIME multipart format so cloud-init
+// explicitly recognizes it as a script to execute. This fixes issues with Amazon Linux 2023
+// and other AMIs where cloud-init may not execute raw scripts passed via user-data.
+func wrapUserDataInMIME(script string) string {
+	const boundary = "==CLANKER_USERDATA_BOUNDARY=="
+	return fmt.Sprintf(`Content-Type: multipart/mixed; boundary="%s"
+MIME-Version: 1.0
+
+--%s
+Content-Type: text/x-shellscript; charset="utf-8"
+Content-Disposition: attachment; filename="userdata.sh"
+
+%s
+
+--%s--
+`, boundary, boundary, script, boundary)
+}
+
+// needsDockerUserData checks if this is a Docker deployment that needs user-data generated.
+func needsDockerUserData(args []string, bindings map[string]string, currentUserData string) bool {
+	// Check if ECR is involved
+	if bindings["ECR_URI"] != "" || bindings["ECR_REPO"] != "" {
+		return true
+	}
+
+	// Check if current user-data is empty or a placeholder
+	trimmed := strings.TrimSpace(currentUserData)
+	if trimmed == "" || isUserDataPlaceholderValue(trimmed) {
+		// Look for indicators this is a Docker/container deployment
+		question := strings.ToLower(bindings["PLAN_QUESTION"])
+		if strings.Contains(question, "docker") || strings.Contains(question, "container") {
+			return true
+		}
+
+		// Check if IAM profile suggests container deployment
+		for _, arg := range args {
+			lower := strings.ToLower(arg)
+			if strings.Contains(lower, "ec2containerregistry") || strings.Contains(lower, "ecr") {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// generateFallbackDockerUserData creates a user-data script that sets up Docker
+// and ECR auth even when the image URI isn't known yet. This ensures the instance
+// is ready to pull and run containers once the image is built and pushed.
+func generateFallbackDockerUserData(bindings map[string]string, region string) string {
+	if region == "" {
+		region = bindings["REGION"]
+	}
+	if region == "" {
+		region = bindings["AWS_REGION"]
+	}
+	if region == "" {
+		region = "us-east-1"
+	}
+
+	// Build environment variable exports
+	var envExports strings.Builder
+	for key, value := range bindings {
+		if strings.HasPrefix(key, "ENV_") {
+			envName := strings.TrimPrefix(key, "ENV_")
+			escaped := strings.ReplaceAll(value, `"`, `\"`)
+			escaped = strings.ReplaceAll(escaped, `$`, `\$`)
+			escaped = strings.ReplaceAll(escaped, "`", "\\`")
+			envExports.WriteString(fmt.Sprintf("export %s=\"%s\"\n", envName, escaped))
+		}
+	}
+
+	script := fmt.Sprintf(`#!/bin/bash
+set -e
+exec > /var/log/user-data.log 2>&1
+
+echo '[bootstrap] fallback Docker setup - image URI will be provided later'
+
+# Environment variables
+%s
+
+echo '[bootstrap] ensuring aws cli'
+if ! command -v aws >/dev/null 2>&1; then
+	. /etc/os-release || true
+	if [ "${ID:-}" = "amzn" ]; then
+		if command -v dnf >/dev/null 2>&1; then dnf install -y awscli; else yum install -y awscli; fi
+	elif command -v apt-get >/dev/null 2>&1; then
+		apt-get update -y && apt-get install -y awscli
+	fi
+fi
+
+echo '[bootstrap] installing docker'
+. /etc/os-release || true
+if [ "${ID:-}" = "amzn" ]; then
+	if command -v dnf >/dev/null 2>&1; then
+		dnf install -y docker
+	else
+		yum install -y docker
+	fi
+elif command -v apt-get >/dev/null 2>&1; then
+	apt-get update -y && apt-get install -y docker.io
+fi
+
+systemctl enable docker
+systemctl start docker
+
+echo '[bootstrap] authenticating with ECR'
+REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "%s")
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")
+
+if [ -n "$ACCOUNT" ]; then
+	for i in 1 2 3 4 5; do
+		if aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ACCOUNT.dkr.ecr.$REGION.amazonaws.com" 2>/dev/null; then
+			echo "[bootstrap] ECR login succeeded (attempt=$i)"
+			break
+		fi
+		echo "[bootstrap] ECR login attempt $i failed; retrying..."
+		sleep $((i*3))
+	done
+fi
+
+echo '[bootstrap] Docker ready, waiting for image deployment...'
+echo '[bootstrap] When image is pushed to ECR, run: docker pull <image> && docker run ...'
+`, envExports.String(), region)
+
+	return script
 }
 
 func findUnresolvedExecutionTokens(args []string) []string {
@@ -4734,6 +5223,7 @@ func inferECRBindings(name, uri, arn string, bindings map[string]string) {
 		bindings["ECR_URI"] = uri
 		bindings["ECR_REPO_URI"] = uri
 		bindings["REPOSITORY_URI"] = uri
+		bindings["ECR_REPOSITORY_URI"] = uri
 	}
 	if arn != "" {
 		bindings["ECR_ARN"] = arn
