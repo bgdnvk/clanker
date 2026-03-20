@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"fmt"
 	"regexp"
 	"sort"
 	"strings"
@@ -30,6 +31,7 @@ type openClawDOBootstrapSpec struct {
 	IncludeGemini    bool
 	IncludeDiscord   bool
 	IncludeTelegram  bool
+	ExtraEnvKeys     []string
 }
 
 type openClawDORuntimeSpec struct {
@@ -218,6 +220,10 @@ func inferOpenClawDOBootstrapSpec(script string) (openClawDOBootstrapSpec, bool)
 			spec.IncludeDiscord = true
 		case "TELEGRAM_BOT_TOKEN":
 			spec.IncludeTelegram = true
+		default:
+			if shouldPassThroughOpenClawDOEnvKey(key) {
+				spec.ExtraEnvKeys = appendUniqueOpenClawDOEnvKey(spec.ExtraEnvKeys, key)
+			}
 		}
 	}
 
@@ -227,7 +233,111 @@ func inferOpenClawDOBootstrapSpec(script string) (openClawDOBootstrapSpec, bool)
 	if spec.GatewaySecretKey == "" {
 		return openClawDOBootstrapSpec{}, false
 	}
+	sort.Strings(spec.ExtraEnvKeys)
 	return spec, true
+}
+
+func appendUniqueOpenClawDOEnvKey(keys []string, key string) []string {
+	key = strings.ToUpper(strings.TrimSpace(key))
+	if key == "" {
+		return keys
+	}
+	for _, existing := range keys {
+		if existing == key {
+			return keys
+		}
+	}
+	return append(keys, key)
+}
+
+func isBuiltInOpenClawDOEnvKey(key string) bool {
+	key = strings.ToUpper(strings.TrimSpace(key))
+	switch key {
+	case "OPENCLAW_CONFIG_DIR", "OPENCLAW_WORKSPACE_DIR", "OPENCLAW_GATEWAY_PORT", "OPENCLAW_BRIDGE_PORT", "OPENCLAW_GATEWAY_BIND", "OPENCLAW_IMAGE", "OPENCLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_PASSWORD", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "DISCORD_BOT_TOKEN", "TELEGRAM_BOT_TOKEN":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldPassThroughOpenClawDOEnvKey(key string) bool {
+	key = strings.ToUpper(strings.TrimSpace(key))
+	if key == "" || isBuiltInOpenClawDOEnvKey(key) {
+		return false
+	}
+	if !regexp.MustCompile(`^[A-Z][A-Z0-9_]{2,127}$`).MatchString(key) {
+		return false
+	}
+	if !strings.Contains(key, "_") {
+		return false
+	}
+	if strings.HasPrefix(key, "AWS_") || strings.HasPrefix(key, "GOOGLE_") || strings.HasPrefix(key, "GCP_") || strings.HasPrefix(key, "AZURE_") || strings.HasPrefix(key, "CLOUDFLARE_") || strings.HasPrefix(key, "DIGITALOCEAN_") || strings.HasPrefix(key, "CLANKER_") || strings.HasPrefix(key, "SSH_") {
+		return false
+	}
+	return strings.Contains(key, "TOKEN") || strings.Contains(key, "KEY") || strings.Contains(key, "PASSWORD") || strings.Contains(key, "SECRET")
+}
+
+func openClawDOAuthProfileScript(spec openClawDOBootstrapSpec) []string {
+	type providerProfile struct {
+		provider string
+		envKey   string
+	}
+	providers := make([]providerProfile, 0, 3)
+	if spec.IncludeAnthropic {
+		providers = append(providers, providerProfile{provider: "anthropic", envKey: "ANTHROPIC_API_KEY"})
+	}
+	if spec.IncludeOpenAI {
+		providers = append(providers, providerProfile{provider: "openai", envKey: "OPENAI_API_KEY"})
+	}
+	if spec.IncludeGemini {
+		providers = append(providers, providerProfile{provider: "gemini", envKey: "GEMINI_API_KEY"})
+	}
+	if len(providers) == 0 {
+		return nil
+	}
+
+	lines := []string{
+		"cat > /opt/openclaw/data/agents/main/agent/auth-profiles.json << 'JSONEOF'",
+		"{",
+		"  \"version\": 1,",
+		"  \"order\": {",
+	}
+	for i, provider := range providers {
+		comma := ","
+		if i == len(providers)-1 {
+			comma = ""
+		}
+		lines = append(lines, fmt.Sprintf("    %q: [%q]%s", provider.provider, provider.provider+":default", comma))
+	}
+	lines = append(lines,
+		"  },",
+		"  \"profiles\": {",
+	)
+	for i, provider := range providers {
+		profileID := provider.provider + ":default"
+		lines = append(lines,
+			fmt.Sprintf("    %q: {", profileID),
+			"      \"type\": \"api_key\",",
+			fmt.Sprintf("      \"provider\": %q,", provider.provider),
+			"      \"keyRef\": {",
+			"        \"source\": \"env\",",
+			"        \"provider\": \"default\",",
+			fmt.Sprintf("        \"id\": %q", provider.envKey),
+			"      }",
+		)
+		closing := "    }"
+		if i < len(providers)-1 {
+			closing += ","
+		}
+		lines = append(lines, closing)
+	}
+	lines = append(lines,
+		"  }",
+		"}",
+		"JSONEOF",
+		"",
+	)
+	return lines
 }
 
 func inferOpenClawDORuntimeSpec(script string) (openClawDORuntimeSpec, bool) {
@@ -323,6 +433,11 @@ func renderOpenClawDOBootstrapScript(spec openClawDOBootstrapSpec) string {
 	if spec.IncludeTelegram {
 		writeLines(&b, "TELEGRAM_BOT_TOKEN=<TELEGRAM_BOT_TOKEN>")
 	}
+	for _, key := range spec.ExtraEnvKeys {
+		if shouldPassThroughOpenClawDOEnvKey(key) {
+			writeLines(&b, key+"=<"+key+">")
+		}
+	}
 	writeLines(&b,
 		"ENVEOF",
 		"",
@@ -338,9 +453,13 @@ func renderOpenClawDOBootstrapScript(spec openClawDOBootstrapSpec) string {
 		"}",
 		"JSONEOF",
 		"",
+	)
+	writeLines(&b, openClawDOAuthProfileScript(spec)...)
+	writeLines(&b,
 		"chown -R 1000:1000 /opt/openclaw/data /opt/openclaw/workspace",
 		"chmod 700 /opt/openclaw/data /opt/openclaw/workspace",
 		"chmod 600 /opt/openclaw/data/openclaw.json",
+		"if [ -f /opt/openclaw/data/agents/main/agent/auth-profiles.json ]; then chmod 600 /opt/openclaw/data/agents/main/agent/auth-profiles.json; fi",
 		"",
 		openClawDOImagePullCommand,
 		"",

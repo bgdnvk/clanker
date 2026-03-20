@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -333,6 +334,9 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 	isOpenClaw := openclaw.Detect(strings.TrimSpace(plan.Question), extractRepoURLFromQuestion(plan.Question))
 
 	bindings := make(map[string]string)
+	if strings.TrimSpace(plan.Question) != "" {
+		bindings["PLAN_QUESTION"] = strings.TrimSpace(plan.Question)
+	}
 	sshPrivateKeyPath := ""
 	var sshKeyMaterial doDeploySSHKeyMaterial
 	sshKeyCleanupDeferred := false
@@ -361,6 +365,7 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 			args = args[1:]
 		}
 		args = applyPlanBindings(args, bindings)
+		args = injectOpenClawDOBynamicUserDataAtExec(args, bindings)
 		args = expandTildeInArgs(args)
 		if generatedArgs, err := ensureDOSSHImportKeyMaterial(args, &sshKeyMaterial, opts.Writer); err != nil {
 			return fmt.Errorf("command %d rejected: %w", idx+1, err)
@@ -387,6 +392,7 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 		args = normalizeFirewallRuleFlagsAtExec(args)
 		args = stripInvalidICMPPortsAtExec(args)
 		args = fixFirewallEmptyAddressAtExec(args)
+		args = ensureDODropletCreateWaitAtExec(args)
 		if resolvedArgs, err := normalizeDODropletVPCUUIDAtExec(ctx, args, opts, opts.Writer); err != nil {
 			return fmt.Errorf("command %d rejected: %w", idx+1, err)
 		} else {
@@ -462,6 +468,9 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 
 		args = normalizeDoctlOutputFlags(args)
 		if isOpenClaw && !openClawGatewayWaitDone && isDOAppsCreate(args) {
+			if err := maybePrepareOpenClawDORuntimeOverSSH(ctx, bindings, sshPrivateKeyPath, opts); err != nil {
+				return wrapDOPartialStateError(ctx, execState, bindings, sshPrivateKeyPath, opts, fmt.Errorf("digitalocean command %d pre-check failed (openclaw-bootstrap): %w", idx+1, err))
+			}
 			if err := waitForOpenClawDOGatewayReady(ctx, bindings, opts.Writer); err != nil {
 				return wrapDOPartialStateError(ctx, execState, bindings, sshPrivateKeyPath, opts, fmt.Errorf("digitalocean command %d pre-check failed (openclaw-gateway): %w", idx+1, err))
 			}
@@ -502,6 +511,9 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 		learnPlanBindingsFromProduces(cmdSpec.Produces, out, bindings)
 		extractSSHKeyBindingsDirect(args, out, bindings)
 		extractDODropletBindingsDirect(args, out, bindings)
+		if isDOComputeDropletCreate(args) {
+			recoverDODropletIPAfterCreate(ctx, bindings, opts, opts.Writer)
+		}
 		extractFirewallBindingsDirect(args, out, bindings)
 		extractDOAppBindingsDirect(args, out, bindings)
 		if isDOAppsCreate(args) {
@@ -535,9 +547,244 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 		if err := maybeStartOpenClawDOPairApproveWindowOverSSH(ctx, bindings, sshPrivateKeyPath, opts); err != nil {
 			_, _ = fmt.Fprintf(opts.Writer, "[openclaw] warning: failed to start DigitalOcean auto-pair approval window: %v\n", err)
 		}
+		openclaw.MaybePrintPostDeployInstructions(bindings, opts.Profile, opts.Region, opts.Writer, strings.TrimSpace(plan.Question), extractRepoURLFromQuestion(plan.Question))
 	}
 
 	return nil
+}
+
+func injectOpenClawDOBynamicUserDataAtExec(args []string, bindings map[string]string) []string {
+	if !isDOComputeDropletCreate(args) {
+		return args
+	}
+	userDataIdx := -1
+	for i := 0; i < len(args)-1; i++ {
+		if strings.TrimSpace(args[i]) == "--user-data" {
+			userDataIdx = i + 1
+			break
+		}
+	}
+	if userDataIdx < 0 || userDataIdx >= len(args) {
+		return args
+	}
+	script := args[userDataIdx]
+	lower := strings.ToLower(script)
+	if !strings.Contains(lower, "/opt/openclaw/.env") || !strings.Contains(lower, "/opt/openclaw/data/openclaw.json") {
+		return args
+	}
+	updated := ensureOpenClawDOCoreEnvLines(script, bindings)
+	updated = appendOpenClawDOEnvLines(updated, requestedOpenClawDOPassThroughEnvKeys(bindings), bindings)
+	updated = ensureOpenClawDOAuthProfilesScript(updated, bindings)
+	if updated == script {
+		return args
+	}
+	newArgs := make([]string, len(args))
+	copy(newArgs, args)
+	newArgs[userDataIdx] = updated
+	return newArgs
+}
+
+func requestedOpenClawDOPassThroughEnvKeys(bindings map[string]string) []string {
+	keys := make([]string, 0, 16)
+	seen := map[string]struct{}{}
+	add := func(key string) {
+		key = strings.ToUpper(strings.TrimSpace(key))
+		if key == "" {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		if !secretLikeEnvKeyRe.MatchString(key) || !strings.Contains(key, "_") {
+			return
+		}
+		if strings.HasPrefix(key, "AWS_") || strings.HasPrefix(key, "GOOGLE_") || strings.HasPrefix(key, "GCP_") || strings.HasPrefix(key, "AZURE_") || strings.HasPrefix(key, "CLOUDFLARE_") || strings.HasPrefix(key, "DIGITALOCEAN_") || strings.HasPrefix(key, "CLANKER_") || strings.HasPrefix(key, "SSH_") {
+			return
+		}
+		switch key {
+		case "OPENCLAW_CONFIG_DIR", "OPENCLAW_WORKSPACE_DIR", "OPENCLAW_GATEWAY_PORT", "OPENCLAW_BRIDGE_PORT", "OPENCLAW_GATEWAY_BIND", "OPENCLAW_IMAGE", "OPENCLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_PASSWORD", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "DISCORD_BOT_TOKEN", "TELEGRAM_BOT_TOKEN":
+			return
+		}
+		if strings.TrimSpace(bindings[key]) == "" && strings.TrimSpace(bindings["ENV_"+key]) == "" {
+			return
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	for _, raw := range splitEnvKeyManifest(os.Getenv("CLANKER_PASSTHROUGH_ENV_KEYS")) {
+		add(raw)
+	}
+	for key := range bindings {
+		if strings.HasPrefix(key, "ENV_") {
+			add(strings.TrimPrefix(key, "ENV_"))
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func splitEnvKeyManifest(raw string) []string {
+	return strings.FieldsFunc(raw, func(r rune) bool {
+		switch r {
+		case ',', '\n', '\r', '\t', ' ':
+			return true
+		default:
+			return false
+		}
+	})
+}
+
+func ensureOpenClawDOCoreEnvLines(script string, bindings map[string]string) string {
+	if !strings.Contains(script, "\nENVEOF") {
+		return script
+	}
+	type envPair struct {
+		key   string
+		value string
+	}
+	pairs := []envPair{
+		{key: "OPENCLAW_GATEWAY_TOKEN", value: strings.TrimSpace(bindings["OPENCLAW_GATEWAY_TOKEN"])},
+		{key: "OPENCLAW_GATEWAY_PASSWORD", value: strings.TrimSpace(bindings["OPENCLAW_GATEWAY_PASSWORD"])},
+		{key: "ANTHROPIC_API_KEY", value: strings.TrimSpace(bindings["ANTHROPIC_API_KEY"])},
+		{key: "OPENAI_API_KEY", value: strings.TrimSpace(bindings["OPENAI_API_KEY"])},
+		{key: "GEMINI_API_KEY", value: strings.TrimSpace(bindings["GEMINI_API_KEY"])},
+		{key: "DISCORD_BOT_TOKEN", value: strings.TrimSpace(bindings["DISCORD_BOT_TOKEN"])},
+		{key: "TELEGRAM_BOT_TOKEN", value: strings.TrimSpace(bindings["TELEGRAM_BOT_TOKEN"])},
+	}
+	updated := script
+	for _, pair := range pairs {
+		if pair.value == "" {
+			continue
+		}
+		updated = upsertOpenClawDOEnvLine(updated, pair.key, pair.value)
+	}
+	return updated
+}
+
+func upsertOpenClawDOEnvLine(script string, key string, value string) string {
+	key = strings.ToUpper(strings.TrimSpace(key))
+	value = strings.TrimSpace(value)
+	if key == "" || value == "" || !strings.Contains(script, "\nENVEOF") {
+		return script
+	}
+	line := key + "=" + value
+	pattern := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(key) + `=.*$`)
+	if pattern.MatchString(script) {
+		return pattern.ReplaceAllString(script, line)
+	}
+	return strings.Replace(script, "\nENVEOF", "\n"+line+"\nENVEOF", 1)
+}
+
+func appendOpenClawDOEnvLines(script string, extraKeys []string, bindings map[string]string) string {
+	if len(extraKeys) == 0 || !strings.Contains(script, "\nENVEOF") {
+		return script
+	}
+	insert := make([]string, 0, len(extraKeys))
+	for _, key := range extraKeys {
+		if strings.Contains(script, "\n"+key+"=") || strings.HasPrefix(script, key+"=") {
+			continue
+		}
+		value := strings.TrimSpace(bindings[key])
+		if value == "" {
+			value = strings.TrimSpace(bindings["ENV_"+key])
+		}
+		if value == "" {
+			continue
+		}
+		insert = append(insert, key+"="+value)
+	}
+	if len(insert) == 0 {
+		return script
+	}
+	block := strings.Join(insert, "\n") + "\n"
+	return strings.Replace(script, "\nENVEOF", "\n"+block+"ENVEOF", 1)
+}
+
+func ensureOpenClawDOAuthProfilesScript(script string, bindings map[string]string) string {
+	if strings.Contains(script, "/opt/openclaw/data/agents/main/agent/auth-profiles.json") {
+		if strings.Contains(script, "chmod 600 /opt/openclaw/data/openclaw.json") && !strings.Contains(script, "chmod 600 /opt/openclaw/data/agents/main/agent/auth-profiles.json") {
+			return strings.Replace(script, "chmod 600 /opt/openclaw/data/openclaw.json", "chmod 600 /opt/openclaw/data/openclaw.json\nif [ -f /opt/openclaw/data/agents/main/agent/auth-profiles.json ]; then chmod 600 /opt/openclaw/data/agents/main/agent/auth-profiles.json; fi", 1)
+		}
+		return script
+	}
+	type providerProfile struct {
+		provider string
+		envKey   string
+	}
+	providers := make([]providerProfile, 0, 3)
+	if strings.TrimSpace(bindings["ANTHROPIC_API_KEY"]) != "" {
+		providers = append(providers, providerProfile{provider: "anthropic", envKey: "ANTHROPIC_API_KEY"})
+	}
+	if strings.TrimSpace(bindings["OPENAI_API_KEY"]) != "" {
+		providers = append(providers, providerProfile{provider: "openai", envKey: "OPENAI_API_KEY"})
+	}
+	if strings.TrimSpace(bindings["GEMINI_API_KEY"]) != "" {
+		providers = append(providers, providerProfile{provider: "gemini", envKey: "GEMINI_API_KEY"})
+	}
+	if len(providers) == 0 || !strings.Contains(script, "\nchown -R 1000:1000 /opt/openclaw/data /opt/openclaw/workspace") {
+		return script
+	}
+	lines := []string{
+		"cat > /opt/openclaw/data/agents/main/agent/auth-profiles.json << 'JSONEOF'",
+		"{",
+		"  \"version\": 1,",
+		"  \"order\": {",
+	}
+	for i, provider := range providers {
+		comma := ","
+		if i == len(providers)-1 {
+			comma = ""
+		}
+		lines = append(lines, fmt.Sprintf("    %q: [%q]%s", provider.provider, provider.provider+":default", comma))
+	}
+	lines = append(lines, "  },", "  \"profiles\": {")
+	for i, provider := range providers {
+		profileID := provider.provider + ":default"
+		lines = append(lines,
+			fmt.Sprintf("    %q: {", profileID),
+			"      \"type\": \"api_key\",",
+			fmt.Sprintf("      \"provider\": %q,", provider.provider),
+			"      \"keyRef\": {",
+			"        \"source\": \"env\",",
+			"        \"provider\": \"default\",",
+			fmt.Sprintf("        \"id\": %q", provider.envKey),
+			"      }",
+		)
+		closing := "    }"
+		if i < len(providers)-1 {
+			closing += ","
+		}
+		lines = append(lines, closing)
+	}
+	lines = append(lines, "  }", "}", "JSONEOF", "")
+	block := strings.Join(lines, "\n") + "\n"
+	updated := strings.Replace(script, "\nchown -R 1000:1000 /opt/openclaw/data /opt/openclaw/workspace", "\n"+block+"chown -R 1000:1000 /opt/openclaw/data /opt/openclaw/workspace", 1)
+	if updated != script && strings.Contains(updated, "chmod 600 /opt/openclaw/data/openclaw.json") && !strings.Contains(updated, "chmod 600 /opt/openclaw/data/agents/main/agent/auth-profiles.json") {
+		updated = strings.Replace(updated, "chmod 600 /opt/openclaw/data/openclaw.json", "chmod 600 /opt/openclaw/data/openclaw.json\nif [ -f /opt/openclaw/data/agents/main/agent/auth-profiles.json ]; then chmod 600 /opt/openclaw/data/agents/main/agent/auth-profiles.json; fi", 1)
+	}
+	return updated
+}
+
+func isDOComputeDropletCreate(args []string) bool {
+	if len(args) < 3 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(args[0]), "compute") && strings.EqualFold(strings.TrimSpace(args[1]), "droplet") && strings.EqualFold(strings.TrimSpace(args[2]), "create")
+}
+
+func ensureDODropletCreateWaitAtExec(args []string) []string {
+	if !isDOComputeDropletCreate(args) {
+		return args
+	}
+	for _, arg := range args[3:] {
+		if strings.EqualFold(strings.TrimSpace(arg), "--wait") {
+			return args
+		}
+	}
+	updated := make([]string, 0, len(args)+1)
+	updated = append(updated, args...)
+	updated = append(updated, "--wait")
+	return updated
 }
 
 func logDOResourceStrategy(args []string, w io.Writer) {
@@ -1956,6 +2203,82 @@ func extractDODropletBindingsDirect(args []string, output string, bindings map[s
 	}
 }
 
+func recoverDODropletIPAfterCreate(ctx context.Context, bindings map[string]string, opts ExecOptions, w io.Writer) {
+	if strings.TrimSpace(bindings["DROPLET_IP"]) != "" {
+		return
+	}
+	dropletID := strings.TrimSpace(bindings["DROPLET_ID"])
+	if dropletID == "" {
+		return
+	}
+	if w != nil {
+		_, _ = fmt.Fprintf(w, "[maker] recovering droplet networking via: doctl compute droplet get %s --output json\n", dropletID)
+	}
+	out, err := runDoctlCommandWithRetry(ctx, []string{"compute", "droplet", "get", dropletID, "--output", "json"}, opts, io.Discard)
+	if err != nil {
+		if w != nil {
+			_, _ = fmt.Fprintf(w, "[maker] warning: failed to recover droplet networking for %s: %v\n", dropletID, err)
+		}
+		return
+	}
+	extractDODropletBindingsFromGetOutput(out, bindings)
+}
+
+func extractDODropletBindingsFromGetOutput(output string, bindings map[string]string) {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return
+	}
+	var entry map[string]any
+	if err := json.Unmarshal([]byte(output), &entry); err == nil && len(entry) > 0 {
+		extractDODropletBindingEntry(entry, bindings)
+		return
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal([]byte(output), &entries); err != nil || len(entries) == 0 {
+		return
+	}
+	extractDODropletBindingEntry(entries[0], bindings)
+}
+
+func extractDODropletBindingEntry(entry map[string]any, bindings map[string]string) {
+	if len(entry) == 0 {
+		return
+	}
+	if id := doJSONStringValue(entry["id"]); id != "" && strings.TrimSpace(bindings["DROPLET_ID"]) == "" {
+		bindings["DROPLET_ID"] = id
+	}
+	networks, ok := entry["networks"].(map[string]any)
+	if !ok {
+		return
+	}
+	v4, ok := networks["v4"].([]any)
+	if !ok || len(v4) == 0 {
+		return
+	}
+	fallbackIP := ""
+	for _, raw := range v4 {
+		netEntry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		ip := doJSONStringValue(netEntry["ip_address"])
+		if ip == "" {
+			continue
+		}
+		if fallbackIP == "" {
+			fallbackIP = ip
+		}
+		if strings.EqualFold(doJSONStringValue(netEntry["type"]), "public") {
+			bindings["DROPLET_IP"] = ip
+			return
+		}
+	}
+	if fallbackIP != "" && strings.TrimSpace(bindings["DROPLET_IP"]) == "" {
+		bindings["DROPLET_IP"] = fallbackIP
+	}
+}
+
 type doVPCInfo struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
@@ -2556,6 +2879,138 @@ func maybePatchOpenClawDOHTTPSOriginOverSSH(ctx context.Context, bindings map[st
 		}
 	}
 	return err
+}
+
+func maybePrepareOpenClawDORuntimeOverSSH(ctx context.Context, bindings map[string]string, sshPrivateKeyPath string, opts ExecOptions) error {
+	dropletIP := strings.TrimSpace(bindings["DROPLET_IP"])
+	if dropletIP == "" {
+		return nil
+	}
+	if sshPrivateKeyPath == "" {
+		sshPrivateKeyPath = strings.TrimSpace(bindings["SSH_PRIVATE_KEY_FILE"])
+	}
+	if sshPrivateKeyPath == "" {
+		return fmt.Errorf("missing SSH private key path")
+	}
+	if _, err := os.Stat(sshPrivateKeyPath); err != nil {
+		return fmt.Errorf("ssh private key unavailable: %w", err)
+	}
+
+	type envPair struct {
+		key   string
+		value string
+	}
+	envPairs := []envPair{
+		{key: "OPENCLAW_CONFIG_DIR", value: "/opt/openclaw/data"},
+		{key: "OPENCLAW_WORKSPACE_DIR", value: "/opt/openclaw/workspace"},
+		{key: "OPENCLAW_GATEWAY_PORT", value: strconv.Itoa(openclaw.DefaultPort)},
+		{key: "OPENCLAW_BRIDGE_PORT", value: "18790"},
+		{key: "OPENCLAW_GATEWAY_BIND", value: "lan"},
+		{key: "OPENCLAW_IMAGE", value: "ghcr.io/openclaw/openclaw:latest"},
+	}
+	for _, key := range []string{"OPENCLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_PASSWORD", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "DISCORD_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"} {
+		if value := strings.TrimSpace(bindings[key]); value != "" {
+			envPairs = append(envPairs, envPair{key: key, value: value})
+		}
+	}
+	for _, key := range requestedOpenClawDOPassThroughEnvKeys(bindings) {
+		value := strings.TrimSpace(bindings[key])
+		if value == "" {
+			value = strings.TrimSpace(bindings["ENV_"+key])
+		}
+		if value == "" {
+			continue
+		}
+		envPairs = append(envPairs, envPair{key: key, value: value})
+	}
+	providerAuthJSON := openClawDOAuthProfilesJSON(bindings)
+
+	scriptLines := []string{
+		"set -euo pipefail",
+		"for _w in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do if [ -d /opt/openclaw ]; then break; fi; sleep 5; done",
+		"mkdir -p /opt/openclaw /opt/openclaw/data /opt/openclaw/workspace /opt/openclaw/data/identity /opt/openclaw/data/agents/main/agent /opt/openclaw/data/agents/main/sessions /opt/openclaw/data/canvas /opt/openclaw/data/cron",
+		"touch /opt/openclaw/.env",
+		"upsert_env() { key=\"$1\"; value=\"$2\"; tmp=$(mktemp); awk -F= -v k=\"$key\" -v v=\"$value\" 'BEGIN{done=0} $1==k{print k\"=\"v; done=1; next} {print} END{if(!done) print k\"=\"v}' /opt/openclaw/.env > \"$tmp\"; mv \"$tmp\" /opt/openclaw/.env; }",
+	}
+	for _, pair := range envPairs {
+		scriptLines = append(scriptLines,
+			fmt.Sprintf("export %s=%s", pair.key, shellSingleQuoteDO(pair.value)),
+			fmt.Sprintf("upsert_env %s \"$%s\"", shellSingleQuoteDO(pair.key), pair.key),
+		)
+	}
+	scriptLines = append(scriptLines,
+		"chmod 600 /opt/openclaw/.env",
+	)
+	if providerAuthJSON != "" {
+		scriptLines = append(scriptLines,
+			fmt.Sprintf("export OPENCLAW_AUTH_PROFILES_JSON=%s", shellSingleQuoteDO(providerAuthJSON)),
+			"printf '%s\n' \"$OPENCLAW_AUTH_PROFILES_JSON\" > /opt/openclaw/data/agents/main/agent/auth-profiles.json",
+			"chmod 600 /opt/openclaw/data/agents/main/agent/auth-profiles.json",
+		)
+	}
+	scriptLines = append(scriptLines,
+		"chown -R 1000:1000 /opt/openclaw/data /opt/openclaw/workspace || true",
+		"cd /opt/openclaw",
+		"docker compose up -d --force-recreate openclaw-gateway >/dev/null",
+		"docker compose ps || true",
+	)
+	script := strings.Join(scriptLines, "\n")
+	out, err := runDOSSHScript(ctx, dropletIP, sshPrivateKeyPath, script)
+	if opts.Writer != nil {
+		_, _ = fmt.Fprintf(opts.Writer, "[openclaw] preparing DigitalOcean droplet runtime before gateway wait\n")
+		if strings.TrimSpace(out) != "" {
+			_, _ = io.WriteString(opts.Writer, out)
+			if !strings.HasSuffix(out, "\n") {
+				_, _ = io.WriteString(opts.Writer, "\n")
+			}
+		}
+	}
+	return err
+}
+
+func openClawDOAuthProfilesJSON(bindings map[string]string) string {
+	type providerProfile struct {
+		provider string
+		envKey   string
+	}
+	providers := make([]providerProfile, 0, 3)
+	if strings.TrimSpace(bindings["ANTHROPIC_API_KEY"]) != "" {
+		providers = append(providers, providerProfile{provider: "anthropic", envKey: "ANTHROPIC_API_KEY"})
+	}
+	if strings.TrimSpace(bindings["OPENAI_API_KEY"]) != "" {
+		providers = append(providers, providerProfile{provider: "openai", envKey: "OPENAI_API_KEY"})
+	}
+	if strings.TrimSpace(bindings["GEMINI_API_KEY"]) != "" {
+		providers = append(providers, providerProfile{provider: "gemini", envKey: "GEMINI_API_KEY"})
+	}
+	if len(providers) == 0 {
+		return ""
+	}
+	order := make(map[string][]string, len(providers))
+	profiles := make(map[string]any, len(providers))
+	for _, provider := range providers {
+		profileID := provider.provider + ":default"
+		order[provider.provider] = []string{profileID}
+		profiles[profileID] = map[string]any{
+			"type":     "api_key",
+			"provider": provider.provider,
+			"keyRef": map[string]any{
+				"source":   "env",
+				"provider": "default",
+				"id":       provider.envKey,
+			},
+		}
+	}
+	payload := map[string]any{
+		"version":  1,
+		"order":    order,
+		"profiles": profiles,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
 }
 
 func maybeEnforceOpenClawDOSecretOverSSH(ctx context.Context, bindings map[string]string, sshPrivateKeyPath string, opts ExecOptions) error {
