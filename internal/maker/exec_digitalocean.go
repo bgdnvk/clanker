@@ -345,6 +345,10 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 	openClawGatewayWaitDone := false
 	execState := &doExecutionState{}
 
+	// Import user-provided env vars from the clanker-cloud manifest so the DO
+	// executor sees the same bindings as the generic executor path.
+	importUserProvidedEnvVars(bindings)
+
 	// Import secret-like env vars into bindings so user-data placeholder substitution works.
 	// Mirrors AWS executor: clanker-cloud passes user-provided env vars to the CLI process.
 	importSecretLikeEnvVarsIntoBindings(bindings)
@@ -649,13 +653,13 @@ func ensureOpenClawDOCoreEnvLines(script string, bindings map[string]string) str
 		value string
 	}
 	pairs := []envPair{
-		{key: "OPENCLAW_GATEWAY_TOKEN", value: strings.TrimSpace(bindings["OPENCLAW_GATEWAY_TOKEN"])},
-		{key: "OPENCLAW_GATEWAY_PASSWORD", value: strings.TrimSpace(bindings["OPENCLAW_GATEWAY_PASSWORD"])},
-		{key: "ANTHROPIC_API_KEY", value: strings.TrimSpace(bindings["ANTHROPIC_API_KEY"])},
-		{key: "OPENAI_API_KEY", value: strings.TrimSpace(bindings["OPENAI_API_KEY"])},
-		{key: "GEMINI_API_KEY", value: strings.TrimSpace(bindings["GEMINI_API_KEY"])},
-		{key: "DISCORD_BOT_TOKEN", value: strings.TrimSpace(bindings["DISCORD_BOT_TOKEN"])},
-		{key: "TELEGRAM_BOT_TOKEN", value: strings.TrimSpace(bindings["TELEGRAM_BOT_TOKEN"])},
+		{key: "OPENCLAW_GATEWAY_TOKEN", value: openClawDOBindingValue(bindings, "OPENCLAW_GATEWAY_TOKEN")},
+		{key: "OPENCLAW_GATEWAY_PASSWORD", value: openClawDOBindingValue(bindings, "OPENCLAW_GATEWAY_PASSWORD")},
+		{key: "ANTHROPIC_API_KEY", value: openClawDOBindingValue(bindings, "ANTHROPIC_API_KEY")},
+		{key: "OPENAI_API_KEY", value: openClawDOBindingValue(bindings, "OPENAI_API_KEY")},
+		{key: "GEMINI_API_KEY", value: openClawDOBindingValue(bindings, "GEMINI_API_KEY")},
+		{key: "DISCORD_BOT_TOKEN", value: openClawDOBindingValue(bindings, "DISCORD_BOT_TOKEN")},
+		{key: "TELEGRAM_BOT_TOKEN", value: openClawDOBindingValue(bindings, "TELEGRAM_BOT_TOKEN")},
 	}
 	updated := script
 	for _, pair := range pairs {
@@ -680,12 +684,23 @@ func pruneOpenClawDOUnboundCoreEnvLines(script string, bindings map[string]strin
 		"DISCORD_BOT_TOKEN",
 		"TELEGRAM_BOT_TOKEN",
 	} {
-		if strings.TrimSpace(bindings[key]) != "" {
+		if openClawDOBindingValue(bindings, key) != "" {
 			continue
 		}
 		script = removeOpenClawDOPlaceholderEnvLine(script, key)
 	}
 	return script
+}
+
+func openClawDOBindingValue(bindings map[string]string, key string) string {
+	key = strings.ToUpper(strings.TrimSpace(key))
+	if key == "" {
+		return ""
+	}
+	if value := strings.TrimSpace(bindings[key]); value != "" {
+		return value
+	}
+	return strings.TrimSpace(bindings["ENV_"+key])
 }
 
 func upsertOpenClawDOEnvLine(script string, key string, value string) string {
@@ -714,10 +729,10 @@ func removeOpenClawDOPlaceholderEnvLine(script string, key string) string {
 }
 
 func validateOpenClawDORequiredBindings(bindings map[string]string) error {
-	if strings.TrimSpace(bindings["OPENCLAW_GATEWAY_TOKEN"]) == "" && strings.TrimSpace(bindings["OPENCLAW_GATEWAY_PASSWORD"]) == "" {
+	if openClawDOBindingValue(bindings, "OPENCLAW_GATEWAY_TOKEN") == "" && openClawDOBindingValue(bindings, "OPENCLAW_GATEWAY_PASSWORD") == "" {
 		return fmt.Errorf("OpenClaw DigitalOcean apply blocked: missing OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_PASSWORD")
 	}
-	if strings.TrimSpace(bindings["ANTHROPIC_API_KEY"]) == "" && strings.TrimSpace(bindings["OPENAI_API_KEY"]) == "" && strings.TrimSpace(bindings["GEMINI_API_KEY"]) == "" {
+	if openClawDOBindingValue(bindings, "ANTHROPIC_API_KEY") == "" && openClawDOBindingValue(bindings, "OPENAI_API_KEY") == "" && openClawDOBindingValue(bindings, "GEMINI_API_KEY") == "" {
 		return fmt.Errorf("OpenClaw DigitalOcean apply blocked: missing ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY")
 	}
 	return nil
@@ -732,10 +747,7 @@ func appendOpenClawDOEnvLines(script string, extraKeys []string, bindings map[st
 		if strings.Contains(script, "\n"+key+"=") || strings.HasPrefix(script, key+"=") {
 			continue
 		}
-		value := strings.TrimSpace(bindings[key])
-		if value == "" {
-			value = strings.TrimSpace(bindings["ENV_"+key])
-		}
+		value := openClawDOBindingValue(bindings, key)
 		if value == "" {
 			continue
 		}
@@ -760,13 +772,13 @@ func ensureOpenClawDOAuthProfilesScript(script string, bindings map[string]strin
 		envKey   string
 	}
 	providers := make([]providerProfile, 0, 3)
-	if strings.TrimSpace(bindings["ANTHROPIC_API_KEY"]) != "" {
+	if openClawDOBindingValue(bindings, "ANTHROPIC_API_KEY") != "" {
 		providers = append(providers, providerProfile{provider: "anthropic", envKey: "ANTHROPIC_API_KEY"})
 	}
-	if strings.TrimSpace(bindings["OPENAI_API_KEY"]) != "" {
+	if openClawDOBindingValue(bindings, "OPENAI_API_KEY") != "" {
 		providers = append(providers, providerProfile{provider: "openai", envKey: "OPENAI_API_KEY"})
 	}
-	if strings.TrimSpace(bindings["GEMINI_API_KEY"]) != "" {
+	if openClawDOBindingValue(bindings, "GEMINI_API_KEY") != "" {
 		providers = append(providers, providerProfile{provider: "gemini", envKey: "GEMINI_API_KEY"})
 	}
 	if len(providers) == 0 || !strings.Contains(script, "\nchown -R 1000:1000 /opt/openclaw/data /opt/openclaw/workspace") {
@@ -2957,15 +2969,12 @@ func maybePrepareOpenClawDORuntimeOverSSH(ctx context.Context, bindings map[stri
 		{key: "OPENCLAW_IMAGE", value: "ghcr.io/openclaw/openclaw:latest"},
 	}
 	for _, key := range []string{"OPENCLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_PASSWORD", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "DISCORD_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"} {
-		if value := strings.TrimSpace(bindings[key]); value != "" {
+		if value := openClawDOBindingValue(bindings, key); value != "" {
 			envPairs = append(envPairs, envPair{key: key, value: value})
 		}
 	}
 	for _, key := range requestedOpenClawDOPassThroughEnvKeys(bindings) {
-		value := strings.TrimSpace(bindings[key])
-		if value == "" {
-			value = strings.TrimSpace(bindings["ENV_"+key])
-		}
+		value := openClawDOBindingValue(bindings, key)
 		if value == "" {
 			continue
 		}
