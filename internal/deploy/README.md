@@ -32,6 +32,7 @@ Most of the package is still intentionally pragmatic and string-heavy, but a few
 - **OpenClaw DO bootstrap canonicalization** in [internal/deploy/openclaw_rules.go](openclaw_rules.go) infers a minimal bootstrap spec from droplet user-data and renders one canonical script shape.
 - **OpenClaw DO firewall canonicalization** in [internal/deploy/openclaw_rules.go](openclaw_rules.go) lifts firewall rule strings into a small typed firewall spec, then re-renders one canonical `doctl compute firewall` rule layout.
 - **DigitalOcean command-schema gating** in [internal/deploy/do_command_schema.go](do_command_schema.go) rejects hallucinated command families early, enforces placeholder production order across paged planning, and blocks strict-schema regressions during repair/review.
+- **Semantic graph compilation** in [internal/deploy/semantic_graph.go](semantic_graph.go) and [internal/deploy/semantic_graph_digitalocean.go](semantic_graph_digitalocean.go) infers a typed provider/app/runtime graph from the LLM plan and recompiles that graph into canonical provider commands before final validation/execution.
 
 Current OpenClaw DigitalOcean invariants:
 
@@ -47,6 +48,13 @@ Current OpenClaw DigitalOcean invariants:
 - after `apps create` resolves the managed HTTPS URL, the executor patches `gateway.controlUi.allowedOrigins` over SSH on the droplet
 
 This is the current architecture direction: keep planning broad and non-deterministic, then lower the riskiest execution surfaces into small typed canonical forms.
+
+For the DigitalOcean OpenClaw path, the executable artifact is no longer treated as raw LLM command text alone. The pipeline now:
+
+- keeps the LLM responsible for repo analysis, intent, and high-level plan shape
+- infers a semantic graph from the generated DO plan
+- recompiles that graph into canonical DO commands for firewall, bootstrap, registry, droplet, and App Platform proxy steps
+- runs deterministic and LLM validation on the compiled output
 
 ## Query → Deploy (Current Flow)
 
@@ -85,6 +93,7 @@ This is the current architecture direction: keep planning broad and non-determin
     - Runs after plan generation (both skeleton and paged paths).
     - Before generic cleanup, matching rule packs may run app/provider-specific autofix hooks (for example OpenClaw and DigitalOcean passes).
     - DigitalOcean autofix in [internal/deploy/do_plan_autofix.go](do_plan_autofix.go) is currently the main deterministic cleanup point for droplet user-data and firewall command repair.
+    - Structured plan transforms in [cmd/deploy.go](../cmd/deploy.go) now also pass supported plans through the semantic graph compiler after rule-pack autofix and before final generic cleanup.
     - **SSM semantic dedup** — deduplicates SSM `send-command` / `put-parameter` steps that do the same thing.
     - **Launch cycle dedup** — removes redundant `run-instances` cycles within the same project.
     - **Read-only dedup** — collapses repeated read-only commands (describe/get/list).
@@ -205,6 +214,8 @@ sequenceDiagram
 - `rule_packs.go` — typed provider/app rule-pack registry and hook routing
 - `do_command_helpers.go` — shared DigitalOcean command-shape helpers (droplet detection, flag counting, user-data extraction)
 - `openclaw_rules.go` — shared OpenClaw DigitalOcean rule text plus typed bootstrap/firewall canonicalization helpers
+- `semantic_graph.go` — provider/app/runtime semantic graph model and build/compile dispatch
+- `semantic_graph_digitalocean.go` — DigitalOcean OpenClaw semantic graph inference and canonical command compiler
 - `skeleton_plan.go` — two-phase skeleton+hydrate plan generation (primary path)
 - `paged_plan.go` — paginated planning protocol (fallback path)
 - `plan_autofix.go` — generic plan autofix (dedup, orphan pruning, critical command protection)

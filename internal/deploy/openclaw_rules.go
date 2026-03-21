@@ -593,8 +593,13 @@ func normalizeOpenClawDOFirewallSpec(spec doFirewallSpec) doFirewallSpec {
 		inboundSeen[key] = true
 		inbound = append(inbound, rule)
 	}
-	for _, required := range []string{"22", "18789", "18790"} {
-		addInbound(doFirewallRuleSpec{Protocol: "tcp", Ports: required, Address: "0.0.0.0/0"})
+	for _, required := range []doFirewallRuleSpec{
+		{Protocol: "tcp", Ports: "22", Address: "0.0.0.0/0"},
+		{Protocol: "tcp", Ports: "18789", Address: "0.0.0.0/0"},
+		{Protocol: "tcp", Ports: "18790", Address: "0.0.0.0/0"},
+		{Protocol: "tcp", Ports: "18790", Address: "::/0"},
+	} {
+		addInbound(required)
 	}
 	for _, rule := range spec.Inbound {
 		addInbound(rule)

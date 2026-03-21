@@ -360,6 +360,36 @@ Examples:
 			requiredLaunchOps = []string{"compute droplet create", "apps create"}
 		}
 
+		applyStructuredPlanTransforms := func(current *maker.Plan) *maker.Plan {
+			if current == nil {
+				return nil
+			}
+			ruleCtx := deploy.RulePackContext{
+				TargetProvider: targetProvider,
+				PlanProvider: func() string {
+					if provider := strings.TrimSpace(current.Provider); provider != "" {
+						return provider
+					}
+					return planProvider
+				}(),
+				Options:  deployOpts,
+				Profile:  rp,
+				Deep:     intel.DeepAnalysis,
+				Docker:   intel.Docker,
+				AppPorts: rp.Ports,
+			}
+			if patched := deploy.ApplyRulePackPlanAutofix(current, ruleCtx, logf); patched != nil {
+				current = patched
+			}
+			if compiled := deploy.ApplySemanticGraphCompilation(current, ruleCtx, logf); compiled != nil {
+				current = compiled
+			}
+			if patched := deploy.ApplyGenericPlanAutofix(current, logf, rp.EnvVars...); patched != nil {
+				current = patched
+			}
+			return current
+		}
+
 		// 4. Generate the maker plan via LLM
 		planGenStart := time.Now()
 		fmt.Fprintf(os.Stderr, "[deploy] phase 3: generating execution plan with %s ...\n", provider)
@@ -435,20 +465,7 @@ Examples:
 			return fmt.Errorf("failed to generate a plan (no commands produced)")
 		}
 
-		// Apply project-specific and generic autofixes
-		if isOpenClawDeploy {
-			if patched := deploy.ApplyOpenClawPlanAutofix(plan, rp, intel.DeepAnalysis, logf); patched != nil {
-				plan = patched
-			}
-		}
-		if strings.EqualFold(strings.TrimSpace(planProvider), "digitalocean") {
-			if patched := deploy.ApplyDigitalOceanPlanAutofix(plan, logf); patched != nil {
-				plan = patched
-			}
-		}
-		if patched := deploy.ApplyGenericPlanAutofix(plan, logf, rp.EnvVars...); patched != nil {
-			plan = patched
-		}
+		plan = applyStructuredPlanTransforms(plan)
 
 		// Deterministic checkpoint validation (AWS only)
 		if strings.EqualFold(strings.TrimSpace(planProvider), "aws") {
@@ -465,14 +482,7 @@ Examples:
 			pagedPlan := generatePagedPlan(ctx, aiClient, planProvider, planningContext, rp, intel, requiredLaunchOps, isOpenClawDeploy, applyMode, logf)
 			if pagedPlan != nil && len(pagedPlan.Commands) > 0 {
 				// Compare: use whichever has fewer issues
-				if isOpenClawDeploy {
-					if patched := deploy.ApplyOpenClawPlanAutofix(pagedPlan, rp, intel.DeepAnalysis, logf); patched != nil {
-						pagedPlan = patched
-					}
-				}
-				if patched := deploy.ApplyGenericPlanAutofix(pagedPlan, logf, rp.EnvVars...); patched != nil {
-					pagedPlan = patched
-				}
+				pagedPlan = applyStructuredPlanTransforms(pagedPlan)
 				pJSON2, _ := json.MarshalIndent(pagedPlan, "", "  ")
 				pagedVal := deploy.DeterministicValidatePlan(string(pJSON2), rp, intel.DeepAnalysis, intel.Docker, rp.EnvVars)
 				pagedIssues := 0
@@ -1047,19 +1057,19 @@ Examples:
 		}
 	skipIntegrityApply:
 
-		if patched := deploy.ApplyOpenClawPlanAutofix(plan, rp, intel.DeepAnalysis, logf); patched != nil {
-			plan = patched
-		}
-
-		// Generic dedup: collapse redundant launch cycles for any project.
-		if patched := deploy.ApplyGenericPlanAutofix(plan, logf, rp.EnvVars...); patched != nil {
-			plan = patched
-		}
+		plan = applyStructuredPlanTransforms(plan)
 
 		openClawUnresolvedApplyBlock := false
 		openClawUnresolvedCritical := make([]string, 0, 12)
+		runtimeEnvBindings := make([]string, 0)
+		if userConfig != nil && len(userConfig.EnvVars) > 0 {
+			runtimeEnvBindings = make([]string, 0, len(userConfig.EnvVars))
+			for name, value := range userConfig.EnvVars {
+				runtimeEnvBindings = append(runtimeEnvBindings, name+"="+value)
+			}
+		}
 		if isOpenClawDeploy {
-			if unresolved := deploy.GetUnresolvedPlaceholders(plan); len(unresolved) > 0 {
+			if unresolved := deploy.FilterRuntimeInjectedTokens(deploy.GetUnresolvedPlaceholders(plan), runtimeEnvBindings); len(unresolved) > 0 {
 				if !deploy.AllPlaceholdersAreProduced(plan, unresolved) {
 					openClawUnresolvedApplyBlock = true
 					openClawUnresolvedCritical = append(openClawUnresolvedCritical, unresolved...)

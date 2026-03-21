@@ -353,6 +353,11 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 	if _, ok := bindings["DIGITALOCEAN_ACCESS_TOKEN"]; !ok {
 		bindings["DIGITALOCEAN_ACCESS_TOKEN"] = opts.DigitalOceanAPIToken
 	}
+	if isOpenClaw {
+		if err := validateOpenClawDORequiredBindings(bindings); err != nil {
+			return err
+		}
+	}
 
 	for idx, cmdSpec := range plan.Commands {
 		if err := validateDoctlCommand(cmdSpec.Args, opts.Destroyer); err != nil {
@@ -407,7 +412,7 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 		}
 
 		if hasUnresolvedPlaceholders(args) {
-			return fmt.Errorf("command %d has unresolved placeholders after substitutions", idx+1)
+			return wrapDOPartialStateError(ctx, execState, bindings, sshPrivateKeyPath, opts, fmt.Errorf("command %d has unresolved placeholders after substitutions", idx+1))
 		}
 
 		if len(args) >= 2 && strings.EqualFold(args[0], "git") && strings.EqualFold(args[1], "clone") {
@@ -573,6 +578,7 @@ func injectOpenClawDOBynamicUserDataAtExec(args []string, bindings map[string]st
 		return args
 	}
 	updated := ensureOpenClawDOCoreEnvLines(script, bindings)
+	updated = pruneOpenClawDOUnboundCoreEnvLines(updated, bindings)
 	updated = appendOpenClawDOEnvLines(updated, requestedOpenClawDOPassThroughEnvKeys(bindings), bindings)
 	updated = ensureOpenClawDOAuthProfilesScript(updated, bindings)
 	if updated == script {
@@ -661,6 +667,27 @@ func ensureOpenClawDOCoreEnvLines(script string, bindings map[string]string) str
 	return updated
 }
 
+func pruneOpenClawDOUnboundCoreEnvLines(script string, bindings map[string]string) string {
+	if !strings.Contains(script, "\nENVEOF") {
+		return script
+	}
+	for _, key := range []string{
+		"OPENCLAW_GATEWAY_TOKEN",
+		"OPENCLAW_GATEWAY_PASSWORD",
+		"ANTHROPIC_API_KEY",
+		"OPENAI_API_KEY",
+		"GEMINI_API_KEY",
+		"DISCORD_BOT_TOKEN",
+		"TELEGRAM_BOT_TOKEN",
+	} {
+		if strings.TrimSpace(bindings[key]) != "" {
+			continue
+		}
+		script = removeOpenClawDOPlaceholderEnvLine(script, key)
+	}
+	return script
+}
+
 func upsertOpenClawDOEnvLine(script string, key string, value string) string {
 	key = strings.ToUpper(strings.TrimSpace(key))
 	value = strings.TrimSpace(value)
@@ -673,6 +700,27 @@ func upsertOpenClawDOEnvLine(script string, key string, value string) string {
 		return pattern.ReplaceAllString(script, line)
 	}
 	return strings.Replace(script, "\nENVEOF", "\n"+line+"\nENVEOF", 1)
+}
+
+func removeOpenClawDOPlaceholderEnvLine(script string, key string) string {
+	key = strings.ToUpper(strings.TrimSpace(key))
+	if key == "" || !strings.Contains(script, "\nENVEOF") {
+		return script
+	}
+	placeholderPattern := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(key) + `=(<[^>]+>|\$\{[^}]+\}|\$[A-Za-z_][A-Za-z0-9_]*)\n?`)
+	updated := placeholderPattern.ReplaceAllString(script, "")
+	blankPattern := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(key) + `=\s*$\n?`)
+	return blankPattern.ReplaceAllString(updated, "")
+}
+
+func validateOpenClawDORequiredBindings(bindings map[string]string) error {
+	if strings.TrimSpace(bindings["OPENCLAW_GATEWAY_TOKEN"]) == "" && strings.TrimSpace(bindings["OPENCLAW_GATEWAY_PASSWORD"]) == "" {
+		return fmt.Errorf("OpenClaw DigitalOcean apply blocked: missing OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_PASSWORD")
+	}
+	if strings.TrimSpace(bindings["ANTHROPIC_API_KEY"]) == "" && strings.TrimSpace(bindings["OPENAI_API_KEY"]) == "" && strings.TrimSpace(bindings["GEMINI_API_KEY"]) == "" {
+		return fmt.Errorf("OpenClaw DigitalOcean apply blocked: missing ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY")
+	}
+	return nil
 }
 
 func appendOpenClawDOEnvLines(script string, extraKeys []string, bindings map[string]string) string {
@@ -2927,7 +2975,12 @@ func maybePrepareOpenClawDORuntimeOverSSH(ctx context.Context, bindings map[stri
 
 	scriptLines := []string{
 		"set -euo pipefail",
-		"for _w in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do if [ -d /opt/openclaw ]; then break; fi; sleep 5; done",
+		"if command -v cloud-init >/dev/null 2>&1; then cloud-init status --wait; fi",
+		"for _w in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do if git -C /opt/openclaw rev-parse --is-inside-work-tree >/dev/null 2>&1; then break; fi; sleep 5; done",
+		"if ! git -C /opt/openclaw rev-parse --is-inside-work-tree >/dev/null 2>&1; then echo '[openclaw] droplet bootstrap did not finish cloning /opt/openclaw'; ls -la /opt || true; exit 1; fi",
+		"cd /opt/openclaw",
+		"for _w in 1 2 3 4 5 6 7 8 9 10 11 12; do if docker compose config >/dev/null 2>&1; then break; fi; sleep 5; done",
+		"if ! docker compose config >/dev/null 2>&1; then echo '[openclaw] docker compose config is not ready on the droplet'; ls -la /opt/openclaw || true; find /opt/openclaw -maxdepth 2 -type f \\( -name 'compose*.yml' -o -name 'compose*.yaml' -o -name 'docker-compose*.yml' -o -name 'docker-compose*.yaml' \\) -print || true; exit 1; fi",
 		"mkdir -p /opt/openclaw /opt/openclaw/data /opt/openclaw/workspace /opt/openclaw/data/identity /opt/openclaw/data/agents/main/agent /opt/openclaw/data/agents/main/sessions /opt/openclaw/data/canvas /opt/openclaw/data/cron",
 		"touch /opt/openclaw/.env",
 		"upsert_env() { key=\"$1\"; value=\"$2\"; tmp=$(mktemp); awk -F= -v k=\"$key\" -v v=\"$value\" 'BEGIN{done=0} $1==k{print k\"=\"v; done=1; next} {print} END{if(!done) print k\"=\"v}' /opt/openclaw/.env > \"$tmp\"; mv \"$tmp\" /opt/openclaw/.env; }",
@@ -2950,7 +3003,6 @@ func maybePrepareOpenClawDORuntimeOverSSH(ctx context.Context, bindings map[stri
 	}
 	scriptLines = append(scriptLines,
 		"chown -R 1000:1000 /opt/openclaw/data /opt/openclaw/workspace || true",
-		"cd /opt/openclaw",
 		"docker compose up -d --force-recreate openclaw-gateway >/dev/null",
 		"docker compose ps || true",
 	)
@@ -3192,17 +3244,10 @@ func runDOSSHScript(ctx context.Context, host, privateKeyPath, script string) (s
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         30 * time.Second,
 	}
-	dialer := net.Dialer{Timeout: 30 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, "22"))
+	client, err := dialDOSSHClient(ctx, host, config)
 	if err != nil {
-		return "", fmt.Errorf("connect ssh: %w", err)
+		return "", err
 	}
-	defer conn.Close()
-	clientConn, chans, reqs, err := ssh.NewClientConn(conn, net.JoinHostPort(host, "22"), config)
-	if err != nil {
-		return "", fmt.Errorf("establish ssh client: %w", err)
-	}
-	client := ssh.NewClient(clientConn, chans, reqs)
 	defer client.Close()
 	session, err := client.NewSession()
 	if err != nil {
@@ -3217,6 +3262,69 @@ func runDOSSHScript(ctx context.Context, host, privateKeyPath, script string) (s
 		return buf.String(), fmt.Errorf("run remote script: %w", err)
 	}
 	return buf.String(), nil
+}
+
+func dialDOSSHClient(ctx context.Context, host string, config *ssh.ClientConfig) (*ssh.Client, error) {
+	address := net.JoinHostPort(host, "22")
+	deadline := time.Now().Add(5 * time.Minute)
+	var lastErr error
+	for attempt := 1; time.Now().Before(deadline); attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		dialer := net.Dialer{Timeout: 5 * time.Second}
+		conn, err := dialer.DialContext(ctx, "tcp", address)
+		if err != nil {
+			lastErr = err
+			if !shouldRetryDOSSHConnect(err) {
+				return nil, fmt.Errorf("connect ssh: %w", err)
+			}
+		} else {
+			clientConn, chans, reqs, err := ssh.NewClientConn(conn, address, config)
+			if err == nil {
+				return ssh.NewClient(clientConn, chans, reqs), nil
+			}
+			_ = conn.Close()
+			lastErr = err
+			if !shouldRetryDOSSHConnect(err) {
+				return nil, fmt.Errorf("establish ssh client: %w", err)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(5 * time.Second):
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("ssh did not become ready")
+	}
+	if isDOSSHHandshakeError(lastErr) {
+		return nil, fmt.Errorf("establish ssh client: %w", lastErr)
+	}
+	return nil, fmt.Errorf("connect ssh: %w", lastErr)
+}
+
+func shouldRetryDOSSHConnect(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isDOSSHHandshakeError(err) {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	if strings.Contains(lower, "connection refused") || strings.Contains(lower, "operation timed out") || strings.Contains(lower, "i/o timeout") || strings.Contains(lower, "connection reset by peer") || strings.Contains(lower, "no route to host") || strings.Contains(lower, "network is unreachable") || strings.Contains(lower, "connection aborted") {
+		return true
+	}
+	return false
+}
+
+func isDOSSHHandshakeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "ssh: handshake failed") || strings.Contains(lower, "unable to authenticate") || strings.Contains(lower, "connection closed by remote host")
 }
 
 func shellSingleQuoteDO(s string) string {
