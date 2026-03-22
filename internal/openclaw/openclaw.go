@@ -120,7 +120,7 @@ func MaybePrintPostDeployInstructions(bindings map[string]string, profile, regio
 	}
 	_, _ = fmt.Fprintf(w, "[openclaw]  3) Click Connect\n")
 	_, _ = fmt.Fprintf(w, "[openclaw] Pairing:\n")
-	_, _ = fmt.Fprintf(w, "[openclaw]  - One-click deploy starts an auto-approve loop for pending pair requests for ~30 minutes (or until 2 new devices are paired) after instance boot\n")
+	_, _ = fmt.Fprintf(w, "[openclaw]  - One-click deploy starts an auto-approve loop for pending pair requests for 20 minutes (or until 2 new devices are paired) after instance boot\n")
 	_, _ = fmt.Fprintf(w, "[openclaw]  - If you still see 'pairing required', use the localhost + approve loop below (this also fixes stale browser device tokens)\n")
 
 	if instanceID != "" && strings.TrimSpace(profile) != "" && strings.TrimSpace(region) != "" {
