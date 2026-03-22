@@ -556,6 +556,9 @@ func ExecuteDigitalOceanPlan(ctx context.Context, plan *Plan, opts ExecOptions) 
 		if err := maybeStartOpenClawDOPairApproveWindowOverSSH(ctx, bindings, sshPrivateKeyPath, opts); err != nil {
 			_, _ = fmt.Fprintf(opts.Writer, "[openclaw] warning: failed to start DigitalOcean auto-pair approval window: %v\n", err)
 		}
+		if err := waitForOpenClawDOHTTPSReady(ctx, bindings, opts.Writer); err != nil {
+			return wrapDOPartialStateError(ctx, execState, bindings, sshPrivateKeyPath, opts, fmt.Errorf("openclaw post-deploy failed (https-ready): %w", err))
+		}
 		openclaw.MaybePrintPostDeployInstructions(bindings, opts.Profile, opts.Region, opts.Writer, strings.TrimSpace(plan.Question), extractRepoURLFromQuestion(plan.Question))
 	}
 
@@ -1290,6 +1293,60 @@ func waitForOpenClawDOGatewayReady(ctx context.Context, bindings map[string]stri
 		return fmt.Errorf("gateway at %s did not become reachable within 12m: %w", targetURL, lastErr)
 	}
 	return fmt.Errorf("gateway at %s did not become reachable within 12m", targetURL)
+}
+
+func waitForOpenClawDOHTTPSReady(ctx context.Context, bindings map[string]string, w io.Writer) error {
+	httpsURL := strings.TrimSpace(bindings["HTTPS_URL"])
+	if httpsURL == "" {
+		httpsURL = strings.TrimSpace(bindings["APP_URL"])
+	}
+	if httpsURL == "" {
+		return nil
+	}
+	targetURL := strings.TrimRight(httpsURL, "/") + "/"
+	deadline := time.Now().Add(6 * time.Minute)
+	client := &http.Client{Timeout: 5 * time.Second}
+	var lastErr error
+	var lastStatus int
+	for attempt := 1; time.Now().Before(deadline); attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if w != nil {
+			_, _ = fmt.Fprintf(w, "[openclaw] waiting for managed HTTPS endpoint to recover at %s (attempt %d)\n", targetURL, attempt)
+		}
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+		if reqErr != nil {
+			lastErr = reqErr
+		} else {
+			resp, respErr := client.Do(req)
+			if respErr == nil {
+				lastStatus = resp.StatusCode
+				_ = resp.Body.Close()
+				if resp.StatusCode >= 200 && resp.StatusCode < 500 {
+					if w != nil {
+						_, _ = fmt.Fprintf(w, "[openclaw] managed HTTPS endpoint is serving again at %s (status=%d)\n", targetURL, resp.StatusCode)
+					}
+					return nil
+				}
+				lastErr = fmt.Errorf("unexpected HTTP status %d", resp.StatusCode)
+			} else {
+				lastErr = respErr
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Second):
+		}
+	}
+	if lastErr != nil {
+		if lastStatus > 0 {
+			return fmt.Errorf("managed HTTPS endpoint %s did not recover within 6m (last status=%d): %w", targetURL, lastStatus, lastErr)
+		}
+		return fmt.Errorf("managed HTTPS endpoint %s did not recover within 6m: %w", targetURL, lastErr)
+	}
+	return fmt.Errorf("managed HTTPS endpoint %s did not recover within 6m", targetURL)
 }
 
 func retryDOCRPushAfterFreshRegistryCreate(ctx context.Context, args []string, opts ExecOptions, workDir string, bindings map[string]string, w io.Writer) (string, error) {
@@ -2963,10 +3020,13 @@ func maybePrepareOpenClawDORuntimeOverSSH(ctx context.Context, bindings map[stri
 	envPairs := []envPair{
 		{key: "OPENCLAW_CONFIG_DIR", value: "/opt/openclaw/data"},
 		{key: "OPENCLAW_WORKSPACE_DIR", value: "/opt/openclaw/workspace"},
+		{key: "OPENCLAW_STATE_DIR", value: "/home/node/.openclaw"},
+		{key: "OPENCLAW_CONFIG_PATH", value: "/home/node/.openclaw/openclaw.json"},
 		{key: "OPENCLAW_GATEWAY_PORT", value: strconv.Itoa(openclaw.DefaultPort)},
 		{key: "OPENCLAW_BRIDGE_PORT", value: "18790"},
 		{key: "OPENCLAW_GATEWAY_BIND", value: "lan"},
 		{key: "OPENCLAW_IMAGE", value: "ghcr.io/openclaw/openclaw:latest"},
+		{key: "XDG_CONFIG_HOME", value: "/home/node/.openclaw"},
 	}
 	for _, key := range []string{"OPENCLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_PASSWORD", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "DISCORD_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"} {
 		if value := openClawDOBindingValue(bindings, key); value != "" {
@@ -2992,7 +3052,9 @@ func maybePrepareOpenClawDORuntimeOverSSH(ctx context.Context, bindings map[stri
 		"if ! docker compose config >/dev/null 2>&1; then echo '[openclaw] docker compose config is not ready on the droplet'; ls -la /opt/openclaw || true; find /opt/openclaw -maxdepth 2 -type f \\( -name 'compose*.yml' -o -name 'compose*.yaml' -o -name 'docker-compose*.yml' -o -name 'docker-compose*.yaml' \\) -print || true; exit 1; fi",
 		"mkdir -p /opt/openclaw /opt/openclaw/data /opt/openclaw/workspace /opt/openclaw/data/identity /opt/openclaw/data/agents/main/agent /opt/openclaw/data/agents/main/sessions /opt/openclaw/data/canvas /opt/openclaw/data/cron",
 		"touch /opt/openclaw/.env",
-		"upsert_env() { key=\"$1\"; value=\"$2\"; tmp=$(mktemp); awk -F= -v k=\"$key\" -v v=\"$value\" 'BEGIN{done=0} $1==k{print k\"=\"v; done=1; next} {print} END{if(!done) print k\"=\"v}' /opt/openclaw/.env > \"$tmp\"; mv \"$tmp\" /opt/openclaw/.env; }",
+		"touch /opt/openclaw/data/.env",
+		"upsert_env_file() { file=\"$1\"; key=\"$2\"; value=\"$3\"; tmp=$(mktemp); awk -F= -v k=\"$key\" -v v=\"$value\" 'BEGIN{done=0} $1==k{print k\"=\"v; done=1; next} {print} END{if(!done) print k\"=\"v}' \"$file\" > \"$tmp\"; mv \"$tmp\" \"$file\"; }",
+		"upsert_env() { key=\"$1\"; value=\"$2\"; upsert_env_file /opt/openclaw/.env \"$key\" \"$value\"; upsert_env_file /opt/openclaw/data/.env \"$key\" \"$value\"; }",
 	}
 	for _, pair := range envPairs {
 		scriptLines = append(scriptLines,
@@ -3002,6 +3064,7 @@ func maybePrepareOpenClawDORuntimeOverSSH(ctx context.Context, bindings map[stri
 	}
 	scriptLines = append(scriptLines,
 		"chmod 600 /opt/openclaw/.env",
+		"chmod 600 /opt/openclaw/data/.env",
 	)
 	if providerAuthJSON != "" {
 		scriptLines = append(scriptLines,
@@ -3035,13 +3098,13 @@ func openClawDOAuthProfilesJSON(bindings map[string]string) string {
 		envKey   string
 	}
 	providers := make([]providerProfile, 0, 3)
-	if strings.TrimSpace(bindings["ANTHROPIC_API_KEY"]) != "" {
+	if openClawDOBindingValue(bindings, "ANTHROPIC_API_KEY") != "" {
 		providers = append(providers, providerProfile{provider: "anthropic", envKey: "ANTHROPIC_API_KEY"})
 	}
-	if strings.TrimSpace(bindings["OPENAI_API_KEY"]) != "" {
+	if openClawDOBindingValue(bindings, "OPENAI_API_KEY") != "" {
 		providers = append(providers, providerProfile{provider: "openai", envKey: "OPENAI_API_KEY"})
 	}
-	if strings.TrimSpace(bindings["GEMINI_API_KEY"]) != "" {
+	if openClawDOBindingValue(bindings, "GEMINI_API_KEY") != "" {
 		providers = append(providers, providerProfile{provider: "gemini", envKey: "GEMINI_API_KEY"})
 	}
 	if len(providers) == 0 {
@@ -3514,25 +3577,49 @@ func ensureDODeploySSHKeyMaterial(material *doDeploySSHKeyMaterial, w io.Writer)
 	if strings.TrimSpace(material.privateKeyPath) != "" && strings.TrimSpace(material.publicKeyPath) != "" && strings.TrimSpace(material.keyName) != "" {
 		return nil
 	}
-	tmpDir, err := os.MkdirTemp("", "clanker-do-ssh-*")
-	if err != nil {
-		return fmt.Errorf("create DigitalOcean deploy SSH key directory: %w", err)
+	tmpDir := strings.TrimSpace(os.Getenv("CLANKER_DO_SSH_KEY_DIR"))
+	persistentDir := tmpDir != ""
+	var err error
+	if persistentDir {
+		tmpDir = expandHomePath(tmpDir)
+		if mkErr := os.MkdirAll(tmpDir, 0o700); mkErr != nil {
+			return fmt.Errorf("create DigitalOcean deploy SSH key directory: %w", mkErr)
+		}
+	} else {
+		tmpDir, err = os.MkdirTemp("", "clanker-do-ssh-*")
+		if err != nil {
+			return fmt.Errorf("create DigitalOcean deploy SSH key directory: %w", err)
+		}
 	}
 	privateKeyPath := filepath.Join(tmpDir, "id_rsa")
-	if err := generateLocalSSHKeyPair(privateKeyPath); err != nil {
-		_ = os.RemoveAll(tmpDir)
-		return fmt.Errorf("generate DigitalOcean SSH key pair: %w", err)
+	publicKeyPath := privateKeyPath + ".pub"
+	if _, statErr := os.Stat(privateKeyPath); statErr != nil || func() bool {
+		_, pubErr := os.Stat(publicKeyPath)
+		return pubErr != nil
+	}() {
+		if err := generateLocalSSHKeyPair(privateKeyPath); err != nil {
+			if !persistentDir {
+				_ = os.RemoveAll(tmpDir)
+			}
+			return fmt.Errorf("generate DigitalOcean SSH key pair: %w", err)
+		}
 	}
 	token, err := newDODeploySSHKeyToken()
 	if err != nil {
-		_ = os.RemoveAll(tmpDir)
+		if !persistentDir {
+			_ = os.RemoveAll(tmpDir)
+		}
 		return err
 	}
 	material.keyName = "clanker-do-" + token
 	material.privateKeyPath = privateKeyPath
-	material.publicKeyPath = privateKeyPath + ".pub"
-	material.cleanup = func() {
-		_ = os.RemoveAll(tmpDir)
+	material.publicKeyPath = publicKeyPath
+	if persistentDir {
+		material.cleanup = nil
+	} else {
+		material.cleanup = func() {
+			_ = os.RemoveAll(tmpDir)
+		}
 	}
 	if w != nil {
 		_, _ = fmt.Fprintf(w, "[maker] generated fresh deploy-scoped SSH key pair for DigitalOcean import: %s\n", material.publicKeyPath)
