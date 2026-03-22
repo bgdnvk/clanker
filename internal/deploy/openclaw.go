@@ -139,14 +139,17 @@ Estimate the MONTHLY cost in USD.
 func OpenClawArchitectPromptDigitalOcean() string {
 	return `
 ## DigitalOcean Options to Consider
-1. **do-droplet** — Droplet VM + Docker Compose (best for long-running gateway services) (~$6-24/mo)
+1. **do-droplet** — Droplet VM + Docker Compose for OpenClaw runtime, plus App Platform as managed HTTPS front door (~$12-30/mo)
 2. **do-app-platform** — managed containers (good for stateless HTTP apps, no persistent disk)
 3. **do-k8s** — Kubernetes (overkill unless explicitly requested)
 
 ## DigitalOcean Services
-- Droplet for always-on gateway runtime
+- Droplet for always-on OpenClaw gateway runtime (build OpenClaw image on droplet, NOT via DOCR)
+- App Platform web service for managed HTTPS on a DigitalOcean-owned ondigitalocean.app hostname
+- DOCR is allowed only for the small App Platform HTTPS proxy image, not for the OpenClaw runtime image
+- DigitalOcean allows only one registry per account/team, so one-click deploy may need to reuse that existing registry while still using a fresh repository name for the proxy image
 - Block storage volume for persistent OpenClaw state/workspace
-- Reserved IP for stable public endpoint
+- Reserved IP only if quota is available and a pinned IP is explicitly needed
 - Cloud Firewall for port restrictions
 
 ## Deployment CLI
@@ -159,27 +162,28 @@ Estimate the MONTHLY cost in USD.
 {
 	"provider": "digitalocean",
 	"method": "do-droplet",
-	"reasoning": "OpenClaw is a long-running gateway with persistent state and channel credentials. A Droplet with Docker Compose is the simplest, cheapest, and most reliable path on DigitalOcean.",
+	"reasoning": "OpenClaw stays on a stateful Droplet while App Platform provides managed HTTPS without requiring a custom domain; when DigitalOcean forces a single shared registry, reuse that registry but keep deploy-scoped repository names for the proxy image.",
 	"alternatives": [
-		{"method": "do-app-platform", "why_not": "No persistent local disk; OpenClaw needs file-based config/workspace"},
+		{"method": "do-app-platform", "why_not": "OpenClaw itself is stateful and still needs file-based config/workspace on a Droplet"},
 		{"method": "do-k8s", "why_not": "Operationally complex for this use case"}
 	],
 	"buildSteps": [
-		"Create DigitalOcean Container Registry",
-		"Build and push Docker image to DOCR",
 		"Create Cloud Firewall for required ports",
-		"Create Droplet with user-data (install Docker, pull image, compose up)",
+		"Create Droplet with user-data (clone repo, write .env with OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:latest, seed config, docker compose pull, compose up)",
+		"Create a DOCR registry when the account has none, otherwise reuse the account's existing registry with a fresh proxy repository name for this deploy, then build and push the tiny HTTPS proxy image and create an App Platform app from that image",
+		"Patch OpenClaw allowedOrigins to the App Platform HTTPS URL after the app is live",
+		"Attach firewall; reserved IP is optional when quota allows",
 		"Verify gateway health"
 	],
 	"runCmd": "docker compose up -d openclaw-gateway",
-	"notes": ["Expose only required ports via Cloud Firewall", "Persist OpenClaw config/workspace on disk or volume"],
-	"cpuMemory": "s-1vcpu-2gb",
+	"notes": ["Keep the OpenClaw runtime on the droplet but use the upstream GHCR image, not a local source build", "Use App Platform as the managed HTTPS front door", "Expose only required ports via Cloud Firewall (22, 18789, 18790)", "Persist OpenClaw config/workspace on disk or volume", "Do not write DIGITALOCEAN_ACCESS_TOKEN into OpenClaw .env", "If building the App Platform proxy image locally, use docker build context __CLANKER_OPENCLAW_DO_PROXY__"],
+	"cpuMemory": "s-2vcpu-4gb",
 	"needsAlb": false,
 	"useApiGateway": false,
 	"needsDb": false,
 	"dbService": "",
-	"estMonthly": "$12-18",
-	"costBreakdown": ["Droplet s-1vcpu-2gb", "Container Registry basic", "Reserved IP"]
+	"estMonthly": "$24-30",
+	"costBreakdown": ["Droplet s-2vcpu-4gb", "Reserved IP (optional)"]
 }`
 }
 
@@ -190,21 +194,17 @@ func OpenClawDigitalOceanDropletPrompt(p *RepoProfile, deep *DeepAnalysis, opts 
 		deployID = opts.DeployID
 	}
 	resourcePrefix := repoResourcePrefix(p.RepoURL, deployID)
-	b.WriteString("Deploy OpenClaw using DigitalOcean Droplet (VM + Docker Compose):\n")
-	b.WriteString(fmt.Sprintf("Naming: use prefix %s for droplet/firewall/registry resources\n", resourcePrefix))
-	b.WriteString("1. Create a DigitalOcean Container Registry (doctl registry create)\n")
-	b.WriteString("2. Build Docker image locally and push to DOCR\n")
-	b.WriteString("3. Create a Cloud Firewall allowing inbound on required ports (18789, 443, 80, 22)\n")
-	b.WriteString("4. Create a Droplet (Ubuntu 22.04 Docker image, s-1vcpu-2gb) with user-data script\n")
-	b.WriteString("5. User-data must: install Docker Compose, login to DOCR, pull image, write .env, run onboarding, compose up\n")
-	b.WriteString(fmt.Sprintf("6. Clone repository: %s\n", p.RepoURL))
-	b.WriteString("7. Create persistent directories for OpenClaw config/workspace on disk\n")
-	b.WriteString("8. Build and start with: docker compose build && docker compose up -d openclaw-gateway\n")
-	b.WriteString("9. Verify gateway health and endpoint readiness\n")
+	b.WriteString("Deploy OpenClaw using DigitalOcean Droplet plus App Platform HTTPS proxy:\n")
+	b.WriteString(fmt.Sprintf("Naming: use prefix %s for droplet/firewall/app resources\n", resourcePrefix))
+	b.WriteString("1. Create a Cloud Firewall allowing inbound only on required public ports (" + openClawDORequiredPortsText + ") unless a reverse proxy was explicitly requested\n")
+	b.WriteString("2. Create a Droplet (Ubuntu 22.04 Docker image, s-2vcpu-4gb) with user-data script\n")
+	b.WriteString(fmt.Sprintf("3. User-data must: clone %s, write .env with OPENCLAW_IMAGE=%s, seed config non-interactively, '%s', docker compose up\n", p.RepoURL, openClawDOImageRef, openClawDOImagePullCommand))
+	b.WriteString("4. Create a DOCR registry only if the account has none; otherwise reuse the existing account-scoped registry, choose a fresh repository name for this deploy, build the HTTPS proxy image with docker build context __CLANKER_OPENCLAW_DO_PROXY__, push it, and create an App Platform web service from that image\n")
+	b.WriteString("5. Use the App Platform default ingress HTTPS URL as the OpenClaw browser endpoint and patch allowedOrigins to that URL\n")
+	b.WriteString("6. Attach firewall to droplet\n")
+	b.WriteString("7. Reserved IP is optional; include it only when quota is available and a pinned IP is required\n")
 	b.WriteString("\nDigitalOcean-specific notes:\n")
-	b.WriteString("- Steps 2 (build) and 2 (push) use plain 'docker build' / 'docker push' CLI, NOT doctl subcommands.\n")
-	b.WriteString("- User-data DOCR auth: install doctl, then 'doctl auth init -t $DIGITALOCEAN_ACCESS_TOKEN && doctl registry login'. Do NOT read /root/.config/doctl/config.yaml.\n")
-	b.WriteString("- .env MUST include OPENCLAW_GATEWAY_BIND=lan (required for gateway to accept external connections).\n")
+	writeLines(&b, openClawDODropletPromptNotes()...)
 	return b.String()
 }
 
@@ -257,11 +257,11 @@ func ApplyOpenClawArchitectureDefaults(targetProvider string, opts *DeployOption
 		return false
 	}
 
-	// DigitalOcean: force do-droplet for OpenClaw (stateful + websocket)
+	// DigitalOcean: force do-droplet for OpenClaw runtime; App Platform is only the HTTPS front door.
 	if provider == "digitalocean" {
 		arch.Provider = "digitalocean"
 		arch.Method = "do-droplet"
-		arch.Reasoning = "OpenClaw is a stateful, long-running gateway; a Droplet with Docker Compose is the simplest path on DigitalOcean"
+		arch.Reasoning = "OpenClaw stays stateful on a Droplet while App Platform supplies managed HTTPS without requiring a user domain"
 		return true
 	}
 
@@ -300,7 +300,7 @@ func AppendOpenClawDeploymentRequirements(b *strings.Builder, p *RepoProfile, de
 	b.WriteString("- Configure gateway token via environment variable\n")
 	b.WriteString("- Expose gateway port (default 18789) intentionally and securely\n")
 	b.WriteString("- Use environment variables for channel/provider secrets; avoid committing tokens\n")
-	b.WriteString("- IMPORTANT: You MUST run the onboarding step (`./docker-setup.sh` or `openclaw-cli onboard`) BEFORE starting the gateway container.\n")
+	b.WriteString("- IMPORTANT: Unattended VPS bootstraps must not depend on interactive onboarding. Seed minimal gateway config non-interactively before starting the gateway container.\n")
 
 	prov := strings.ToLower(strings.TrimSpace(provider))
 
@@ -308,11 +308,7 @@ func AppendOpenClawDeploymentRequirements(b *strings.Builder, p *RepoProfile, de
 	switch prov {
 	case "digitalocean":
 		b.WriteString("\n### DigitalOcean Deployment Ordering\n")
-		b.WriteString("- Create Container Registry BEFORE building/pushing the Docker image.\n")
-		b.WriteString("- Create Cloud Firewall BEFORE OR AFTER creating the Droplet (both work, but before is cleaner).\n")
-		b.WriteString("- The Droplet user-data script runs at first boot — it must login to DOCR, pull the image, write .env, and docker compose up.\n")
-		b.WriteString("- DO does NOT have IAM roles; use doctl auth or access tokens for registry login.\n")
-		b.WriteString("- Secrets go directly into the .env file written by user-data (no Secrets Manager equivalent needed for basic deploys).\n")
+		writeLines(b, openClawDODeploymentRequirementLines()...)
 	default:
 		// AWS-specific ordering
 		b.WriteString("- For AWS EC2+ALB deployments, ALWAYS create CloudFront in front of ALB and set HTTPS as the primary endpoint\n")
@@ -364,10 +360,10 @@ func applyOpenClawUserDataValidation(out *deterministicValidation, script string
 
 	lower := strings.ToLower(script)
 
-	// Expect either docker-setup.sh or onboard, regardless of compose vs run.
-	if !strings.Contains(lower, "docker-setup.sh") && !strings.Contains(lower, "openclaw-cli") && !strings.Contains(lower, " onboar") {
-		out.Issues = append(out.Issues, "[HARD] OpenClaw deploy missing onboarding step (docker-setup.sh / openclaw-cli onboard)")
-		out.Fixes = append(out.Fixes, "Run ./docker-setup.sh (or docker run/compose openclaw-cli onboard) before starting openclaw-gateway")
+	// Accept either the legacy onboarding path or a direct non-interactive config seed.
+	if !strings.Contains(lower, "docker-setup.sh") && !strings.Contains(lower, "openclaw-cli") && !strings.Contains(lower, " onboar") && !hasOpenClawNonInteractiveBootstrap(script) {
+		out.Issues = append(out.Issues, "[HARD] OpenClaw deploy is missing bootstrap initialization before starting the gateway")
+		out.Fixes = append(out.Fixes, "Seed a minimal openclaw.json with gateway.mode=local before docker compose up, or run onboarding in an interactive environment before starting openclaw-gateway")
 	}
 
 	if usesCompose {

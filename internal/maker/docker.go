@@ -2,12 +2,14 @@ package maker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -18,24 +20,44 @@ var dockerPlatformLineRe = regexp.MustCompile(`(?m)^\s*Platform:\s*(linux/(?:amd
 
 var dockerBuildxDriverLineRe = regexp.MustCompile(`(?m)^\s*Driver:\s*([a-zA-Z0-9_-]+)\s*$`)
 
+var knownDockerCLIPluginDirs = []string{filepath.Join(".docker", "cli-plugins")}
+
 // hasBuildxAvailable checks if docker buildx plugin is installed and working
 func hasBuildxAvailable(ctx context.Context) bool {
+	return hasBuildxAvailableWithConfig(ctx, "")
+}
+
+func hasBuildxAvailableWithConfig(ctx context.Context, dockerConfigDir string) bool {
+	version, ok := dockerBuildxVersion(ctx, dockerConfigDir)
+	return ok && strings.TrimSpace(version) != ""
+}
+
+func dockerBuildxVersion(ctx context.Context, dockerConfigDir string) (string, bool) {
 	cmd := exec.CommandContext(ctx, "docker", "buildx", "version")
+	cmd.Env = dockerBuildxEnv(os.Environ(), dockerConfigDir)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return false
+		return "", false
 	}
 	// Check output contains version info (not just docker help)
-	return strings.Contains(string(out), "buildx") || strings.Contains(string(out), "github.com/docker/buildx")
+	text := strings.TrimSpace(string(out))
+	if strings.Contains(text, "buildx") || strings.Contains(text, "github.com/docker/buildx") {
+		return text, true
+	}
+	return "", false
 }
 
 // BuildAndPushDockerImage builds a Docker image locally and pushes to ECR.
 // It handles ECR authentication, building the image, tagging, and pushing.
 func BuildAndPushDockerImage(ctx context.Context, clonePath, ecrURI, profile, region, imageTag string, w io.Writer) (string, error) {
-	return BuildAndPushDockerImageWithTags(ctx, clonePath, ecrURI, profile, region, []string{imageTag}, w)
+	return BuildAndPushDockerImageWithRequirements(ctx, clonePath, ecrURI, profile, region, []string{imageTag}, nil, w)
 }
 
 func BuildAndPushDockerImageWithTags(ctx context.Context, clonePath, ecrURI, profile, region string, imageTags []string, w io.Writer) (string, error) {
+	return BuildAndPushDockerImageWithRequirements(ctx, clonePath, ecrURI, profile, region, imageTags, nil, w)
+}
+
+func BuildAndPushDockerImageWithRequirements(ctx context.Context, clonePath, ecrURI, profile, region string, imageTags []string, requiredPlatforms []string, w io.Writer) (string, error) {
 	accountID := extractAccountFromECR(ecrURI)
 	if accountID == "" {
 		return "", fmt.Errorf("failed to extract account ID from ECR URI: %s", ecrURI)
@@ -73,13 +95,17 @@ func BuildAndPushDockerImageWithTags(ctx context.Context, clonePath, ecrURI, pro
 		tagArgs = append(tagArgs, "-t", ecrURI+":"+t)
 	}
 
-	// Check if buildx is available, fall back to regular docker build if not
-	useBuildx := hasBuildxAvailable(ctx)
-
+	requiredPlatforms = normalizeDockerPlatforms(requiredPlatforms)
+	useBuildx, buildxReason, err := dockerBuildNeedsBuildx(ctx, requiredPlatforms)
+	if err != nil {
+		return "", err
+	}
 	if useBuildx {
-		if err := ensureDockerBuildxReady(ctx, w); err != nil {
-			fmt.Fprintf(w, "[docker] buildx setup failed, falling back to regular docker build: %v\n", err)
-			useBuildx = false
+		if !hasBuildxAvailableWithConfig(ctx, "") {
+			return "", fmt.Errorf("docker buildx is required for %s but is not available", buildxReason)
+		}
+		if err := ensureDockerBuildxReadyWithConfig(ctx, w, ""); err != nil {
+			return "", fmt.Errorf("docker buildx is required for %s but is not ready: %w", buildxReason, err)
 		}
 	}
 
@@ -87,12 +113,11 @@ func BuildAndPushDockerImageWithTags(ctx context.Context, clonePath, ecrURI, pro
 	defer cancel()
 
 	if useBuildx {
-		// 2a. Build+push a multi-arch image using buildx
-		fmt.Fprintf(w, "[docker] building multi-arch image (linux/amd64, linux/arm64) from %s...\n", clonePath)
+		// 2a. Build+push when the target platform differs from the local Docker daemon platform.
+		fmt.Fprintf(w, "[docker] building image for %s from %s using buildx (%s)...\n", strings.Join(requiredPlatforms, ", "), clonePath, buildxReason)
 		buildArgs := []string{
 			"buildx", "build",
-			"--builder", "clanker-builder",
-			"--platform", "linux/amd64,linux/arm64",
+			"--platform", strings.Join(requiredPlatforms, ","),
 			"--progress", "plain",
 			"--provenance=false",
 			"--sbom=false",
@@ -101,6 +126,7 @@ func BuildAndPushDockerImageWithTags(ctx context.Context, clonePath, ecrURI, pro
 		buildArgs = append(buildArgs, tagArgs...)
 		buildArgs = append(buildArgs, "--push", clonePath)
 		buildCmd := exec.CommandContext(buildCtx, "docker", buildArgs...)
+		buildCmd.Env = dockerBuildxEnv(os.Environ(), "")
 		buildCmd.Stdout = w
 		buildCmd.Stderr = w
 		if err := buildCmd.Run(); err != nil {
@@ -112,7 +138,7 @@ func BuildAndPushDockerImageWithTags(ctx context.Context, clonePath, ecrURI, pro
 		fmt.Fprintf(w, "[docker] push complete\n")
 
 		// 3. Verify the registry has the expected platforms.
-		if err := verifyRemoteImagePlatforms(ctx, primaryRef, []string{"linux/amd64", "linux/arm64"}); err != nil {
+		if err := verifyRemoteImagePlatformsWithConfig(ctx, primaryRef, requiredPlatforms, ""); err != nil {
 			return "", err
 		}
 	} else {
@@ -258,6 +284,11 @@ func dockerLoginECR(ctx context.Context, accountID, profile, region string, w io
 }
 
 func ensureDockerBuildxReady(ctx context.Context, w io.Writer) error {
+	return ensureDockerBuildxReadyWithConfig(ctx, w, "")
+}
+
+func ensureDockerBuildxReadyWithConfig(ctx context.Context, w io.Writer, dockerConfigDir string) error {
+	env := dockerBuildxEnv(os.Environ(), dockerConfigDir)
 	// Ensure a docker-container builder exists/selected.
 	// The Docker Desktop 'docker' driver can hang during export/unpack; docker-container avoids that.
 	name := "clanker-builder"
@@ -265,6 +296,7 @@ func ensureDockerBuildxReady(ctx context.Context, w io.Writer) error {
 	// Helper to select an existing builder
 	selectBuilder := func() error {
 		use := exec.CommandContext(ctx, "docker", "buildx", "use", name)
+		use.Env = env
 		return use.Run()
 	}
 
@@ -272,18 +304,40 @@ func ensureDockerBuildxReady(ctx context.Context, w io.Writer) error {
 	// The --use flag combined with create is not supported in older Docker buildx versions.
 	createAndSelectBuilder := func() error {
 		// First, clean up any existing broken builder
-		_ = exec.CommandContext(ctx, "docker", "buildx", "rm", "-f", name).Run()
+		rm := exec.CommandContext(ctx, "docker", "buildx", "rm", "-f", name)
+		rm.Env = env
+		_ = rm.Run()
 
-		// Create builder using positional argument (compatible with all Docker versions)
-		// The --name flag is not supported in older Docker buildx versions
-		create := exec.CommandContext(ctx, "docker", "buildx", "create", name, "--driver", "docker-container")
-		out, err := create.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("failed to create builder: %w\nOutput: %s", err, strings.TrimSpace(string(out)))
+		// Newer buildx versions expect the builder name via --name. Older versions may only
+		// accept the positional form, so try --name first and fall back if needed.
+		createArgs := [][]string{
+			{"buildx", "create", "--name", name, "--driver", "docker-container"},
+			{"buildx", "create", name, "--driver", "docker-container"},
+		}
+		var lastOut string
+		var lastErr error
+		created := false
+		for idx, args := range createArgs {
+			create := exec.CommandContext(ctx, "docker", args...)
+			create.Env = env
+			out, err := create.CombinedOutput()
+			if err == nil {
+				created = true
+				break
+			}
+			lastErr = err
+			lastOut = strings.TrimSpace(string(out))
+			if idx == 0 && !strings.Contains(strings.ToLower(lastOut), "unknown flag: --name") {
+				return fmt.Errorf("failed to create builder: %w\nOutput: %s", err, lastOut)
+			}
+		}
+		if !created {
+			return fmt.Errorf("failed to create builder: %w\nOutput: %s", lastErr, lastOut)
 		}
 
 		// Select the builder in a separate command (compatible with all Docker versions)
 		use := exec.CommandContext(ctx, "docker", "buildx", "use", name)
+		use.Env = env
 		if useOut, useErr := use.CombinedOutput(); useErr != nil {
 			return fmt.Errorf("failed to select builder: %w\nOutput: %s", useErr, strings.TrimSpace(string(useOut)))
 		}
@@ -293,6 +347,7 @@ func ensureDockerBuildxReady(ctx context.Context, w io.Writer) error {
 
 	// Check if builder already exists and is valid
 	inspect := exec.CommandContext(ctx, "docker", "buildx", "inspect", name)
+	inspect.Env = env
 	out, err := inspect.CombinedOutput()
 	if err == nil {
 		driver := parseBuildxDriver(string(out))
@@ -330,6 +385,10 @@ func parseBuildxDriver(inspectOutput string) string {
 }
 
 func verifyRemoteImagePlatforms(ctx context.Context, imageRef string, requiredPlatforms []string) error {
+	return verifyRemoteImagePlatformsWithConfig(ctx, imageRef, requiredPlatforms, "")
+}
+
+func verifyRemoteImagePlatformsWithConfig(ctx context.Context, imageRef string, requiredPlatforms []string, dockerConfigDir string) error {
 	imageRef = strings.TrimSpace(imageRef)
 	if imageRef == "" {
 		return fmt.Errorf("missing image ref for platform verification")
@@ -339,6 +398,7 @@ func verifyRemoteImagePlatforms(ctx context.Context, imageRef string, requiredPl
 	}
 
 	cmd := exec.CommandContext(ctx, "docker", "buildx", "imagetools", "inspect", imageRef)
+	cmd.Env = dockerBuildxEnv(os.Environ(), dockerConfigDir)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to inspect pushed image platforms: %w\nOutput: %s", err, strings.TrimSpace(string(out)))
@@ -393,6 +453,205 @@ func dockerDaemonAvailable(ctx context.Context) bool {
 // This is used by CLI flows to surface a clearer message than "docker not installed".
 func DockerDaemonAvailableForCLI(ctx context.Context) bool {
 	return dockerDaemonAvailable(ctx)
+}
+
+func dockerBuildNeedsBuildx(ctx context.Context, requiredPlatforms []string) (bool, string, error) {
+	requiredPlatforms = normalizeDockerPlatforms(requiredPlatforms)
+	if len(requiredPlatforms) == 0 {
+		return false, "", nil
+	}
+	if len(requiredPlatforms) > 1 {
+		return true, "multiple target platforms", nil
+	}
+	nativePlatform, err := dockerDaemonPlatform(ctx)
+	if err != nil {
+		return true, "cross-platform target with unknown local Docker platform", nil
+	}
+	if nativePlatform == "" {
+		return true, "cross-platform target with unknown local Docker platform", nil
+	}
+	if !strings.EqualFold(requiredPlatforms[0], nativePlatform) {
+		return true, fmt.Sprintf("target platform %s differs from local Docker platform %s", requiredPlatforms[0], nativePlatform), nil
+	}
+	return false, "", nil
+}
+
+func dockerDaemonPlatform(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "info", "--format", "{{.OSType}}/{{.Architecture}}")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+	platform := strings.TrimSpace(string(out))
+	if platform == "" {
+		return "", nil
+	}
+	return platform, nil
+}
+
+func dockerBuildxEnv(env []string, dockerConfigDir string) []string {
+	resolved := resolveDockerConfigDir(dockerConfigDir)
+	if strings.TrimSpace(resolved) != "" {
+		_ = ensureDockerConfigPluginDirs(resolved)
+	}
+	return envWithDockerConfig(env, resolved)
+}
+
+func resolveDockerConfigDir(preferred string) string {
+	preferred = strings.TrimSpace(preferred)
+	if preferred != "" {
+		return preferred
+	}
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		return filepath.Join(home, ".docker")
+	}
+	return strings.TrimSpace(os.Getenv("DOCKER_CONFIG"))
+}
+
+func ensureDockerConfigPluginDirs(dockerConfigDir string) error {
+	dockerConfigDir = strings.TrimSpace(dockerConfigDir)
+	if dockerConfigDir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dockerConfigDir, 0700); err != nil {
+		return err
+	}
+	configPath := filepath.Join(dockerConfigDir, "config.json")
+	payload := map[string]any{}
+	if raw, err := os.ReadFile(configPath); err == nil {
+		trimmed := strings.TrimSpace(string(raw))
+		if trimmed != "" {
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				return fmt.Errorf("parse docker config %s: %w", configPath, err)
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	existing := toStringSlice(payload["cliPluginsExtraDirs"])
+	merged := append([]string{}, existing...)
+	for _, dir := range discoverDockerCLIPluginDirs() {
+		if !containsString(merged, dir) {
+			merged = append(merged, dir)
+		}
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	payload["cliPluginsExtraDirs"] = merged
+	out, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	out = append(out, '\n')
+	return os.WriteFile(configPath, out, 0600)
+}
+
+func discoverDockerCLIPluginDirs() []string {
+	seen := map[string]bool{}
+	dirs := make([]string, 0, len(knownDockerCLIPluginDirs)+8)
+	home, _ := os.UserHomeDir()
+	for _, dir := range dockerCLIPluginDirCandidates() {
+		resolved := dir
+		if strings.HasPrefix(dir, filepath.Join(".docker", "cli-plugins")) {
+			if strings.TrimSpace(home) == "" {
+				continue
+			}
+			resolved = filepath.Join(home, dir)
+		}
+		resolved = strings.TrimSpace(resolved)
+		if resolved == "" || seen[resolved] {
+			continue
+		}
+		if st, err := os.Stat(resolved); err == nil && st.IsDir() {
+			seen[resolved] = true
+			dirs = append(dirs, resolved)
+		}
+	}
+	return dirs
+}
+
+func dockerCLIPluginDirCandidates() []string {
+	candidates := append([]string{}, knownDockerCLIPluginDirs...)
+	switch runtime.GOOS {
+	case "windows":
+		if localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localAppData != "" {
+			candidates = append(candidates,
+				filepath.Join(localAppData, "Docker", "cli-plugins"),
+				filepath.Join(localAppData, "Programs", "Docker", "cli-plugins"),
+			)
+		}
+		if programFiles := strings.TrimSpace(os.Getenv("ProgramFiles")); programFiles != "" {
+			candidates = append(candidates,
+				filepath.Join(programFiles, "Docker", "cli-plugins"),
+				filepath.Join(programFiles, "Docker", "Docker", "resources", "cli-plugins"),
+			)
+		}
+		if programData := strings.TrimSpace(os.Getenv("ProgramData")); programData != "" {
+			candidates = append(candidates, filepath.Join(programData, "DockerDesktop", "cli-plugins"))
+		}
+	case "darwin":
+		candidates = append(candidates,
+			"/opt/homebrew/lib/docker/cli-plugins",
+			"/usr/local/lib/docker/cli-plugins",
+			"/usr/local/libexec/docker/cli-plugins",
+			"/Applications/Docker.app/Contents/Resources/cli-plugins",
+		)
+	default:
+		candidates = append(candidates,
+			"/home/linuxbrew/.linuxbrew/lib/docker/cli-plugins",
+			"/usr/local/lib/docker/cli-plugins",
+			"/usr/local/libexec/docker/cli-plugins",
+			"/usr/lib/docker/cli-plugins",
+			"/usr/libexec/docker/cli-plugins",
+		)
+	}
+	return candidates
+}
+
+func normalizeDockerPlatforms(platforms []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(platforms))
+	for _, platform := range platforms {
+		platform = strings.ToLower(strings.TrimSpace(platform))
+		if platform == "" || seen[platform] {
+			continue
+		}
+		seen[platform] = true
+		out = append(out, platform)
+	}
+	return out
+}
+
+func toStringSlice(v any) []string {
+	items, ok := v.([]any)
+	if !ok {
+		if direct, ok := v.([]string); ok {
+			return append([]string{}, direct...)
+		}
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		text := strings.TrimSpace(fmt.Sprint(item))
+		if text == "" {
+			continue
+		}
+		out = append(out, text)
+	}
+	return out
+}
+
+func containsString(items []string, target string) bool {
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item), strings.TrimSpace(target)) {
+			return true
+		}
+	}
+	return false
 }
 
 // extractAccountFromECR extracts the AWS account ID from an ECR URI.

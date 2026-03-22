@@ -3,7 +3,7 @@
 Early alpha.  
 First agent powering https://clankercloud.ai
 
-Ask questions about your infra (and optionally GitHub/etc). Clanker is read-only: it calls CLIs/APIs and summarizes what it finds.
+Ask questions about your infra (and optionally GitHub/etc). Clanker can inspect existing environments and also generate or apply infrastructure and deploy plans through its maker and deploy flows.
 
 Repo: https://github.com/bgdnvk/clanker
 
@@ -26,8 +26,8 @@ make install
 
 ### Requirements
 
--   Go
--   AWS CLI v2 (recommended; v1 breaks `--no-cli-pager`)
+- Go
+- AWS CLI v2 (recommended; v1 breaks `--no-cli-pager`)
 
 ```bash
 brew install awscli
@@ -55,10 +55,10 @@ export GEMINI_API_KEY="..."
 
 If you run without `~/.clanker.yaml`:
 
--   Default provider: `openai` (unless you pass `--ai-profile`).
--   OpenAI key order: `--openai-key` → `OPENAI_API_KEY` (also supports `ai.providers.openai.api_key` and `ai.providers.openai.api_key_env` if config exists).
--   Gemini API key order (when using `--ai-profile gemini-api`): `--gemini-key` → `GEMINI_API_KEY` (also supports `ai.providers.gemini-api.api_key` and `ai.providers.gemini-api.api_key_env` if config exists).
--   Model: `openai` defaults to `gpt-5`; `gemini`/`gemini-api` defaults to `gemini-3-pro-preview`.
+- Default provider: `openai` (unless you pass `--ai-profile`).
+- OpenAI key order: `--openai-key` → `OPENAI_API_KEY` (also supports `ai.providers.openai.api_key` and `ai.providers.openai.api_key_env` if config exists).
+- Gemini API key order (when using `--ai-profile gemini-api`): `--gemini-key` → `GEMINI_API_KEY` (also supports `ai.providers.gemini-api.api_key` and `ai.providers.gemini-api.api_key_env` if config exists).
+- Model: `openai` defaults to `gpt-5`; `gemini`/`gemini-api` defaults to `gemini-3-pro-preview`.
 
 ### AWS
 
@@ -95,15 +95,15 @@ clanker ask --aws --profile clankercloud-tekbog "what lambdas do we have?" | cat
 
 Flags:
 
--   `--aws`: force AWS context/tooling for the question (uses the default env/profile from `~/.clanker.yaml` unless you pass `--profile`)
--   `--profile <name>`: override the AWS CLI profile for this run
--   `--ai-profile <name>`: select an AI provider profile from `ai.providers.<name>` (overrides `ai.default_provider`)
--   `--maker`: generate an AWS CLI plan (JSON) for infrastructure changes
--   `--destroyer`: allow destructive AWS CLI operations when using `--maker`
--   `--apply`: apply an approved maker plan (reads from stdin unless `--plan-file` is provided)
--   `--plan-file <path>`: optional path to maker plan JSON file for `--apply`
--   `--debug`: print diagnostics (selected tools, AWS CLI calls, prompt sizes)
--   `--agent-trace`: print detailed coordinator/agent lifecycle logs (tool selection + investigation steps)
+- `--aws`: force AWS context/tooling for the question (uses the default env/profile from `~/.clanker.yaml` unless you pass `--profile`)
+- `--profile <name>`: override the AWS CLI profile for this run
+- `--ai-profile <name>`: select an AI provider profile from `ai.providers.<name>` (overrides `ai.default_provider`)
+- `--maker`: generate an AWS CLI plan (JSON) for infrastructure changes
+- `--destroyer`: allow destructive AWS CLI operations when using `--maker`
+- `--apply`: apply an approved maker plan (reads from stdin unless `--plan-file` is provided)
+- `--plan-file <path>`: optional path to maker plan JSON file for `--apply`
+- `--debug`: print diagnostics (selected tools, AWS CLI calls, prompt sizes)
+- `--agent-trace`: print detailed coordinator/agent lifecycle logs (tool selection + investigation steps)
 
 ```bash
 clanker ask "what's the status of my chat service lambda?"
@@ -133,10 +133,10 @@ clanker ask --aws --maker --destroyer "delete the clanka-postgres rds instance" 
 
 When you run with `--maker --apply`, the runner tries to be safe and repeatable:
 
--   Idempotent "already exists" errors are treated as success when safe (e.g. duplicate SG rules).
--   Some AWS async operations are waited to terminal state (e.g. CloudFormation create/update) so failures surface and can be remediated.
--   If the runner detects common AWS runtime issues (CIDR/subnet/template mismatches), it may rewrite and retry the original AWS CLI command.
--   If built-in retries/glue are exhausted, it can escalate to AI for prerequisite commands, then retry the original command with exponential backoff.
+- Idempotent "already exists" errors are treated as success when safe (e.g. duplicate SG rules).
+- Some AWS async operations are waited to terminal state (e.g. CloudFormation create/update) so failures surface and can be remediated.
+- If the runner detects common AWS runtime issues (CIDR/subnet/template mismatches), it may rewrite and retry the original AWS CLI command.
+- If built-in retries/glue are exhausted, it can escalate to AI for prerequisite commands, then retry the original command with exponential backoff.
 
 ## Kubernetes Commands
 
@@ -292,15 +292,15 @@ clanker k8s ask --debug "how many pods are running"
 
 #### K8s Ask Flags
 
-| Flag | Description |
-|------|-------------|
-| `--cluster` | EKS cluster name (updates kubeconfig automatically) |
-| `--profile` | AWS profile for EKS clusters |
-| `--kubeconfig` | Path to kubeconfig file (default: ~/.kube/config) |
-| `--context` | kubectl context to use (overrides --cluster) |
-| `-n, --namespace` | Default namespace for queries |
-| `--ai-profile` | AI profile to use for LLM queries |
-| `--debug` | Show detailed debug output including LLM operations |
+| Flag              | Description                                         |
+| ----------------- | --------------------------------------------------- |
+| `--cluster`       | EKS cluster name (updates kubeconfig automatically) |
+| `--profile`       | AWS profile for EKS clusters                        |
+| `--kubeconfig`    | Path to kubeconfig file (default: ~/.kube/config)   |
+| `--context`       | kubectl context to use (overrides --cluster)        |
+| `-n, --namespace` | Default namespace for queries                       |
+| `--ai-profile`    | AI profile to use for LLM queries                   |
+| `--debug`         | Show detailed debug output including LLM operations |
 
 ### Legacy Natural Language Queries (via `clanker ask`)
 
@@ -341,7 +341,7 @@ Or configure in `~/.clanker.yaml`:
 
 ```yaml
 digitalocean:
-  api_token: "your-token-here"
+    api_token: "your-token-here"
 ```
 
 ### Static Commands
@@ -409,7 +409,7 @@ Or configure in `~/.clanker.yaml`:
 
 ```yaml
 hetzner:
-  api_token: "your-token-here"
+    api_token: "your-token-here"
 ```
 
 ### Static Commands
@@ -470,7 +470,7 @@ clanker ask "test" --debug | cat
 
 Clanker has a single output flag:
 
--   `--debug`: prints progress + internal diagnostics (tool selection, AWS CLI calls, prompt sizes, etc).
+- `--debug`: prints progress + internal diagnostics (tool selection, AWS CLI calls, prompt sizes, etc).
 
 Examples:
 
@@ -481,4 +481,4 @@ clanker ask "show github actions status" --github --debug | cat
 
 ## Notes
 
--   Only tested on macOS.
+- Only tested on macOS.

@@ -3,6 +3,7 @@ package openclaw
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,7 +29,7 @@ func ConfigWriteShellCmd(cfDomain string, port int) string {
 	// Single-quote the JSON for shell safety; escape inner single quotes.
 	escaped := strings.ReplaceAll(json, "'", "'\\''")
 	return fmt.Sprintf(
-		`docker run --rm -v openclaw_data:/home/node/.openclaw alpine:3.20 sh -lc 'mkdir -p /home/node/.openclaw/workspace /home/node/.openclaw/devices; printf "%%s\n" '"'"'%s'"'"' > /home/node/.openclaw/openclaw.json; chown -R 1000:1000 /home/node/.openclaw' || true`,
+		`docker run --rm -v openclaw_data:/home/node/.openclaw -v openclaw_data:/root/.openclaw alpine:3.20 sh -lc 'mkdir -p /home/node/.openclaw/workspace /home/node/.openclaw/devices /root/.openclaw/workspace /root/.openclaw/devices; printf "%%s\n" '"'"'%s'"'"' | tee /home/node/.openclaw/openclaw.json > /root/.openclaw/openclaw.json; chown -R 1000:1000 /home/node/.openclaw; chown -R 0:0 /root/.openclaw' || true`,
 		escaped,
 	)
 }
@@ -71,6 +72,7 @@ func MaybePrintPostDeployInstructions(bindings map[string]string, profile, regio
 			httpsURL = "https://" + cf
 		}
 	}
+	tokenizedHTTPSURL := buildTokenizedDashboardURL(httpsURL, bindings)
 
 	port := 0
 	if p := strings.TrimSpace(bindings["APP_PORT"]); p != "" {
@@ -88,7 +90,12 @@ func MaybePrintPostDeployInstructions(bindings map[string]string, profile, regio
 	_, _ = fmt.Fprintf(w, "[openclaw] post-deploy connect + pairing\n")
 	if httpsURL != "" {
 		_, _ = fmt.Fprintf(w, "[openclaw] Control UI (HTTPS): %s\n", httpsURL)
-		_, _ = fmt.Fprintf(w, "[openclaw] Pairing URL: %s\n", httpsURL)
+		if tokenizedHTTPSURL != "" {
+			_, _ = fmt.Fprintf(w, "[openclaw] Control UI (ready): %s\n", tokenizedHTTPSURL)
+			_, _ = fmt.Fprintf(w, "[openclaw] Pairing URL: %s\n", tokenizedHTTPSURL)
+		} else {
+			_, _ = fmt.Fprintf(w, "[openclaw] Pairing URL: %s\n", httpsURL)
+		}
 	}
 	if albDNS != "" {
 		_, _ = fmt.Fprintf(w, "[openclaw] ALB origin (HTTP): http://%s\n", albDNS)
@@ -96,17 +103,24 @@ func MaybePrintPostDeployInstructions(bindings map[string]string, profile, regio
 	_, _ = fmt.Fprintf(w, "[openclaw] Gateway port: %d\n", port)
 
 	_, _ = fmt.Fprintf(w, "[openclaw] Steps:\n")
-	if httpsURL != "" {
+	if tokenizedHTTPSURL != "" {
+		_, _ = fmt.Fprintf(w, "[openclaw]  1) Open %s in a fresh Private/Incognito tab\n", tokenizedHTTPSURL)
+		_, _ = fmt.Fprintf(w, "[openclaw]     (OpenClaw imports #token=... into sessionStorage for this tab and strips it from the URL after load)\n")
+	} else if httpsURL != "" {
 		_, _ = fmt.Fprintf(w, "[openclaw]  1) Open %s in your browser\n", httpsURL)
 	} else if albDNS != "" {
 		_, _ = fmt.Fprintf(w, "[openclaw]  1) Open http://%s (note: some browsers require HTTPS for the Control UI)\n", albDNS)
 	} else {
 		_, _ = fmt.Fprintf(w, "[openclaw]  1) Open the HTTPS URL printed above\n")
 	}
-	_, _ = fmt.Fprintf(w, "[openclaw]  2) When prompted, enter your gateway token (env var OPENCLAW_GATEWAY_TOKEN)\n")
+	if tokenizedHTTPSURL != "" {
+		_, _ = fmt.Fprintf(w, "[openclaw]  2) If the UI still prompts, enter your gateway token manually (env var OPENCLAW_GATEWAY_TOKEN)\n")
+	} else {
+		_, _ = fmt.Fprintf(w, "[openclaw]  2) When prompted, enter your gateway token (env var OPENCLAW_GATEWAY_TOKEN)\n")
+	}
 	_, _ = fmt.Fprintf(w, "[openclaw]  3) Click Connect\n")
 	_, _ = fmt.Fprintf(w, "[openclaw] Pairing:\n")
-	_, _ = fmt.Fprintf(w, "[openclaw]  - One-click deploy starts an auto-approve loop for pending pair requests for ~30 minutes (or until 2 new devices are paired) after instance boot\n")
+	_, _ = fmt.Fprintf(w, "[openclaw]  - One-click deploy starts an auto-approve loop for pending pair requests for 20 minutes (or until 2 new devices are paired) after instance boot\n")
 	_, _ = fmt.Fprintf(w, "[openclaw]  - If you still see 'pairing required', use the localhost + approve loop below (this also fixes stale browser device tokens)\n")
 
 	if instanceID != "" && strings.TrimSpace(profile) != "" && strings.TrimSpace(region) != "" {
@@ -126,6 +140,17 @@ func MaybePrintPostDeployInstructions(bindings map[string]string, profile, regio
 		_, _ = fmt.Fprintf(w, "[openclaw]  aws ssm send-command --document-name AWS-RunShellScript --instance-ids %s --parameters 'commands=[\"sudo docker exec %s cat /home/node/.openclaw/devices/pending.json\",\"sudo docker exec %s cat /home/node/.openclaw/devices/paired.json\"]' --profile %s --region %s\n", instanceID, containerName, containerName, profile, region)
 		_, _ = fmt.Fprintf(w, "[openclaw]  (Pending/paired files are inside the container at /home/node/.openclaw/devices/pending.json and /home/node/.openclaw/devices/paired.json)\n")
 	}
+}
+
+func buildTokenizedDashboardURL(httpsURL string, bindings map[string]string) string {
+	if strings.TrimSpace(httpsURL) == "" || len(bindings) == 0 {
+		return ""
+	}
+	token := strings.TrimSpace(bindings["OPENCLAW_GATEWAY_TOKEN"])
+	if token == "" {
+		return ""
+	}
+	return strings.TrimRight(strings.TrimSpace(httpsURL), "/") + "/#token=" + url.QueryEscape(token)
 }
 
 func SSMRestartCommands(prelude []string, port int, image string, startCmd string, bindings map[string]string) []string {

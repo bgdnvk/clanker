@@ -2,6 +2,60 @@
 
 This package powers the `clanker deploy` intelligence flow from user query to plan/apply.
 
+## Rule-Pack Layer
+
+The deploy package now has a small typed rule-pack layer in [internal/deploy/rule_packs.go](rule_packs.go).
+
+- **Provider packs** hold provider-specific hooks such as DigitalOcean autofix/validation and AWS validation.
+- **App packs** hold app-specific hooks such as OpenClaw and WordPress architecture defaults, prompt requirements, and app-aware autofix/validation.
+- The current implementation is intentionally thin: it **routes to the existing low-level logic** instead of replacing it.
+- Goal: reduce drift between prompt text, autofix, deterministic validation, and future backend parity work while keeping generic one-click deploy behavior intact.
+
+Related shared text/helpers:
+
+- [internal/deploy/openclaw_rules.go](openclaw_rules.go) centralizes repeated OpenClaw DigitalOcean guidance used by prompts, skeleton generation, and user-data repair.
+
+## Current Typed Seams
+
+Most of the package is still intentionally pragmatic and string-heavy, but a few narrow typed seams now exist to keep the highest-risk OpenClaw DigitalOcean paths deterministic without rewriting the whole planner.
+
+- **Rule-pack routing** in [internal/deploy/rule_packs.go](rule_packs.go) is the small typed dispatch layer for provider/app hooks.
+- **Skeleton capability hints** in [internal/deploy/skeleton_plan.go](skeleton_plan.go) attach lightweight provider/app/runtime constraints to the high-level plan before hydration.
+  Those hints are now also stamped onto hydrated plan JSON as plan-level capabilities metadata for downstream backend normalization/preflight.
+  The paged fallback planner now stamps the same inferred plan-level capabilities so backend checks do not lose metadata when skeleton generation is skipped.
+  WordPress on AWS now emits richer capability metadata too, so backend review/repair and preflight can keep the EC2 + ALB + Docker Hub runtime shape intact.
+  OpenClaw on AWS now emits stronger EC2 + ALB + CloudFront capability metadata as well, so backend checks can keep the required HTTPS pairing shape.
+  Backend normalization also uses that metadata now, so OpenClaw AWS autofill for CloudFront outputs/waiters and ECR pull viability still works even when the raw plan text is sparse.
+  Backend AWS normalization also uses WordPress capability metadata to strip accidental ECR/build flows and normalize the ALB health-check path back to /wp-login.php.
+  Backend app detection for rule-pack routing and advisory normalization is now centralized too, reducing drift between OpenClaw and WordPress matching paths.
+  Backend capability step-family matching is centralized now as well, so required/forbidden capability checks and app-specific preflight use the same command-family view.
+- **OpenClaw DO bootstrap canonicalization** in [internal/deploy/openclaw_rules.go](openclaw_rules.go) infers a minimal bootstrap spec from droplet user-data and renders one canonical script shape.
+- **OpenClaw DO firewall canonicalization** in [internal/deploy/openclaw_rules.go](openclaw_rules.go) lifts firewall rule strings into a small typed firewall spec, then re-renders one canonical `doctl compute firewall` rule layout.
+- **DigitalOcean command-schema gating** in [internal/deploy/do_command_schema.go](do_command_schema.go) rejects hallucinated command families early, enforces placeholder production order across paged planning, and blocks strict-schema regressions during repair/review.
+- **Semantic graph compilation** in [internal/deploy/semantic_graph.go](semantic_graph.go) and [internal/deploy/semantic_graph_digitalocean.go](semantic_graph_digitalocean.go) infers a typed provider/app/runtime graph from the LLM plan and recompiles that graph into canonical provider commands before final validation/execution.
+
+Current OpenClaw DigitalOcean invariants:
+
+- OpenClaw runtime image is built on the droplet with `docker build -t openclaw:local .`
+- App Platform provides the managed HTTPS front door on a DigitalOcean-owned hostname
+- DOCR is allowed only for the small App Platform proxy image, not for the OpenClaw runtime image
+- inbound TCP must include `22`, `18789`, and `18790`
+- outbound must include `tcp/all`, `udp/all`, and `icmp/all`
+- empty `address:` fields are normalized to `0.0.0.0/0`
+- repeated `--inbound-rules` / `--outbound-rules` flags are merged into one canonical arg each
+- droplet-facing firewall rules stay on the gateway ports only; browser HTTPS comes from App Platform rather than droplet ports `80` or `443`
+- plans must include `compute ssh-key import`, `compute firewall create`, `compute droplet create`, `compute firewall add-droplets`, `registry create`, `registry login`, `docker build`, `docker push`, and `apps create`
+- after `apps create` resolves the managed HTTPS URL, the executor patches `gateway.controlUi.allowedOrigins` over SSH on the droplet
+
+This is the current architecture direction: keep planning broad and non-deterministic, then lower the riskiest execution surfaces into small typed canonical forms.
+
+For the DigitalOcean OpenClaw path, the executable artifact is no longer treated as raw LLM command text alone. The pipeline now:
+
+- keeps the LLM responsible for repo analysis, intent, and high-level plan shape
+- infers a semantic graph from the generated DO plan
+- recompiles that graph into canonical DO commands for firewall, bootstrap, registry, droplet, and App Platform proxy steps
+- runs deterministic and LLM validation on the compiled output
+
 ## Query → Deploy (Current Flow)
 
 1. **Input + context setup**
@@ -14,12 +68,17 @@ This package powers the `clanker deploy` intelligence flow from user query to pl
     - **Phase 1.25: Docker analysis** (`docker_agent.go`) — Docker/Compose topology, primary port, container runtime hints.
     - **Phase 1.5: Infra scan** (`infra_scan.go`, `cf_infra_scan.go`) — existing cloud resources to reuse.
     - **Phase 2: Architecture decision** (`intelligence.go`) — method/provider recommendation (e.g. EC2 for OpenClaw).
+    - App rule packs can apply deterministic architecture overrides and append app/provider deployment requirements to the planning prompt.
     - Produces `EnrichedPrompt` for planning.
 
 3. **Skeleton + hydrate plan generation (`skeleton_plan.go`) — primary path**
     - **Phase 3a: Skeleton** — single LLM call produces a lightweight `PlanSkeleton` (service, operation, reason, produces, dependsOn per step). No real CLI args yet.
+    - Skeletons now also carry lightweight typed `Capabilities` hints so provider/app/runtime constraints survive into hydration without forcing a rigid full-plan schema.
     - Skeleton is validated (`validateSkeleton`): checks required launch ops are present, flags duplicates using a composite key of `(service, operation, produces, dependsOn)`.
+    - Capability-aware validation also checks required/forbidden step families for typed cases such as OpenClaw on DigitalOcean.
     - **Phase 3b: Hydrate** — skeleton steps are batched (max 5 consecutive independent steps per batch) and each batch is hydrated into real `maker.Command` structs via separate LLM calls.
+    - Hydrate prompts receive the same capability hints so later detail generation keeps the same execution model.
+    - Hydrated commands are now checked structurally against the requested skeleton step family and capability constraints before they are accepted.
     - Hydrate prompts enforce resource name consistency across steps (e.g. ECR repo names in user-data must match earlier `ecr create-repository` commands).
     - If skeleton or hydration fails, falls back to the **paged plan generation** path.
 
@@ -32,6 +91,9 @@ This package powers the `clanker deploy` intelligence flow from user query to pl
 
 4. **Generic plan autofix (`plan_autofix.go`)**
     - Runs after plan generation (both skeleton and paged paths).
+    - Before generic cleanup, matching rule packs may run app/provider-specific autofix hooks (for example OpenClaw and DigitalOcean passes).
+    - DigitalOcean autofix in [internal/deploy/do_plan_autofix.go](do_plan_autofix.go) is currently the main deterministic cleanup point for droplet user-data and firewall command repair.
+    - Structured plan transforms in [cmd/deploy.go](../cmd/deploy.go) now also pass supported plans through the semantic graph compiler after rule-pack autofix and before final generic cleanup.
     - **SSM semantic dedup** — deduplicates SSM `send-command` / `put-parameter` steps that do the same thing.
     - **Launch cycle dedup** — removes redundant `run-instances` cycles within the same project.
     - **Read-only dedup** — collapses repeated read-only commands (describe/get/list).
@@ -46,6 +108,9 @@ This package powers the `clanker deploy` intelligence flow from user query to pl
         - missing compose-required env vars,
         - secret inlining,
         - AWS wiring sanity checks.
+    - DigitalOcean strict-schema checks now also reject fake command families, enforce placeholder production order during paging/repair, and verify the OpenClaw droplet plus App Platform proxy image flow stays internally consistent.
+    - DigitalOcean validation now also reads firewall rules through the typed OpenClaw DO firewall spec so repeated flags, missing required ports, and bad plain-droplet ingress are checked from one normalized view.
+    - Provider/app rule packs contribute deterministic validation hooks so provider-specific and app-specific checks are routed from one place.
     - Waiter/order sanity for AWS runtime wiring (`ec2 wait instance-running` before target registration, `elbv2 wait load-balancer-available` before listener creation).
     - CloudFront command-shape sanity (`create-distribution` must not carry `--tags`) and OpenClaw output contract (`CLOUDFRONT_DOMAIN` + full `HTTPS_URL` with `https://`).
     - **User-data vs plan cross-check** (`crossCheckUserDataVsPlan`) — decodes base64 user-data from `run-instances` commands, extracts ECR image references, and verifies they match ECR repositories created in the plan. Catches hallucinated repo name mismatches.
@@ -54,7 +119,7 @@ This package powers the `clanker deploy` intelligence flow from user query to pl
         - IAM instance-profile readiness before EC2 launch,
         - user-data quote sanity (detects unterminated quote breakages).
     - **Project overlay invariants:**
-        - OpenClaw: HTTPS pairing URL via CloudFront, onboarding before gateway start.
+        - OpenClaw: provider-appropriate HTTPS pairing URL, onboarding before gateway start.
     - Stuck detection fails fast in `--apply`; in plan-only mode it logs warnings and returns best-effort output.
 
 6. **Deterministic repair + triage**
@@ -146,9 +211,15 @@ sequenceDiagram
 
 ## Key Files
 
+- `rule_packs.go` — typed provider/app rule-pack registry and hook routing
+- `do_command_helpers.go` — shared DigitalOcean command-shape helpers (droplet detection, flag counting, user-data extraction)
+- `openclaw_rules.go` — shared OpenClaw DigitalOcean rule text plus typed bootstrap/firewall canonicalization helpers
+- `semantic_graph.go` — provider/app/runtime semantic graph model and build/compile dispatch
+- `semantic_graph_digitalocean.go` — DigitalOcean OpenClaw semantic graph inference and canonical command compiler
 - `skeleton_plan.go` — two-phase skeleton+hydrate plan generation (primary path)
 - `paged_plan.go` — paginated planning protocol (fallback path)
 - `plan_autofix.go` — generic plan autofix (dedup, orphan pruning, critical command protection)
+- `do_plan_autofix.go` — DigitalOcean-specific deterministic cleanup for doctl arg repair, user-data repair, and OpenClaw firewall normalization
 - `plan_preflight_validate.go` — deterministic hard checks + user-data vs plan cross-check
 - `plan_repair_agent.go` — plan rewrite/repair agent
 - `plan_issue_triage.go` — triage for hard-fixable vs noise/context findings

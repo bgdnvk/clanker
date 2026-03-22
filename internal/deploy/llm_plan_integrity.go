@@ -89,6 +89,9 @@ func RepairPlanJSONWithLLM(
 		cleaned := strings.TrimSpace(clean(resp))
 		plan, pErr := maker.ParsePlan(cleaned)
 		if pErr == nil {
+			if baseline, bErr := maker.ParsePlan(strings.TrimSpace(baselinePlanJSON)); bErr == nil && baseline != nil && baseline.Capabilities != nil && plan.Capabilities == nil {
+				plan.Capabilities = baseline.Capabilities
+			}
 			return plan, nil
 		}
 		logf("[deploy] warning: plan JSON-fix attempt %d failed (%v)", attempt, pErr)
@@ -137,6 +140,7 @@ func RunGenericPlanIntegrityPassWithLLM(
 		if parseErr == nil {
 			fixedPlan.Provider = plan.Provider
 			fixedPlan.Question = plan.Question
+			fixedPlan.Capabilities = plan.Capabilities
 			if fixedPlan.CreatedAt.IsZero() {
 				fixedPlan.CreatedAt = plan.CreatedAt
 			}
@@ -163,6 +167,10 @@ func buildPlanPageJSONRepairPrompt(provider, deploymentIntent, projectSummary, r
 	b.WriteString("- Keep command ordering from input where possible.\n")
 	b.WriteString("- Keep command args as CLI tokens only; no shell wrappers.\n")
 	b.WriteString("- For provider=aws, args must not include leading 'aws'.\n")
+	if provider == "digitalocean" {
+		b.WriteString("- For provider=digitalocean, valid command families are doctl groups without the leading 'doctl' prefix, plus plain docker build/push commands.\n")
+		b.WriteString("- INVALID examples: registry docker-login, registry docker-credential, registry docker-config, registry docker build, registry docker-push, __DOCKER_BUILD__, __DOCKER_PUSH__, __LOCAL_DOCKER_BUILD__, __LOCAL_DOCKER_PUSH__, __docker__, compute ssh-key create, compute droplet create --tag, compute firewall create --tag-names.\n")
+	}
 	b.WriteString("- Keep placeholders in <NAME> format, never ${NAME}.\n")
 	b.WriteString("- If uncertain, keep done=false and include at least one command.\n")
 	b.WriteString("- provider: " + provider + "\n")
@@ -252,6 +260,7 @@ func buildGenericPlanIntegrityPrompt(deploymentIntent, projectSummary, candidate
 	b.WriteString("  * Keep flags outside scripts (e.g., do not merge CLI flags into --user-data body).\n")
 	b.WriteString("  * Keep run-instances user-data as script content only; preserve separate CLI flags.\n")
 	b.WriteString("  * Replace obvious placeholder secrets like 'changeme' with placeholders (<OPENCLAW_GATEWAY_TOKEN>) if needed.\n")
+	b.WriteString("  * NEVER replace provided secret placeholders/envs with generated shell values or dummy literals like 'placeholder_replace_me', 'changeme', or 'openssl rand'.\n")
 	b.WriteString("  * Keep existing launch chain; do not drop required front-door steps if already present.\n")
 	b.WriteString("- NOT allowed: swapping deployment method, introducing unrelated services, or broad resource churn.\n")
 	b.WriteString("- Keep placeholders in angle form <NAME>; never ${NAME} or $NAME.\n")
@@ -260,6 +269,8 @@ func buildGenericPlanIntegrityPrompt(deploymentIntent, projectSummary, candidate
 	b.WriteString("- For waiters, ensure service wait commands are syntactically valid and not placeholder/fake filters.\n")
 	b.WriteString("- For cloudfront create-distribution, keep --distribution-config as one valid JSON string arg.\n")
 	b.WriteString("- cloudfront create-distribution does not support --tags; if tagging is required use create-distribution-with-tags or a separate tagging command.\n")
+	b.WriteString("- If provider is DigitalOcean, use only real doctl command families and plain docker build/push. Never emit registry docker-login, registry docker-credential, registry docker-config, registry docker build, registry docker-push, __DOCKER_BUILD__, __DOCKER_PUSH__, __LOCAL_DOCKER_BUILD__, __LOCAL_DOCKER_PUSH__, __docker__, or compute ssh-key create.\n")
+	b.WriteString("- If provider is DigitalOcean, never emit compute droplet create --tag; use --tag-name. Never emit compute firewall create --tag-names.\n")
 	b.WriteString("\nAcceptance checklist (MUST satisfy before you return):\n")
 	b.WriteString("- If command args include ec2 run-instances, verify no trailing CLI flags are embedded into user-data script text.\n")
 	b.WriteString("- If any ALB-related SG rule exists (ALB SG or source-group to app SG), ensure ALB chain exists in commands: create-load-balancer + create-target-group + create-listener.\n")
@@ -267,7 +278,7 @@ func buildGenericPlanIntegrityPrompt(deploymentIntent, projectSummary, candidate
 	b.WriteString("- If producing HTTPS_URL for CloudFront, it must be a full URL (https://...) not just a bare domain.\n")
 	b.WriteString("- If create-load-balancer and create-listener both exist, include elbv2 wait load-balancer-available in between.\n")
 	b.WriteString("- If run-instances and register-targets both exist, include ec2 wait instance-running in between.\n")
-	b.WriteString("- If SSH ingress is 0.0.0.0/0, replace with <ADMIN_CIDR> placeholder in that command (do not keep world-open SSH).\n")
+	b.WriteString("- For AWS security-group SSH ingress 0.0.0.0/0, replace with <ADMIN_CIDR> placeholder (do not keep world-open SSH). Do NOT apply this to DigitalOcean firewall inbound-rules — DO firewalls require a literal CIDR like 0.0.0.0/0, never a placeholder.\n")
 	b.WriteString("- For EC2 bootstrap connectivity, prefer --associate-public-ip-address on run-instances when no explicit NAT/private-network path is present in plan.\n")
 	b.WriteString("- Normalize known docker-compose binary URL typo: use docker-compose-linux-x86_64 (lowercase linux).\n")
 	b.WriteString("- Preserve produced bindings used by downstream commands (do not break placeholder chains).\n")

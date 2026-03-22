@@ -13,13 +13,25 @@ var dollarPlaceholderRe = regexp.MustCompile(`\$\{([A-Z0-9_]+)\}`)
 const CurrentPlanVersion = 1
 
 type Plan struct {
-	Version   int       `json:"version"`
-	CreatedAt time.Time `json:"createdAt"`
-	Provider  string    `json:"provider,omitempty"`
-	Question  string    `json:"question"`
-	Summary   string    `json:"summary"`
-	Commands  []Command `json:"commands"`
-	Notes     []string  `json:"notes,omitempty"`
+	Version      int               `json:"version"`
+	CreatedAt    time.Time         `json:"createdAt"`
+	Provider     string            `json:"provider,omitempty"`
+	Question     string            `json:"question"`
+	Summary      string            `json:"summary"`
+	Commands     []Command         `json:"commands"`
+	Notes        []string          `json:"notes,omitempty"`
+	Capabilities *PlanCapabilities `json:"capabilities,omitempty"`
+}
+
+type PlanCapabilities struct {
+	Provider       string   `json:"provider,omitempty"`
+	AppKind        string   `json:"app_kind,omitempty"`
+	RuntimeModel   string   `json:"runtime_model,omitempty"`
+	RequiredSteps  []string `json:"required_steps,omitempty"`
+	ForbiddenSteps []string `json:"forbidden_steps,omitempty"`
+	PreferredPorts []string `json:"preferred_ports,omitempty"`
+	RequiredEnv    []string `json:"required_env,omitempty"`
+	ExecutionNotes []string `json:"execution_notes,omitempty"`
 }
 
 type Command struct {

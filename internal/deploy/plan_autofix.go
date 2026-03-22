@@ -16,6 +16,10 @@ import (
 // Does NOT match the canonical <USER_DATA> since we require at least _X suffix.
 var userDataVariantRe = regexp.MustCompile(`<USER_DATA_[A-Z0-9_]+>`)
 
+// hardcodedAWSResourceIDRe matches common AWS resource IDs that should be
+// rewritten to placeholders when an earlier command produces the resource.
+var hardcodedAWSResourceIDRe = regexp.MustCompile(`\b(?:sg|subnet|vpc|vol|igw|nat|eni|rtb|acl|tgw|pcx|eip|eigw)-[A-Za-z0-9-]+\b`)
+
 // resourceIDPrefixToPlaceholder maps AWS resource ID prefixes to placeholder names
 var resourceIDPrefixToPlaceholder = map[string]string{
 	"sg":     "SG_ID",
@@ -176,6 +180,12 @@ func ApplyGenericPlanAutofix(plan *maker.Plan, logf func(string, ...any), extern
 	ssmRemoved := pruneSSMSemanticDuplicatesGeneric(plan)
 	if ssmRemoved > 0 {
 		logf("[deploy] generic autofix: removed %d redundant SSM command(s)", ssmRemoved)
+	}
+
+	// Strip flags with empty string values (LLM hallucination like --ssh-keys "")
+	emptyFlagRemoved := stripEmptyValueFlags(plan)
+	if emptyFlagRemoved > 0 {
+		logf("[deploy] generic autofix: stripped %d flag(s) with empty values", emptyFlagRemoved)
 	}
 
 	// Remove commands referencing placeholders that no command produces.
@@ -506,6 +516,10 @@ func extractSSMInstanceIDs(args []string) string {
 // orphanPlaceholderRe matches <UPPER_CASE_KEY> placeholders in command args.
 var orphanPlaceholderRe = regexp.MustCompile(`<([A-Z][A-Z0-9_]+)>`)
 
+// emptyFWAddrAfterStripRe matches "address:" followed by whitespace or end-of-string
+// (result of stripping an orphan placeholder like <ADMIN_CIDR> from a firewall rule).
+var emptyFWAddrAfterStripRe = regexp.MustCompile(`address:(\s|$)`)
+
 // isCriticalCommand returns true for commands that should never be removed
 // by orphan pruning — instead, their bad placeholders are stripped in-place.
 func isCriticalCommand(args []string) bool {
@@ -514,16 +528,54 @@ func isCriticalCommand(args []string) bool {
 	}
 	svc := strings.ToLower(strings.TrimSpace(args[0]))
 	op := strings.ToLower(strings.TrimSpace(args[1]))
-	// ec2 run-instances is the most critical — it creates the instance
+
+	// AWS: ec2 run-instances
 	if svc == "ec2" && op == "run-instances" {
 		return true
 	}
-	// elbv2 create-load-balancer, create-target-group, create-listener
+	// AWS: elbv2 create-load-balancer, create-target-group, create-listener
 	if svc == "elbv2" && strings.HasPrefix(op, "create-") {
 		return true
 	}
-	// cloudfront create-distribution
+	// AWS: cloudfront create-distribution
 	if svc == "cloudfront" && op == "create-distribution" {
+		return true
+	}
+	// DO: compute droplet/reserved-ip/firewall create
+	if svc == "compute" && (op == "droplet" || op == "firewall" || op == "reserved-ip") {
+		if len(args) >= 3 && strings.ToLower(strings.TrimSpace(args[2])) == "create" {
+			return true
+		}
+	}
+	// DO: registry create, apps create, kubernetes cluster create
+	if svc == "registry" && op == "create" {
+		return true
+	}
+	if svc == "apps" && op == "create" {
+		return true
+	}
+	if svc == "kubernetes" && op == "cluster" {
+		if len(args) >= 3 && strings.ToLower(strings.TrimSpace(args[2])) == "create" {
+			return true
+		}
+	}
+	// Docker build/push are critical for image-based deploys
+	if svc == "docker" && (op == "build" || op == "push") {
+		return true
+	}
+	// GCP: compute instances create, run deploy
+	if svc == "compute" && op == "instances" {
+		return true
+	}
+	if svc == "run" && op == "deploy" {
+		return true
+	}
+	// Azure: vm create, containerapp create
+	if (svc == "vm" || svc == "containerapp" || svc == "aks") && op == "create" {
+		return true
+	}
+	// Hetzner: server create
+	if svc == "server" && op == "create" {
 		return true
 	}
 	return false
@@ -597,6 +649,11 @@ func pruneOrphanedPlaceholderRefs(plan *maker.Plan, externalBindings ...string) 
 							cmd.Args[ai] = strings.ReplaceAll(cmd.Args[ai], "<"+m[1]+">", "")
 						}
 					}
+					// Safety net: stripping a placeholder from a firewall address: field
+					// can leave "address:" empty which doctl rejects. Fill with 0.0.0.0/0.
+					if strings.Contains(cmd.Args[ai], "address:") {
+						cmd.Args[ai] = emptyFWAddrAfterStripRe.ReplaceAllString(cmd.Args[ai], "address:0.0.0.0/0${1}")
+					}
 				}
 				plan.Commands[i] = cmd
 				continue
@@ -632,7 +689,44 @@ func pruneOrphanedPlaceholderRefs(plan *maker.Plan, externalBindings ...string) 
 	return len(drop)
 }
 
-// ---------------------------------------------------------------------------
+// stripEmptyValueFlags removes --flag "" pairs where the LLM hallucinated
+// a flag but left the value empty. Catches --ssh-keys "", --vpc-uuid "",
+// etc. across any provider.
+func stripEmptyValueFlags(plan *maker.Plan) int {
+	if plan == nil {
+		return 0
+	}
+	count := 0
+	for ci := range plan.Commands {
+		args := plan.Commands[ci].Args
+		cleaned := make([]string, 0, len(args))
+		skip := false
+		for i := 0; i < len(args); i++ {
+			if skip {
+				skip = false
+				continue
+			}
+			a := args[i]
+			// flag with empty value as next arg
+			if strings.HasPrefix(a, "--") && i+1 < len(args) {
+				next := strings.TrimSpace(args[i+1])
+				if next == "" {
+					count++
+					skip = true // skip the empty next arg too
+					continue
+				}
+			}
+			// flag=<empty> (--key=)
+			if strings.HasPrefix(a, "--") && strings.HasSuffix(a, "=") {
+				count++
+				continue
+			}
+			cleaned = append(cleaned, a)
+		}
+		plan.Commands[ci].Args = cleaned
+	}
+	return count
+} // ---------------------------------------------------------------------------
 // Read-only command dedup
 // ---------------------------------------------------------------------------
 

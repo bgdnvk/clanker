@@ -4,20 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
 
 // DOInfraSnapshot holds existing Digital Ocean infrastructure
 type DOInfraSnapshot struct {
-	Droplets    []DODropletInfo `json:"droplets,omitempty"`
-	SSHKeys     []DOSSHKeyInfo  `json:"sshKeys,omitempty"`
-	Registries  []string        `json:"registries,omitempty"`
-	Firewalls   []DOFirewall    `json:"firewalls,omitempty"`
-	ReservedIPs []string        `json:"reservedIps,omitempty"`
-	VPCs        []DOVPCInfo     `json:"vpcs,omitempty"`
-	Summary     string          `json:"summary"`
+	Droplets       []DODropletInfo `json:"droplets,omitempty"`
+	SSHKeys        []DOSSHKeyInfo  `json:"sshKeys,omitempty"`
+	LocalSSHPubKey string          `json:"localSshPubKey,omitempty"` // best local ~/.ssh/*.pub path
+	Registries     []string        `json:"registries,omitempty"`
+	Firewalls      []DOFirewall    `json:"firewalls,omitempty"`
+	ReservedIPs    []string        `json:"reservedIps,omitempty"`
+	VPCs           []DOVPCInfo     `json:"vpcs,omitempty"`
+	Summary        string          `json:"summary"`
 }
 
 // DODropletInfo is a droplet summary
@@ -140,9 +143,27 @@ func ScanDOInfra(ctx context.Context, apiToken string, logf func(string, ...any)
 		}
 	}
 
+	// Detect local SSH public key when no DO keys exist
+	if len(snap.SSHKeys) == 0 {
+		snap.LocalSSHPubKey = detectLocalSSHPubKey()
+	}
+
 	snap.Summary = buildDOInfraSummary(snap)
 	logf("[do-scan] %s", snap.Summary)
 	return snap
+}
+
+// detectLocalSSHPubKey finds the first local ~/.ssh/*.pub file.
+func detectLocalSSHPubKey() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	matches, _ := filepath.Glob(filepath.Join(home, ".ssh", "*.pub"))
+	if len(matches) > 0 {
+		return "~/.ssh/" + filepath.Base(matches[0])
+	}
+	return ""
 }
 
 // FormatForPrompt formats the DO infra snapshot for the LLM prompt
@@ -159,9 +180,19 @@ func (s *DOInfraSnapshot) FormatForPrompt() string {
 			names = append(names, fmt.Sprintf("%s (id=%s)", k.Name, k.ID))
 		}
 		b.WriteString(fmt.Sprintf("- SSH Keys: %s\n", strings.Join(names, ", ")))
-		b.WriteString("  → REUSE an existing SSH key ID in droplet create; do NOT create a new one\n")
+		if s.LocalSSHPubKey != "" {
+			b.WriteString("  → Prefer a fresh deployment-scoped SSH key import instead of reusing an existing account key or local public key\n")
+			b.WriteString("  → Use 'compute ssh-key import <name> --public-key-file <path>' as the FIRST step; the executor can generate fresh local key material and then bind SSH_KEY_ID into droplet create\n")
+		} else {
+			b.WriteString("  → Prefer creating/importing a fresh deployment-scoped SSH key instead of reusing an unrelated account-wide key\n")
+		}
 	} else {
-		b.WriteString("- SSH Keys: NONE — the plan MUST create or import an SSH key before creating droplets\n")
+		if s.LocalSSHPubKey != "" {
+			b.WriteString("- SSH Keys: NONE on DigitalOcean — start with compute ssh-key import; a fresh deployment-scoped key can be generated locally even when another local public key already exists\n")
+			b.WriteString("  → Use 'compute ssh-key import <name> --public-key-file <path>' as the FIRST step\n")
+		} else {
+			b.WriteString("- SSH Keys: NONE — no local ~/.ssh/*.pub found either; the deployment should still start with compute ssh-key import because the executor can generate a fresh local key pair first\n")
+		}
 	}
 
 	if len(s.Droplets) > 0 {
@@ -175,7 +206,7 @@ func (s *DOInfraSnapshot) FormatForPrompt() string {
 
 	if len(s.Registries) > 0 {
 		b.WriteString(fmt.Sprintf("- Container Registry: %s\n", strings.Join(s.Registries, ", ")))
-		b.WriteString("  → REUSE existing registry; do NOT create a new one\n")
+		b.WriteString("  → DigitalOcean supports only one registry per account/team; reuse this registry when present, but prefer fresh repository names inside it for each deploy\n")
 	}
 
 	if len(s.Firewalls) > 0 {
