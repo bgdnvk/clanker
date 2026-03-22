@@ -27,6 +27,7 @@ import (
 
 var awsErrorCodeRe = regexp.MustCompile(`(?i)an error occurred \(([^)]+)\)`)
 var planPlaceholderTokenRe = regexp.MustCompile(`<([A-Z0-9_]+)>`)
+var jsonEscapedPlanPlaceholderTokenRe = regexp.MustCompile(`\\u003[cC]([A-Z0-9_]+)\\u003[eE]`)
 var shellStylePlaceholderTokenRe = regexp.MustCompile(`^\$[A-Z][A-Z0-9_]*$`)
 var awsARNRegionHintRe = regexp.MustCompile(`arn:aws[a-zA-Z-]*:[a-z0-9-]+:([a-z0-9-]+):\d{12}:[^,\s"']+`)
 
@@ -224,7 +225,8 @@ type ExecOptions struct {
 	CloudflareAccountID string
 
 	// Digital Ocean options
-	DigitalOceanAPIToken string
+	DigitalOceanAPIToken        string
+	DigitalOceanDockerConfigDir string
 
 	// Hetzner options
 	HetznerAPIToken string
@@ -1052,13 +1054,13 @@ func autoPrepareImageForOneClickDeploy(ctx context.Context, question string, run
 	}
 	defer cleanup()
 
-	imageURI, err := BuildAndPushDockerImageWithTags(ctx, clonePath, ecrURI, opts.Profile, opts.Region, []string{imageTag, "latest"}, opts.Writer)
+	imageURI, err := BuildAndPushDockerImageWithRequirements(ctx, clonePath, ecrURI, opts.Profile, opts.Region, []string{imageTag, "latest"}, requiredPlatforms, opts.Writer)
 	if err != nil {
 		// Use agentic loop for docker build/push issues
 		var retryImageURI string
 		retryFunc := func() error {
 			var retryErr error
-			retryImageURI, retryErr = BuildAndPushDockerImageWithTags(ctx, clonePath, ecrURI, opts.Profile, opts.Region, []string{imageTag, "latest"}, opts.Writer)
+			retryImageURI, retryErr = BuildAndPushDockerImageWithRequirements(ctx, clonePath, ecrURI, opts.Profile, opts.Region, []string{imageTag, "latest"}, requiredPlatforms, opts.Writer)
 			return retryErr
 		}
 		if handled, _ := ShellAgenticRemediation(ctx, opts, "docker buildx build --push", err.Error(), retryFunc); handled {
@@ -1409,7 +1411,13 @@ func jsonPathString(obj any, path string) (string, bool) {
 		if name != "" {
 			m, ok := cur.(map[string]any)
 			if !ok {
-				return "", false
+				// Auto-unwrap single-element arrays (doctl wraps results in [...])
+				if arr, isArr := cur.([]any); isArr && len(arr) == 1 {
+					m, ok = arr[0].(map[string]any)
+				}
+				if !ok {
+					return "", false
+				}
 			}
 			cur, ok = m[name]
 			if !ok {
@@ -1472,11 +1480,37 @@ func applyPlanBindings(args []string, bindings map[string]string) []string {
 	out := make([]string, 0, len(args))
 	for _, a := range args {
 		if !strings.Contains(a, "<") || !strings.Contains(a, ">") {
+			if strings.Contains(strings.ToLower(a), `\u003c`) && strings.Contains(strings.ToLower(a), `\u003e`) {
+				rewritten := jsonEscapedPlanPlaceholderTokenRe.ReplaceAllStringFunc(a, func(m string) string {
+					parts := jsonEscapedPlanPlaceholderTokenRe.FindStringSubmatch(m)
+					if len(parts) != 2 {
+						return m
+					}
+					key := strings.TrimSpace(parts[1])
+					if v, ok := bindings[key]; ok && strings.TrimSpace(v) != "" {
+						return v
+					}
+					return m
+				})
+				out = append(out, rewritten)
+				continue
+			}
 			out = append(out, a)
 			continue
 		}
 		rewritten := planPlaceholderTokenRe.ReplaceAllStringFunc(a, func(m string) string {
 			key := strings.TrimSuffix(strings.TrimPrefix(m, "<"), ">")
+			if v, ok := bindings[key]; ok && strings.TrimSpace(v) != "" {
+				return v
+			}
+			return m
+		})
+		rewritten = jsonEscapedPlanPlaceholderTokenRe.ReplaceAllStringFunc(rewritten, func(m string) string {
+			parts := jsonEscapedPlanPlaceholderTokenRe.FindStringSubmatch(m)
+			if len(parts) != 2 {
+				return m
+			}
+			key := strings.TrimSpace(parts[1])
 			if v, ok := bindings[key]; ok && strings.TrimSpace(v) != "" {
 				return v
 			}

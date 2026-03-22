@@ -356,6 +356,39 @@ Examples:
 		case "do-k8s":
 			requiredLaunchOps = []string{"kubernetes cluster create"}
 		}
+		if isOpenClawDeploy && strings.EqualFold(planProvider, "digitalocean") {
+			requiredLaunchOps = []string{"compute droplet create", "apps create"}
+		}
+
+		applyStructuredPlanTransforms := func(current *maker.Plan) *maker.Plan {
+			if current == nil {
+				return nil
+			}
+			ruleCtx := deploy.RulePackContext{
+				TargetProvider: targetProvider,
+				PlanProvider: func() string {
+					if provider := strings.TrimSpace(current.Provider); provider != "" {
+						return provider
+					}
+					return planProvider
+				}(),
+				Options:  deployOpts,
+				Profile:  rp,
+				Deep:     intel.DeepAnalysis,
+				Docker:   intel.Docker,
+				AppPorts: rp.Ports,
+			}
+			if patched := deploy.ApplyRulePackPlanAutofix(current, ruleCtx, logf); patched != nil {
+				current = patched
+			}
+			if compiled := deploy.ApplySemanticGraphCompilation(current, ruleCtx, logf); compiled != nil {
+				current = compiled
+			}
+			if patched := deploy.ApplyGenericPlanAutofix(current, logf, rp.EnvVars...); patched != nil {
+				current = patched
+			}
+			return current
+		}
 
 		// 4. Generate the maker plan via LLM
 		planGenStart := time.Now()
@@ -432,25 +465,12 @@ Examples:
 			return fmt.Errorf("failed to generate a plan (no commands produced)")
 		}
 
-		// Apply project-specific and generic autofixes
-		if isOpenClawDeploy {
-			if patched := deploy.ApplyOpenClawPlanAutofix(plan, rp, intel.DeepAnalysis, logf); patched != nil {
-				plan = patched
-			}
-		}
-		if strings.EqualFold(strings.TrimSpace(planProvider), "digitalocean") {
-			if patched := deploy.ApplyDigitalOceanPlanAutofix(plan, logf); patched != nil {
-				plan = patched
-			}
-		}
-		if patched := deploy.ApplyGenericPlanAutofix(plan, logf, rp.EnvVars...); patched != nil {
-			plan = patched
-		}
+		plan = applyStructuredPlanTransforms(plan)
 
 		// Deterministic checkpoint validation (AWS only)
 		if strings.EqualFold(strings.TrimSpace(planProvider), "aws") {
 			pJSON, _ := json.MarshalIndent(plan, "", "  ")
-			lastDetValidation = deploy.DeterministicValidatePlan(string(pJSON), rp, intel.DeepAnalysis, intel.Docker)
+			lastDetValidation = deploy.DeterministicValidatePlan(string(pJSON), rp, intel.DeepAnalysis, intel.Docker, rp.EnvVars)
 			if lastDetValidation != nil && !lastDetValidation.IsValid {
 				mustFixIssues = lastDetValidation.Issues
 			}
@@ -462,16 +482,9 @@ Examples:
 			pagedPlan := generatePagedPlan(ctx, aiClient, planProvider, planningContext, rp, intel, requiredLaunchOps, isOpenClawDeploy, applyMode, logf)
 			if pagedPlan != nil && len(pagedPlan.Commands) > 0 {
 				// Compare: use whichever has fewer issues
-				if isOpenClawDeploy {
-					if patched := deploy.ApplyOpenClawPlanAutofix(pagedPlan, rp, intel.DeepAnalysis, logf); patched != nil {
-						pagedPlan = patched
-					}
-				}
-				if patched := deploy.ApplyGenericPlanAutofix(pagedPlan, logf, rp.EnvVars...); patched != nil {
-					pagedPlan = patched
-				}
+				pagedPlan = applyStructuredPlanTransforms(pagedPlan)
 				pJSON2, _ := json.MarshalIndent(pagedPlan, "", "  ")
-				pagedVal := deploy.DeterministicValidatePlan(string(pJSON2), rp, intel.DeepAnalysis, intel.Docker)
+				pagedVal := deploy.DeterministicValidatePlan(string(pJSON2), rp, intel.DeepAnalysis, intel.Docker, rp.EnvVars)
 				pagedIssues := 0
 				if pagedVal != nil && !pagedVal.IsValid {
 					pagedIssues = len(pagedVal.Issues)
@@ -669,7 +682,7 @@ Examples:
 					// Re-validate to see if user-data issues are resolved
 					patchedJSON, _ := json.MarshalIndent(plan, "", "  ")
 					currentPlanJSON = string(patchedJSON)
-					reVal := deploy.DeterministicValidatePlan(currentPlanJSON, rp, intel.DeepAnalysis, intel.Docker)
+					reVal := deploy.DeterministicValidatePlan(currentPlanJSON, rp, intel.DeepAnalysis, intel.Docker, rp.EnvVars)
 					if reVal != nil && len(reVal.Issues) == 0 {
 						logf("[deploy] user-data micro-repair resolved all deterministic issues")
 						currentValidation = &deploy.PlanValidation{IsValid: true}
@@ -733,7 +746,7 @@ Examples:
 				plan = repaired
 
 				repairedJSON, _ := json.MarshalIndent(repaired, "", "  ")
-				invariants := deploy.CheckBulkRepairInvariants(repaired, rp, intel.DeepAnalysis)
+				invariants := deploy.CheckBulkRepairInvariants(repaired, rp, intel.DeepAnalysis, rp.EnvVars)
 				if invariants != nil && !invariants.IsValid {
 					logf("[deploy] bulk invariant check failed after repair round %d (issues=%d)", r, len(invariants.Issues))
 					for i, issue := range invariants.Issues {
@@ -822,7 +835,7 @@ Examples:
 			reviewIssues := make([]string, 0, 24)
 			reviewFixes := make([]string, 0, 24)
 			reviewWarnings := make([]string, 0, 16)
-			if det := deploy.DeterministicValidatePlan(string(currentPlanJSON), rp, intel.DeepAnalysis, intel.Docker); det != nil {
+			if det := deploy.DeterministicValidatePlan(string(currentPlanJSON), rp, intel.DeepAnalysis, intel.Docker, rp.EnvVars); det != nil {
 				reviewIssues = append(reviewIssues, det.Issues...)
 				reviewFixes = append(reviewFixes, det.Fixes...)
 				reviewWarnings = append(reviewWarnings, det.Warnings...)
@@ -1044,19 +1057,19 @@ Examples:
 		}
 	skipIntegrityApply:
 
-		if patched := deploy.ApplyOpenClawPlanAutofix(plan, rp, intel.DeepAnalysis, logf); patched != nil {
-			plan = patched
-		}
-
-		// Generic dedup: collapse redundant launch cycles for any project.
-		if patched := deploy.ApplyGenericPlanAutofix(plan, logf, rp.EnvVars...); patched != nil {
-			plan = patched
-		}
+		plan = applyStructuredPlanTransforms(plan)
 
 		openClawUnresolvedApplyBlock := false
 		openClawUnresolvedCritical := make([]string, 0, 12)
+		runtimeEnvBindings := make([]string, 0)
+		if userConfig != nil && len(userConfig.EnvVars) > 0 {
+			runtimeEnvBindings = make([]string, 0, len(userConfig.EnvVars))
+			for name, value := range userConfig.EnvVars {
+				runtimeEnvBindings = append(runtimeEnvBindings, name+"="+value)
+			}
+		}
 		if isOpenClawDeploy {
-			if unresolved := deploy.GetUnresolvedPlaceholders(plan); len(unresolved) > 0 {
+			if unresolved := deploy.FilterRuntimeInjectedTokens(deploy.GetUnresolvedPlaceholders(plan), runtimeEnvBindings); len(unresolved) > 0 {
 				if !deploy.AllPlaceholdersAreProduced(plan, unresolved) {
 					openClawUnresolvedApplyBlock = true
 					openClawUnresolvedCritical = append(openClawUnresolvedCritical, unresolved...)
@@ -1178,6 +1191,21 @@ Examples:
 			}
 			if doToken == "" {
 				return fmt.Errorf("digitalocean API token is required (use --do-token or set DIGITALOCEAN_ACCESS_TOKEN)")
+			}
+			checkCtx, checkCancel := context.WithTimeout(ctx, 30*time.Second)
+			checkErr := maker.ValidateDigitalOceanAccess(checkCtx, doToken, os.Stderr)
+			checkCancel()
+			if checkErr != nil {
+				return checkErr
+			}
+			if maker.PlanNeedsDigitalOceanRegistryPush(plan) {
+				fmt.Fprintf(os.Stderr, "[deploy] prereq: probing DigitalOcean registry push access before apply...\n")
+				probeCtx, probeCancel := context.WithTimeout(ctx, 3*time.Minute)
+				probeErr := maker.PrepareDigitalOceanRegistryPushPlan(probeCtx, doToken, plan, os.Stderr)
+				probeCancel()
+				if probeErr != nil {
+					fmt.Fprintf(os.Stderr, "[deploy] warning: DigitalOcean registry prereq failed before apply; continuing and deferring exact registry handling to execution: %v\n", probeErr)
+				}
 			}
 			fmt.Fprintf(os.Stderr, "[deploy] applying DigitalOcean plan (%d commands)...\n", len(plan.Commands))
 			return maker.ExecuteDigitalOceanPlan(ctx, plan, maker.ExecOptions{
@@ -1645,7 +1673,7 @@ func generatePagedPlan(
 		// Deterministic checkpoint validation (AWS only).
 		if strings.EqualFold(strings.TrimSpace(planProvider), "aws") {
 			planJSON, _ := json.MarshalIndent(plan, "", "  ")
-			lastDetValidation := deploy.DeterministicValidatePlan(string(planJSON), rp, intel.DeepAnalysis, intel.Docker)
+			lastDetValidation := deploy.DeterministicValidatePlan(string(planJSON), rp, intel.DeepAnalysis, intel.Docker, rp.EnvVars)
 			if lastDetValidation != nil && !lastDetValidation.IsValid {
 				mustFixIssues = lastDetValidation.Issues
 			} else {

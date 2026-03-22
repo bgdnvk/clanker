@@ -16,77 +16,53 @@ type deterministicValidation struct {
 	Warnings []string
 }
 
-// hardcodedAWSResourceIDRe matches AWS resource IDs that should typically be placeholders.
-// Excludes AMI IDs since those are often legitimately hardcoded.
-var hardcodedAWSResourceIDRe = regexp.MustCompile(`\b(sg|subnet|vpc|i|vol|igw|nat|eni|rtb|acl|tgw|pcx|eip|eigw)-[0-9a-f]{8,17}\b`)
-
-// detectHardcodedResourceIDs scans plan command args for hardcoded AWS resource IDs
-// that should instead be placeholders produced by earlier commands.
-func detectHardcodedResourceIDs(plan *maker.Plan) []string {
-	if plan == nil || len(plan.Commands) == 0 {
-		return nil
-	}
-
-	// Track which resource IDs are produced by earlier commands
-	producedIDs := make(map[string]bool)
-
-	issues := []string{}
-
-	for i, cmd := range plan.Commands {
-		// First, check if any args contain hardcoded IDs that weren't produced earlier
-		argsJoined := strings.Join(cmd.Args, " ")
-		matches := hardcodedAWSResourceIDRe.FindAllString(argsJoined, -1)
-
-		for _, match := range matches {
-			if !producedIDs[match] {
-				// Check if there's a placeholder for this type of resource
-				prefix := strings.Split(match, "-")[0]
-				resourceType := map[string]string{
-					"sg":     "security group",
-					"subnet": "subnet",
-					"vpc":    "VPC",
-					"i":      "instance",
-					"vol":    "volume",
-					"igw":    "internet gateway",
-					"nat":    "NAT gateway",
-					"eni":    "network interface",
-					"rtb":    "route table",
-					"acl":    "network ACL",
-					"tgw":    "transit gateway",
-					"pcx":    "VPC peering connection",
-					"eip":    "elastic IP",
-					"eigw":   "egress-only internet gateway",
-				}[prefix]
-
-				issues = append(issues, fmt.Sprintf(
-					"[HARD] command %d uses hardcoded %s ID '%s'; use a placeholder like <%s_ID> with produces mapping instead",
-					i+1, resourceType, match, strings.ToUpper(prefix)))
-			}
-		}
-
-		// Track any IDs this command produces (we do this after checking args
-		// so that a command cannot reference its own output)
-		for _, v := range cmd.Produces {
-			// Extract resource IDs from JSON paths that might produce them
-			// This is a heuristic; actual produced values are resolved at runtime
-			_ = v
-		}
-
-		// Also track if this command creates resources (by checking operation)
-		if len(cmd.Args) >= 2 {
-			op := strings.ToLower(strings.TrimSpace(cmd.Args[1]))
-			// After a create command runs, any IDs mentioned in later commands
-			// should use placeholders from produces, not hardcoded values
-			if strings.HasPrefix(op, "create-") || strings.HasPrefix(op, "run-") {
-				// Mark that we've seen a create operation
-			}
+// ValidatePlanDeterministicFinal re-runs deterministic validation on the final
+// post-review/post-autofix plan so late mutations cannot silently reintroduce
+// broken DO firewall shapes, missing OpenClaw env vars, or bad user-data.
+func ValidatePlanDeterministicFinal(plan *maker.Plan, p *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis, runtimeEnvKeys []string) *PlanValidation {
+	if plan == nil {
+		return &PlanValidation{
+			IsValid: false,
+			Issues:  []string{"[HARD] final plan is nil"},
+			Fixes:   []string{"Regenerate the plan before apply"},
 		}
 	}
-
-	return issues
+	planJSON, err := json.Marshal(plan)
+	if err != nil {
+		return &PlanValidation{
+			IsValid: false,
+			Issues:  []string{"[HARD] failed to serialize final plan for deterministic validation"},
+			Fixes:   []string{"Fix the generated plan shape so it can be marshaled to JSON"},
+		}
+	}
+	det := runDeterministicPlanValidation(string(planJSON), p, deep, docker, runtimeEnvKeys)
+	v := &PlanValidation{
+		IsValid:  len(det.Issues) == 0,
+		Issues:   det.Issues,
+		Fixes:    det.Fixes,
+		Warnings: det.Warnings,
+	}
+	return normalizeValidation(v)
 }
 
-func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis) deterministicValidation {
+func doFlagValueLocal(args []string, flagName string) string {
+	flagName = strings.TrimSpace(flagName)
+	if flagName == "" {
+		return ""
+	}
+	for i := 0; i < len(args); i++ {
+		trimmed := strings.TrimSpace(args[i])
+		switch {
+		case trimmed == flagName && i+1 < len(args):
+			return strings.TrimSpace(args[i+1])
+		case strings.HasPrefix(trimmed, flagName+"="):
+			return strings.TrimSpace(strings.TrimPrefix(trimmed, flagName+"="))
+		}
+	}
+	return ""
+}
+
+func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis, runtimeEnvKeys []string) deterministicValidation {
 	var out deterministicValidation
 
 	if containsSecretLikeText(planJSON) {
@@ -97,13 +73,6 @@ func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepA
 	var plan maker.Plan
 	if err := json.Unmarshal([]byte(planJSON), &plan); err != nil {
 		return out
-	}
-
-	// Check for hardcoded AWS resource IDs that should be placeholders
-	hardcodedIssues := detectHardcodedResourceIDs(&plan)
-	if len(hardcodedIssues) > 0 {
-		out.Issues = append(out.Issues, hardcodedIssues...)
-		out.Fixes = append(out.Fixes, "Replace hardcoded resource IDs with placeholder tokens like <SG_ID>, <SUBNET_ID>, etc. and add corresponding produces mappings to the commands that create those resources")
 	}
 
 	isOpenClaw := IsOpenClawRepo(p, deep)
@@ -202,27 +171,24 @@ func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepA
 	}
 	appPorts = uniqueInts(appPorts)
 
-	// Plan-wide AWS checks (ports/health checks) for ALB-based EC2 deploys — only for AWS.
-	if isAWS {
-		awsChecks := validateAWSPlanCommands(&plan, appPorts, deep)
-		out.Issues = append(out.Issues, awsChecks.Issues...)
-		out.Fixes = append(out.Fixes, awsChecks.Fixes...)
-		out.Warnings = append(out.Warnings, awsChecks.Warnings...)
-	}
+	packChecks := ApplyRulePackDeterministicValidation(&plan, RulePackContext{
+		PlanProvider: plan.Provider,
+		Profile:      p,
+		Deep:         deep,
+		Docker:       docker,
+		AppPorts:     appPorts,
+	})
+	out.Issues = append(out.Issues, packChecks.Issues...)
+	out.Fixes = append(out.Fixes, packChecks.Fixes...)
+	out.Warnings = append(out.Warnings, packChecks.Warnings...)
 
-	if isOpenClaw && isAWS {
-		openClawChecks := validateOpenClawPlanCommands(&plan)
-		out.Issues = append(out.Issues, openClawChecks.Issues...)
-		out.Fixes = append(out.Fixes, openClawChecks.Fixes...)
-		out.Warnings = append(out.Warnings, openClawChecks.Warnings...)
+	if schemaIssues, schemaFixes := validateDigitalOceanCommandSchema(&plan); len(schemaIssues) > 0 {
+		out.Issues = append(out.Issues, schemaIssues...)
+		out.Fixes = append(out.Fixes, schemaFixes...)
 	}
-
-	// DO-specific plan checks.
-	if provider == "digitalocean" {
-		doChecks := validateDigitalOceanPlanCommands(&plan, appPorts, isOpenClaw)
-		out.Issues = append(out.Issues, doChecks.Issues...)
-		out.Fixes = append(out.Fixes, doChecks.Fixes...)
-		out.Warnings = append(out.Warnings, doChecks.Warnings...)
+	if bindingIssues := ValidateCommandBindingSequence(nil, plan.Commands, runtimeEnvKeys); len(bindingIssues) > 0 {
+		out.Issues = append(out.Issues, bindingIssues...)
+		out.Fixes = append(out.Fixes, "Reorder commands so placeholders are consumed only after an earlier command produces them, or add the missing produces binding")
 	}
 
 	// EC2 user-data lint — only for AWS plans.
@@ -349,15 +315,15 @@ func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepA
 
 // DeterministicValidatePlan runs only the deterministic validation checks and returns a PlanValidation.
 // This is used for incremental / checkpointed plan generation to avoid repeated LLM validation calls.
-func DeterministicValidatePlan(planJSON string, profile *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis) *PlanValidation {
-	det := runDeterministicPlanValidation(planJSON, profile, deep, docker)
+func DeterministicValidatePlan(planJSON string, profile *RepoProfile, deep *DeepAnalysis, docker *DockerAnalysis, runtimeEnvKeys []string) *PlanValidation {
+	det := runDeterministicPlanValidation(planJSON, profile, deep, docker, runtimeEnvKeys)
 	if len(det.Issues) > 0 {
 		return &PlanValidation{IsValid: false, Issues: det.Issues, Fixes: det.Fixes, Warnings: det.Warnings}
 	}
 	return &PlanValidation{IsValid: true, Issues: nil, Fixes: nil, Warnings: det.Warnings}
 }
 
-func CheckBulkRepairInvariants(plan *maker.Plan, profile *RepoProfile, deep *DeepAnalysis) *PlanValidation {
+func CheckBulkRepairInvariants(plan *maker.Plan, profile *RepoProfile, deep *DeepAnalysis, runtimeEnvKeys []string) *PlanValidation {
 	if plan == nil {
 		return &PlanValidation{IsValid: true}
 	}
@@ -370,7 +336,7 @@ func CheckBulkRepairInvariants(plan *maker.Plan, profile *RepoProfile, deep *Dee
 		issues = append(issues, "[HARD] bulk invariant failed: plan has no commands")
 		fixes = append(fixes, "Ensure repaired plan keeps a non-empty commands array")
 	}
-	if unresolved := GetUnresolvedPlaceholders(plan); len(unresolved) > 0 {
+	if unresolved := FilterRuntimeInjectedTokens(GetUnresolvedPlaceholders(plan), runtimeEnvKeys); len(unresolved) > 0 {
 		issues = append(issues, "[HARD] bulk invariant failed: unresolved placeholders remain")
 		fixes = append(fixes, "Resolve placeholder bindings so every <TOKEN> has a concrete produced value")
 	}
@@ -449,8 +415,8 @@ func CheckBulkRepairInvariants(plan *maker.Plan, profile *RepoProfile, deep *Dee
 	return &PlanValidation{IsValid: len(issues) == 0, Issues: issues, Fixes: fixes, Warnings: warnings}
 }
 
-func CheckOpenClawBulkInvariants(plan *maker.Plan, profile *RepoProfile, deep *DeepAnalysis) *PlanValidation {
-	return CheckBulkRepairInvariants(plan, profile, deep)
+func CheckOpenClawBulkInvariants(plan *maker.Plan, profile *RepoProfile, deep *DeepAnalysis, runtimeEnvKeys []string) *PlanValidation {
+	return CheckBulkRepairInvariants(plan, profile, deep, runtimeEnvKeys)
 }
 
 func checkOpenClawProjectInvariants(plan *maker.Plan) ([]string, []string) {
@@ -494,27 +460,28 @@ func checkOpenClawProjectInvariants(plan *maker.Plan) ([]string, []string) {
 			usesCompose := strings.Contains(lower, "docker compose") || strings.Contains(lower, "docker-compose")
 			usesDockerRun := strings.Contains(lower, "docker run")
 			hasECRRef := strings.Contains(lower, ".dkr.ecr.") || strings.Contains(lower, "<image_uri>") || strings.Contains(lower, "<ecr_uri>")
+			hasNonInteractiveBootstrap := hasOpenClawNonInteractiveBootstrap(script)
 			onboardIdx := strings.Index(lower, "docker-setup.sh")
 			if onboardIdx < 0 {
 				onboardIdx = strings.Index(lower, "openclaw-cli onboard")
 			}
 			startIdx := strings.Index(lower, "up -d openclaw-gateway")
-			if startIdx >= 0 && (onboardIdx < 0 || onboardIdx > startIdx) {
-				issues = append(issues, "[HARD] OpenClaw invariant failed: onboarding must run before starting openclaw-gateway")
-				fixes = append(fixes, "Run docker-setup.sh or openclaw-cli onboard before docker compose up -d openclaw-gateway")
+			if startIdx >= 0 && !hasNonInteractiveBootstrap && (onboardIdx < 0 || onboardIdx > startIdx) {
+				issues = append(issues, "[HARD] OpenClaw invariant failed: bootstrap initialization must run before starting openclaw-gateway")
+				fixes = append(fixes, "Seed a minimal openclaw.json before docker compose up -d openclaw-gateway, or run onboarding first in an interactive environment")
 			}
 			if usesCompose {
 				missing := missingEnvVarsInScript(script, OpenClawComposeHardEnvVars())
-				if len(missing) == 0 && startIdx >= 0 && onboardIdx >= 0 && onboardIdx < startIdx {
+				if len(missing) == 0 && startIdx >= 0 && ((onboardIdx >= 0 && onboardIdx < startIdx) || hasNonInteractiveBootstrap) {
 					hasRunnableOpenClawRuntimePath = true
 				}
 			}
 			if usesDockerRun && hasECRRef {
-				if onboardIdx >= 0 {
+				if onboardIdx >= 0 || hasNonInteractiveBootstrap {
 					hasRunnableOpenClawRuntimePath = true
 				} else {
-					issues = append(issues, "[HARD] OpenClaw invariant failed: onboarding must run before starting openclaw-gateway")
-					fixes = append(fixes, "Run docker-setup.sh or openclaw-cli onboard before docker run")
+					issues = append(issues, "[HARD] OpenClaw invariant failed: bootstrap initialization must run before starting openclaw-gateway")
+					fixes = append(fixes, "Seed a minimal openclaw.json before docker run, or run onboarding first in an interactive environment")
 				}
 			}
 		}
@@ -750,14 +717,14 @@ func validateOpenClawPlanCommands(plan *maker.Plan) awsPlanChecks {
 			hasECRRef := strings.Contains(script, ".dkr.ecr.") || strings.Contains(script, "<image_uri>") || strings.Contains(script, "<ecr_uri>")
 			if usesCompose {
 				missing := missingEnvVarsInScript(script, OpenClawComposeHardEnvVars())
-				onboarded := strings.Contains(script, "docker-setup.sh") || strings.Contains(script, "openclaw-cli onboard")
+				onboarded := strings.Contains(script, "docker-setup.sh") || strings.Contains(script, "openclaw-cli onboard") || hasOpenClawNonInteractiveBootstrap(script)
 				started := strings.Contains(script, "up -d openclaw-gateway")
 				if len(missing) == 0 && onboarded && started {
 					hasRunnableOpenClawRuntimePath = true
 				}
 			}
 			if usesDockerRun && hasECRRef {
-				onboarded := strings.Contains(script, "docker-setup.sh") || strings.Contains(script, "openclaw-cli onboard")
+				onboarded := strings.Contains(script, "docker-setup.sh") || strings.Contains(script, "openclaw-cli onboard") || hasOpenClawNonInteractiveBootstrap(script)
 				if onboarded {
 					hasRunnableOpenClawRuntimePath = true
 				}
@@ -825,18 +792,40 @@ func validateDigitalOceanPlanCommands(plan *maker.Plan, appPorts []int, isOpenCl
 	hasDropletCreate := false
 	hasFirewallCreate := false
 	hasFirewallAttach := false
+	hasSSHKeyImport := false
 	hasSSHKeyList := false
 	hasReservedIP := false
 	producesDropletID := false
+	hasAppsCreate := false
+	hasHTTPSOutput := false
+	hasDORegistryCreate := false
+	hasDockerBuild := false
+	hasDockerPush := false
+	proxyBuildImageRef := ""
+	proxyPushImageRef := ""
+	proxyAppImageRef := ""
+	proxyAppRepository := ""
+	requiredInboundPorts := map[string]bool{"22": true}
+	for _, p := range appPorts {
+		if p > 0 {
+			requiredInboundPorts[fmt.Sprintf("%d", p)] = true
+		}
+	}
+	if isOpenClaw {
+		requiredInboundPorts["18789"] = true
+	}
 
 	for _, cmd := range plan.Commands {
 		args := cmd.Args
-		if len(args) < 3 {
+		if len(args) < 2 {
 			continue
 		}
 		s0 := strings.ToLower(strings.TrimSpace(args[0]))
 		s1 := strings.ToLower(strings.TrimSpace(args[1]))
-		s2 := strings.ToLower(strings.TrimSpace(args[2]))
+		s2 := ""
+		if len(args) >= 3 {
+			s2 = strings.ToLower(strings.TrimSpace(args[2]))
+		}
 
 		if s0 == "compute" && s1 == "droplet" && s2 == "create" {
 			hasDropletCreate = true
@@ -847,23 +836,155 @@ func validateDigitalOceanPlanCommands(plan *maker.Plan, appPorts []int, isOpenCl
 				}
 			}
 		}
+		if s0 == "apps" && s1 == "create" {
+			hasAppsCreate = true
+			if isOpenClaw {
+				if appImageRef, repository := extractOpenClawDOAppProxyImageRef(args); appImageRef != "" {
+					proxyAppImageRef = appImageRef
+					proxyAppRepository = repository
+				}
+			}
+			for k, v := range cmd.Produces {
+				ku := strings.ToUpper(strings.TrimSpace(k))
+				if ku == "HTTPS_URL" || ku == "APP_URL" {
+					vv := strings.TrimSpace(v)
+					if vv != "" {
+						hasHTTPSOutput = true
+					}
+				}
+			}
+		}
+		if s0 == "registry" && s1 == "create" {
+			hasDORegistryCreate = true
+		}
+		if s0 == "docker" && s1 == "build" {
+			hasDockerBuild = true
+			if isOpenClaw {
+				if imageRef := extractDockerBuildTag(args); imageRef != "" {
+					proxyBuildImageRef = imageRef
+				}
+			}
+		}
+		if s0 == "docker" && s1 == "push" {
+			hasDockerPush = true
+			if isOpenClaw {
+				if imageRef := extractDockerPushTarget(args); imageRef != "" {
+					proxyPushImageRef = imageRef
+				}
+			}
+		}
 		if s0 == "compute" && s1 == "firewall" && s2 == "create" {
 			hasFirewallCreate = true
+			inboundCount := countDOFlagOccurrences(args, "--inbound-rules")
+			outboundCount := countDOFlagOccurrences(args, "--outbound-rules")
+			firewallSpec := extractDOFirewallSpec(args)
+			if strings.TrimSpace(doFlagValueLocal(args, "--name")) == "" {
+				out.Issues = append(out.Issues, "[HARD] DigitalOcean firewall create is missing --name <FIREWALL_NAME>")
+				out.Fixes = append(out.Fixes, "Rewrite compute firewall create to use --name <FIREWALL_NAME> instead of a positional firewall name")
+			}
+			if isOpenClaw && countDOFlagOccurrences(args, "--tag-names") > 0 {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw DigitalOcean firewall create uses --tag-names before the droplet exists")
+				out.Fixes = append(out.Fixes, "Remove --tag-names from compute firewall create and attach the firewall later with compute firewall add-droplets <FIREWALL_ID> --droplet-ids <DROPLET_ID>")
+			}
+			if inboundCount > 1 {
+				out.Issues = append(out.Issues, "[HARD] DigitalOcean firewall create uses repeated --inbound-rules flags; doctl keeps only the last one")
+				out.Fixes = append(out.Fixes, "Use exactly ONE --inbound-rules arg containing a quoted string of space-separated rules")
+			}
+			if outboundCount > 1 {
+				out.Issues = append(out.Issues, "[HARD] DigitalOcean firewall create uses repeated --outbound-rules flags; doctl keeps only the last one")
+				out.Fixes = append(out.Fixes, "Use exactly ONE --outbound-rules arg containing a quoted string of space-separated rules")
+			}
+
+			for port := range requiredInboundPorts {
+				if !doFirewallSpecHasInboundPort(firewallSpec, "tcp", port) {
+					out.Issues = append(out.Issues, fmt.Sprintf("[HARD] DigitalOcean firewall create is missing inbound TCP port %s", port))
+					out.Fixes = append(out.Fixes, fmt.Sprintf("Add inbound rule protocol:tcp,ports:%s,address:0.0.0.0/0 to compute firewall create", port))
+				}
+			}
+			if isOpenClaw {
+				for _, forbidden := range []string{"80", "443", "8080"} {
+					if doFirewallSpecHasInboundPort(firewallSpec, "tcp", forbidden) {
+						out.Issues = append(out.Issues, fmt.Sprintf("[HARD] DigitalOcean firewall create exposes TCP port %s for OpenClaw without an explicit reverse proxy requirement", forbidden))
+						out.Fixes = append(out.Fixes, fmt.Sprintf("Remove inbound TCP port %s from compute firewall create; the OpenClaw droplet should expose only 22 and 18789 publicly", forbidden))
+					}
+				}
+			}
+
+			if !doFirewallSpecHasOutboundAll(firewallSpec, "tcp") {
+				out.Issues = append(out.Issues, "[HARD] DigitalOcean firewall create is missing outbound TCP all rule")
+				out.Fixes = append(out.Fixes, "Add outbound rule protocol:tcp,ports:all,address:0.0.0.0/0 to compute firewall create")
+			}
+			if !doFirewallSpecHasOutboundAll(firewallSpec, "udp") {
+				out.Issues = append(out.Issues, "[HARD] DigitalOcean firewall create is missing outbound UDP all rule")
+				out.Fixes = append(out.Fixes, "Add outbound rule protocol:udp,ports:all,address:0.0.0.0/0 to compute firewall create")
+			}
 		}
 		if s0 == "compute" && s1 == "firewall" && s2 == "add-droplets" {
 			hasFirewallAttach = true
 		}
+		if s0 == "compute" && s1 == "ssh-key" && s2 == "import" {
+			hasSSHKeyImport = true
+		}
 		if s0 == "compute" && s1 == "ssh-key" && s2 == "list" {
 			hasSSHKeyList = true
+			if isOpenClaw {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw DigitalOcean plan reuses an existing SSH key via compute ssh-key list")
+				out.Fixes = append(out.Fixes, "Replace compute ssh-key list with compute ssh-key import so the executor can create a fresh deploy-scoped SSH key and bind SSH_KEY_ID into droplet create")
+			} else {
+				out.Warnings = append(out.Warnings, "DigitalOcean plan reuses an existing SSH key via compute ssh-key list — prefer compute ssh-key import for a dedicated deployment key")
+			}
 		}
 		if s0 == "compute" && s1 == "reserved-ip" && s2 == "create" {
 			hasReservedIP = true
+		}
+		if s0 == "compute" && s1 == "droplet" && s2 == "create" {
+			if countDOFlagOccurrences(args, "--tag") > 0 {
+				out.Issues = append(out.Issues, "[HARD] DigitalOcean droplet create uses invalid --tag flag")
+				out.Fixes = append(out.Fixes, "Replace --tag with --tag-name on compute droplet create")
+			}
 		}
 	}
 
 	if !hasDropletCreate {
 		out.Issues = append(out.Issues, "[HARD] DigitalOcean plan missing compute droplet create")
 		out.Fixes = append(out.Fixes, "Add compute droplet create with --image docker-20-04 --user-data boot script")
+	}
+	if isOpenClaw && !hasAppsCreate {
+		out.Issues = append(out.Issues, "[HARD] OpenClaw DigitalOcean plan missing App Platform HTTPS front door (apps create)")
+		out.Fixes = append(out.Fixes, "Add apps create for a small HTTPS proxy app that forwards to the OpenClaw droplet and exposes a managed ondigitalocean.app URL")
+	}
+	if isOpenClaw && !hasHTTPSOutput {
+		out.Issues = append(out.Issues, "[HARD] OpenClaw DigitalOcean plan is missing HTTPS output binding from App Platform")
+		out.Fixes = append(out.Fixes, "Produce HTTPS_URL (or APP_URL) from apps create using the App Platform default ingress URL")
+	}
+	if isOpenClaw && !hasDockerBuild {
+		out.Issues = append(out.Issues, "[HARD] OpenClaw DigitalOcean plan missing docker build for the App Platform HTTPS proxy image")
+		out.Fixes = append(out.Fixes, "Add docker build for the proxy image; use context __CLANKER_OPENCLAW_DO_PROXY__ when building the managed HTTPS front-door proxy")
+	}
+	if isOpenClaw && !hasDockerPush {
+		out.Issues = append(out.Issues, "[HARD] OpenClaw DigitalOcean plan missing docker push for the App Platform HTTPS proxy image")
+		out.Fixes = append(out.Fixes, "Push the proxy image to DOCR before apps create so App Platform can deploy it")
+	}
+	if isOpenClaw && !hasDORegistryCreate {
+		out.Warnings = append(out.Warnings, "OpenClaw DigitalOcean plan does not create a DOCR registry — this is fine only if REGISTRY_NAME already resolves to an existing registry")
+	}
+	if isOpenClaw {
+		if strings.HasPrefix(proxyAppRepository, "<REGISTRY_NAME>/") {
+			out.Issues = append(out.Issues, fmt.Sprintf("[HARD] OpenClaw DigitalOcean App Platform proxy repository must not include the registry name prefix: %s", proxyAppRepository))
+			out.Fixes = append(out.Fixes, "Set apps create --spec image.repository to the repository name only, for example openclaw-proxy, and keep image.registry as <REGISTRY_NAME>")
+		}
+		if proxyBuildImageRef != "" && proxyPushImageRef != "" && proxyBuildImageRef != proxyPushImageRef {
+			out.Issues = append(out.Issues, fmt.Sprintf("[HARD] OpenClaw DigitalOcean proxy image mismatch: docker build tags %q but docker push uploads %q", proxyBuildImageRef, proxyPushImageRef))
+			out.Fixes = append(out.Fixes, "Use the exact same DOCR image ref for both docker build -t and docker push")
+		}
+		if proxyAppImageRef != "" && proxyBuildImageRef != "" && proxyAppImageRef != proxyBuildImageRef {
+			out.Issues = append(out.Issues, fmt.Sprintf("[HARD] OpenClaw DigitalOcean proxy image mismatch: App Platform expects %q but docker build tags %q", proxyAppImageRef, proxyBuildImageRef))
+			out.Fixes = append(out.Fixes, "Make apps create --spec image.registry/image.repository/image.tag resolve to the same DOCR image ref used by docker build")
+		}
+		if proxyAppImageRef != "" && proxyPushImageRef != "" && proxyAppImageRef != proxyPushImageRef {
+			out.Issues = append(out.Issues, fmt.Sprintf("[HARD] OpenClaw DigitalOcean proxy image mismatch: App Platform expects %q but docker push uploads %q", proxyAppImageRef, proxyPushImageRef))
+			out.Fixes = append(out.Fixes, "Make docker push upload the same DOCR image ref referenced by apps create --spec")
+		}
 	}
 
 	if !hasFirewallCreate {
@@ -879,12 +1000,17 @@ func validateDigitalOceanPlanCommands(plan *maker.Plan, appPorts []int, isOpenCl
 		out.Warnings = append(out.Warnings, "Firewall created but not attached to droplet — add compute firewall add-droplets <FIREWALL_ID> --droplet-ids <DROPLET_ID>")
 	}
 
-	if !hasSSHKeyList {
-		out.Warnings = append(out.Warnings, "No ssh-key list step — <SSH_KEY_ID> placeholder will be unresolved unless hardcoded")
+	if isOpenClaw && !hasSSHKeyImport {
+		out.Issues = append(out.Issues, "[HARD] OpenClaw DigitalOcean plan missing compute ssh-key import for deploy-scoped SSH access")
+		out.Fixes = append(out.Fixes, "Add compute ssh-key import before droplet create so the executor can generate a fresh SSH key pair and bind SSH_KEY_ID into compute droplet create")
+	} else if !hasSSHKeyImport && !hasSSHKeyList {
+		out.Warnings = append(out.Warnings, "No ssh-key import/list step — <SSH_KEY_ID> placeholder will be unresolved unless hardcoded")
 	}
 
-	if !hasReservedIP {
+	if !hasReservedIP && !isOpenClaw {
 		out.Warnings = append(out.Warnings, "No reserved IP — Droplet public IP may change on reboot; consider compute reserved-ip create")
+	} else if hasReservedIP && isOpenClaw {
+		out.Warnings = append(out.Warnings, "Reserved IP is optional for OpenClaw on DigitalOcean — omit compute reserved-ip create unless quota is available and a pinned IP is required")
 	}
 
 	if hasDropletCreate && !producesDropletID {
@@ -894,10 +1020,18 @@ func validateDigitalOceanPlanCommands(plan *maker.Plan, appPorts []int, isOpenCl
 	// Catch invalid doctl subcommands (LLM hallucinations)
 	for i, cmd := range plan.Commands {
 		args := cmd.Args
-		if len(args) < 3 {
+		if len(args) == 0 {
 			continue
 		}
 		s0 := strings.ToLower(strings.TrimSpace(args[0]))
+		if s0 == "__docker_build__" || s0 == "__docker_push__" || s0 == "__local_docker_build__" || s0 == "__local_docker_push__" {
+			out.Issues = append(out.Issues, fmt.Sprintf("[HARD] Step %d uses invalid fake docker command prefix '%s'", i+1, args[0]))
+			out.Fixes = append(out.Fixes, fmt.Sprintf("Change step %d to plain docker CLI args starting with 'docker build' or 'docker push'", i+1))
+			continue
+		}
+		if len(args) < 3 {
+			continue
+		}
 		s1 := strings.ToLower(strings.TrimSpace(args[1]))
 		if s0 == "registry" && (s1 == "docker" || strings.HasPrefix(s1, "docker-")) {
 			out.Issues = append(out.Issues, fmt.Sprintf("[HARD] Step %d uses invalid doctl subcommand 'registry %s' — use plain 'docker build'/'docker push' instead", i+1, strings.Join(args[1:], " ")))
@@ -943,17 +1077,103 @@ func validateDigitalOceanPlanCommands(plan *maker.Plan, appPorts []int, isOpenCl
 			continue
 		}
 		lower := strings.ToLower(script)
+		runtimeSpec, hasRuntime := inferOpenClawDORuntimeSpec(script)
+
+		// Unterminated single-quote check (shared with AWS)
+		if hasLikelyBrokenSingleQuoteLine(script) {
+			out.Issues = append(out.Issues, "[HARD] user-data script contains an unterminated single-quoted string")
+			out.Fixes = append(out.Fixes, "Fix quoting in user-data (close trailing single quotes)")
+		}
+
+		// Docker daemon check — docker-20-04 image has docker pre-started
+		if strings.Contains(lower, "docker") {
+			// Check --image flag in command args for docker-ready image
+			usesDockerImage := false
+			for _, a := range args {
+				al := strings.ToLower(strings.TrimSpace(a))
+				if strings.Contains(al, "docker-") {
+					usesDockerImage = true
+					break
+				}
+			}
+			if !usesDockerImage &&
+				!strings.Contains(lower, "systemctl start docker") &&
+				!strings.Contains(lower, "service docker start") {
+				out.Warnings = append(out.Warnings, "user-data uses docker but does not explicitly start the docker daemon")
+			}
+		}
+
 		// Check OpenClaw-specific user-data requirements
-		if isOpenClaw {
-			if !strings.Contains(lower, "docker compose up") && !strings.Contains(lower, "docker-compose up") && !strings.Contains(lower, "docker run") {
+		if isOpenClaw || hasRuntime {
+			if strings.Contains(lower, "cloud-init status --wait") {
+				out.Issues = append(out.Issues, "[HARD] DigitalOcean droplet user-data runs 'cloud-init status --wait' inside cloud-init and will deadlock")
+				out.Fixes = append(out.Fixes, "Remove 'cloud-init status --wait' from user-data; it already runs inside cloud-init")
+			}
+			if strings.Contains(lower, "docker compose ") && scriptInstallsAPTRequestedPackage(script, "docker-compose") && !scriptInstallsAPTRequestedPackage(script, "docker-compose-plugin") {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw DigitalOcean user-data runs 'docker compose' but installs only the standalone docker-compose package")
+				out.Fixes = append(out.Fixes, "Install docker-compose-plugin when using 'docker compose', or switch the script to the standalone 'docker-compose' binary consistently")
+			}
+			if strings.Contains(lower, "git clone ") && !scriptInstallsAPTRequestedPackage(script, "git") {
+				out.Warnings = append(out.Warnings, "OpenClaw DigitalOcean user-data runs git clone without explicitly installing git")
+			}
+			if runtimeSpec.HasComposeBuild {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data uses 'docker compose build' in the DigitalOcean cloud-init flow")
+				out.Fixes = append(out.Fixes, "Set OPENCLAW_IMAGE='"+openClawDOImageRef+"', run '"+openClawDOImagePullCommand+"', then '"+openClawDOGatewayComposeCmd+"'")
+			}
+			if runtimeSpec.HasDockerBuild {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw DigitalOcean user-data still uses a local source-build flow instead of the upstream GHCR image")
+				out.Fixes = append(out.Fixes, "Remove local 'docker build -t openclaw:local ...' steps, set OPENCLAW_IMAGE='"+openClawDOImageRef+"' in .env, and pull the image before docker compose up")
+			}
+			if !strings.Contains(lower, "openclaw_image="+strings.ToLower(openClawDOImageRef)) {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw DigitalOcean user-data does not pin OPENCLAW_IMAGE to the upstream GHCR image")
+				out.Fixes = append(out.Fixes, "Write OPENCLAW_IMAGE='"+openClawDOImageRef+"' into the .env heredoc before starting the gateway")
+			}
+			if hasRuntime && !runtimeSpec.HasComposeUp && !runtimeSpec.HasDockerRun {
 				out.Issues = append(out.Issues, "[HARD] DigitalOcean droplet user-data does not start OpenClaw (missing docker compose up or docker run)")
 				out.Fixes = append(out.Fixes, "Add 'docker compose up -d openclaw-gateway' to user-data script")
 			}
-			if !strings.Contains(lower, "openclaw_gateway_token") && !strings.Contains(lower, "openclaw_gateway_password") {
-				out.Warnings = append(out.Warnings, "user-data .env missing OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_PASSWORD")
+			if hasRuntime && !runtimeSpec.HasGatewaySecret {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data .env is missing OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_PASSWORD")
+				out.Fixes = append(out.Fixes, "Write OPENCLAW_GATEWAY_TOKEN=<OPENCLAW_GATEWAY_TOKEN> or OPENCLAW_GATEWAY_PASSWORD=<...> into the .env heredoc before docker compose up")
 			}
-			if !strings.Contains(lower, "openclaw_gateway_bind") {
+			if runtimeSpec.LeaksDOAccessToken {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data writes DIGITALOCEAN_ACCESS_TOKEN into .env")
+				out.Fixes = append(out.Fixes, "Remove DIGITALOCEAN_ACCESS_TOKEN from the OpenClaw .env heredoc; it is not an application secret")
+			}
+			if runtimeSpec.HasCloneSoftFail {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data ignores git clone failure with a shell fallback ('|| ...')")
+				out.Fixes = append(out.Fixes, "Remove the shell fallback from git clone so user-data fails fast when repository checkout fails")
+			}
+			if runtimeSpec.HasDockerSetupSoftFail {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data ignores docker-setup.sh failure with a shell fallback ('|| ...')")
+				out.Fixes = append(out.Fixes, "Remove the shell fallback from docker-setup.sh so onboarding failure stops the deployment")
+			}
+			if runtimeSpec.HasLeakedDoctlFlags {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data includes outer doctl flags like --wait/--output on the docker compose up line")
+				out.Fixes = append(out.Fixes, "Keep doctl flags outside user-data; the user-data runtime command must be just 'docker compose up -d openclaw-gateway'")
+			}
+			if runtimeSpec.HasDummySecrets {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data contains dummy secret values like placeholder_replace_me/changeme")
+				out.Fixes = append(out.Fixes, "Preserve provided placeholders such as <OPENCLAW_GATEWAY_TOKEN> and <ANTHROPIC_API_KEY>; never replace them with dummy literals")
+			}
+			if runtimeSpec.HasGeneratedGateway {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data generates a random gateway token instead of using the user-provided gateway secret")
+				out.Fixes = append(out.Fixes, "Write OPENCLAW_GATEWAY_TOKEN=<OPENCLAW_GATEWAY_TOKEN> directly into the .env heredoc; do not generate a random token in user-data")
+			}
+			if hasRuntime && !runtimeSpec.HasProviderKey {
+				out.Issues = append(out.Issues, "[HARD] OpenClaw user-data .env is missing all AI provider keys (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY)")
+				out.Fixes = append(out.Fixes, "Write at least one provider key placeholder into the .env heredoc before docker compose up")
+			}
+			if hasRuntime && !runtimeSpec.HasBindSetting {
 				out.Warnings = append(out.Warnings, "user-data .env missing OPENCLAW_GATEWAY_BIND=lan — gateway may not accept external connections")
+			}
+			for _, marker := range []string{"discord_bot_token", "telegram_bot_token"} {
+				if strings.Contains(lower, marker) && !strings.Contains(lower, marker+"=") {
+					out.Warnings = append(out.Warnings, fmt.Sprintf("user-data references %s but does not appear to write it into .env", strings.ToUpper(marker)))
+				}
+			}
+			if size := strings.TrimSpace(parseFlag(args, "--size")); size == "s-1vcpu-2gb" {
+				out.Warnings = append(out.Warnings, "OpenClaw build-on-droplet on s-1vcpu-2gb may OOM during docker build; prefer s-2vcpu-4gb")
 			}
 		}
 	}
@@ -961,14 +1181,80 @@ func validateDigitalOceanPlanCommands(plan *maker.Plan, appPorts []int, isOpenCl
 	return out
 }
 
-// extractDoctlUserDataScript extracts the --user-data value from doctl args.
-func extractDoctlUserDataScript(args []string) string {
-	for i, a := range args {
-		if strings.EqualFold(strings.TrimSpace(a), "--user-data") && i+1 < len(args) {
-			return args[i+1]
+func scriptInstallsAPTRequestedPackage(script string, pkg string) bool {
+	pkg = strings.TrimSpace(strings.ToLower(pkg))
+	if pkg == "" {
+		return false
+	}
+	for _, line := range strings.Split(strings.ToLower(script), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.Contains(trimmed, "apt-get install") {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		for _, field := range fields {
+			if strings.TrimSpace(field) == pkg {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func extractDockerBuildTag(args []string) string {
+	for i := 0; i < len(args); i++ {
+		trimmed := strings.TrimSpace(args[i])
+		if trimmed == "-t" || trimmed == "--tag" {
+			if i+1 < len(args) {
+				return strings.TrimSpace(args[i+1])
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "--tag=") {
+			return strings.TrimSpace(strings.TrimPrefix(trimmed, "--tag="))
 		}
 	}
 	return ""
+}
+
+func extractDockerPushTarget(args []string) string {
+	if len(args) < 3 {
+		return ""
+	}
+	return strings.TrimSpace(args[2])
+}
+
+func extractOpenClawDOAppProxyImageRef(args []string) (string, string) {
+	specRaw, _ := commandFlagValueLocal(args, "--spec")
+	if strings.TrimSpace(specRaw) == "" {
+		return "", ""
+	}
+	var spec map[string]any
+	if err := json.Unmarshal([]byte(specRaw), &spec); err != nil {
+		return "", ""
+	}
+	services, ok := spec["services"].([]any)
+	if !ok || len(services) == 0 {
+		return "", ""
+	}
+	service, ok := services[0].(map[string]any)
+	if !ok {
+		return "", ""
+	}
+	image, ok := service["image"].(map[string]any)
+	if !ok {
+		return "", ""
+	}
+	registry := strings.TrimSpace(stringMapValue(image, "registry"))
+	repository := strings.TrimSpace(stringMapValue(image, "repository"))
+	tag := strings.TrimSpace(stringMapValue(image, "tag"))
+	if registry == "" || repository == "" {
+		return "", repository
+	}
+	if tag == "" {
+		tag = "latest"
+	}
+	return fmt.Sprintf("registry.digitalocean.com/%s/%s:%s", registry, repository, tag), repository
 }
 
 // hasOpenClawSSMRuntimePath checks if SSM send-command steps collectively

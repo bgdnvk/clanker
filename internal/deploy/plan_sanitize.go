@@ -58,7 +58,7 @@ func deterministicIssueCount(plan *maker.Plan, profile *RepoProfile, deep *DeepA
 	if err != nil {
 		return 0
 	}
-	v := DeterministicValidatePlan(string(planJSON), profile, deep, docker)
+	v := DeterministicValidatePlan(string(planJSON), profile, deep, docker, profile.EnvVars)
 	if v == nil {
 		return 0
 	}

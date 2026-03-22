@@ -194,15 +194,19 @@ func findUserDataInPlan(plan *maker.Plan) (int, int, string) {
 func buildUserDataRepairPrompt(script string, issues, fixes []string, provider string) string {
 	var b strings.Builder
 	if provider == "digitalocean" {
+		runtimeSpec, _ := inferOpenClawDORuntimeSpec(script)
 		b.WriteString("You are a shell script repair agent. Fix the following DigitalOcean Droplet user-data script.\n\n")
 		b.WriteString("Rules:\n")
 		b.WriteString("- Output ONLY the corrected shell script (no markdown, no code fences, no explanation).\n")
 		b.WriteString("- Start with #!/bin/bash shebang line.\n")
 		b.WriteString("- Fix ONLY the listed issues. Do NOT rewrite the script from scratch.\n")
 		b.WriteString("- Preserve all existing functionality — only change what is broken.\n")
-		b.WriteString("- For DOCR auth: install doctl, then 'doctl auth init -t $TOKEN && doctl registry login'. Do NOT read /root/.config/doctl/config.yaml.\n")
 		b.WriteString("- Docker is pre-installed on docker-20-04 images. Do NOT reinstall.\n")
-		b.WriteString("- Ensure image tags are consistent between docker pull/tag and the actual pushed image.\n\n")
+		writeLines(&b, openClawDOUserDataRepairLines()...)
+		if runtimeSpec.HasBootstrap || runtimeSpec.HasComposeUp || runtimeSpec.HasOnboarding {
+			b.WriteString("- Keep the existing OpenClaw runtime shape intact: clone the repo for Compose files, set OPENCLAW_IMAGE to the upstream GHCR image, seed config non-interactively, pull the image, then start the gateway.\n")
+		}
+		b.WriteString("\n")
 	} else {
 		b.WriteString("You are a shell script repair agent. Fix the following EC2 user-data script.\n\n")
 		b.WriteString("Rules:\n")
