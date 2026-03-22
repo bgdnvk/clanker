@@ -1640,10 +1640,6 @@ func generateDOCRProbeRepositoryName() (string, error) {
 	return generateDOCRRepositoryName(doDOCRPushProbePrefix)
 }
 
-func generateDOCRFallbackRepositoryName() (string, error) {
-	return generateDOCRRepositoryName(doDOCRPushFallbackPrefix)
-}
-
 func generateAdaptiveDOCRRepositoryCandidates(targetRepo string, count int) ([]string, error) {
 	base := sanitizeDOCRRepositoryBase(targetRepo)
 	if base == "" {
