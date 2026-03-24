@@ -167,6 +167,13 @@ infra:
 # hetzner:
 #   api_token: ""            # Hetzner Cloud API token (or set HCLOUD_TOKEN)
 
+# Hermes Agent (for `clanker talk` and `clanker ask --agent hermes`):
+# hermes:
+#   path: "./vendor/hermes-agent"    # Auto-detected if omitted
+#   model: "anthropic/claude-opus-4"  # Model via OpenRouter
+#   base_url: "https://openrouter.ai/api/v1"
+#   openrouter_api_key: ""           # Or set OPENROUTER_API_KEY env var
+
 # Backend integration (for storing and retrieving credentials across machines):
 # backend:
 #   # API key for clanker backend authentication (or set CLANKER_BACKEND_API_KEY)
