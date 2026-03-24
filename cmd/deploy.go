@@ -50,11 +50,13 @@ Examples:
 		anthropicKey, _ := cmd.Flags().GetString("anthropic-key")
 		geminiKey, _ := cmd.Flags().GetString("gemini-key")
 		deepseekKey, _ := cmd.Flags().GetString("deepseek-key")
+		cohereKey, _ := cmd.Flags().GetString("cohere-key")
 		minimaxKey, _ := cmd.Flags().GetString("minimax-key")
 		openaiModel, _ := cmd.Flags().GetString("openai-model")
 		anthropicModel, _ := cmd.Flags().GetString("anthropic-model")
 		geminiModel, _ := cmd.Flags().GetString("gemini-model")
 		deepseekModel, _ := cmd.Flags().GetString("deepseek-model")
+		cohereModel, _ := cmd.Flags().GetString("cohere-model")
 		minimaxModel, _ := cmd.Flags().GetString("minimax-model")
 		targetProvider, _ := cmd.Flags().GetString("provider")
 		deployTarget, _ := cmd.Flags().GetString("target")
@@ -99,13 +101,15 @@ Examples:
 			apiKey = resolveAnthropicKey(anthropicKey)
 		case "deepseek":
 			apiKey = resolveDeepSeekKey(deepseekKey)
+		case "cohere":
+			apiKey = resolveCohereKey(cohereKey)
 		case "minimax":
 			apiKey = resolveMiniMaxKey(minimaxKey)
 		default:
 			apiKey = viper.GetString("ai.api_key")
 		}
 
-		maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, minimaxModel)
+		maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel)
 
 		aiClient := ai.NewClient(provider, apiKey, debug, aiProfile)
 
@@ -2037,6 +2041,8 @@ func maxPlanningPromptChars(provider string) int {
 		return 280000
 	case "openai":
 		return 230000
+	case "cohere":
+		return 200000
 	case "anthropic":
 		return 170000
 	default:
@@ -2122,11 +2128,13 @@ func init() {
 	deployCmd.Flags().String("anthropic-key", "", "Anthropic API key")
 	deployCmd.Flags().String("gemini-key", "", "Gemini API key")
 	deployCmd.Flags().String("deepseek-key", "", "DeepSeek API key")
+	deployCmd.Flags().String("cohere-key", "", "Cohere API key")
 	deployCmd.Flags().String("minimax-key", "", "MiniMax API key")
 	deployCmd.Flags().String("openai-model", "", "OpenAI model to use (overrides config)")
 	deployCmd.Flags().String("anthropic-model", "", "Anthropic model to use (overrides config)")
 	deployCmd.Flags().String("gemini-model", "", "Gemini model to use (overrides config)")
 	deployCmd.Flags().String("deepseek-model", "", "DeepSeek model to use (overrides config)")
+	deployCmd.Flags().String("cohere-model", "", "Cohere model to use (overrides config)")
 	deployCmd.Flags().String("minimax-model", "", "MiniMax model to use (overrides config)")
 	deployCmd.Flags().Bool("apply", false, "Apply the plan immediately after generation")
 	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws, gcp, azure, cloudflare, digitalocean, or hetzner")
