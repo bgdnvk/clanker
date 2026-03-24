@@ -120,7 +120,7 @@ Examples:
 		// Handle explicit --agent flag: delegate to a specific agent
 		agentName, _ := cmd.Flags().GetString("agent")
 		if agentName == "hermes" {
-			return handleHermesQuery(context.Background(), question, debug)
+			return handleHermesQuery(context.Background(), question, profile, debug)
 		} else if agentName != "" {
 			return fmt.Errorf("unknown agent: %s (available: hermes)", agentName)
 		}
@@ -2611,7 +2611,9 @@ func determineRoutingDecision(question string) (agent string, reason string) {
 }
 
 // handleHermesQuery delegates a question to the Hermes agent and prints the response.
-func handleHermesQuery(ctx context.Context, question string, debug bool) error {
+// When an AWS profile is available, it gathers infrastructure context first so the
+// agent can answer questions about the user's environment.
+func handleHermesQuery(ctx context.Context, question string, profile string, debug bool) error {
 	hermesPath, err := hermes.FindHermesPath()
 	if err != nil {
 		return fmt.Errorf("hermes agent not found: %w\nRun 'make setup-hermes' to install", err)
@@ -2625,7 +2627,38 @@ func handleHermesQuery(ctx context.Context, question string, debug bool) error {
 	}
 	defer runner.Stop()
 
-	response, err := runner.PromptSync(ctx, question)
+	// Gather AWS infrastructure context if a profile is available.
+	prompt := question
+	targetProfile := profile
+	if targetProfile == "" {
+		defaultEnv := viper.GetString("infra.default_environment")
+		if defaultEnv == "" {
+			defaultEnv = "dev"
+		}
+		targetProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+		if targetProfile == "" {
+			targetProfile = viper.GetString("aws.default_profile")
+		}
+	}
+
+	if targetProfile != "" {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[hermes] gathering AWS context with profile %s\n", targetProfile)
+		}
+		awsClient, err := aws.NewClientWithProfileAndDebug(ctx, targetProfile, debug)
+		if err == nil {
+			awsContext, err := awsClient.GetRelevantContext(ctx, question)
+			if err == nil && strings.TrimSpace(awsContext) != "" {
+				prompt = fmt.Sprintf("Here is the current AWS infrastructure context:\n\n%s\n\nUser question: %s", awsContext, question)
+			} else if debug && err != nil {
+				fmt.Fprintf(os.Stderr, "[hermes] warning: failed to get AWS context: %v\n", err)
+			}
+		} else if debug {
+			fmt.Fprintf(os.Stderr, "[hermes] warning: failed to create AWS client: %v\n", err)
+		}
+	}
+
+	response, err := runner.PromptSync(ctx, prompt)
 	if err != nil {
 		return fmt.Errorf("hermes agent error: %w", err)
 	}
