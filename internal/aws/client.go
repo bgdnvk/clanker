@@ -68,8 +68,25 @@ type awsCredentialsFromCLI struct {
 	Expiration      string `json:"Expiration"`
 }
 
+func normalizeProfile(profile string) string {
+	return strings.TrimSpace(profile)
+}
+
+func configWithOptionalProfile(ctx context.Context, profile string, opts ...func(*config.LoadOptions) error) (aws.Config, error) {
+	profile = normalizeProfile(profile)
+	if profile == "" {
+		return config.LoadDefaultConfig(ctx, opts...)
+	}
+	return config.LoadDefaultConfig(ctx, append(opts, config.WithSharedConfigProfile(profile))...)
+}
+
 // getCredentialsFromCLI uses AWS CLI to get fresh credentials for the profile
 func getCredentialsFromCLI(ctx context.Context, profile string) (*awsCredentialsFromCLI, error) {
+	profile = normalizeProfile(profile)
+	if profile == "" {
+		return nil, fmt.Errorf("aws profile is empty")
+	}
+
 	// For SSO profiles, use export-credentials with process format
 	cmd := exec.CommandContext(ctx, "aws", "configure", "export-credentials", "--profile", profile, "--format", "process")
 	cmd.Env = append(os.Environ(), fmt.Sprintf("AWS_PROFILE=%s", profile))
@@ -92,12 +109,17 @@ func NewClientWithProfile(ctx context.Context, profile string) (*Client, error) 
 }
 
 func NewClientWithProfileAndDebug(ctx context.Context, profile string, debug bool) (*Client, error) {
+	profile = normalizeProfile(profile)
+
 	// Try to get credentials from AWS CLI first (works better with SSO)
 	creds, err := getCredentialsFromCLI(ctx, profile)
 	if err != nil {
 		// Fallback to standard SDK approach
-		cfg, err := config.LoadDefaultConfig(ctx, config.WithSharedConfigProfile(profile))
+		cfg, err := configWithOptionalProfile(ctx, profile)
 		if err != nil {
+			if profile == "" {
+				return nil, fmt.Errorf("unable to load default AWS SDK config: %w", err)
+			}
 			return nil, fmt.Errorf("unable to load SDK config for profile %s: %w", profile, err)
 		}
 
@@ -118,15 +140,17 @@ func NewClientWithProfileAndDebug(ctx context.Context, profile string, debug boo
 	}
 
 	// Create AWS config with CLI-provided credentials
-	cfg, err := config.LoadDefaultConfig(ctx,
+	cfg, err := configWithOptionalProfile(ctx, profile,
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
 			creds.AccessKeyId,
 			creds.SecretAccessKey,
 			creds.SessionToken,
 		)),
-		config.WithSharedConfigProfile(profile),
 	)
 	if err != nil {
+		if profile == "" {
+			return nil, fmt.Errorf("unable to load default AWS SDK config with CLI credentials: %w", err)
+		}
 		return nil, fmt.Errorf("unable to load SDK config with CLI credentials for profile %s: %w", profile, err)
 	}
 

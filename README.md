@@ -49,6 +49,7 @@ Most providers use env vars for keys (see [.clanker.example.yaml](.clanker.examp
 ```bash
 export OPENAI_API_KEY="..."
 export GEMINI_API_KEY="..."
+export COHERE_API_KEY="..."
 ```
 
 ### No config file defaults
@@ -58,7 +59,8 @@ If you run without `~/.clanker.yaml`:
 - Default provider: `openai` (unless you pass `--ai-profile`).
 - OpenAI key order: `--openai-key` → `OPENAI_API_KEY` (also supports `ai.providers.openai.api_key` and `ai.providers.openai.api_key_env` if config exists).
 - Gemini API key order (when using `--ai-profile gemini-api`): `--gemini-key` → `GEMINI_API_KEY` (also supports `ai.providers.gemini-api.api_key` and `ai.providers.gemini-api.api_key_env` if config exists).
-- Model: `openai` defaults to `gpt-5`; `gemini`/`gemini-api` defaults to `gemini-3-pro-preview`.
+- Cohere API key order (when using `--ai-profile cohere`): `--cohere-key` → `COHERE_API_KEY` (also supports `ai.providers.cohere.api_key` and `ai.providers.cohere.api_key_env` if config exists).
+- Model: `openai` defaults to `gpt-5`; `gemini`/`gemini-api` defaults to `gemini-3-pro-preview`; `cohere` defaults to `command-a-03-2025`.
 
 ### AWS
 
@@ -111,6 +113,8 @@ clanker ask "what's the status of my chat service lambda?"
 clanker ask --profile dev "what's the last error from my big-api-service lambda?"
 
 clanker ask --ai-profile openai "What are the latest logs for our dev Lambda functions?"
+
+clanker ask --ai-profile cohere --cohere-model command-a-03-2025 "Summarize the current deployment risks in dev."
 
 clanker ask --agent-trace --profile dev "how can i create an additional lambda and link it to dev?"
 

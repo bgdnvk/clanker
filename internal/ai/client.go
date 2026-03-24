@@ -52,6 +52,27 @@ type anthropicModelsResponse struct {
 	} `json:"data"`
 }
 
+type cohereChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type cohereChatRequest struct {
+	Model       string              `json:"model"`
+	Messages    []cohereChatMessage `json:"messages"`
+	MaxTokens   int                 `json:"max_tokens,omitempty"`
+	Temperature float64             `json:"temperature,omitempty"`
+}
+
+type cohereChatResponse struct {
+	Message struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	} `json:"message"`
+}
+
 type Client struct {
 	provider     string
 	apiKey       string
@@ -93,6 +114,29 @@ func waitForAIRetry(ctx context.Context, d time.Duration) error {
 	case <-t.C:
 		return nil
 	}
+}
+
+func newBedrockInvokeCommand(ctx context.Context, model, bodyFilePath, awsProfile, region, responsePath string) *exec.Cmd {
+	args := []string{
+		"bedrock-runtime",
+		"invoke-model",
+		"--model-id", model,
+		"--body", "fileb://" + bodyFilePath,
+	}
+
+	if trimmedProfile := strings.TrimSpace(awsProfile); trimmedProfile != "" {
+		args = append(args, "--profile", trimmedProfile)
+	}
+	if trimmedRegion := strings.TrimSpace(region); trimmedRegion != "" {
+		args = append(args, "--region", trimmedRegion)
+	}
+
+	args = append(args, responsePath)
+	cmd := exec.CommandContext(ctx, "aws", args...)
+	if trimmedProfile := strings.TrimSpace(awsProfile); trimmedProfile != "" {
+		cmd.Env = append(os.Environ(), fmt.Sprintf("AWS_PROFILE=%s", trimmedProfile))
+	}
+	return cmd
 }
 
 func isRetryableHTTPStatus(code int) bool {
@@ -353,6 +397,8 @@ func NewClient(provider, apiKey string, debug bool, aiProfile ...string) *Client
 		client.baseURL = "https://api.openai.com/v1"
 	case "anthropic":
 		client.baseURL = "https://api.anthropic.com/v1"
+	case "cohere":
+		client.baseURL = "https://api.cohere.com"
 	case "deepseek":
 		client.baseURL = "https://api.deepseek.com/v1"
 	case "minimax":
@@ -502,6 +548,8 @@ func (c *Client) askWithDynamicAnalysis(ctx context.Context, question, awsContex
 		analysisResponse, err = c.askOpenAI(ctx, analysisPrompt)
 	case "anthropic":
 		analysisResponse, err = c.askAnthropic(ctx, analysisPrompt)
+	case "cohere":
+		analysisResponse, err = c.askCohere(ctx, analysisPrompt)
 	case "gemini", "gemini-api":
 		analysisResponse, err = c.askGemini(ctx, analysisPrompt)
 	default:
@@ -663,6 +711,8 @@ Please provide a comprehensive answer based on the live data above.`, question, 
 		return c.askOpenAI(ctx, finalPrompt)
 	case "anthropic":
 		return c.askAnthropic(ctx, finalPrompt)
+	case "cohere":
+		return c.askCohere(ctx, finalPrompt)
 	case "gemini", "gemini-api":
 		return c.askGemini(ctx, finalPrompt)
 	default:
@@ -719,6 +769,8 @@ func (c *Client) AskOriginal(ctx context.Context, question, awsContext, codeCont
 		return c.askGemini(ctx, prompt)
 	case "anthropic":
 		return c.askAnthropic(ctx, prompt)
+	case "cohere":
+		return c.askCohere(ctx, prompt)
 	case "openai":
 		return c.askOpenAI(ctx, prompt)
 	default:
@@ -817,14 +869,7 @@ func (c *Client) askBedrock(ctx context.Context, prompt string) (string, error) 
 
 	// Call AWS CLI with LLM profile from config (for Bedrock API access)
 	// Use fileb:// to read body from file as binary blob to avoid command line length limits
-	cmd := exec.CommandContext(ctx, "aws", "bedrock-runtime", "invoke-model",
-		"--model-id", profileLLMCall.Model,
-		"--body", "fileb://"+bodyFilePath,
-		"--profile", profileLLMCall.AWSProfile,
-		"--region", profileLLMCall.Region,
-		tmpFilePath)
-
-	cmd.Env = append(os.Environ(), fmt.Sprintf("AWS_PROFILE=%s", profileLLMCall.AWSProfile))
+	cmd := newBedrockInvokeCommand(ctx, profileLLMCall.Model, bodyFilePath, profileLLMCall.AWSProfile, profileLLMCall.Region, tmpFilePath)
 
 	var output []byte
 	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
@@ -838,13 +883,7 @@ func (c *Client) askBedrock(ctx context.Context, prompt string) (string, error) 
 		if wErr := waitForAIRetry(ctx, aiRetryDelay(attempt-1)); wErr != nil {
 			return "", wErr
 		}
-		cmd = exec.CommandContext(ctx, "aws", "bedrock-runtime", "invoke-model",
-			"--model-id", profileLLMCall.Model,
-			"--body", "fileb://"+bodyFilePath,
-			"--profile", profileLLMCall.AWSProfile,
-			"--region", profileLLMCall.Region,
-			tmpFilePath)
-		cmd.Env = append(os.Environ(), fmt.Sprintf("AWS_PROFILE=%s", profileLLMCall.AWSProfile))
+		cmd = newBedrockInvokeCommand(ctx, profileLLMCall.Model, bodyFilePath, profileLLMCall.AWSProfile, profileLLMCall.Region, tmpFilePath)
 	}
 
 	// Read the response file
@@ -1041,6 +1080,94 @@ func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
 	}
 
 	return response.Choices[0].Message.Content, nil
+}
+
+func (c *Client) askCohere(ctx context.Context, prompt string) (string, error) {
+	profileLLMCall, err := c.getAIProfile(c.aiProfile)
+	if err != nil {
+		return "", fmt.Errorf("failed to get AI profile for LLM calls: %w", err)
+	}
+
+	if strings.TrimSpace(c.apiKey) == "" {
+		return "", fmt.Errorf("Cohere API key not configured")
+	}
+
+	model := strings.TrimSpace(profileLLMCall.Model)
+	if model == "" {
+		model = "command-a-03-2025"
+	}
+
+	reqBody := cohereChatRequest{
+		Model: model,
+		Messages: []cohereChatMessage{{
+			Role:    "user",
+			Content: sanitizeASCII(prompt),
+		}},
+		MaxTokens:   4000,
+		Temperature: 0.1,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	client := &http.Client{}
+	var body []byte
+	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
+		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.baseURL, "/")+"/v2/chat", bytes.NewBuffer(jsonData))
+		if reqErr != nil {
+			return "", fmt.Errorf("failed to create request: %w", reqErr)
+		}
+
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+strings.TrimSpace(c.apiKey))
+
+		resp, doErr := client.Do(httpReq)
+		if doErr != nil {
+			if attempt == aiRetryMaxAttempts || !isRetryableProviderErrorText(doErr.Error()) {
+				return "", fmt.Errorf("failed to send request: %w", doErr)
+			}
+			if wErr := waitForAIRetry(ctx, aiRetryDelay(attempt-1)); wErr != nil {
+				return "", wErr
+			}
+			continue
+		}
+
+		body, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return "", fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+
+		if attempt == aiRetryMaxAttempts || !(isRetryableHTTPStatus(resp.StatusCode) || isRetryableProviderErrorText(string(body))) {
+			return "", fmt.Errorf("Cohere API request failed with status %d: %s", resp.StatusCode, string(body))
+		}
+
+		delay := aiRetryDelay(attempt - 1)
+		if ra, ok := retryAfterDelay(resp.Header); ok {
+			delay = ra
+		}
+		if wErr := waitForAIRetry(ctx, delay); wErr != nil {
+			return "", wErr
+		}
+	}
+
+	var parsed cohereChatResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	text := extractCohereText(parsed.Message.Content)
+	if text == "" {
+		return "", fmt.Errorf("no response content from Cohere")
+	}
+
+	return text, nil
 }
 
 func (c *Client) askAnthropic(ctx context.Context, prompt string) (string, error) {
@@ -1385,6 +1512,8 @@ func (c *Client) AskPrompt(ctx context.Context, prompt string) (string, error) {
 		return c.askOpenAI(ctx, prompt)
 	case "anthropic":
 		return c.askAnthropic(ctx, prompt)
+	case "cohere":
+		return c.askCohere(ctx, prompt)
 	case "gemini", "gemini-api":
 		return c.askGemini(ctx, prompt)
 	default:
@@ -1408,6 +1537,8 @@ func (c *Client) AskWithContext(ctx context.Context, conv *ConversationContext, 
 		response, err = c.askAnthropicWithHistory(ctx, conv)
 	case "openai":
 		response, err = c.askOpenAIWithHistory(ctx, conv)
+	case "cohere":
+		response, err = c.askCohereWithHistory(ctx, conv)
 	case "gemini", "gemini-api":
 		response, err = c.askGeminiWithHistory(ctx, conv)
 	default:
@@ -1485,13 +1616,7 @@ func (c *Client) askBedrockWithHistory(ctx context.Context, conv *ConversationCo
 	tmpFile.Close()
 	defer os.Remove(tmpFilePath)
 
-	cmd := exec.CommandContext(ctx, "aws", "bedrock-runtime", "invoke-model",
-		"--model-id", profileLLMCall.Model,
-		"--body", "fileb://"+bodyFilePath,
-		"--profile", profileLLMCall.AWSProfile,
-		"--region", profileLLMCall.Region,
-		tmpFilePath)
-	cmd.Env = append(os.Environ(), fmt.Sprintf("AWS_PROFILE=%s", profileLLMCall.AWSProfile))
+	cmd := newBedrockInvokeCommand(ctx, profileLLMCall.Model, bodyFilePath, profileLLMCall.AWSProfile, profileLLMCall.Region, tmpFilePath)
 
 	var output []byte
 	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
@@ -1505,13 +1630,7 @@ func (c *Client) askBedrockWithHistory(ctx context.Context, conv *ConversationCo
 		if wErr := waitForAIRetry(ctx, aiRetryDelay(attempt-1)); wErr != nil {
 			return "", wErr
 		}
-		cmd = exec.CommandContext(ctx, "aws", "bedrock-runtime", "invoke-model",
-			"--model-id", profileLLMCall.Model,
-			"--body", "fileb://"+bodyFilePath,
-			"--profile", profileLLMCall.AWSProfile,
-			"--region", profileLLMCall.Region,
-			tmpFilePath)
-		cmd.Env = append(os.Environ(), fmt.Sprintf("AWS_PROFILE=%s", profileLLMCall.AWSProfile))
+		cmd = newBedrockInvokeCommand(ctx, profileLLMCall.Model, bodyFilePath, profileLLMCall.AWSProfile, profileLLMCall.Region, tmpFilePath)
 	}
 
 	respData, err := os.ReadFile(tmpFilePath)
@@ -1809,6 +1928,124 @@ func (c *Client) askGeminiWithHistory(ctx context.Context, conv *ConversationCon
 	return textResult.String(), nil
 }
 
+func (c *Client) askCohereWithHistory(ctx context.Context, conv *ConversationContext) (string, error) {
+	profileLLMCall, err := c.getAIProfile(c.aiProfile)
+	if err != nil {
+		return "", fmt.Errorf("failed to get AI profile: %w", err)
+	}
+
+	if strings.TrimSpace(c.apiKey) == "" {
+		return "", fmt.Errorf("Cohere API key not configured")
+	}
+
+	model := strings.TrimSpace(profileLLMCall.Model)
+	if model == "" {
+		model = "command-a-03-2025"
+	}
+
+	messages := make([]cohereChatMessage, 0, len(conv.Messages)+1)
+	if conv.SystemPrompt != "" {
+		messages = append(messages, cohereChatMessage{
+			Role:    "system",
+			Content: sanitizeASCII(conv.SystemPrompt),
+		})
+	}
+
+	for _, m := range conv.Messages {
+		role := strings.TrimSpace(m.Role)
+		if role == "" {
+			role = "user"
+		}
+		messages = append(messages, cohereChatMessage{
+			Role:    role,
+			Content: sanitizeASCII(m.Content),
+		})
+	}
+
+	reqBody := cohereChatRequest{
+		Model:       model,
+		Messages:    messages,
+		MaxTokens:   4000,
+		Temperature: 0.1,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	client := &http.Client{}
+	var body []byte
+	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
+		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.baseURL, "/")+"/v2/chat", bytes.NewBuffer(jsonData))
+		if reqErr != nil {
+			return "", fmt.Errorf("failed to create request: %w", reqErr)
+		}
+
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+strings.TrimSpace(c.apiKey))
+
+		resp, doErr := client.Do(httpReq)
+		if doErr != nil {
+			if attempt == aiRetryMaxAttempts || !isRetryableProviderErrorText(doErr.Error()) {
+				return "", fmt.Errorf("failed to send request: %w", doErr)
+			}
+			if wErr := waitForAIRetry(ctx, aiRetryDelay(attempt-1)); wErr != nil {
+				return "", wErr
+			}
+			continue
+		}
+
+		body, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return "", fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+
+		if attempt == aiRetryMaxAttempts || !(isRetryableHTTPStatus(resp.StatusCode) || isRetryableProviderErrorText(string(body))) {
+			return "", fmt.Errorf("Cohere API request failed with status %d: %s", resp.StatusCode, string(body))
+		}
+
+		delay := aiRetryDelay(attempt - 1)
+		if ra, ok := retryAfterDelay(resp.Header); ok {
+			delay = ra
+		}
+		if wErr := waitForAIRetry(ctx, delay); wErr != nil {
+			return "", wErr
+		}
+	}
+
+	var parsed cohereChatResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	text := extractCohereText(parsed.Message.Content)
+	if text == "" {
+		return "", fmt.Errorf("no response content from Cohere")
+	}
+
+	return text, nil
+}
+
+func extractCohereText(parts []struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}) string {
+	var builder strings.Builder
+	for _, part := range parts {
+		if strings.TrimSpace(part.Text) == "" {
+			continue
+		}
+		builder.WriteString(part.Text)
+	}
+	return strings.TrimSpace(builder.String())
+}
+
 // CleanJSONResponse extracts the first JSON object from a response and applies minimal cleanup.
 func (c *Client) CleanJSONResponse(response string) string {
 	return c.extractAndCleanJSON(response)
@@ -1924,6 +2161,8 @@ Take your time to thoroughly analyze the data. Think extremely hard about what t
 		response, err = c.askOpenAI(ctx, finalPrompt)
 	case "anthropic":
 		response, err = c.askAnthropic(ctx, finalPrompt)
+	case "cohere":
+		response, err = c.askCohere(ctx, finalPrompt)
 	case "gemini", "gemini-api":
 		response, err = c.askGemini(ctx, finalPrompt)
 	default:
@@ -2046,6 +2285,8 @@ func (c *Client) dispatchLLM(ctx context.Context, prompt string) (string, error)
 		return c.askOpenAI(ctx, prompt)
 	case "anthropic":
 		return c.askAnthropic(ctx, prompt)
+	case "cohere":
+		return c.askCohere(ctx, prompt)
 	case "gemini", "gemini-api":
 		return c.askGemini(ctx, prompt)
 	default:

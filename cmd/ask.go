@@ -90,11 +90,13 @@ Examples:
 		anthropicKey, _ := cmd.Flags().GetString("anthropic-key")
 		geminiKey, _ := cmd.Flags().GetString("gemini-key")
 		deepseekKey, _ := cmd.Flags().GetString("deepseek-key")
+		cohereKey, _ := cmd.Flags().GetString("cohere-key")
 		minimaxKey, _ := cmd.Flags().GetString("minimax-key")
 		geminiModel, _ := cmd.Flags().GetString("gemini-model")
 		openaiModel, _ := cmd.Flags().GetString("openai-model")
 		anthropicModel, _ := cmd.Flags().GetString("anthropic-model")
 		deepseekModel, _ := cmd.Flags().GetString("deepseek-model")
+		cohereModel, _ := cmd.Flags().GetString("cohere-model")
 		minimaxModel, _ := cmd.Flags().GetString("minimax-model")
 		makerMode, _ := cmd.Flags().GetBool("maker")
 		applyMode, _ := cmd.Flags().GetBool("apply")
@@ -227,20 +229,7 @@ Examples:
 			}
 
 			// Resolve AWS profile/region for execution.
-			targetProfile := profile
-			if targetProfile == "" {
-				defaultEnv := viper.GetString("infra.default_environment")
-				if defaultEnv == "" {
-					defaultEnv = "dev"
-				}
-				targetProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
-				if targetProfile == "" {
-					targetProfile = viper.GetString("aws.default_profile")
-				}
-				if targetProfile == "" {
-					targetProfile = "default"
-				}
-			}
+			targetProfile := resolveAWSProfile(profile)
 
 			region := ""
 			if envRegion := strings.TrimSpace(os.Getenv("AWS_REGION")); envRegion != "" {
@@ -284,6 +273,8 @@ Examples:
 				apiKey = resolveAnthropicKey(anthropicKey)
 			case "deepseek":
 				apiKey = resolveDeepSeekKey(deepseekKey)
+			case "cohere":
+				apiKey = resolveCohereKey(cohereKey)
 			case "minimax":
 				apiKey = resolveMiniMaxKey(minimaxKey)
 			default:
@@ -327,7 +318,7 @@ Examples:
 				}
 			}
 
-			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, minimaxModel)
+			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel)
 
 			// Resolve API key based on provider.
 			var apiKey string
@@ -342,6 +333,8 @@ Examples:
 				apiKey = resolveAnthropicKey(anthropicKey)
 			case "deepseek":
 				apiKey = resolveDeepSeekKey(deepseekKey)
+			case "cohere":
+				apiKey = resolveCohereKey(cohereKey)
 			case "minimax":
 				apiKey = resolveMiniMaxKey(minimaxKey)
 			default:
@@ -521,20 +514,7 @@ Examples:
 			}
 
 			// Resolve AWS profile/region for planning-time dependency expansion.
-			targetProfile := profile
-			if targetProfile == "" {
-				defaultEnv := viper.GetString("infra.default_environment")
-				if defaultEnv == "" {
-					defaultEnv = "dev"
-				}
-				targetProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
-				if targetProfile == "" {
-					targetProfile = viper.GetString("aws.default_profile")
-				}
-				if targetProfile == "" {
-					targetProfile = "default"
-				}
-			}
+			targetProfile := resolveAWSProfile(profile)
 
 			region := ""
 			if envRegion := strings.TrimSpace(os.Getenv("AWS_REGION")); envRegion != "" {
@@ -761,21 +741,7 @@ Format as a professional compliance table suitable for government security docum
 			// Fall back to local profile if backend credentials not available
 			if awsClient == nil {
 				// Use specified profile or default from config
-				targetProfile := profile
-				if targetProfile == "" {
-					// Try infra config first
-					defaultEnv := viper.GetString("infra.default_environment")
-					if defaultEnv == "" {
-						defaultEnv = "dev"
-					}
-					targetProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
-					if targetProfile == "" {
-						targetProfile = viper.GetString("aws.default_profile")
-					}
-					if targetProfile == "" {
-						targetProfile = "default" // fallback
-					}
-				}
+				targetProfile := resolveAWSProfile(profile)
 
 				awsClient, err = aws.NewClientWithProfileAndDebug(ctx, targetProfile, debug)
 				if err != nil {
@@ -1003,21 +969,7 @@ Format as a professional compliance table suitable for government security docum
 				// Fall back to local profile if backend credentials not available
 				if awsClient == nil {
 					// Use specified profile or default from config
-					targetProfile := profile
-					if targetProfile == "" {
-						// Try infra config first
-						defaultEnv := viper.GetString("infra.default_environment")
-						if defaultEnv == "" {
-							defaultEnv = "dev"
-						}
-						targetProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
-						if targetProfile == "" {
-							targetProfile = viper.GetString("aws.default_profile")
-						}
-						if targetProfile == "" {
-							targetProfile = "default" // fallback
-						}
-					}
+					targetProfile := resolveAWSProfile(profile)
 
 					awsClient, err = aws.NewClientWithProfileAndDebug(ctx, targetProfile, debug)
 					if err != nil {
@@ -1051,7 +1003,7 @@ Format as a professional compliance table suitable for government security docum
 				}
 			}
 
-			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, minimaxModel)
+			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel)
 
 			// Get the appropriate API key based on provider
 			var apiKey string
@@ -1067,6 +1019,8 @@ Format as a professional compliance table suitable for government security docum
 				apiKey = resolveAnthropicKey(anthropicKey)
 			case "deepseek":
 				apiKey = resolveDeepSeekKey(deepseekKey)
+			case "cohere":
+				apiKey = resolveCohereKey(cohereKey)
 			case "minimax":
 				apiKey = resolveMiniMaxKey(minimaxKey)
 			default:
@@ -1092,7 +1046,7 @@ Format as a professional compliance table suitable for government security docum
 				}
 			}
 
-			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, minimaxModel)
+			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel)
 
 			// Get the appropriate API key based on provider
 			var apiKey string
@@ -1108,6 +1062,8 @@ Format as a professional compliance table suitable for government security docum
 				apiKey = resolveAnthropicKey(anthropicKey)
 			case "deepseek":
 				apiKey = resolveDeepSeekKey(deepseekKey)
+			case "cohere":
+				apiKey = resolveCohereKey(cohereKey)
 			case "minimax":
 				apiKey = resolveMiniMaxKey(minimaxKey)
 			default:
@@ -1193,11 +1149,13 @@ func init() {
 	askCmd.Flags().String("anthropic-key", "", "Anthropic API key (overrides config)")
 	askCmd.Flags().String("gemini-key", "", "Gemini API key (overrides config and env vars)")
 	askCmd.Flags().String("deepseek-key", "", "DeepSeek API key (overrides config)")
+	askCmd.Flags().String("cohere-key", "", "Cohere API key (overrides config)")
 	askCmd.Flags().String("minimax-key", "", "MiniMax API key (overrides config)")
 	askCmd.Flags().String("openai-model", "", "OpenAI model to use (overrides config)")
 	askCmd.Flags().String("anthropic-model", "", "Anthropic model to use (overrides config)")
 	askCmd.Flags().String("gemini-model", "", "Gemini model to use (overrides config)")
 	askCmd.Flags().String("deepseek-model", "", "DeepSeek model to use (overrides config)")
+	askCmd.Flags().String("cohere-model", "", "Cohere model to use (overrides config)")
 	askCmd.Flags().String("minimax-model", "", "MiniMax model to use (overrides config)")
 	askCmd.Flags().Bool("agent-trace", false, "Show detailed coordinator agent lifecycle logs (overrides config)")
 	askCmd.Flags().Bool("maker", false, "Generate an AWS, GCP, Azure, Cloudflare, Digital Ocean, or Hetzner CLI plan (JSON) for infrastructure changes")
@@ -1279,6 +1237,24 @@ func resolveDeepSeekKey(flagValue string) string {
 	return ""
 }
 
+func resolveCohereKey(flagValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if key := viper.GetString("ai.providers.cohere.api_key"); key != "" {
+		return key
+	}
+	if envName := viper.GetString("ai.providers.cohere.api_key_env"); envName != "" {
+		if envVal := os.Getenv(envName); envVal != "" {
+			return envVal
+		}
+	}
+	if envVal := os.Getenv("COHERE_API_KEY"); envVal != "" {
+		return envVal
+	}
+	return ""
+}
+
 func resolveMiniMaxKey(flagValue string) string {
 	if flagValue != "" {
 		return flagValue
@@ -1334,7 +1310,7 @@ func maybeRunTerraformCommand(ctx context.Context, question string, tfClient *tf
 	return true, nil
 }
 
-func maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, minimaxModel string) {
+func maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel string) {
 	switch provider {
 	case "openai":
 		if strings.TrimSpace(openaiModel) != "" {
@@ -1351,6 +1327,10 @@ func maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiMod
 	case "deepseek":
 		if strings.TrimSpace(deepseekModel) != "" {
 			viper.Set("ai.providers.deepseek.model", strings.TrimSpace(deepseekModel))
+		}
+	case "cohere":
+		if strings.TrimSpace(cohereModel) != "" {
+			viper.Set("ai.providers.cohere.model", strings.TrimSpace(cohereModel))
 		}
 	case "minimax":
 		if strings.TrimSpace(minimaxModel) != "" {
@@ -1664,6 +1644,8 @@ func handleCloudflareQuery(ctx context.Context, question string, debug bool) err
 		if apiKey == "" {
 			apiKey = os.Getenv("OPENAI_API_KEY")
 		}
+	case "cohere":
+		apiKey = resolveCohereKey("")
 	default:
 		apiKey = viper.GetString("ai.api_key")
 	}
@@ -1806,6 +1788,8 @@ func handleDigitalOceanQuery(ctx context.Context, question string, debug bool) e
 		apiKey = resolveOpenAIKey("")
 	case "anthropic":
 		apiKey = resolveAnthropicKey("")
+	case "cohere":
+		apiKey = resolveCohereKey("")
 	case "deepseek":
 		apiKey = resolveDeepSeekKey("")
 	case "minimax":
@@ -1873,6 +1857,8 @@ func handleHetznerQuery(ctx context.Context, question string, debug bool) error 
 		apiKey = resolveOpenAIKey("")
 	case "anthropic":
 		apiKey = resolveAnthropicKey("")
+	case "cohere":
+		apiKey = resolveCohereKey("")
 	case "deepseek":
 		apiKey = resolveDeepSeekKey("")
 	case "minimax":
@@ -2406,20 +2392,7 @@ func executeK8sPlan(ctx context.Context, rawPlan string, profile string, debug b
 	}
 
 	// Resolve AWS profile
-	awsProfile := profile
-	if awsProfile == "" {
-		defaultEnv := viper.GetString("infra.default_environment")
-		if defaultEnv == "" {
-			defaultEnv = "dev"
-		}
-		awsProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
-		if awsProfile == "" {
-			awsProfile = viper.GetString("aws.default_profile")
-		}
-		if awsProfile == "" {
-			awsProfile = "default"
-		}
-	}
+	awsProfile := resolveAWSProfile(profile)
 
 	// Resolve region
 	awsRegion := viper.GetString(fmt.Sprintf("infra.aws.environments.%s.region", viper.GetString("infra.default_environment")))

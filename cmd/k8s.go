@@ -2133,6 +2133,8 @@ func createAIClient(debug bool) (*ai.Client, error) {
 		apiKey = resolveAnthropicKey("")
 	case "deepseek":
 		apiKey = resolveDeepSeekKey("")
+	case "cohere":
+		apiKey = resolveCohereKey("")
 	case "minimax":
 		apiKey = resolveMiniMaxKey("")
 	}
