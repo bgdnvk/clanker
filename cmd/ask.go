@@ -2634,25 +2634,51 @@ func handleHermesQuery(ctx context.Context, question string, debug bool) error {
 	return nil
 }
 
-// buildHermesEnv resolves clanker's API keys and hermes config into environment
-// variables for the bridge subprocess.
+// buildHermesEnv resolves clanker's API keys, AI provider, and hermes config
+// into environment variables for the bridge subprocess.
 func buildHermesEnv() []string {
 	var env []string
 
-	if key := resolveOpenAIKey(""); key != "" {
-		env = append(env, "OPENAI_API_KEY="+key)
+	// Determine the AI provider so the bridge knows which backend to use.
+	provider := viper.GetString("ai.default_provider")
+	if provider == "" {
+		provider = "openai"
 	}
-	if key := resolveAnthropicKey(""); key != "" {
-		env = append(env, "ANTHROPIC_API_KEY="+key)
+
+	switch provider {
+	case "bedrock":
+		env = append(env, "HERMES_PROVIDER=bedrock")
+		if p := viper.GetString("ai.providers.bedrock.aws_profile"); p != "" {
+			env = append(env, "AWS_PROFILE="+p)
+		}
+		if r := viper.GetString("ai.providers.bedrock.region"); r != "" {
+			env = append(env, "AWS_REGION="+r)
+		}
+		if m := viper.GetString("ai.providers.bedrock.model"); m != "" {
+			env = append(env, "HERMES_BEDROCK_MODEL="+m)
+		}
+	case "anthropic":
+		env = append(env, "HERMES_PROVIDER=anthropic")
+		if key := resolveAnthropicKey(""); key != "" {
+			env = append(env, "ANTHROPIC_API_KEY="+key)
+		}
+	case "openai":
+		env = append(env, "HERMES_PROVIDER=openai")
+		if key := resolveOpenAIKey(""); key != "" {
+			env = append(env, "OPENAI_API_KEY="+key)
+		}
+	default:
+		// For other providers, pass through all available keys.
+		if key := resolveOpenAIKey(""); key != "" {
+			env = append(env, "OPENAI_API_KEY="+key)
+		}
+		if key := resolveAnthropicKey(""); key != "" {
+			env = append(env, "ANTHROPIC_API_KEY="+key)
+		}
 	}
+
 	if key := resolveGeminiAPIKey(""); key != "" {
 		env = append(env, "GEMINI_API_KEY="+key)
-	}
-	if key := resolveDeepSeekKey(""); key != "" {
-		env = append(env, "DEEPSEEK_API_KEY="+key)
-	}
-	if key := resolveMiniMaxKey(""); key != "" {
-		env = append(env, "MINIMAX_API_KEY="+key)
 	}
 
 	// OpenRouter key from config or env
@@ -2662,7 +2688,7 @@ func buildHermesEnv() []string {
 		env = append(env, "OPENROUTER_API_KEY="+key)
 	}
 
-	// Hermes model and base URL from config
+	// Hermes model and base URL overrides from hermes config section
 	if model := viper.GetString("hermes.model"); model != "" {
 		env = append(env, "HERMES_MODEL="+model)
 	}
