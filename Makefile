@@ -18,7 +18,8 @@ TAG ?= v0.0.0
 DIST_DIR ?= ./dist
 
 .PHONY: build build-all clean test test-short run install uninstall dev deps fmt vet lint docs quick ci help \
-	release-clean release-build-macos release-tar-macos release-sha release release-create release-upload
+	release-clean release-build-macos release-tar-macos release-sha release release-create release-upload \
+	setup-hermes
 
 # Default target
 all: build
@@ -156,6 +157,12 @@ help:
 	@echo "  release-create         - Create GitHub release + upload macOS tarballs (TAG=vX.Y.Z)"
 	@echo "  release-upload         - Upload tarballs to an existing GitHub release (TAG=vX.Y.Z)"
 	@echo "  release-clean          - Remove dist/ artifacts"
+	@echo "  setup-hermes           - Install Hermes Agent into vendor/hermes-agent"
+
+# -------------------- Hermes Agent --------------------
+
+setup-hermes:
+	@bash scripts/setup-hermes.sh
 
 # -------------------- Release targets (macOS tarballs for Homebrew) --------------------
 

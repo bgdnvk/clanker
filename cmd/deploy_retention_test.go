@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bgdnvk/clanker/internal/deploy"
 	"github.com/bgdnvk/clanker/internal/maker"
 )
 
@@ -18,7 +19,7 @@ func TestEnforceStrictPlanRetentionRejectsNewStrictSchemaViolation(t *testing.T)
 		},
 		Commands: []maker.Command{
 			{Args: []string{"compute", "ssh-key", "import", "openclaw-key", "--public-key-file", "./id.pub"}, Produces: map[string]string{"SSH_KEY_ID": "$.id"}},
-			{Args: []string{"compute", "firewall", "create", "openclaw-fw"}, Produces: map[string]string{"FIREWALL_ID": "$.id"}},
+			{Args: []string{"compute", "firewall", "create", "--name", "openclaw-fw"}, Produces: map[string]string{"FIREWALL_ID": "$.id"}},
 			{Args: []string{"compute", "droplet", "create", "openclaw", "--ssh-keys", "<SSH_KEY_ID>"}, Produces: map[string]string{"DROPLET_ID": "$.id", "DROPLET_IP": "$.droplet.networks.v4[0].ip_address"}},
 			{Args: []string{"registry", "create", "openclaw-registry"}, Produces: map[string]string{"REGISTRY_NAME": "$.name"}},
 			{Args: []string{"registry", "login"}},
@@ -45,7 +46,7 @@ func TestEnforceStrictPlanRetentionRejectsNewStrictSchemaViolation(t *testing.T)
 		),
 	}
 
-	err := enforceStrictPlanRetention(baseline, candidate, []string{"compute droplet create", "apps create"}, nil)
+	err := deploy.CheckStrictPlanCandidateRegression(baseline, candidate)
 	if err == nil {
 		t.Fatal("expected strict retention guard to reject new schema violation")
 	}

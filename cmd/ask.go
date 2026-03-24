@@ -23,6 +23,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/digitalocean"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	ghclient "github.com/bgdnvk/clanker/internal/github"
+	"github.com/bgdnvk/clanker/internal/hermes"
 	"github.com/bgdnvk/clanker/internal/hetzner"
 	iamclient "github.com/bgdnvk/clanker/internal/iam"
 	"github.com/bgdnvk/clanker/internal/k8s"
@@ -116,6 +117,14 @@ Examples:
 				"reason": reason,
 			}
 			return json.NewEncoder(os.Stdout).Encode(result)
+		}
+
+		// Handle explicit --agent flag: delegate to a specific agent
+		agentName, _ := cmd.Flags().GetString("agent")
+		if agentName == "hermes" {
+			return handleHermesQuery(context.Background(), question, profile, debug)
+		} else if agentName != "" {
+			return fmt.Errorf("unknown agent: %s (available: hermes)", agentName)
 		}
 
 		// Handle apply mode (independent of maker mode)
@@ -1163,6 +1172,7 @@ func init() {
 	askCmd.Flags().Bool("apply", false, "Apply an approved maker plan (reads from stdin unless --plan-file is provided)")
 	askCmd.Flags().String("plan-file", "", "Optional path to maker plan JSON file for --apply")
 	askCmd.Flags().Bool("route-only", false, "Return routing decision as JSON without executing (for backend integration)")
+	askCmd.Flags().String("agent", "", "Use a specific agent to handle the query (e.g., hermes)")
 }
 
 func resolveGeminiAPIKey(flagValue string) string {
@@ -2455,6 +2465,14 @@ func executeK8sPlan(ctx context.Context, rawPlan string, profile string, debug b
 func determineRoutingDecision(question string) (agent string, reason string) {
 	questionLower := strings.ToLower(question)
 
+	// Check for explicit Hermes agent requests
+	hermesKeywords := []string{"hermes", "hermes agent", "talk to hermes", "use hermes"}
+	for _, kw := range hermesKeywords {
+		if strings.Contains(questionLower, kw) {
+			return "hermes", "Hermes agent explicitly requested"
+		}
+	}
+
 	// Check for IAM-specific queries first
 	iamKeywords := []string{
 		"iam role", "iam roles", "iam policy", "iam policies",
@@ -2563,4 +2581,126 @@ func determineRoutingDecision(question string) (agent string, reason string) {
 
 	// Default to CLI for general queries
 	return "cli", "General infrastructure query or analysis"
+}
+
+// handleHermesQuery delegates a question to the Hermes agent and prints the response.
+// When an AWS profile is available, it gathers infrastructure context first so the
+// agent can answer questions about the user's environment.
+func handleHermesQuery(ctx context.Context, question string, profile string, debug bool) error {
+	hermesPath, err := hermes.FindHermesPath()
+	if err != nil {
+		return fmt.Errorf("hermes agent not found: %w\nRun 'make setup-hermes' to install", err)
+	}
+
+	runner := hermes.NewRunner(hermesPath, debug)
+	runner.SetEnv(buildHermesEnv())
+
+	if err := runner.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start hermes agent: %w", err)
+	}
+	defer runner.Stop()
+
+	// Gather AWS infrastructure context if a profile is available.
+	prompt := question
+	targetProfile := profile
+	if targetProfile == "" {
+		defaultEnv := viper.GetString("infra.default_environment")
+		if defaultEnv == "" {
+			defaultEnv = "dev"
+		}
+		targetProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+		if targetProfile == "" {
+			targetProfile = viper.GetString("aws.default_profile")
+		}
+	}
+
+	if targetProfile != "" {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[hermes] gathering AWS context with profile %s\n", targetProfile)
+		}
+		awsClient, err := aws.NewClientWithProfileAndDebug(ctx, targetProfile, debug)
+		if err == nil {
+			awsContext, err := awsClient.GetRelevantContext(ctx, question)
+			if err == nil && strings.TrimSpace(awsContext) != "" {
+				prompt = fmt.Sprintf("Here is the current AWS infrastructure context:\n\n%s\n\nUser question: %s", awsContext, question)
+			} else if debug && err != nil {
+				fmt.Fprintf(os.Stderr, "[hermes] warning: failed to get AWS context: %v\n", err)
+			}
+		} else if debug {
+			fmt.Fprintf(os.Stderr, "[hermes] warning: failed to create AWS client: %v\n", err)
+		}
+	}
+
+	response, err := runner.PromptSync(ctx, prompt)
+	if err != nil {
+		return fmt.Errorf("hermes agent error: %w", err)
+	}
+
+	fmt.Println(response)
+	return nil
+}
+
+// buildHermesEnv resolves clanker's API keys, AI provider, and hermes config
+// into environment variables for the bridge subprocess.
+func buildHermesEnv() []string {
+	var env []string
+
+	// Determine the AI provider so the bridge knows which backend to use.
+	provider := viper.GetString("ai.default_provider")
+	if provider == "" {
+		provider = "openai"
+	}
+
+	switch provider {
+	case "bedrock":
+		env = append(env, "HERMES_PROVIDER=bedrock")
+		if p := viper.GetString("ai.providers.bedrock.aws_profile"); p != "" {
+			env = append(env, "AWS_PROFILE="+p)
+		}
+		if r := viper.GetString("ai.providers.bedrock.region"); r != "" {
+			env = append(env, "AWS_REGION="+r)
+		}
+		if m := viper.GetString("ai.providers.bedrock.model"); m != "" {
+			env = append(env, "HERMES_BEDROCK_MODEL="+m)
+		}
+	case "anthropic":
+		env = append(env, "HERMES_PROVIDER=anthropic")
+		if key := resolveAnthropicKey(""); key != "" {
+			env = append(env, "ANTHROPIC_API_KEY="+key)
+		}
+	case "openai":
+		env = append(env, "HERMES_PROVIDER=openai")
+		if key := resolveOpenAIKey(""); key != "" {
+			env = append(env, "OPENAI_API_KEY="+key)
+		}
+	default:
+		// For other providers, pass through all available keys.
+		if key := resolveOpenAIKey(""); key != "" {
+			env = append(env, "OPENAI_API_KEY="+key)
+		}
+		if key := resolveAnthropicKey(""); key != "" {
+			env = append(env, "ANTHROPIC_API_KEY="+key)
+		}
+	}
+
+	if key := resolveGeminiAPIKey(""); key != "" {
+		env = append(env, "GEMINI_API_KEY="+key)
+	}
+
+	// OpenRouter key from config or env
+	if key := viper.GetString("hermes.openrouter_api_key"); key != "" {
+		env = append(env, "OPENROUTER_API_KEY="+key)
+	} else if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
+		env = append(env, "OPENROUTER_API_KEY="+key)
+	}
+
+	// Hermes model and base URL overrides from hermes config section
+	if model := viper.GetString("hermes.model"); model != "" {
+		env = append(env, "HERMES_MODEL="+model)
+	}
+	if baseURL := viper.GetString("hermes.base_url"); baseURL != "" {
+		env = append(env, "HERMES_BASE_URL="+baseURL)
+	}
+
+	return env
 }
