@@ -239,6 +239,8 @@ func handleGeneralCfQuery(ctx context.Context, client *cloudflare.Client, questi
 		apiKey = resolveAnthropicKey("")
 	case "deepseek":
 		apiKey = resolveDeepSeekKey("")
+	case "cohere":
+		apiKey = resolveCohereKey("")
 	case "minimax":
 		apiKey = resolveMiniMaxKey("")
 	default:

@@ -67,6 +67,12 @@ func GetAIProfile(providerName string) (*AIProfile, error) {
 				Model:     "deepseek-chat",
 				APIKeyEnv: "DEEPSEEK_API_KEY",
 			}, nil
+		case "cohere":
+			return &AIProfile{
+				Provider:  "cohere",
+				Model:     "command-a-03-2025",
+				APIKeyEnv: "COHERE_API_KEY",
+			}, nil
 		case "minimax":
 			return &AIProfile{
 				Provider:  "minimax",

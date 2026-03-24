@@ -341,6 +341,11 @@ func ClassifyWithLLM(ctx context.Context, question string, debug bool) (string, 
 		if apiKey == "" {
 			apiKey = viper.GetString("ai.providers.anthropic.api_key")
 		}
+	case "cohere":
+		apiKey = os.Getenv("COHERE_API_KEY")
+		if apiKey == "" {
+			apiKey = viper.GetString("ai.providers.cohere.api_key")
+		}
 	case "gemini", "gemini-api":
 		apiKey = os.Getenv("GEMINI_API_KEY")
 	}
