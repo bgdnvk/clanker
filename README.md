@@ -50,6 +50,7 @@ Most providers use env vars for keys (see [.clanker.example.yaml](.clanker.examp
 export OPENAI_API_KEY="..."
 export GEMINI_API_KEY="..."
 export COHERE_API_KEY="..."
+export RAILWAY_API_TOKEN="..."
 ```
 
 ### No config file defaults
@@ -115,6 +116,8 @@ clanker ask --profile dev "what's the last error from my big-api-service lambda?
 clanker ask --ai-profile openai "What are the latest logs for our dev Lambda functions?"
 
 clanker ask --ai-profile cohere --cohere-model command-a-03-2025 "Summarize the current deployment risks in dev."
+
+clanker ask --railway "what's the status of my railway project?"
 
 clanker ask --agent-trace --profile dev "how can i create an additional lambda and link it to dev?"
 

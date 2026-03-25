@@ -219,6 +219,8 @@ func buildSkeletonPrompt(provider, enrichedPrompt string, requiredLaunchOps []st
 	b.WriteString("You are generating a deployment plan SKELETON — just the structure, not the full CLI args.\n\n")
 
 	switch provider {
+	case "railway":
+		b.WriteString("Provider: Railway (railway CLI commands)\n")
 	case "cloudflare":
 		b.WriteString("Provider: Cloudflare (wrangler/cloudflared commands)\n")
 	case "gcp":
@@ -270,6 +272,10 @@ func buildSkeletonPrompt(provider, enrichedPrompt string, requiredLaunchOps []st
 		}
 		b.WriteString("- Prefer a fresh dedicated deployment SSH key import step over reusing an unrelated existing SSH key.\n")
 		writeLines(&b, openClawDOSkeletonLines()...)
+	} else if provider == "railway" {
+		b.WriteString("- Prefer discovery/selection steps before deploy steps: whoami, list/status, service/environment selection, variable set, then up --detach.\n")
+		b.WriteString("- Keep commands Railway-only. Do NOT introduce docker/build shell commands in the plan; Railway will build/deploy from the linked working directory.\n")
+		b.WriteString("- If the app needs env vars, add explicit variable set steps before the deploy step.\n")
 	} else {
 		b.WriteString("- For user-data on EC2: use ONE 'ssm send-command' or embed in run-instances user-data. Do NOT repeat.\n")
 	}
@@ -285,6 +291,30 @@ func buildSkeletonPrompt(provider, enrichedPrompt string, requiredLaunchOps []st
 
 	// Provider-specific example
 	switch provider {
+	case "railway":
+		b.WriteString("Output format (JSON only, no markdown):\n")
+		b.WriteString("{\n")
+		b.WriteString("  \"steps\": [\n")
+		b.WriteString("    {\n")
+		b.WriteString("      \"service\": \"railway\",\n")
+		b.WriteString("      \"operation\": \"status\",\n")
+		b.WriteString("      \"reason\": \"Inspect the linked Railway project and environment before deploying\",\n")
+		b.WriteString("      \"produces\": [],\n")
+		b.WriteString("      \"depends_on\": []\n")
+		b.WriteString("    },\n")
+		b.WriteString("    {\n")
+		b.WriteString("      \"service\": \"railway\",\n")
+		b.WriteString("      \"operation\": \"up\",\n")
+		b.WriteString("      \"reason\": \"Deploy the current application to the selected Railway service\",\n")
+		b.WriteString("      \"produces\": [],\n")
+		b.WriteString("      \"depends_on\": []\n")
+		b.WriteString("    }\n")
+		b.WriteString("  ],\n")
+		b.WriteString("  \"capabilities\": {\n")
+		b.WriteString("    \"provider\": \"railway\",\n")
+		b.WriteString("    \"runtime_model\": \"managed-service\"\n")
+		b.WriteString("  }\n")
+		b.WriteString("}\n\n")
 	case "digitalocean":
 		b.WriteString("Output format (JSON only, no markdown):\n")
 		b.WriteString("{\n")
@@ -376,6 +406,9 @@ func buildHydratePrompt(provider, enrichedPrompt, skeletonSummary string, batch 
 	b.WriteString("You are filling in exact CLI arguments for deployment plan steps.\n\n")
 
 	switch provider {
+	case "railway":
+		b.WriteString("Provider: Railway. Commands start with 'railway'.\n")
+		b.WriteString("Use Railway CLI subcommands like whoami, list, status, link, service, environment, variable set, up, redeploy, domain.\n")
 	case "cloudflare":
 		b.WriteString("Provider: Cloudflare. Commands use wrangler/cloudflared.\n")
 	case "gcp":

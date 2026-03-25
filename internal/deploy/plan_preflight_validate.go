@@ -141,6 +141,10 @@ func runDeterministicPlanValidation(planJSON string, p *RepoProfile, deep *DeepA
 			if op == "create" {
 				hasLaunch = true
 			}
+		case "railway":
+			if op == "up" || op == "deploy" || op == "redeploy" {
+				hasLaunch = true
+			}
 		}
 		if hasLaunch {
 			break

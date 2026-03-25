@@ -21,9 +21,10 @@ var Version = "dev"
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:     "clanker",
-	Short:   "AI-powered terminal for Cloud queries",
-	Version: Version,
+	Use:          "clanker",
+	Short:        "AI-powered terminal for Cloud queries",
+	Version:      Version,
+	SilenceUsage: true,
 	Long: `Clanker is an AI-powered CLI tool that helps you query your cloud infrastructure
 using natural language. Ask questions about your systems,
 get insights, and perform operations through an intelligent interface.`,

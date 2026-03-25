@@ -598,6 +598,8 @@ func isProviderCredentialToken(tok string) bool {
 		return true
 	case "HCLOUD_TOKEN", "HETZNER_API_TOKEN":
 		return true
+	case "RAILWAY_API_TOKEN", "RAILWAY_TOKEN":
+		return true
 	}
 	// Generic suffix patterns: *_ACCESS_TOKEN, *_API_TOKEN, *_API_KEY for provider prefixes
 	for _, suffix := range []string{"_ACCESS_TOKEN", "_API_TOKEN"} {
@@ -615,7 +617,7 @@ func isProviderCredentialToken(tok string) bool {
 func isCloudProviderPrefix(prefix string) bool {
 	switch prefix {
 	case "DIGITALOCEAN", "DO", "AWS", "GOOGLE", "GCP", "AZURE",
-		"HCLOUD", "HETZNER", "CLOUDFLARE", "LINODE", "VULTR":
+		"HCLOUD", "HETZNER", "CLOUDFLARE", "RAILWAY", "LINODE", "VULTR":
 		return true
 	}
 	return false

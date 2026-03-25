@@ -159,6 +159,11 @@ infra:
 #   account_id: ""           # Cloudflare account ID (or set CLOUDFLARE_ACCOUNT_ID / CF_ACCOUNT_ID)
 #   default_zone: ""         # Default zone name for DNS operations
 
+# Railway:
+# railway:
+#   api_token: your-railway-api-token
+#   # Or set RAILWAY_API_TOKEN / RAILWAY_TOKEN and use `railway login --browserless`
+
 # Digital Ocean (for `clanker do ...` and `clanker ask --digitalocean ...`):
 # digitalocean:
 #   api_token: ""            # Digital Ocean API token (or set DO_API_TOKEN / DIGITALOCEAN_ACCESS_TOKEN)

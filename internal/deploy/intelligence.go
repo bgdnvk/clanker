@@ -148,6 +148,7 @@ type DeployOptions struct {
 	DeployID     string // run-specific id for unique resource naming
 	DOToken      string // DigitalOcean API token for infra scan
 	HetznerToken string // Hetzner Cloud API token for infra scan
+	RailwayToken string // Railway token for linked project actions
 }
 
 // shouldUseAPIGateway determines whether to use API Gateway or ALB based on app characteristics.
@@ -774,6 +775,47 @@ Think about:
 `)
 
 	switch strings.ToLower(strings.TrimSpace(targetProvider)) {
+	case "railway":
+		b.WriteString(`
+## Railway Options to Consider
+1. **railway-service** — Managed Railway service deployed from the repo with ` + "`railway up --detach`" + ` (best for most web apps and APIs) (~$5-25/mo depending on usage)
+2. **railway-service + variables** — Same as above, but explicitly stage required env vars with ` + "`railway variable set`" + ` before deploy
+
+## Railway Services
+- Railway builds and deploys directly from the linked working directory
+- Use ` + "`railway service`" + ` and ` + "`railway environment`" + ` to target the right service/environment
+- Use ` + "`railway variable set KEY=value`" + ` for runtime configuration before deploy
+- Use ` + "`railway domain`" + ` to inspect or add public domains
+
+## Deployment CLI
+All commands must use Railway CLI only.
+Auth uses RAILWAY_API_TOKEN for account/workspace actions and RAILWAY_TOKEN for project-scoped actions.
+
+## Cost Estimation
+Estimate the MONTHLY cost in USD for a small always-on app.
+
+## Response Format (JSON only, no markdown fences)
+{
+	"provider": "railway",
+	"method": "railway-service",
+	"reasoning": "This repo is a long-running web service and Railway can build/deploy it directly with minimal infrastructure work.",
+	"alternatives": [
+		{"method": "railway-service", "why_not": "Only alternative is the same method with more explicit variable management"}
+	],
+	"buildSteps": [
+		"Inspect linked project/service state with railway status --json",
+		"Set required variables with railway variable set KEY=value",
+		"Deploy the repo with railway up --detach"
+	],
+	"runCmd": "railway run npm run dev",
+	"notes": ["Use railway service/environment to target the correct service before deploy"],
+	"cpuMemory": "shared",
+	"needsAlb": false,
+	"needsDb": false,
+	"dbService": "",
+	"estMonthly": "$5-25",
+	"costBreakdown": ["Railway managed service runtime", "Bandwidth and usage-dependent build/runtime charges"]
+}`)
 	case "cloudflare":
 		b.WriteString(`
 ## Cloudflare Options to Consider
@@ -1208,6 +1250,8 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAn
 	switch strings.ToLower(strings.TrimSpace(strat.Provider)) {
 	case "cloudflare":
 		providerLabel = "Cloudflare"
+	case "railway":
+		providerLabel = "Railway"
 	case "gcp":
 		providerLabel = "GCP"
 	case "azure":
@@ -1401,8 +1445,12 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAn
 		b.WriteString(azureVMPrompt(p, deep, opts))
 	case "do-droplet":
 		b.WriteString(doDropletPrompt(p, deep, opts))
+	case "railway-service":
+		b.WriteString(railwayServicePrompt(p, deep, opts))
 	default:
 		switch strings.ToLower(strings.TrimSpace(strat.Provider)) {
+		case "railway":
+			b.WriteString(railwayServicePrompt(p, deep, opts))
 		case "cloudflare":
 			b.WriteString(cfWorkersPrompt(p, deep, opts))
 		case "gcp":
@@ -1430,6 +1478,8 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAn
 	if len(p.EnvVars) > 0 {
 		b.WriteString("\n## Environment Variables\n")
 		switch strings.ToLower(strings.TrimSpace(strat.Provider)) {
+		case "railway":
+			b.WriteString("- Store sensitive values as Railway service variables before deploy\n")
 		case "cloudflare":
 			b.WriteString("- Store sensitive values via Wrangler secrets\n")
 		case "gcp":
@@ -1447,6 +1497,12 @@ func buildIntelligentPrompt(p *RepoProfile, deep *DeepAnalysis, docker *DockerAn
 
 	b.WriteString("\n## Rules\n")
 	switch strings.ToLower(strings.TrimSpace(strat.Provider)) {
+	case "railway":
+		b.WriteString("- All commands must use Railway CLI only\n")
+		b.WriteString("- Auth via RAILWAY_API_TOKEN and/or RAILWAY_TOKEN env vars (already set)\n")
+		b.WriteString(fmt.Sprintf("- Name/target resources consistently for %s\n", resourcePrefix))
+		b.WriteString("- Prefer railway status/service/environment discovery before write operations\n")
+		b.WriteString("- Set required variables before railway up --detach\n")
 	case "cloudflare":
 		b.WriteString("- All commands use npx wrangler CLI\n")
 		b.WriteString("- Auth via CLOUDFLARE_API_TOKEN env var (already set)\n")
@@ -1536,6 +1592,26 @@ func smartECSPrompt(p *RepoProfile, arch *ArchitectDecision, deep *DeepAnalysis,
 		b.WriteString("8. Output the task's public IP as the access URL\n")
 	}
 
+	return b.String()
+}
+
+func railwayServicePrompt(p *RepoProfile, deep *DeepAnalysis, opts *DeployOptions) string {
+	var b strings.Builder
+	b.WriteString("Deploy using Railway managed services:\n")
+	b.WriteString("1. Verify the linked Railway project and current service/environment with railway status --json\n")
+	b.WriteString("2. If the target service is ambiguous, select it with railway service <SERVICE_NAME> and the environment with railway environment <ENVIRONMENT_NAME>\n")
+	if len(p.EnvVars) > 0 {
+		b.WriteString("3. Set required runtime variables with railway variable set KEY=value before deployment\n")
+	} else {
+		b.WriteString("3. If the app needs runtime configuration, set variables with railway variable set KEY=value before deployment\n")
+	}
+	b.WriteString("4. Deploy the current repository with railway up --detach\n")
+	b.WriteString("5. Inspect the public endpoint with railway domain and verify the service is healthy\n")
+	if deep != nil && deep.HealthEndpoint != "" {
+		b.WriteString(fmt.Sprintf("6. Verify the health endpoint %s after deploy\n", deep.HealthEndpoint))
+	}
+	b.WriteString("- Keep the plan Railway-only. Do not generate AWS/GCP/Azure/DigitalOcean commands for this provider path.\n")
+	b.WriteString("- Railway builds from the working directory; assume the repo has already been cloned locally for apply.\n")
 	return b.String()
 }
 
