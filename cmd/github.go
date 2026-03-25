@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	ghclient "github.com/bgdnvk/clanker/internal/github"
 	"github.com/spf13/cobra"
@@ -10,47 +11,12 @@ import (
 )
 
 func listGitHubRepos() error {
-	// Get default repo
-	defaultRepo := viper.GetString("github.default_repo")
-	if defaultRepo == "" {
-		defaultRepo = "infrastructure"
+	client := ghclient.NewClient(viper.GetString("github.token"), "", "")
+	repos, err := client.ListRepositories(context.Background(), 100)
+	if err != nil {
+		return err
 	}
-
-	// Get all configured repos
-	repos := viper.Get("github.repos")
-	reposList, ok := repos.([]interface{})
-	if !ok || len(reposList) == 0 {
-		fmt.Println("No GitHub repositories configured.")
-		return nil
-	}
-
-	fmt.Printf("Available GitHub Repositories (default: %s):\n\n", defaultRepo)
-
-	for _, r := range reposList {
-		if repoMap, ok := r.(map[string]interface{}); ok {
-			owner := repoMap["owner"].(string)
-			repo := repoMap["repo"].(string)
-			description := ""
-
-			if d, ok := repoMap["description"].(string); ok {
-				description = d
-			}
-
-			marker := ""
-			if repo == defaultRepo {
-				marker = " (default)"
-			}
-
-			fmt.Printf("  %s/%s%s\n", owner, repo, marker)
-			if description != "" {
-				fmt.Printf("    Description: %s\n", description)
-			}
-			fmt.Println()
-		}
-	}
-
-	fmt.Println("Usage: clanker github list workflows --repo <repo-name>")
-
+	fmt.Print(ghclient.FormatRepositories(repos))
 	return nil
 }
 
@@ -67,7 +33,8 @@ var githubListCmd = &cobra.Command{
 	Long: `List GitHub resources of a specific type.
 	
 Supported resources:
-  repos        - Configured GitHub repositories
+	repos        - Accessible GitHub repositories
+	runners      - Repository self-hosted runners
   workflows    - GitHub Actions workflows
   runs         - Recent workflow runs
   prs          - Recent pull requests`,
@@ -82,49 +49,27 @@ Supported resources:
 			return listGitHubRepos()
 		}
 
-		// Get GitHub configuration
 		token := viper.GetString("github.token")
-		defaultRepo := viper.GetString("github.default_repo")
-
-		// Get repo flag or use default
 		repoFlag, _ := cmd.Flags().GetString("repo")
 		var owner, repo string
-
-		if repoFlag != "" {
-			// Use specified repo
-			repos := viper.Get("github.repos")
-			if reposList, ok := repos.([]interface{}); ok {
-				for _, r := range reposList {
-					if repoMap, ok := r.(map[string]interface{}); ok {
-						if repoName, ok := repoMap["repo"].(string); ok && repoName == repoFlag {
-							owner = repoMap["owner"].(string)
-							repo = repoName
-							break
-						}
-					}
-				}
+		if trimmed := strings.TrimSpace(repoFlag); trimmed != "" {
+			parts := strings.SplitN(trimmed, "/", 2)
+			if len(parts) == 2 {
+				owner = strings.TrimSpace(parts[0])
+				repo = strings.TrimSpace(parts[1])
+			} else {
+				repo = trimmed
 			}
-		} else {
-			// Use default repo
-			repos := viper.Get("github.repos")
-			if reposList, ok := repos.([]interface{}); ok {
-				for _, r := range reposList {
-					if repoMap, ok := r.(map[string]interface{}); ok {
-						if repoName, ok := repoMap["repo"].(string); ok && repoName == defaultRepo {
-							owner = repoMap["owner"].(string)
-							repo = repoName
-							break
-						}
-					}
-				}
-			}
-		}
-
-		if owner == "" || repo == "" {
-			return fmt.Errorf("github repository configuration not found. Use --repo flag or configure github.default_repo")
 		}
 
 		client := ghclient.NewClient(token, owner, repo)
+		if owner == "" || repo == "" {
+			resolvedOwner, resolvedRepo, err := client.ResolveRepository(ctx)
+			if err == nil {
+				owner = resolvedOwner
+				repo = resolvedRepo
+			}
+		}
 
 		switch resourceType {
 		case "workflows", "workflow":
@@ -145,6 +90,12 @@ Supported resources:
 				return err
 			}
 			fmt.Print(info)
+		case "runners", "runner":
+			runners, err := client.ListRunners(ctx)
+			if err != nil {
+				return err
+			}
+			fmt.Print(ghclient.FormatRunners(runners))
 		default:
 			return fmt.Errorf("unsupported resource type: %s", resourceType)
 		}
@@ -155,24 +106,34 @@ Supported resources:
 
 var githubStatusCmd = &cobra.Command{
 	Use:   "status [workflow-name]",
-	Short: "Get status of a specific workflow",
-	Long:  `Get the status of a specific GitHub Actions workflow by name.`,
-	Args:  cobra.ExactArgs(1),
+	Short: "Show GitHub auth or workflow status",
+	Long:  `Show general GitHub CLI/auth status, or the status of a specific GitHub Actions workflow by name.`,
+	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		workflowName := args[0]
-
 		ctx := context.Background()
-
-		// Get GitHub configuration
-		token := viper.GetString("github.token")
-		owner := viper.GetString("github.owner")
-		repo := viper.GetString("github.repo")
-
-		if owner == "" || repo == "" {
-			return fmt.Errorf("github.owner and github.repo must be configured")
+		repoFlag, _ := cmd.Flags().GetString("repo")
+		var owner, repo string
+		if trimmed := strings.TrimSpace(repoFlag); trimmed != "" {
+			parts := strings.SplitN(trimmed, "/", 2)
+			if len(parts) == 2 {
+				owner = strings.TrimSpace(parts[0])
+				repo = strings.TrimSpace(parts[1])
+			} else {
+				repo = trimmed
+			}
 		}
 
-		client := ghclient.NewClient(token, owner, repo)
+		client := ghclient.NewClient(viper.GetString("github.token"), owner, repo)
+		if len(args) == 0 {
+			status, err := client.FormatStatus(ctx)
+			if err != nil {
+				return err
+			}
+			fmt.Print(status)
+			return nil
+		}
+
+		workflowName := args[0]
 
 		status, err := client.GetWorkflowStatus(ctx, workflowName)
 		if err != nil {
@@ -191,4 +152,5 @@ func init() {
 
 	// Add repo flag to list command
 	githubListCmd.Flags().StringP("repo", "r", "", "Repository name to use (overrides default)")
+	githubStatusCmd.Flags().StringP("repo", "r", "", "Repository name to use (overrides default)")
 }
