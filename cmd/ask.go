@@ -63,6 +63,7 @@ Examples:
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		question := ""
+		selectedGitHubCodingAgent := ""
 		if len(args) > 0 {
 			question = args[0]
 		}
@@ -93,12 +94,14 @@ Examples:
 		deepseekKey, _ := cmd.Flags().GetString("deepseek-key")
 		cohereKey, _ := cmd.Flags().GetString("cohere-key")
 		minimaxKey, _ := cmd.Flags().GetString("minimax-key")
+		githubModel, _ := cmd.Flags().GetString("github-model")
 		geminiModel, _ := cmd.Flags().GetString("gemini-model")
 		openaiModel, _ := cmd.Flags().GetString("openai-model")
 		anthropicModel, _ := cmd.Flags().GetString("anthropic-model")
 		deepseekModel, _ := cmd.Flags().GetString("deepseek-model")
 		cohereModel, _ := cmd.Flags().GetString("cohere-model")
 		minimaxModel, _ := cmd.Flags().GetString("minimax-model")
+		githubCodingAgentModel, _ := cmd.Flags().GetString("github-coding-agent-model")
 		makerMode, _ := cmd.Flags().GetBool("maker")
 		applyMode, _ := cmd.Flags().GetBool("apply")
 		planFile, _ := cmd.Flags().GetString("plan-file")
@@ -123,8 +126,10 @@ Examples:
 		agentName, _ := cmd.Flags().GetString("agent")
 		if agentName == "hermes" {
 			return handleHermesQuery(context.Background(), question, profile, debug)
+		} else if isGitHubCodingAgent(agentName) {
+			selectedGitHubCodingAgent = agentName
 		} else if agentName != "" {
-			return fmt.Errorf("unknown agent: %s (available: hermes)", agentName)
+			return fmt.Errorf("unknown agent: %s (available: hermes, copilot, codex, claude)", agentName)
 		}
 
 		// Handle apply mode (independent of maker mode)
@@ -286,6 +291,8 @@ Examples:
 				apiKey = resolveCohereKey(cohereKey)
 			case "minimax":
 				apiKey = resolveMiniMaxKey(minimaxKey)
+			case "github-models":
+				apiKey = ""
 			default:
 				apiKey = viper.GetString("ai.api_key")
 			}
@@ -327,7 +334,7 @@ Examples:
 				}
 			}
 
-			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel)
+			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel, githubModel)
 
 			// Resolve API key based on provider.
 			var apiKey string
@@ -346,6 +353,8 @@ Examples:
 				apiKey = resolveCohereKey(cohereKey)
 			case "minimax":
 				apiKey = resolveMiniMaxKey(minimaxKey)
+			case "github-models":
+				apiKey = ""
 			default:
 				apiKey = viper.GetString("ai.api_key")
 			}
@@ -779,14 +788,14 @@ Format as a professional compliance table suitable for government security docum
 			token := viper.GetString("github.token")
 			owner := viper.GetString("github.owner")
 			repo := viper.GetString("github.repo")
-
-			if owner != "" && repo != "" {
-				githubClient := ghclient.NewClient(token, owner, repo)
-				var err error
-				githubContext, err = githubClient.GetRelevantContext(ctx, question)
-				if err != nil {
-					return fmt.Errorf("failed to get GitHub context: %w", err)
+			githubClient := ghclient.NewClient(token, owner, repo)
+			var err error
+			githubContext, err = githubClient.GetRelevantContext(ctx, question)
+			if err != nil {
+				if debug {
+					fmt.Printf("warning: failed to get GitHub context: %v\n", err)
 				}
+				githubContext = ""
 			}
 		}
 
@@ -932,6 +941,25 @@ Format as a professional compliance table suitable for government security docum
 			}
 		}
 
+		// Only Terraform context is supported here (code scanning disabled).
+		combinedCodeContext := terraformContext
+		if strings.TrimSpace(gcpContext) != "" {
+			if combinedCodeContext != "" {
+				combinedCodeContext += "\n"
+			}
+			combinedCodeContext += "GCP Context:\n" + gcpContext
+		}
+		if strings.TrimSpace(azureContext) != "" {
+			if combinedCodeContext != "" {
+				combinedCodeContext += "\n"
+			}
+			combinedCodeContext += "Azure Context:\n" + azureContext
+		}
+
+		if selectedGitHubCodingAgent != "" {
+			return runGitHubCodingAgentQuery(ctx, selectedGitHubCodingAgent, githubCodingAgentModel, question, awsContext, combinedCodeContext, githubContext)
+		}
+
 		// Query AI with tool support
 		var aiClient *ai.Client
 		var err error
@@ -994,9 +1022,7 @@ Format as a professional compliance table suitable for government security docum
 				token := viper.GetString("github.token")
 				owner := viper.GetString("github.owner")
 				repo := viper.GetString("github.repo")
-				if owner != "" && repo != "" {
-					githubClient = ghclient.NewClient(token, owner, repo)
-				}
+				githubClient = ghclient.NewClient(token, owner, repo)
 			}
 
 			// Get the provider from the AI profile, or use default
@@ -1012,7 +1038,7 @@ Format as a professional compliance table suitable for government security docum
 				}
 			}
 
-			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel)
+			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel, githubModel)
 
 			// Get the appropriate API key based on provider
 			var apiKey string
@@ -1032,6 +1058,8 @@ Format as a professional compliance table suitable for government security docum
 				apiKey = resolveCohereKey(cohereKey)
 			case "minimax":
 				apiKey = resolveMiniMaxKey(minimaxKey)
+			case "github-models":
+				apiKey = ""
 			default:
 				// Default/other providers
 				apiKey = viper.GetString("ai.api_key")
@@ -1055,7 +1083,7 @@ Format as a professional compliance table suitable for government security docum
 				}
 			}
 
-			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel)
+			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel, githubModel)
 
 			// Get the appropriate API key based on provider
 			var apiKey string
@@ -1075,27 +1103,14 @@ Format as a professional compliance table suitable for government security docum
 				apiKey = resolveCohereKey(cohereKey)
 			case "minimax":
 				apiKey = resolveMiniMaxKey(minimaxKey)
+			case "github-models":
+				apiKey = ""
 			default:
 				// Default/other providers
 				apiKey = viper.GetString("ai.api_key")
 			}
 
 			aiClient = ai.NewClient(provider, apiKey, debug, aiProfile)
-		}
-
-		// Only Terraform context is supported here (code scanning disabled).
-		combinedCodeContext := terraformContext
-		if strings.TrimSpace(gcpContext) != "" {
-			if combinedCodeContext != "" {
-				combinedCodeContext += "\n"
-			}
-			combinedCodeContext += "GCP Context:\n" + gcpContext
-		}
-		if strings.TrimSpace(azureContext) != "" {
-			if combinedCodeContext != "" {
-				combinedCodeContext += "\n"
-			}
-			combinedCodeContext += "Azure Context:\n" + azureContext
 		}
 
 		// If no tools are enabled, skip the tool-calling pipeline entirely.
@@ -1166,13 +1181,83 @@ func init() {
 	askCmd.Flags().String("deepseek-model", "", "DeepSeek model to use (overrides config)")
 	askCmd.Flags().String("cohere-model", "", "Cohere model to use (overrides config)")
 	askCmd.Flags().String("minimax-model", "", "MiniMax model to use (overrides config)")
+	askCmd.Flags().String("github-model", "", "GitHub Models model to use (overrides config)")
 	askCmd.Flags().Bool("agent-trace", false, "Show detailed coordinator agent lifecycle logs (overrides config)")
 	askCmd.Flags().Bool("maker", false, "Generate an AWS, GCP, Azure, Cloudflare, Digital Ocean, or Hetzner CLI plan (JSON) for infrastructure changes")
 	askCmd.Flags().Bool("destroyer", false, "Allow destructive operations when using --maker (requires explicit confirmation in UI/workflow)")
 	askCmd.Flags().Bool("apply", false, "Apply an approved maker plan (reads from stdin unless --plan-file is provided)")
 	askCmd.Flags().String("plan-file", "", "Optional path to maker plan JSON file for --apply")
 	askCmd.Flags().Bool("route-only", false, "Return routing decision as JSON without executing (for backend integration)")
-	askCmd.Flags().String("agent", "", "Use a specific agent to handle the query (e.g., hermes)")
+	askCmd.Flags().String("agent", "", "Use a specific agent to handle the query (e.g., hermes, copilot, codex, claude)")
+	askCmd.Flags().String("github-coding-agent-model", "", "Override the Copilot CLI model used for GitHub coding-agent delegation")
+}
+
+func isGitHubCodingAgent(agentName string) bool {
+	switch strings.TrimSpace(strings.ToLower(agentName)) {
+	case "copilot", "codex", "claude":
+		return true
+	default:
+		return false
+	}
+}
+
+func runGitHubCodingAgentQuery(ctx context.Context, agentName, modelOverride, question, awsContext, codeContext, githubContext string) error {
+	copilotPath, err := exec.LookPath("copilot")
+	if err != nil {
+		return fmt.Errorf("copilot cli not found in PATH: %w", err)
+	}
+
+	prompt := buildGitHubCodingAgentPrompt(question, awsContext, codeContext, githubContext)
+	args := []string{"-p", prompt, "-s", "--excluded-tools=write", "--deny-tool=shell"}
+	if model := resolveGitHubCodingAgentModel(agentName, modelOverride); model != "" {
+		args = append([]string{"--model", model}, args...)
+	}
+
+	cmd := exec.CommandContext(ctx, copilotPath, args...)
+	cmd.Env = os.Environ()
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to run %s via copilot cli: %w", strings.TrimSpace(agentName), err)
+	}
+	return nil
+}
+
+func resolveGitHubCodingAgentModel(agentName, modelOverride string) string {
+	if trimmed := strings.TrimSpace(modelOverride); trimmed != "" {
+		return trimmed
+	}
+	switch strings.TrimSpace(strings.ToLower(agentName)) {
+	case "codex":
+		return "gpt-5.4"
+	case "claude":
+		return "claude-sonnet-4.6"
+	case "copilot":
+		return "gpt-5.4"
+	default:
+		return ""
+	}
+}
+
+func buildGitHubCodingAgentPrompt(question, awsContext, codeContext, githubContext string) string {
+	sections := []string{
+		"You are answering a Clanker infrastructure chat request.",
+		"Use the provided Clanker-generated context when it is relevant. Answer directly and do not ask to modify files or run shell commands.",
+	}
+
+	if trimmed := strings.TrimSpace(awsContext); trimmed != "" {
+		sections = append(sections, "AWS Context:\n"+trimmed)
+	}
+	if trimmed := strings.TrimSpace(codeContext); trimmed != "" {
+		sections = append(sections, "Additional Context:\n"+trimmed)
+	}
+	if trimmed := strings.TrimSpace(githubContext); trimmed != "" {
+		sections = append(sections, "GitHub Context:\n"+trimmed)
+	}
+
+	sections = append(sections, "User Question:\n"+strings.TrimSpace(question))
+	return strings.Join(sections, "\n\n")
 }
 
 func resolveGeminiAPIKey(flagValue string) string {
@@ -1320,7 +1405,7 @@ func maybeRunTerraformCommand(ctx context.Context, question string, tfClient *tf
 	return true, nil
 }
 
-func maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel string) {
+func maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel, githubModel string) {
 	switch provider {
 	case "openai":
 		if strings.TrimSpace(openaiModel) != "" {
@@ -1345,6 +1430,10 @@ func maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiMod
 	case "minimax":
 		if strings.TrimSpace(minimaxModel) != "" {
 			viper.Set("ai.providers.minimax.model", strings.TrimSpace(minimaxModel))
+		}
+	case "github-models":
+		if strings.TrimSpace(githubModel) != "" {
+			viper.Set("ai.providers.github-models.model", strings.TrimSpace(githubModel))
 		}
 	}
 }

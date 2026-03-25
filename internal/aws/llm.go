@@ -73,6 +73,11 @@ func GetAIProfile(providerName string) (*AIProfile, error) {
 				Model:     "command-a-03-2025",
 				APIKeyEnv: "COHERE_API_KEY",
 			}, nil
+		case "github-models":
+			return &AIProfile{
+				Provider: "github-models",
+				Model:    "openai/gpt-5.4",
+			}, nil
 		case "minimax":
 			return &AIProfile{
 				Provider:  "minimax",
