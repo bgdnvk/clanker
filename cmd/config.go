@@ -72,6 +72,9 @@ ai:
       model: gemini-2.5-flash
       api_key_env: GEMINI_API_KEY
 
+		github-models:
+			model: openai/gpt-5.4
+
     deepseek:
       model: deepseek-chat
       api_key_env: DEEPSEEK_API_KEY

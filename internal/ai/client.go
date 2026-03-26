@@ -395,6 +395,8 @@ func NewClient(provider, apiKey string, debug bool, aiProfile ...string) *Client
 		}
 	case "openai":
 		client.baseURL = "https://api.openai.com/v1"
+	case "github-models":
+		client.baseURL = "https://models.github.ai"
 	case "anthropic":
 		client.baseURL = "https://api.anthropic.com/v1"
 	case "cohere":
@@ -546,6 +548,8 @@ func (c *Client) askWithDynamicAnalysis(ctx context.Context, question, awsContex
 		analysisResponse, err = c.askBedrock(ctx, analysisPrompt)
 	case "openai":
 		analysisResponse, err = c.askOpenAI(ctx, analysisPrompt)
+	case "github-models":
+		analysisResponse, err = c.askGitHubModels(ctx, analysisPrompt)
 	case "anthropic":
 		analysisResponse, err = c.askAnthropic(ctx, analysisPrompt)
 	case "cohere":
@@ -709,6 +713,8 @@ Please provide a comprehensive answer based on the live data above.`, question, 
 		return c.askBedrock(ctx, finalPrompt)
 	case "openai":
 		return c.askOpenAI(ctx, finalPrompt)
+	case "github-models":
+		return c.askGitHubModels(ctx, finalPrompt)
 	case "anthropic":
 		return c.askAnthropic(ctx, finalPrompt)
 	case "cohere":
@@ -767,6 +773,8 @@ func (c *Client) AskOriginal(ctx context.Context, question, awsContext, codeCont
 		return c.askBedrock(ctx, prompt)
 	case "gemini", "gemini-api":
 		return c.askGemini(ctx, prompt)
+	case "github-models":
+		return c.askGitHubModels(ctx, prompt)
 	case "anthropic":
 		return c.askAnthropic(ctx, prompt)
 	case "cohere":
@@ -1080,6 +1088,104 @@ func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
 	}
 
 	return response.Choices[0].Message.Content, nil
+}
+
+func (c *Client) resolveGitHubModelsToken(ctx context.Context) string {
+	if strings.TrimSpace(c.apiKey) != "" {
+		return strings.TrimSpace(c.apiKey)
+	}
+	cmd := exec.CommandContext(ctx, "gh", "auth", "token")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func (c *Client) askGitHubModels(ctx context.Context, prompt string) (string, error) {
+	profileLLMCall, err := c.getAIProfile(c.aiProfile)
+	if err != nil {
+		return "", fmt.Errorf("failed to get AI profile for LLM calls: %w", err)
+	}
+
+	token := c.resolveGitHubModelsToken(ctx)
+	if token == "" {
+		return "", fmt.Errorf("GitHub auth token not configured; run 'gh auth login' or provide a token with models access")
+	}
+
+	model := strings.TrimSpace(profileLLMCall.Model)
+	if model == "" {
+		model = "openai/gpt-5.4"
+	}
+
+	reqBody := OpenAIRequest{
+		Model: model,
+		Messages: []Message{{
+			Role:    "user",
+			Content: sanitizeASCII(prompt),
+		}},
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	client := &http.Client{}
+	var body []byte
+	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
+		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.baseURL, "/")+"/inference/chat/completions", bytes.NewBuffer(jsonData))
+		if reqErr != nil {
+			return "", fmt.Errorf("failed to create request: %w", reqErr)
+		}
+
+		httpReq.Header.Set("Accept", "application/vnd.github+json")
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+		httpReq.Header.Set("X-GitHub-Api-Version", "2026-03-10")
+
+		resp, doErr := client.Do(httpReq)
+		if doErr != nil {
+			if attempt == aiRetryMaxAttempts || !isRetryableProviderErrorText(doErr.Error()) {
+				return "", fmt.Errorf("failed to send GitHub Models request: %w", doErr)
+			}
+			if wErr := waitForAIRetry(ctx, aiRetryDelay(attempt-1)); wErr != nil {
+				return "", wErr
+			}
+			continue
+		}
+
+		body, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return "", fmt.Errorf("failed to read GitHub Models response: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+
+		if attempt == aiRetryMaxAttempts || !(isRetryableHTTPStatus(resp.StatusCode) || isRetryableProviderErrorText(string(body))) {
+			return "", fmt.Errorf("GitHub Models request failed with status %d: %s", resp.StatusCode, string(body))
+		}
+
+		delay := aiRetryDelay(attempt - 1)
+		if ra, ok := retryAfterDelay(resp.Header); ok {
+			delay = ra
+		}
+		if wErr := waitForAIRetry(ctx, delay); wErr != nil {
+			return "", wErr
+		}
+	}
+
+	var parsed OpenAIResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("failed to unmarshal GitHub Models response: %w", err)
+	}
+	if len(parsed.Choices) == 0 || strings.TrimSpace(parsed.Choices[0].Message.Content) == "" {
+		return "", fmt.Errorf("no response from GitHub Models")
+	}
+	return parsed.Choices[0].Message.Content, nil
 }
 
 func (c *Client) askCohere(ctx context.Context, prompt string) (string, error) {
@@ -1510,6 +1616,8 @@ func (c *Client) AskPrompt(ctx context.Context, prompt string) (string, error) {
 		return c.askBedrock(ctx, prompt)
 	case "openai":
 		return c.askOpenAI(ctx, prompt)
+	case "github-models":
+		return c.askGitHubModels(ctx, prompt)
 	case "anthropic":
 		return c.askAnthropic(ctx, prompt)
 	case "cohere":
@@ -1537,6 +1645,8 @@ func (c *Client) AskWithContext(ctx context.Context, conv *ConversationContext, 
 		response, err = c.askAnthropicWithHistory(ctx, conv)
 	case "openai":
 		response, err = c.askOpenAIWithHistory(ctx, conv)
+	case "github-models":
+		response, err = c.askGitHubModelsWithHistory(ctx, conv)
 	case "cohere":
 		response, err = c.askCohereWithHistory(ctx, conv)
 	case "gemini", "gemini-api":
@@ -1858,6 +1968,89 @@ func (c *Client) askOpenAIWithHistory(ctx context.Context, conv *ConversationCon
 	return "", fmt.Errorf("no response content from OpenAI")
 }
 
+func (c *Client) askGitHubModelsWithHistory(ctx context.Context, conv *ConversationContext) (string, error) {
+	messages := make([]Message, 0, len(conv.Messages)+1)
+	if conv.SystemPrompt != "" {
+		messages = append(messages, Message{Role: "system", Content: sanitizeASCII(conv.SystemPrompt)})
+	}
+	messages = append(messages, conv.Messages...)
+
+	profileLLMCall, err := c.getAIProfile(c.aiProfile)
+	if err != nil {
+		return "", fmt.Errorf("failed to get AI profile: %w", err)
+	}
+
+	model := strings.TrimSpace(profileLLMCall.Model)
+	if model == "" {
+		model = "openai/gpt-5.4"
+	}
+
+	token := c.resolveGitHubModelsToken(ctx)
+	if token == "" {
+		return "", fmt.Errorf("GitHub auth token not configured; run 'gh auth login' or provide a token with models access")
+	}
+
+	reqBody := OpenAIRequest{Model: model, Messages: messages}
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	client := &http.Client{}
+	var body []byte
+	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
+		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.baseURL, "/")+"/inference/chat/completions", bytes.NewBuffer(jsonData))
+		if reqErr != nil {
+			return "", fmt.Errorf("failed to create request: %w", reqErr)
+		}
+		httpReq.Header.Set("Accept", "application/vnd.github+json")
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+		httpReq.Header.Set("X-GitHub-Api-Version", "2026-03-10")
+
+		resp, doErr := client.Do(httpReq)
+		if doErr != nil {
+			if attempt == aiRetryMaxAttempts || !isRetryableProviderErrorText(doErr.Error()) {
+				return "", fmt.Errorf("failed to send request: %w", doErr)
+			}
+			if wErr := waitForAIRetry(ctx, aiRetryDelay(attempt-1)); wErr != nil {
+				return "", wErr
+			}
+			continue
+		}
+
+		body, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return "", fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+		if attempt == aiRetryMaxAttempts || !(isRetryableHTTPStatus(resp.StatusCode) || isRetryableProviderErrorText(string(body))) {
+			return "", fmt.Errorf("GitHub Models request failed with status %d: %s", resp.StatusCode, string(body))
+		}
+
+		delay := aiRetryDelay(attempt - 1)
+		if ra, ok := retryAfterDelay(resp.Header); ok {
+			delay = ra
+		}
+		if wErr := waitForAIRetry(ctx, delay); wErr != nil {
+			return "", wErr
+		}
+	}
+
+	var parsed OpenAIResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+	if len(parsed.Choices) > 0 && strings.TrimSpace(parsed.Choices[0].Message.Content) != "" {
+		return parsed.Choices[0].Message.Content, nil
+	}
+	return "", fmt.Errorf("no response content from GitHub Models")
+}
+
 // askGeminiWithHistory sends a multi-turn request to Gemini
 func (c *Client) askGeminiWithHistory(ctx context.Context, conv *ConversationContext) (string, error) {
 	if c.geminiClient == nil {
@@ -2159,6 +2352,8 @@ Take your time to thoroughly analyze the data. Think extremely hard about what t
 		response, err = c.askBedrock(ctx, finalPrompt)
 	case "openai":
 		response, err = c.askOpenAI(ctx, finalPrompt)
+	case "github-models":
+		response, err = c.askGitHubModels(ctx, finalPrompt)
 	case "anthropic":
 		response, err = c.askAnthropic(ctx, finalPrompt)
 	case "cohere":
@@ -2283,6 +2478,8 @@ func (c *Client) dispatchLLM(ctx context.Context, prompt string) (string, error)
 		return c.askBedrock(ctx, prompt)
 	case "openai":
 		return c.askOpenAI(ctx, prompt)
+	case "github-models":
+		return c.askGitHubModels(ctx, prompt)
 	case "anthropic":
 		return c.askAnthropic(ctx, prompt)
 	case "cohere":

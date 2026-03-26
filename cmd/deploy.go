@@ -109,7 +109,7 @@ Examples:
 			apiKey = viper.GetString("ai.api_key")
 		}
 
-		maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel)
+		maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel, "")
 
 		aiClient := ai.NewClient(provider, apiKey, debug, aiProfile)
 
