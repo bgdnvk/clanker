@@ -118,7 +118,10 @@ func (a *Agent) InvestigateQuery(ctx context.Context, query string) (*AgentConte
 	}
 
 	// Create agent coordinator with decision tree
-	coord := coordinator.New(agentCtx, a.client)
+	coord, err := coordinator.New(agentCtx, a.client)
+	if err != nil {
+		return agentCtx, fmt.Errorf("failed to create coordinator: %w", err)
+	}
 
 	// Traverse decision tree to determine what agents to spawn
 	applicableNodes := coord.Analyze(query)

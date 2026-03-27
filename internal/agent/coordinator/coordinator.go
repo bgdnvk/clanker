@@ -43,7 +43,14 @@ type Coordinator struct {
 }
 
 // New returns a ready-to-use coordinator.
-func New(mainContext *model.AgentContext, client *awsclient.Client) *Coordinator {
+// Both mainContext and client must be non-nil; New returns an error otherwise.
+func New(mainContext *model.AgentContext, client *awsclient.Client) (*Coordinator, error) {
+	if mainContext == nil {
+		return nil, fmt.Errorf("coordinator: mainContext must not be nil")
+	}
+	if client == nil {
+		return nil, fmt.Errorf("coordinator: AWS client must not be nil")
+	}
 	return &Coordinator{
 		DecisionTree: dt.New(),
 		MainContext:  mainContext,
@@ -51,7 +58,7 @@ func New(mainContext *model.AgentContext, client *awsclient.Client) *Coordinator
 		registry:     NewAgentRegistry(),
 		dataBus:      NewSharedDataBus(),
 		scheduler:    NewDependencyScheduler(),
-	}
+	}, nil
 }
 
 // Analyze traverses the decision tree for the provided query.
