@@ -307,14 +307,18 @@ Focus on being efficient - use aws_function_call first to directly gather specif
 
 // BuildFinalContext creates the final context string for the LLM with all gathered information
 func (a *Agent) BuildFinalContext(agentCtx *AgentContext) string {
+	if agentCtx == nil {
+		return ""
+	}
+
 	var context strings.Builder
 
 	context.WriteString("=== INTELLIGENT AGENT INVESTIGATION RESULTS ===\n")
 	context.WriteString(fmt.Sprintf("Query: %s\n\n", agentCtx.OriginalQuery))
 
-	// Add semantic analysis if available
+	// Semantic analysis
 	if semanticData, exists := agentCtx.GatheredData["semantic_analysis"]; exists {
-		context.WriteString("🧠 SEMANTIC ANALYSIS:\n")
+		context.WriteString("SEMANTIC ANALYSIS:\n")
 		if semData, ok := semanticData.(map[string]interface{}); ok {
 			for key, value := range semData {
 				context.WriteString(fmt.Sprintf("  %s: %v\n", key, value))
@@ -323,198 +327,105 @@ func (a *Agent) BuildFinalContext(agentCtx *AgentContext) string {
 		context.WriteString("\n")
 	}
 
-	// DEBUG: Show all gathered data keys to understand the structure
-	context.WriteString("DEBUG - All Gathered Data Keys:\n")
-	for key := range agentCtx.GatheredData {
-		context.WriteString(fmt.Sprintf("  - %s\n", key))
-	}
-	context.WriteString("\n")
+	// Single pass over gathered data, categorized by type.
+	// Track which keys have been rendered to avoid duplication.
+	rendered := make(map[string]bool)
+	skipKeys := map[string]bool{"semantic_analysis": true, "_metadata": true}
 
-	// Process ALL data from parallel agents to ensure we don't miss anything
-	context.WriteString("📋 COMPLETE PARALLEL AGENT RESULTS:\n")
-	context.WriteString("=======================================\n")
-
+	// Pass 1: Lambda error analysis (highlighted at top for visibility)
 	for key, data := range agentCtx.GatheredData {
-		// Skip semantic analysis and metadata as we handle those separately
-		if key == "semantic_analysis" || key == "_metadata" {
+		if skipKeys[key] {
 			continue
 		}
-
-		context.WriteString(fmt.Sprintf("\n📊 %s:\n", strings.ToUpper(key)))
-		context.WriteString("=" + strings.Repeat("=", len(key)) + "\n")
-
-		if strValue, ok := data.(string); ok {
-			context.WriteString(strValue)
-		} else if awsData, ok := data.(AWSData); ok {
-			// Handle nested agent data structure properly
-			for subKey, subValue := range awsData {
-				context.WriteString(fmt.Sprintf("\n🔍 %s:\n", strings.ToUpper(subKey)))
-				context.WriteString(strings.Repeat("-", len(subKey)) + "\n")
-
-				if strSubValue, ok := subValue.(string); ok {
-					context.WriteString(strSubValue)
-				} else {
-					context.WriteString(fmt.Sprintf("%v", subValue))
-				}
-				context.WriteString("\n")
-			}
-		} else {
-			context.WriteString(fmt.Sprintf("%v", data))
-		}
-		context.WriteString("\n")
-	}
-	for key, data := range agentCtx.GatheredData {
 		if strings.Contains(key, "analyze_lambda_errors") {
-			context.WriteString("\n🚨 CRITICAL LAMBDA ERROR ANALYSIS\n")
+			context.WriteString("\nCRITICAL LAMBDA ERROR ANALYSIS\n")
 			context.WriteString("=====================================\n")
-
-			context.WriteString(fmt.Sprintf("\n📋 ANALYSIS RESULTS (%s):\n", strings.ToUpper(key)))
+			context.WriteString(fmt.Sprintf("\nANALYSIS RESULTS (%s):\n", strings.ToUpper(key)))
 			context.WriteString(strings.Repeat("-", 50) + "\n")
-
-			if strValue, ok := data.(string); ok {
-				context.WriteString(strValue)
-			} else {
-				context.WriteString(fmt.Sprintf("%v", data))
-			}
+			writeDataValue(&context, data)
 			context.WriteString("\n")
+			rendered[key] = true
 		}
 	}
 
-	// Also check if we have log agent data stored as nested structure
+	// Check nested lambda error analysis inside the "log" agent key
 	if logData, exists := agentCtx.GatheredData["log"]; exists {
 		if awsData, ok := logData.(AWSData); ok {
 			for subKey, subValue := range awsData {
 				if strings.Contains(subKey, "analyze_lambda_errors") {
-					context.WriteString("\n🚨 CRITICAL LAMBDA ERROR ANALYSIS\n")
+					context.WriteString("\nCRITICAL LAMBDA ERROR ANALYSIS\n")
 					context.WriteString("=====================================\n")
-
-					context.WriteString(fmt.Sprintf("\n📋 NESTED ANALYSIS RESULTS (%s):\n", strings.ToUpper(subKey)))
+					context.WriteString(fmt.Sprintf("\nNESTED ANALYSIS RESULTS (%s):\n", strings.ToUpper(subKey)))
 					context.WriteString(strings.Repeat("-", 50) + "\n")
-
-					if strSubValue, ok := subValue.(string); ok {
-						context.WriteString(strSubValue)
-					} else {
-						context.WriteString(fmt.Sprintf("%v", subValue))
-					}
+					writeDataValue(&context, subValue)
 					context.WriteString("\n")
 				}
 			}
 		}
 	}
 
+	// Pass 2: Legacy log format (structured LogData slices)
 	for key, data := range agentCtx.GatheredData {
-		// Skip semantic analysis and metadata as we handle those separately
-		if key == "semantic_analysis" || key == "_metadata" {
+		if skipKeys[key] || rendered[key] {
 			continue
 		}
-
-		// Skip Lambda error analysis as we handled it above
-		if strings.Contains(key, "analyze_lambda_errors") {
-			continue
-		}
-
-		context.WriteString(fmt.Sprintf("\n� %s:\n", strings.ToUpper(key)))
-		context.WriteString("=" + strings.Repeat("=", len(key)) + "\n")
-
-		if strValue, ok := data.(string); ok {
-			context.WriteString(strValue)
-		} else if awsData, ok := data.(AWSData); ok {
-			for subKey, subValue := range awsData {
-				context.WriteString(fmt.Sprintf("\n📊 %s:\n", strings.ToUpper(subKey)))
-				if strSubValue, ok := subValue.(string); ok {
-					context.WriteString(strSubValue)
-				} else {
-					context.WriteString(fmt.Sprintf("%v", subValue))
-				}
-				context.WriteString("\n")
-			}
-		} else {
-			context.WriteString(fmt.Sprintf("%v", data))
-		}
-		context.WriteString("\n\n")
-	}
-
-	// Legacy format support - Display detailed log analysis by service
-	for key, data := range agentCtx.GatheredData {
 		if strings.HasSuffix(key, "_logs") && !strings.HasSuffix(key, "_all_log_entries") {
-			serviceName := strings.TrimSuffix(key, "_logs")
-			context.WriteString(fmt.Sprintf("=== %s SERVICE LOG ANALYSIS (Legacy) ===\n", strings.ToUpper(serviceName)))
-
 			if logGroups, ok := data.([]LogData); ok {
+				serviceName := strings.TrimSuffix(key, "_logs")
+				context.WriteString(fmt.Sprintf("=== %s SERVICE LOG ANALYSIS ===\n", strings.ToUpper(serviceName)))
 				for _, logGroupData := range logGroups {
-					if logGroup, exists := logGroupData["log_group"]; exists {
-						context.WriteString(fmt.Sprintf("Log Group: %s\n", logGroup))
-					}
-
-					if totalEntries, exists := logGroupData["total_entries"]; exists {
-						context.WriteString(fmt.Sprintf("Total Recent Entries: %v\n", totalEntries))
-					}
-
-					if errorCount, exists := logGroupData["error_count"]; exists {
-						context.WriteString(fmt.Sprintf("Error Entries: %v\n", errorCount))
-					}
-
-					if streamCount, exists := logGroupData["stream_count"]; exists {
-						context.WriteString(fmt.Sprintf("Active Streams: %v\n", streamCount))
-					}
-
-					// Display recent logs
-					if recentLogs, exists := logGroupData["recent_logs"]; exists {
-						if logs, ok := recentLogs.([]string); ok && len(logs) > 0 {
-							context.WriteString("\n--- Recent Log Entries ---\n")
-							for i, log := range logs {
-								if i < 20 { // Show most recent 20 entries
-									context.WriteString(fmt.Sprintf("%s\n", log))
-								}
-							}
-						}
-					}
-
-					// Display error logs
-					if errorLogs, exists := logGroupData["error_logs"]; exists {
-						if logs, ok := errorLogs.([]string); ok && len(logs) > 0 {
-							context.WriteString("\n--- Error Log Entries ---\n")
-							for i, log := range logs {
-								if i < 10 { // Show most recent 10 error entries
-									context.WriteString(fmt.Sprintf("ERROR: %s\n", log))
-								}
-							}
-						}
-					}
-
-					// Display log streams
-					if logStreams, exists := logGroupData["log_streams"]; exists {
-						if streams, ok := logStreams.([]string); ok && len(streams) > 0 {
-							context.WriteString("\n--- Active Log Streams ---\n")
-							for _, stream := range streams {
-								context.WriteString(fmt.Sprintf("%s\n", stream))
-							}
-						}
-					}
-
-					context.WriteString("\n")
+					writeLogGroupData(&context, logGroupData)
 				}
+				rendered[key] = true
 			}
 		}
 	}
 
-	// Also display raw logs if available (fallback for older format)
+	// Pass 3: Raw log entries
 	for key, data := range agentCtx.GatheredData {
+		if skipKeys[key] || rendered[key] {
+			continue
+		}
 		if strings.HasSuffix(key, "_all_log_entries") {
 			serviceName := strings.TrimSuffix(key, "_all_log_entries")
 			if logs, ok := data.([]string); ok && len(logs) > 0 {
 				context.WriteString(fmt.Sprintf("=== %s RAW LOG ENTRIES ===\n", strings.ToUpper(serviceName)))
-				for i, log := range logs {
-					if i < 30 { // Limit to most recent 30 raw logs
-						context.WriteString(fmt.Sprintf("%s\n", log))
-					}
+				limit := 30
+				if len(logs) < limit {
+					limit = len(logs)
+				}
+				for _, log := range logs[:limit] {
+					context.WriteString(fmt.Sprintf("%s\n", log))
 				}
 				context.WriteString("\n")
 			}
+			rendered[key] = true
 		}
 	}
 
-	// Display service data
+	// Pass 4: All remaining gathered data
+	context.WriteString("PARALLEL AGENT RESULTS:\n")
+	context.WriteString("=======================================\n")
+	for key, data := range agentCtx.GatheredData {
+		if skipKeys[key] || rendered[key] {
+			continue
+		}
+		context.WriteString(fmt.Sprintf("\n%s:\n", strings.ToUpper(key)))
+		context.WriteString("=" + strings.Repeat("=", len(key)) + "\n")
+		if awsData, ok := data.(AWSData); ok {
+			for subKey, subValue := range awsData {
+				context.WriteString(fmt.Sprintf("\n  %s:\n", strings.ToUpper(subKey)))
+				context.WriteString(strings.Repeat("-", len(subKey)) + "\n")
+				writeDataValue(&context, subValue)
+				context.WriteString("\n")
+			}
+		} else {
+			writeDataValue(&context, data)
+		}
+		context.WriteString("\n")
+	}
+
+	// Service data
 	if len(agentCtx.ServiceData) > 0 {
 		context.WriteString("=== SERVICE DATA ===\n")
 		for service, data := range agentCtx.ServiceData {
@@ -523,7 +434,7 @@ func (a *Agent) BuildFinalContext(agentCtx *AgentContext) string {
 		context.WriteString("\n")
 	}
 
-	// Display metrics
+	// Metrics
 	if len(agentCtx.Metrics) > 0 {
 		context.WriteString("=== SERVICE METRICS ===\n")
 		for service, metrics := range agentCtx.Metrics {
@@ -532,7 +443,7 @@ func (a *Agent) BuildFinalContext(agentCtx *AgentContext) string {
 		context.WriteString("\n")
 	}
 
-	// Display service status
+	// Service status
 	if len(agentCtx.ServiceStatus) > 0 {
 		context.WriteString("=== SERVICE STATUS ===\n")
 		for service, status := range agentCtx.ServiceStatus {
@@ -541,34 +452,84 @@ func (a *Agent) BuildFinalContext(agentCtx *AgentContext) string {
 		context.WriteString("\n")
 	}
 
-	// Display error analysis if available
+	// Error analysis
 	if errorPatterns, exists := agentCtx.GatheredData["error_patterns"]; exists {
 		context.WriteString("=== ERROR ANALYSIS ===\n")
 		context.WriteString(fmt.Sprintf("%v\n\n", errorPatterns))
 	}
 
-	// Display any other gathered data
-	for key, data := range agentCtx.GatheredData {
-		if !strings.HasSuffix(key, "_logs") && key != "error_patterns" {
-			context.WriteString(fmt.Sprintf("=== %s ===\n", strings.ToUpper(key)))
-			context.WriteString(fmt.Sprintf("%v\n\n", data))
-		}
-	}
-
 	context.WriteString(fmt.Sprintf("Investigation completed in %d steps.\n", agentCtx.CurrentStep))
 
-	// Add chain of thought summary
+	// Chain of thought summary
 	if len(agentCtx.ChainOfThought) > 0 {
 		context.WriteString("\n=== AGENT REASONING CHAIN ===\n")
 		for _, thought := range agentCtx.ChainOfThought {
 			context.WriteString(fmt.Sprintf("Step %d [%s]: %s\n", thought.Step, thought.Action, thought.Thought))
 			if thought.Outcome != "" {
-				context.WriteString(fmt.Sprintf("  → %s\n", thought.Outcome))
+				context.WriteString(fmt.Sprintf("  -> %s\n", thought.Outcome))
 			}
 		}
 	}
 
 	return context.String()
+}
+
+// writeDataValue writes any data value to the builder in a readable format.
+func writeDataValue(b *strings.Builder, data any) {
+	if strValue, ok := data.(string); ok {
+		b.WriteString(strValue)
+	} else {
+		b.WriteString(fmt.Sprintf("%v", data))
+	}
+}
+
+// writeLogGroupData writes a structured log group entry.
+func writeLogGroupData(b *strings.Builder, lgd LogData) {
+	if logGroup, exists := lgd["log_group"]; exists {
+		b.WriteString(fmt.Sprintf("Log Group: %s\n", logGroup))
+	}
+	if totalEntries, exists := lgd["total_entries"]; exists {
+		b.WriteString(fmt.Sprintf("Total Recent Entries: %v\n", totalEntries))
+	}
+	if errorCount, exists := lgd["error_count"]; exists {
+		b.WriteString(fmt.Sprintf("Error Entries: %v\n", errorCount))
+	}
+	if streamCount, exists := lgd["stream_count"]; exists {
+		b.WriteString(fmt.Sprintf("Active Streams: %v\n", streamCount))
+	}
+	if recentLogs, exists := lgd["recent_logs"]; exists {
+		if logs, ok := recentLogs.([]string); ok && len(logs) > 0 {
+			b.WriteString("\n--- Recent Log Entries ---\n")
+			limit := 20
+			if len(logs) < limit {
+				limit = len(logs)
+			}
+			for _, log := range logs[:limit] {
+				b.WriteString(fmt.Sprintf("%s\n", log))
+			}
+		}
+	}
+	if errorLogs, exists := lgd["error_logs"]; exists {
+		if logs, ok := errorLogs.([]string); ok && len(logs) > 0 {
+			b.WriteString("\n--- Error Log Entries ---\n")
+			limit := 10
+			if len(logs) < limit {
+				limit = len(logs)
+			}
+			for _, log := range logs[:limit] {
+				b.WriteString(fmt.Sprintf("ERROR: %s\n", log))
+			}
+		}
+	}
+	if logStreams, exists := lgd["log_streams"]; exists {
+		if streams, ok := logStreams.([]string); ok && len(streams) > 0 {
+			b.WriteString("\n--- Active Log Streams ---\n")
+			for _, stream := range streams {
+				b.WriteString(fmt.Sprintf("%s\n", stream))
+			}
+		}
+	}
+	b.WriteString("\n")
 }
 
 // getErrorLogsFromGroup gets error logs from a specific log group
