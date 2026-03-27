@@ -54,34 +54,34 @@ ai:
   providers:
     bedrock:
       aws_profile: your-aws-profile  # AWS profile for Bedrock API calls
-			model: anthropic.claude-opus-4-6-v1
+      model: anthropic.claude-opus-4-6-v1
       region: us-west-1
-    
+
     openai:
       model: gpt-5
       api_key_env: OPENAI_API_KEY
-    
+
     anthropic:
-			model: claude-opus-4-6
+      model: claude-opus-4-6
       api_key_env: ANTHROPIC_API_KEY
-    
+
     gemini:
       project_id: your-gcp-project-id
-    
+
     gemini-api:
       model: gemini-2.5-flash
       api_key_env: GEMINI_API_KEY
 
-		github-models:
-			model: openai/gpt-5.4
+    github-models:
+      model: openai/gpt-5.4
 
     deepseek:
       model: deepseek-chat
       api_key_env: DEEPSEEK_API_KEY
 
-		cohere:
-			model: command-a-03-2025
-			api_key_env: COHERE_API_KEY
+    cohere:
+      model: command-a-03-2025
+      api_key_env: COHERE_API_KEY
 
     minimax:
       model: MiniMax-M2.5

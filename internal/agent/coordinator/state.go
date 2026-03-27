@@ -114,7 +114,18 @@ func (r *AgentRegistry) Reset() {
 }
 
 // CopyContextForAgent clones the main context for an agent run.
+// Returns a minimal empty context if main is nil.
 func CopyContextForAgent(main *model.AgentContext) *model.AgentContext {
+	if main == nil {
+		return &model.AgentContext{
+			GatheredData:   make(model.AWSData),
+			ServiceData:    make(model.ServiceData),
+			Metrics:        make(model.MetricsData),
+			ServiceStatus:  make(map[string]string),
+			MaxSteps:       3,
+			LastUpdateTime: time.Now(),
+		}
+	}
 	return &model.AgentContext{
 		OriginalQuery:  main.OriginalQuery,
 		CurrentStep:    0,

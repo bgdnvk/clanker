@@ -17,7 +17,6 @@ type (
 
 type QueryIntent struct {
 	Primary        string   `json:"primary"`
-	Secondary      []string `json:"secondary"`
 	Confidence     float64  `json:"confidence"`
 	TargetServices []string `json:"target_services"`
 	Urgency        string   `json:"urgency"`
@@ -73,7 +72,6 @@ type AgentDecision struct {
 	AWSFunctions []AWSFunctionCall   `json:"aws_functions"`
 	Reasoning    string              `json:"reasoning"`
 	Confidence   float64             `json:"confidence"`
-	NextSteps    []string            `json:"next_steps"`
 	IsComplete   bool                `json:"is_complete"`
 	Parameters   AWSData             `json:"parameters"`
 }

@@ -89,9 +89,10 @@ type Client struct {
 }
 
 const (
-	aiRetryMaxAttempts = 5
-	aiRetryBaseDelay   = 1 * time.Second
-	aiRetryMaxDelay    = 16 * time.Second
+	aiRetryMaxAttempts  = 5
+	aiRetryBaseDelay    = 1 * time.Second
+	aiRetryMaxDelay     = 16 * time.Second
+	aiHTTPClientTimeout = 120 * time.Second
 )
 
 func aiRetryDelay(retryIndex int) time.Duration {
@@ -1028,7 +1029,7 @@ func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: aiHTTPClientTimeout}
 	var body []byte
 	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
 		resp, doErr := client.Do(req)
@@ -1131,7 +1132,7 @@ func (c *Client) askGitHubModels(ctx context.Context, prompt string) (string, er
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: aiHTTPClientTimeout}
 	var body []byte
 	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
 		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.baseURL, "/")+"/inference/chat/completions", bytes.NewBuffer(jsonData))
@@ -1218,7 +1219,7 @@ func (c *Client) askCohere(ctx context.Context, prompt string) (string, error) {
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: aiHTTPClientTimeout}
 	var body []byte
 	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
 		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.baseURL, "/")+"/v2/chat", bytes.NewBuffer(jsonData))
@@ -1327,7 +1328,7 @@ func (c *Client) askAnthropic(ctx context.Context, prompt string) (string, error
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: aiHTTPClientTimeout}
 	var body []byte
 	triedModelFallback := false
 	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
@@ -1423,7 +1424,7 @@ func (c *Client) getLatestAnthropicModelID(ctx context.Context) (string, error) 
 	req.Header.Set("x-api-key", strings.TrimSpace(c.apiKey))
 	req.Header.Set("anthropic-version", "2023-06-01")
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: aiHTTPClientTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch Anthropic models: %w", err)
@@ -1816,7 +1817,7 @@ func (c *Client) askAnthropicWithHistory(ctx context.Context, conv *Conversation
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: aiHTTPClientTimeout}
 	var body []byte
 	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
 		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.baseURL, "/")+"/messages", bytes.NewBuffer(jsonData))
@@ -1911,7 +1912,7 @@ func (c *Client) askOpenAIWithHistory(ctx context.Context, conv *ConversationCon
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: aiHTTPClientTimeout}
 	var body []byte
 	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
 		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.baseURL, "/")+"/chat/completions", bytes.NewBuffer(jsonData))
@@ -1996,7 +1997,7 @@ func (c *Client) askGitHubModelsWithHistory(ctx context.Context, conv *Conversat
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: aiHTTPClientTimeout}
 	var body []byte
 	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
 		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.baseURL, "/")+"/inference/chat/completions", bytes.NewBuffer(jsonData))
@@ -2167,7 +2168,7 @@ func (c *Client) askCohereWithHistory(ctx context.Context, conv *ConversationCon
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: aiHTTPClientTimeout}
 	var body []byte
 	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
 		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.baseURL, "/")+"/v2/chat", bytes.NewBuffer(jsonData))

@@ -65,13 +65,21 @@ func init() {
 	rootCmd.PersistentFlags().String("backend-env", "", "Backend environment: testing, staging, production (or set CLANKER_BACKEND_ENV)")
 	rootCmd.PersistentFlags().String("backend-url", "", "Backend API URL, overrides backend-env (or set CLANKER_BACKEND_URL)")
 
-	// TODO: add error return here
-	viper.BindPFlag("debug", rootCmd.PersistentFlags().Lookup("debug"))
-	viper.BindPFlag("local_mode", rootCmd.PersistentFlags().Lookup("local-mode"))
-	viper.BindPFlag("local_delay_ms", rootCmd.PersistentFlags().Lookup("local-delay"))
-	viper.BindPFlag("backend.api_key", rootCmd.PersistentFlags().Lookup("api-key"))
-	viper.BindPFlag("backend.env", rootCmd.PersistentFlags().Lookup("backend-env"))
-	viper.BindPFlag("backend.url", rootCmd.PersistentFlags().Lookup("backend-url"))
+	for _, binding := range []struct {
+		key  string
+		flag string
+	}{
+		{"debug", "debug"},
+		{"local_mode", "local-mode"},
+		{"local_delay_ms", "local-delay"},
+		{"backend.api_key", "api-key"},
+		{"backend.env", "backend-env"},
+		{"backend.url", "backend-url"},
+	} {
+		if err := viper.BindPFlag(binding.key, rootCmd.PersistentFlags().Lookup(binding.flag)); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to bind flag %s: %v\n", binding.flag, err)
+		}
+	}
 
 	// Set defaults for local mode
 	viper.SetDefault("local_mode", true)

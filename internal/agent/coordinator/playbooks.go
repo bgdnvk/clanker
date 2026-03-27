@@ -26,11 +26,23 @@ func (c *Coordinator) discoverServicesWithAI(ctx context.Context, params map[str
 
 func (c *Coordinator) minimalServiceDiscovery(ctx context.Context) (any, error) {
 	services := make(map[string]any)
+	var errors []string
+
 	if lambdaResult, err := c.client.ExecuteOperation(ctx, "list_lambda_functions", map[string]any{}); err == nil {
 		services["lambda_functions"] = lambdaResult
+	} else {
+		errors = append(errors, fmt.Sprintf("lambda discovery: %v", err))
 	}
+
 	if logsResult, err := c.client.ExecuteOperation(ctx, "list_log_groups", map[string]any{}); err == nil {
 		services["log_groups"] = logsResult
+	} else {
+		errors = append(errors, fmt.Sprintf("log group discovery: %v", err))
+	}
+
+	// Return an error only when every discovery call failed.
+	if len(services) == 0 && len(errors) > 0 {
+		return services, fmt.Errorf("all service discovery failed: %s", strings.Join(errors, "; "))
 	}
 	return services, nil
 }
@@ -124,11 +136,42 @@ func (c *Coordinator) fallbackLogInvestigation(ctx context.Context, discovered m
 }
 
 func (c *Coordinator) investigateGeneralLogs(ctx context.Context, logGroupData any) (any, error) {
-	return c.client.ExecuteOperation(ctx, "get_recent_logs", map[string]any{
+	// Try to extract the first log group name from the discovery data
+	// so we query a specific group instead of relying on a default.
+	logGroupName := ""
+	if dataStr, ok := logGroupData.(string); ok {
+		lines := strings.Split(dataStr, "\n")
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "/") && !strings.Contains(trimmed, "|") {
+				logGroupName = trimmed
+				break
+			}
+			if strings.Contains(line, "|") {
+				parts := strings.Split(line, "|")
+				for _, part := range parts {
+					part = strings.TrimSpace(part)
+					if strings.HasPrefix(part, "/") {
+						logGroupName = part
+						break
+					}
+				}
+				if logGroupName != "" {
+					break
+				}
+			}
+		}
+	}
+
+	params := map[string]any{
 		"hours_back":     6,
 		"limit":          200,
 		"filter_pattern": "?ERROR ?Exception ?CRITICAL ?WARN ?WARNING",
-	})
+	}
+	if logGroupName != "" {
+		params["log_group_name"] = logGroupName
+	}
+	return c.client.ExecuteOperation(ctx, "get_recent_logs", params)
 }
 
 func (c *Coordinator) findRelevantServices(lambdaData any, query string) []string {
