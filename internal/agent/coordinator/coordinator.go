@@ -250,14 +250,16 @@ func (c *Coordinator) runParallelAgent(ctx context.Context, agent *ParallelAgent
 		}
 
 		if err != nil {
-			agent.Error = err
 			if verbose {
-				fmt.Printf("❌ Agent %s operation %s failed: %v\n", agent.ID, op.Operation, err)
+				fmt.Printf("Agent %s operation %s failed: %v\n", agent.ID, op.Operation, err)
 			}
+			// Service discovery and log investigation failures are non-fatal:
+			// the agent continues with whatever data it has gathered so far.
 			if op.Operation == "discover_services" || op.Operation == "investigate_service_logs" {
-				agent.Error = nil
+				agent.Results[fmt.Sprintf("%s_%s_error", agent.Type.Name, op.Operation)] = err.Error()
 				continue
 			}
+			agent.Error = err
 			return
 		}
 
