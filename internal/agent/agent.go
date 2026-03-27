@@ -9,8 +9,6 @@ import (
 
 	"github.com/bgdnvk/clanker/internal/agent/coordinator"
 	dt "github.com/bgdnvk/clanker/internal/agent/decisiontree"
-
-	// "github.com/bgdnvk/clanker/internal/agent/memory" // TODO: enable once we persist memory in a DB
 	"github.com/bgdnvk/clanker/internal/agent/model"
 	"github.com/bgdnvk/clanker/internal/agent/semantic"
 	awsclient "github.com/bgdnvk/clanker/internal/aws"
@@ -33,19 +31,17 @@ type (
 	ChainOfThought   = model.ChainOfThought
 	AgentContext     = model.AgentContext
 	SemanticAnalyzer = semantic.Analyzer
-	// AgentMemory      = memory.AgentMemory // TODO: re-enable persisted memory store
-	DecisionTree = dt.Tree
-	DecisionNode = dt.Node
-	LLMOperation = awsclient.LLMOperation
+	DecisionTree     = dt.Tree
+	DecisionNode     = dt.Node
+	LLMOperation     = awsclient.LLMOperation
 )
 
 // Agent represents the intelligent context-gathering agent
 type Agent struct {
-	client   *awsclient.Client
-	debug    bool
-	maxSteps int
-	// memory       *AgentMemory // TODO: wire persistent DB-backed memory store
-	aiDecisionFn func(context.Context, string) (string, error) // AI decision making function
+	client       *awsclient.Client
+	debug        bool
+	maxSteps     int
+	aiDecisionFn func(context.Context, string) (string, error)
 }
 
 // NewAgent creates a new intelligent agent for context gathering
@@ -92,18 +88,6 @@ func (a *Agent) InvestigateQuery(ctx context.Context, query string) (*AgentConte
 		"time_frame":      queryIntent.TimeFrame,
 		"data_types":      queryIntent.DataTypes,
 	}
-
-	// TODO: Re-enable similarity lookups once queries are persisted outside process memory.
-	/*
-		if a.memory == nil {
-			a.memory = memory.New(50) // Keep last 50 queries
-		}
-
-		similarQueries := a.memory.GetSimilarQueries(queryIntent, 3)
-		if len(similarQueries) > 0 && verbose {
-			fmt.Printf("🧠 Found %d similar queries in memory\n", len(similarQueries))
-		}
-	*/
 
 	// Initial chain of thought with semantic analysis
 	a.addThought(agentCtx, fmt.Sprintf("Starting investigation of query: '%s'", query), "analyze", "Query received, beginning analysis")
@@ -203,33 +187,6 @@ func (a *Agent) InvestigateQuery(ctx context.Context, query string) (*AgentConte
 	}
 	a.addThought(agentCtx, fmt.Sprintf("Investigation complete: %d data points gathered across %d steps", dataCount, agentCtx.CurrentStep), "summary", "Ready to analyze findings and provide response")
 
-	// TODO: Persist query contexts & learned patterns once the agent connects to a database.
-	/*
-		queryContext := QueryContext{
-			Query:         query,
-			Timestamp:     time.Now(),
-			Intent:        queryIntent,
-			Results:       agentCtx.GatheredData,
-			ExecutionTime: time.Since(agentCtx.LastUpdateTime),
-			Success:       len(agentCtx.GatheredData) > 0,
-		}
-		a.memory.AddQueryContext(queryContext)
-
-		if queryContext.Success && queryIntent.Confidence > 0.7 {
-			conditions := []string{
-				fmt.Sprintf("intent=%s", queryIntent.Primary),
-				fmt.Sprintf("urgency=%s", queryIntent.Urgency),
-			}
-			for _, service := range queryIntent.TargetServices {
-				conditions = append(conditions, fmt.Sprintf("service=%s", service))
-			}
-
-			patternName := fmt.Sprintf("%s_%s_pattern", queryIntent.Primary, queryIntent.Urgency)
-			description := fmt.Sprintf("Successful %s investigation with %s urgency", queryIntent.Primary, queryIntent.Urgency)
-			a.memory.LearnPattern(patternName, description, conditions)
-		}
-	*/
-
 	return agentCtx, nil
 }
 
@@ -291,7 +248,6 @@ Respond with ONLY a JSON object:
   "aws_functions": [{"function": "function_name", "parameters": {"key": "value"}, "reasoning": "why", "service_type": "aws_service"}],
   "reasoning": "detailed explanation of why this action is needed",
   "confidence": 0.85,
-  "next_steps": ["what you plan to do after this"],
   "is_complete": false,
   "parameters": {"key": "value"}
 }
