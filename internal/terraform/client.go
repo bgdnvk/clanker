@@ -47,9 +47,12 @@ func NewClient(workspace string) (*Client, error) {
 		return nil, fmt.Errorf("terraform workspace '%s' not found in configuration", workspace)
 	}
 
-	config := workspaceData.(map[string]interface{})
-	path, ok := config["path"].(string)
+	config, ok := workspaceData.(map[string]interface{})
 	if !ok {
+		return nil, fmt.Errorf("terraform workspace '%s' has invalid configuration format", workspace)
+	}
+	path, pathOk := config["path"].(string)
+	if !pathOk {
 		return nil, fmt.Errorf("terraform workspace '%s' has no path configured", workspace)
 	}
 
