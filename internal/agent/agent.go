@@ -139,8 +139,12 @@ func (a *Agent) InvestigateQuery(ctx context.Context, query string) (*AgentConte
 	if len(applicableNodes) > 0 {
 		coord.SpawnAgents(ctx, applicableNodes)
 
-		// Wait for parallel agents to complete (with shorter timeout for faster decisions)
-		timeout := 15 * time.Second
+		// Wait for parallel agents to complete.
+		// Configurable via agent.timeout in config, defaults to 15s.
+		timeout := time.Duration(viper.GetInt("agent.timeout")) * time.Second
+		if timeout <= 0 {
+			timeout = 15 * time.Second
+		}
 		err := coord.WaitForCompletion(ctx, timeout)
 		if err != nil {
 			a.addThought(agentCtx, fmt.Sprintf("Some parallel agents failed or timed out: %v", err), "warning", "Proceeding with available data")

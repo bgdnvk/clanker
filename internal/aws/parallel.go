@@ -50,8 +50,21 @@ func (c *Client) executeOperationsWithProfile(ctx context.Context, operations []
 
 		go func(index int, operation string, params map[string]interface{}) {
 			defer wg.Done()
+
+			// Check for context cancellation before starting the operation.
+			select {
+			case <-ctx.Done():
+				resultChan <- LLMOperationResult{
+					Operation: operation,
+					Error:     ctx.Err(),
+					Index:     index,
+				}
+				return
+			default:
+			}
+
 			if verbose {
-				log.Printf("🚀 Starting operation %d: %s", index+1, operation)
+				log.Printf("Starting operation %d: %s", index+1, operation)
 			}
 
 			start := time.Now()
