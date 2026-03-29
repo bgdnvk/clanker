@@ -95,6 +95,81 @@ clanker ask --aws --profile clankercloud-tekbog "what lambdas do we have?" | cat
 
 ## Usage
 
+### MCP
+
+Clanker also exposes its own MCP surface as a CLI command.
+
+Run it over HTTP:
+
+```bash
+clanker mcp --transport http --listen 127.0.0.1:39393 | cat
+```
+
+Or over stdio for MCP clients that launch commands directly:
+
+```bash
+clanker mcp --transport stdio | cat
+```
+
+The CLI MCP currently exposes tools to:
+
+- return the installed Clanker version
+- return Clanker routing decisions for a prompt
+- run local `clanker` commands through MCP, including `ask`, `openclaw`, and other subcommands
+
+Clanker chat routing also recognizes Clanker Cloud app questions now. If you use `clanker talk` and ask about the running desktop app or its saved settings, it will try the local Clanker Cloud backend first and fall back to Hermes if the app is not running.
+
+Examples:
+
+```bash
+clanker ask --route-only "use clanker cloud mcp to show my saved settings" | cat
+clanker ask --route-only "ask clanker cloud about the running app backend" | cat
+clanker mcp --transport http --listen 127.0.0.1:39393 | cat
+```
+
+Example MCP calls against the standalone Clanker CLI server:
+
+```bash
+# Start the HTTP MCP server
+clanker mcp --transport http --listen 127.0.0.1:39393 | cat
+
+# Initialize a client session
+curl -sS -X POST http://127.0.0.1:39393/mcp \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"local-cli","version":"1.0"}}}' | jq
+
+# List available CLI MCP tools
+curl -sS -X POST http://127.0.0.1:39393/mcp \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | jq
+
+# Return the installed clanker version
+curl -sS -X POST http://127.0.0.1:39393/mcp \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    --data '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"clanker_version","arguments":{}}}' | jq
+
+# Return the internal route decision for a prompt
+curl -sS -X POST http://127.0.0.1:39393/mcp \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    --data '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"clanker_route_question","arguments":{"question":"use clanker cloud mcp to show my saved settings"}}}' | jq
+
+# Run a real clanker command through MCP
+curl -sS -X POST http://127.0.0.1:39393/mcp \
+    -H 'Content-Type: application/json' \
+    -H 'Accept: application/json, text/event-stream' \
+    --data '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"clanker_run_command","arguments":{"args":["ask","--route-only","use clanker cloud mcp to show my saved settings"]}}}' | jq
+```
+
+The standalone CLI MCP currently exposes these tools:
+
+- `clanker_version`
+- `clanker_route_question`
+- `clanker_run_command`
+
 Flags:
 
 - `--aws`: force AWS context/tooling for the question (uses the default env/profile from `~/.clanker.yaml` unless you pass `--profile`)

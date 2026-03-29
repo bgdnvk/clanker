@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/bgdnvk/clanker/internal/clankercloud"
 	"github.com/bgdnvk/clanker/internal/hermes"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -92,6 +93,17 @@ func runHermesTalk(parentCtx context.Context, debug bool) error {
 			break
 		}
 
+		routedAgent, _ := determineRoutingDecision(input)
+		if routedAgent == "clanker-cloud" {
+			if handled, err := handleClankerCloudTalk(ctx, input, debug); handled {
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				}
+				fmt.Println()
+				continue
+			}
+		}
+
 		events, err := runner.Prompt(ctx, input)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -126,6 +138,33 @@ func runHermesTalk(parentCtx context.Context, debug bool) error {
 	}
 
 	return nil
+}
+
+func handleClankerCloudTalk(ctx context.Context, question string, debug bool) (bool, error) {
+	client := clankercloud.NewClient()
+	result, err := client.AskAgent(ctx, question, "")
+	if err != nil {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[clanker-cloud] route selected but app backend unavailable: %v\n", err)
+		}
+		return false, nil
+	}
+
+	if result.Status < 200 || result.Status >= 300 {
+		message := strings.TrimSpace(result.FinalMessage)
+		if message == "" {
+			message = fmt.Sprintf("backend status %d", result.Status)
+		}
+		return true, fmt.Errorf("clanker-cloud request failed: %s", message)
+	}
+
+	fmt.Print("clanker-cloud> ")
+	if strings.TrimSpace(result.FinalMessage) != "" {
+		fmt.Println(result.FinalMessage)
+	} else {
+		fmt.Println("No response from Clanker Cloud.")
+	}
+	return true, nil
 }
 
 func init() {
