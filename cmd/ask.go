@@ -39,6 +39,30 @@ import (
 // askCmd represents the ask command
 const defaultGeminiModel = "gemini-2.5-flash"
 
+const routeOnlySystemPrompt = `You are a routing classifier for Clanker.
+
+Return exactly one target in JSON with fields 'agent' and 'reason'.
+
+Valid targets:
+- agent-cli: infrastructure questions, status, logs, troubleshooting, analysis, read-only guidance.
+- agent-diagram: diagram-only changes, canvas/layout updates, visual planning without real infra changes.
+- agent-maker: requests to create, modify, deploy, scale, wire, or delete real infrastructure/resources.
+- none: empty or unsupported requests.
+
+Rules:
+- If the user wants actual infra/resource changes, choose agent-maker.
+- If the user wants only visual/diagram changes, choose agent-diagram.
+- If the user is asking questions, analysis, explanation, logs, status, or advisory guidance, choose agent-cli.
+- Prefer agent-maker when the request is actionable and would normally produce a plan/apply workflow.
+- If uncertain, choose agent-cli.
+
+Respond strictly as JSON.`
+
+type routeDecision struct {
+	Agent  string `json:"agent"`
+	Reason string `json:"reason"`
+}
+
 var askCmd = &cobra.Command{
 	Use:   "ask [question]",
 	Short: "Ask AI about your cloud infrastructure or GitHub repository",
@@ -114,7 +138,10 @@ Examples:
 
 		// Handle route-only mode: return routing decision as JSON without executing
 		if routeOnly {
-			agent, reason := determineRoutingDecision(question)
+			provider := resolveAIProvider(aiProfile)
+			maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel, githubModel)
+			apiKey := resolveAIAPIKey(provider, openaiKey, anthropicKey, geminiKey, deepseekKey, cohereKey, minimaxKey)
+			agent, reason := determineRoutingDecisionWithAI(context.Background(), question, provider, aiProfile, apiKey, debug)
 			result := map[string]string{
 				"agent":  agent,
 				"reason": reason,
@@ -1148,6 +1175,62 @@ Format as a professional compliance table suitable for government security docum
 	},
 }
 
+func resolveAIProvider(aiProfile string) string {
+	if strings.TrimSpace(aiProfile) != "" {
+		return strings.TrimSpace(aiProfile)
+	}
+	provider := viper.GetString("ai.default_provider")
+	if provider == "" {
+		provider = "openai"
+	}
+	return provider
+}
+
+func resolveAIAPIKey(provider, openaiKey, anthropicKey, geminiKey, deepseekKey, cohereKey, minimaxKey string) string {
+	switch provider {
+	case "gemini", "github-models":
+		return ""
+	case "gemini-api":
+		return resolveGeminiAPIKey(geminiKey)
+	case "openai":
+		return resolveOpenAIKey(openaiKey)
+	case "anthropic":
+		return resolveAnthropicKey(anthropicKey)
+	case "deepseek":
+		return resolveDeepSeekKey(deepseekKey)
+	case "cohere":
+		return resolveCohereKey(cohereKey)
+	case "minimax":
+		return resolveMiniMaxKey(minimaxKey)
+	default:
+		return viper.GetString("ai.api_key")
+	}
+}
+
+func determineRoutingDecisionWithAI(ctx context.Context, question, provider, aiProfile, apiKey string, debug bool) (agent string, reason string) {
+	q := questionForRouting(question)
+	if strings.TrimSpace(q) == "" {
+		return "none", "empty question"
+	}
+
+	if provider != "" {
+		client := ai.NewClient(provider, apiKey, debug, aiProfile)
+		conv := ai.NewConversationContext(routeOnlySystemPrompt)
+		response, err := client.AskWithContext(ctx, conv, fmt.Sprintf("Classify this request for routing and respond with JSON only. Question: %s", q))
+		if err == nil {
+			if parsed, parseErr := parseRouteDecision(response); parseErr == nil {
+				return parsed.Agent, parsed.Reason
+			}
+		}
+	}
+
+	return determineRoutingDecisionHeuristic(q)
+}
+
+func determineRoutingDecision(question string) (agent string, reason string) {
+	return determineRoutingDecisionHeuristic(questionForRouting(question))
+}
+
 func init() {
 	rootCmd.AddCommand(askCmd)
 
@@ -1432,9 +1515,29 @@ func maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiMod
 			viper.Set("ai.providers.minimax.model", strings.TrimSpace(minimaxModel))
 		}
 	case "github-models":
-		if strings.TrimSpace(githubModel) != "" {
-			viper.Set("ai.providers.github-models.model", strings.TrimSpace(githubModel))
+		if normalized := normalizeGitHubModelsModel(githubModel); normalized != "" {
+			viper.Set("ai.providers.github-models.model", normalized)
 		}
+	}
+}
+
+func normalizeGitHubModelsModel(raw string) string {
+	model := strings.TrimSpace(raw)
+	if model == "" {
+		return ""
+	}
+	if strings.Contains(model, "/") {
+		return model
+	}
+	switch {
+	case strings.HasPrefix(model, "gpt-"):
+		return "openai/" + model
+	case strings.HasPrefix(model, "claude-"):
+		return "anthropic/" + model
+	case strings.HasPrefix(model, "gemini-"):
+		return "google/" + model
+	default:
+		return model
 	}
 }
 
@@ -2549,19 +2652,64 @@ func executeK8sPlan(ctx context.Context, rawPlan string, profile string, debug b
 	return nil
 }
 
-// determineRoutingDecision analyzes a question and returns which agent should handle it.
-// This is used by the --route-only flag to return routing decisions without executing.
-func determineRoutingDecision(question string) (agent string, reason string) {
+func parseRouteDecision(raw string) (routeDecision, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return routeDecision{}, fmt.Errorf("empty route decision")
+	}
+
+	var parsed routeDecision
+	if err := json.Unmarshal([]byte(trimmed), &parsed); err == nil {
+		return normalizeRouteDecision(parsed), nil
+	}
+
+	for i := 0; i < len(trimmed); i++ {
+		if trimmed[i] != '{' {
+			continue
+		}
+		dec := json.NewDecoder(strings.NewReader(trimmed[i:]))
+		if err := dec.Decode(&parsed); err == nil {
+			return normalizeRouteDecision(parsed), nil
+		}
+	}
+
+	return routeDecision{}, fmt.Errorf("no valid route decision json found")
+}
+
+func normalizeRouteDecision(parsed routeDecision) routeDecision {
+	agent := strings.ToLower(strings.TrimSpace(parsed.Agent))
+	switch agent {
+	case "maker", "k8s-maker", "agent-maker":
+		parsed.Agent = "agent-maker"
+	case "diagram", "agent-diagram":
+		parsed.Agent = "agent-diagram"
+	case "cli", "agent-cli", "k8s", "terraform", "iam", "clanker-cloud", "hermes":
+		parsed.Agent = "agent-cli"
+	case "none":
+		parsed.Agent = "none"
+	default:
+		parsed.Agent = "agent-cli"
+	}
+	parsed.Reason = strings.TrimSpace(parsed.Reason)
+	if parsed.Reason == "" {
+		parsed.Reason = "router returned no reason"
+	}
+	return parsed
+}
+
+// determineRoutingDecisionHeuristic analyzes a question and returns which agent should handle it.
+// This is a fallback used when intelligent route-only classification is unavailable.
+func determineRoutingDecisionHeuristic(question string) (agent string, reason string) {
 	questionLower := strings.ToLower(question)
 	if isClankerCloudQuestion(questionLower) {
-		return "clanker-cloud", "Explicit Clanker Cloud app request detected"
+		return "agent-cli", "Explicit Clanker Cloud app request detected"
 	}
 
 	// Check for explicit Hermes agent requests
 	hermesKeywords := []string{"hermes", "hermes agent", "talk to hermes", "use hermes"}
 	for _, kw := range hermesKeywords {
 		if strings.Contains(questionLower, kw) {
-			return "hermes", "Hermes agent explicitly requested"
+			return "agent-cli", "Hermes agent explicitly requested"
 		}
 	}
 
@@ -2579,7 +2727,7 @@ func determineRoutingDecision(question string) (agent string, reason string) {
 	}
 	for _, kw := range iamKeywords {
 		if strings.Contains(questionLower, kw) {
-			return "iam", "IAM query or security analysis request"
+			return "agent-cli", "IAM query or security analysis request"
 		}
 	}
 
@@ -2590,7 +2738,7 @@ func determineRoutingDecision(question string) (agent string, reason string) {
 	}
 	for _, kw := range terraformSignals {
 		if strings.Contains(questionLower, kw) {
-			return "terraform", "Terraform query or analysis request"
+			return "agent-cli", "Terraform query or analysis request"
 		}
 	}
 
@@ -2602,7 +2750,7 @@ func determineRoutingDecision(question string) (agent string, reason string) {
 	}
 	for _, kw := range diagramKeywords {
 		if strings.Contains(questionLower, kw) {
-			return "diagram", "Diagram or visualization request detected"
+			return "agent-diagram", "Diagram or visualization request detected"
 		}
 	}
 
@@ -2656,23 +2804,23 @@ func determineRoutingDecision(question string) (agent string, reason string) {
 	if hasAction {
 		// Check K8s resources first (more specific)
 		if hasK8sResource {
-			return "k8s-maker", "K8s infrastructure provisioning or modification request"
+			return "agent-maker", "K8s infrastructure provisioning or modification request"
 		}
 		// Check AWS resources
 		for _, resource := range awsResources {
 			if strings.Contains(questionLower, resource) {
-				return "maker", "AWS infrastructure provisioning or modification request"
+				return "agent-maker", "AWS infrastructure provisioning or modification request"
 			}
 		}
 	}
 
 	// K8s read queries (no action keyword but mentions K8s resources)
 	if hasK8sResource {
-		return "k8s", "K8s query or analysis request"
+		return "agent-cli", "K8s query or analysis request"
 	}
 
 	// Default to CLI for general queries
-	return "cli", "General infrastructure query or analysis"
+	return "agent-cli", "General infrastructure query or analysis"
 }
 
 func isClankerCloudQuestion(questionLower string) bool {

@@ -76,7 +76,7 @@ func GetAIProfile(providerName string) (*AIProfile, error) {
 		case "github-models":
 			return &AIProfile{
 				Provider: "github-models",
-				Model:    "openai/gpt-5.4",
+				Model:    "",
 			}, nil
 		case "minimax":
 			return &AIProfile{

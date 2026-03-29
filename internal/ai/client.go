@@ -1103,6 +1103,88 @@ func (c *Client) resolveGitHubModelsToken(ctx context.Context) string {
 	return strings.TrimSpace(string(output))
 }
 
+func normalizeGitHubModelsModel(raw string) string {
+	model := strings.TrimSpace(raw)
+	if model == "" {
+		return ""
+	}
+	if strings.Contains(model, "/") {
+		return model
+	}
+	switch {
+	case strings.HasPrefix(model, "gpt-"):
+		return "openai/" + model
+	case strings.HasPrefix(model, "claude-"):
+		return "anthropic/" + model
+	case strings.HasPrefix(model, "gemini-"):
+		return "google/" + model
+	default:
+		return model
+	}
+}
+
+type gitHubCatalogModel struct {
+	ID                        string   `json:"id"`
+	SupportedInputModalities  []string `json:"supported_input_modalities"`
+	SupportedOutputModalities []string `json:"supported_output_modalities"`
+}
+
+func containsTextModality(values []string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), "text") {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveDefaultGitHubModelsModel(ctx context.Context, token string) (string, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://models.github.ai/catalog/models", nil)
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("X-GitHub-Api-Version", "2026-03-10")
+
+	client := &http.Client{Timeout: aiHTTPClientTimeout}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
+		return "", fmt.Errorf("github models catalog failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var catalog []gitHubCatalogModel
+	if err := json.NewDecoder(resp.Body).Decode(&catalog); err != nil {
+		return "", err
+	}
+
+	for _, model := range catalog {
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		if !containsTextModality(model.SupportedInputModalities) || !containsTextModality(model.SupportedOutputModalities) {
+			continue
+		}
+		return id, nil
+	}
+
+	for _, model := range catalog {
+		id := strings.TrimSpace(model.ID)
+		if id != "" {
+			return id, nil
+		}
+	}
+
+	return "", fmt.Errorf("github models catalog returned no usable models")
+}
+
 func (c *Client) askGitHubModels(ctx context.Context, prompt string) (string, error) {
 	profileLLMCall, err := c.getAIProfile(c.aiProfile)
 	if err != nil {
@@ -1114,9 +1196,12 @@ func (c *Client) askGitHubModels(ctx context.Context, prompt string) (string, er
 		return "", fmt.Errorf("GitHub auth token not configured; run 'gh auth login' or provide a token with models access")
 	}
 
-	model := strings.TrimSpace(profileLLMCall.Model)
+	model := normalizeGitHubModelsModel(profileLLMCall.Model)
 	if model == "" {
-		model = "openai/gpt-5.4"
+		model, err = resolveDefaultGitHubModelsModel(ctx, token)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	reqBody := OpenAIRequest{
@@ -1981,14 +2066,17 @@ func (c *Client) askGitHubModelsWithHistory(ctx context.Context, conv *Conversat
 		return "", fmt.Errorf("failed to get AI profile: %w", err)
 	}
 
-	model := strings.TrimSpace(profileLLMCall.Model)
-	if model == "" {
-		model = "openai/gpt-5.4"
-	}
-
 	token := c.resolveGitHubModelsToken(ctx)
 	if token == "" {
 		return "", fmt.Errorf("GitHub auth token not configured; run 'gh auth login' or provide a token with models access")
+	}
+
+	model := normalizeGitHubModelsModel(profileLLMCall.Model)
+	if model == "" {
+		model, err = resolveDefaultGitHubModelsModel(ctx, token)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	reqBody := OpenAIRequest{Model: model, Messages: messages}
