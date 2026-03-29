@@ -187,6 +187,10 @@ func SSMRestartCommands(prelude []string, port int, image string, startCmd strin
 
 	extraEnvLines := envFileLinesFromBindings(bindings)
 	for _, line := range extraEnvLines {
+		if idx := strings.Index(line, "="); idx > 0 {
+			key := line[:idx]
+			cmds = append(cmds, fmt.Sprintf("sed -i '/^%s=/d' /tmp/clanker.env", key))
+		}
 		cmds = append(cmds, fmt.Sprintf("printf '%%s\\n' %s >> /tmp/clanker.env", shellSingleQuote(line)))
 	}
 
