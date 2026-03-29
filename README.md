@@ -1,7 +1,8 @@
 # Clanker CLI
 
-Early alpha.  
-First agent powering https://clankercloud.ai
+Alpha version.
+Docs available at https://docs.clankercloud.ai/
+Main agent powering https://clankercloud.ai
 
 Ask questions about your infra (and optionally GitHub/etc). Clanker can inspect existing environments and also generate or apply infrastructure and deploy plans through its maker and deploy flows.
 
@@ -11,7 +12,7 @@ Homebrew tap: https://github.com/clankercloud/homebrew-tap
 
 ## Install
 
-### Homebrew (recommended)
+### Homebrew (outdated beware)
 
 ```bash
 brew tap clankercloud/tap
@@ -560,4 +561,4 @@ clanker ask "show github actions status" --github --debug | cat
 
 ## Notes
 
-- Only tested on macOS.
+- Works on MacOS, Linux and Windows, please report any issues.
