@@ -1230,7 +1230,7 @@ func resolveGitHubCodingAgentModel(agentName, modelOverride string) string {
 	}
 	switch strings.TrimSpace(strings.ToLower(agentName)) {
 	case "codex":
-		return "gpt-5.4"
+		return "gpt-5.3-codex"
 	case "claude":
 		return "claude-sonnet-4.6"
 	case "copilot":
