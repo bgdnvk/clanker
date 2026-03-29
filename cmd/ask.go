@@ -2553,6 +2553,9 @@ func executeK8sPlan(ctx context.Context, rawPlan string, profile string, debug b
 // This is used by the --route-only flag to return routing decisions without executing.
 func determineRoutingDecision(question string) (agent string, reason string) {
 	questionLower := strings.ToLower(question)
+	if isClankerCloudQuestion(questionLower) {
+		return "clanker-cloud", "Explicit Clanker Cloud app request detected"
+	}
 
 	// Check for explicit Hermes agent requests
 	hermesKeywords := []string{"hermes", "hermes agent", "talk to hermes", "use hermes"}
@@ -2670,6 +2673,48 @@ func determineRoutingDecision(question string) (agent string, reason string) {
 
 	// Default to CLI for general queries
 	return "cli", "General infrastructure query or analysis"
+}
+
+func isClankerCloudQuestion(questionLower string) bool {
+	if strings.Contains(questionLower, "clanker cloud mcp") ||
+		strings.Contains(questionLower, "clanker-cloud mcp") ||
+		strings.Contains(questionLower, "mcp server") && strings.Contains(questionLower, "clanker cloud") {
+		return true
+	}
+
+	explicitSignals := []string{
+		"clanker cloud",
+		"clanker-cloud",
+		"clanker cloud app",
+		"clanker cloud settings",
+		"clanker cloud backend",
+		"clanker cloud server",
+		"clanker cloud mcp",
+		"clanker-cloud mcp",
+		"desktop app",
+		"tauri app",
+		"saved settings",
+		"app settings",
+		"running app",
+		"local app",
+	}
+	for _, signal := range explicitSignals {
+		if strings.Contains(questionLower, signal) {
+			return true
+		}
+	}
+
+	if strings.Contains(questionLower, "profile") && strings.Contains(questionLower, "app") {
+		return true
+	}
+	if strings.Contains(questionLower, "settings") && strings.Contains(questionLower, "app") {
+		return true
+	}
+	if strings.Contains(questionLower, "settings") && strings.Contains(questionLower, "clanker") {
+		return true
+	}
+
+	return false
 }
 
 // handleHermesQuery delegates a question to the Hermes agent and prints the response.
