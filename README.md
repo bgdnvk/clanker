@@ -3,6 +3,8 @@
 Alpha version.  
 Main agent powering [Clanker Cloud](https://clankercloud.ai)
 
+Beta coming soon [clankercloud.ai](https://clankercloud.ai)
+
 Docs available at [docs.clankercloud.ai](https://docs.clankercloud.ai/)
 
 Interactive docs: [Clanker Cloud: How It Works](https://codexsims.com/explainers/clanker-cloud-how-it-works/)  
