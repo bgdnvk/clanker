@@ -379,14 +379,19 @@ func init() {
 
 func getK8sAgent() (*k8s.Agent, string, string) {
 	debug := viper.GetBool("debug")
-
-	// Resolve AWS profile
-	awsProfile := ""
 	defaultEnv := viper.GetString("infra.default_environment")
 	if defaultEnv == "" {
 		defaultEnv = "dev"
 	}
-	awsProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+
+	// Resolve AWS profile
+	awsProfile := strings.TrimSpace(os.Getenv("AWS_PROFILE"))
+	if awsProfile == "" {
+		awsProfile = strings.TrimSpace(os.Getenv("AWS_DEFAULT_PROFILE"))
+	}
+	if awsProfile == "" {
+		awsProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+	}
 	if awsProfile == "" {
 		awsProfile = viper.GetString("aws.default_profile")
 	}
@@ -395,7 +400,13 @@ func getK8sAgent() (*k8s.Agent, string, string) {
 	}
 
 	// Resolve region
-	awsRegion := viper.GetString(fmt.Sprintf("infra.aws.environments.%s.region", defaultEnv))
+	awsRegion := strings.TrimSpace(os.Getenv("AWS_REGION"))
+	if awsRegion == "" {
+		awsRegion = strings.TrimSpace(os.Getenv("AWS_DEFAULT_REGION"))
+	}
+	if awsRegion == "" {
+		awsRegion = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.region", defaultEnv))
+	}
 	if awsRegion == "" {
 		awsRegion = viper.GetString("aws.default_region")
 	}
