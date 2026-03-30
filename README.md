@@ -1,7 +1,10 @@
 # Clanker CLI
 
-Alpha version.
-Docs available at https://docs.clankercloud.ai/
+Alpha version.  
+Docs available at https://docs.clankercloud.ai/  
+
+Interactive docs: https://codexsims.com/explainers/clanker-cloud-how-it-works/  
+
 Main agent powering https://clankercloud.ai
 
 Ask questions about your infra (and optionally GitHub/etc). Clanker can inspect existing environments and also generate or apply infrastructure and deploy plans through its maker and deploy flows.
