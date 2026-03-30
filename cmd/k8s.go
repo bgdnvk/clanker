@@ -3,14 +3,17 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/bgdnvk/clanker/internal/ai"
+	"github.com/bgdnvk/clanker/internal/azure"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	"github.com/bgdnvk/clanker/internal/k8s"
 	"github.com/bgdnvk/clanker/internal/k8s/cluster"
@@ -87,8 +90,12 @@ var k8sListCmd = &cobra.Command{
 	Long: `List Kubernetes clusters of a specific type.
 
 Example:
+	clanker k8s list
+	clanker k8s list all
+	clanker k8s list existing
   clanker k8s list eks
   clanker k8s list gke --gcp-project my-project
+	clanker k8s list aks --azure-subscription <subscription-id>
   clanker k8s list kubeadm`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runListClusters,
@@ -112,8 +119,10 @@ var k8sGetKubeconfigCmd = &cobra.Command{
 	Long: `Retrieve and configure kubeconfig for a cluster.
 
 Example:
+	clanker k8s kubeconfig existing my-context
   clanker k8s kubeconfig eks my-cluster
   clanker k8s kubeconfig gke my-cluster --gcp-project my-project
+	clanker k8s kubeconfig aks my-cluster --azure-subscription <subscription-id> --azure-resource-group <resource-group>
   clanker k8s kubeconfig kubeadm my-cluster`,
 	Args: cobra.ExactArgs(2),
 	RunE: runGetKubeconfig,
@@ -125,6 +134,7 @@ var k8sResourcesCmd = &cobra.Command{
 	Long: `Fetch all Kubernetes resources (nodes, pods, services, PVs, ConfigMaps) for visualization.
 
 Example:
+	clanker k8s resources
   clanker k8s resources --cluster my-cluster
   clanker k8s resources --cluster my-cluster --output json`,
 	RunE: runGetResources,
@@ -261,6 +271,10 @@ var (
 	k8sGCPProject     string
 	k8sGCPRegion      string
 	k8sGKEPreemptible bool
+	// AKS flags
+	k8sAzureSubscription  string
+	k8sAzureResourceGroup string
+	k8sAzureRegion        string
 )
 
 func init() {
@@ -375,18 +389,44 @@ func init() {
 	k8sDeleteCmd.Flags().StringVar(&k8sGCPRegion, "gcp-region", "", "GCP region for GKE clusters")
 	k8sGetKubeconfigCmd.Flags().StringVar(&k8sGCPProject, "gcp-project", "", "GCP project ID for GKE clusters")
 	k8sGetKubeconfigCmd.Flags().StringVar(&k8sGCPRegion, "gcp-region", "", "GCP region for GKE clusters")
+	k8sListCmd.Flags().StringVar(&k8sAzureSubscription, "azure-subscription", "", "Azure subscription ID for AKS clusters")
+	k8sListCmd.Flags().StringVar(&k8sAzureResourceGroup, "azure-resource-group", "", "Azure resource group for AKS clusters")
+	k8sListCmd.Flags().StringVar(&k8sAzureRegion, "azure-region", "", "Azure region for AKS clusters")
+	k8sGetKubeconfigCmd.Flags().StringVar(&k8sAzureSubscription, "azure-subscription", "", "Azure subscription ID for AKS clusters")
+	k8sGetKubeconfigCmd.Flags().StringVar(&k8sAzureResourceGroup, "azure-resource-group", "", "Azure resource group for AKS clusters")
+	k8sGetKubeconfigCmd.Flags().StringVar(&k8sAzureRegion, "azure-region", "", "Azure region for AKS clusters")
+	k8sResourcesCmd.Flags().StringVar(&k8sAzureSubscription, "azure-subscription", "", "Azure subscription ID for AKS clusters")
+	k8sResourcesCmd.Flags().StringVar(&k8sAzureResourceGroup, "azure-resource-group", "", "Azure resource group for AKS clusters")
+	k8sResourcesCmd.Flags().StringVar(&k8sAzureRegion, "azure-region", "", "Azure region for AKS clusters")
 }
 
 func getK8sAgent() (*k8s.Agent, string, string) {
 	debug := viper.GetBool("debug")
+	awsProfile, awsRegion := resolveAWSK8sConfig()
 
-	// Resolve AWS profile
-	awsProfile := ""
+	agent := k8s.NewAgentWithOptions(k8s.AgentOptions{
+		Debug:      debug,
+		AWSProfile: awsProfile,
+		Region:     awsRegion,
+		Kubeconfig: getKubeconfigPath(),
+	})
+
+	return agent, awsProfile, awsRegion
+}
+
+func resolveAWSK8sConfig() (string, string) {
 	defaultEnv := viper.GetString("infra.default_environment")
 	if defaultEnv == "" {
 		defaultEnv = "dev"
 	}
-	awsProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+
+	awsProfile := strings.TrimSpace(os.Getenv("AWS_PROFILE"))
+	if awsProfile == "" {
+		awsProfile = strings.TrimSpace(os.Getenv("AWS_DEFAULT_PROFILE"))
+	}
+	if awsProfile == "" {
+		awsProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+	}
 	if awsProfile == "" {
 		awsProfile = viper.GetString("aws.default_profile")
 	}
@@ -394,8 +434,13 @@ func getK8sAgent() (*k8s.Agent, string, string) {
 		awsProfile = "default"
 	}
 
-	// Resolve region
-	awsRegion := viper.GetString(fmt.Sprintf("infra.aws.environments.%s.region", defaultEnv))
+	awsRegion := strings.TrimSpace(os.Getenv("AWS_REGION"))
+	if awsRegion == "" {
+		awsRegion = strings.TrimSpace(os.Getenv("AWS_DEFAULT_REGION"))
+	}
+	if awsRegion == "" {
+		awsRegion = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.region", defaultEnv))
+	}
 	if awsRegion == "" {
 		awsRegion = viper.GetString("aws.default_region")
 	}
@@ -403,13 +448,7 @@ func getK8sAgent() (*k8s.Agent, string, string) {
 		awsRegion = "us-east-1"
 	}
 
-	agent := k8s.NewAgentWithOptions(k8s.AgentOptions{
-		Debug:      debug,
-		AWSProfile: awsProfile,
-		Region:     awsRegion,
-	})
-
-	return agent, awsProfile, awsRegion
+	return awsProfile, awsRegion
 }
 
 // getGCPConfig resolves GCP project and region from flags, config, or environment
@@ -430,6 +469,461 @@ func getGCPConfig() (string, string) {
 	}
 
 	return gcpProject, gcpRegion
+}
+
+func getAKSConfig() (string, string, string) {
+	subscriptionID := strings.TrimSpace(k8sAzureSubscription)
+	if subscriptionID == "" {
+		subscriptionID = azure.ResolveSubscriptionID()
+	}
+
+	resourceGroup := strings.TrimSpace(k8sAzureResourceGroup)
+	if resourceGroup == "" {
+		resourceGroup = strings.TrimSpace(viper.GetString("infra.azure.resource_group"))
+	}
+	if resourceGroup == "" {
+		resourceGroup = strings.TrimSpace(os.Getenv("AZURE_RESOURCE_GROUP"))
+	}
+	if resourceGroup == "" {
+		resourceGroup = strings.TrimSpace(os.Getenv("AZ_RESOURCE_GROUP"))
+	}
+
+	region := strings.TrimSpace(k8sAzureRegion)
+	if region == "" {
+		region = strings.TrimSpace(viper.GetString("infra.azure.region"))
+	}
+	if region == "" {
+		region = strings.TrimSpace(os.Getenv("AZURE_REGION"))
+	}
+	if region == "" {
+		region = strings.TrimSpace(os.Getenv("AZURE_LOCATION"))
+	}
+
+	return subscriptionID, resourceGroup, region
+}
+
+type multiProviderK8sContext struct {
+	agent              *k8s.Agent
+	awsProfile         string
+	awsRegion          string
+	gcpProject         string
+	gcpRegion          string
+	azureSubscription  string
+	azureResourceGroup string
+	azureRegion        string
+	kubeconfigPath     string
+}
+
+type discoveredK8sCluster struct {
+	Provider k8s.ClusterType
+	Info     k8s.ClusterInfo
+}
+
+func getK8sAgentWithAvailableProviders() *multiProviderK8sContext {
+	debug := viper.GetBool("debug")
+	awsProfile, awsRegion := resolveAWSK8sConfig()
+	kubeconfigPath := getKubeconfigPath()
+	agent := k8s.NewAgentWithOptions(k8s.AgentOptions{
+		Debug:      debug,
+		Kubeconfig: kubeconfigPath,
+	})
+
+	ctx := &multiProviderK8sContext{
+		agent:          agent,
+		awsProfile:     awsProfile,
+		awsRegion:      awsRegion,
+		kubeconfigPath: kubeconfigPath,
+	}
+
+	if commandExists("aws") {
+		agent.RegisterEKSProvider(awsProfile, awsRegion)
+		agent.RegisterKubeadmProvider(k8s.KubeadmProviderOptions{
+			AWSProfile: awsProfile,
+			Region:     awsRegion,
+		})
+	}
+
+	gcpProject, gcpRegion := getGCPConfig()
+	ctx.gcpProject = gcpProject
+	ctx.gcpRegion = gcpRegion
+	if commandExists("gcloud") && gcpProject != "" {
+		agent.RegisterGKEProvider(gcpProject, gcpRegion)
+	}
+
+	azureSubscription, azureResourceGroup, azureRegion := getAKSConfig()
+	ctx.azureSubscription = azureSubscription
+	ctx.azureResourceGroup = azureResourceGroup
+	ctx.azureRegion = azureRegion
+	if commandExists("az") && azureSubscription != "" {
+		agent.RegisterAKSProvider(azureSubscription, azureResourceGroup, azureRegion)
+	}
+
+	return ctx
+}
+
+func commandExists(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+func hasAWSProviderSignals() bool {
+	defaultEnv := viper.GetString("infra.default_environment")
+	if defaultEnv == "" {
+		defaultEnv = "dev"
+	}
+
+	for _, value := range []string{
+		strings.TrimSpace(os.Getenv("AWS_PROFILE")),
+		strings.TrimSpace(os.Getenv("AWS_DEFAULT_PROFILE")),
+		strings.TrimSpace(os.Getenv("AWS_REGION")),
+		strings.TrimSpace(os.Getenv("AWS_DEFAULT_REGION")),
+		strings.TrimSpace(os.Getenv("AWS_ACCESS_KEY_ID")),
+		strings.TrimSpace(viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))),
+		strings.TrimSpace(viper.GetString(fmt.Sprintf("infra.aws.environments.%s.region", defaultEnv))),
+		strings.TrimSpace(viper.GetString("aws.default_profile")),
+		strings.TrimSpace(viper.GetString("aws.default_region")),
+	} {
+		if value != "" {
+			return true
+		}
+	}
+
+	return false
+}
+
+func listDiscoveredK8sClusters(ctx context.Context, providerCtx *multiProviderK8sContext) ([]discoveredK8sCluster, map[k8s.ClusterType]error) {
+	type providerFetcher struct {
+		providerType k8s.ClusterType
+		fetch        func() ([]k8s.ClusterInfo, error)
+	}
+
+	fetchers := []providerFetcher{
+		{providerType: k8s.ClusterTypeExisting, fetch: func() ([]k8s.ClusterInfo, error) {
+			provider, ok := providerCtx.agent.GetClusterProvider(k8s.ClusterTypeExisting)
+			if !ok {
+				return nil, nil
+			}
+			return provider.ListClusters(ctx)
+		}},
+		{providerType: k8s.ClusterTypeEKS, fetch: func() ([]k8s.ClusterInfo, error) {
+			provider, ok := providerCtx.agent.GetClusterProvider(k8s.ClusterTypeEKS)
+			if !ok {
+				return nil, nil
+			}
+			_ = provider
+			return providerCtx.agent.ListEKSClusters(ctx)
+		}},
+		{providerType: k8s.ClusterTypeGKE, fetch: func() ([]k8s.ClusterInfo, error) {
+			provider, ok := providerCtx.agent.GetClusterProvider(k8s.ClusterTypeGKE)
+			if !ok {
+				return nil, nil
+			}
+			_ = provider
+			return providerCtx.agent.ListGKEClusters(ctx)
+		}},
+		{providerType: k8s.ClusterTypeAKS, fetch: func() ([]k8s.ClusterInfo, error) {
+			provider, ok := providerCtx.agent.GetClusterProvider(k8s.ClusterTypeAKS)
+			if !ok {
+				return nil, nil
+			}
+			_ = provider
+			return providerCtx.agent.ListAKSClusters(ctx)
+		}},
+		{providerType: k8s.ClusterTypeKubeadm, fetch: func() ([]k8s.ClusterInfo, error) {
+			provider, ok := providerCtx.agent.GetClusterProvider(k8s.ClusterTypeKubeadm)
+			if !ok {
+				return nil, nil
+			}
+			return provider.ListClusters(ctx)
+		}},
+	}
+
+	discovered := make([]discoveredK8sCluster, 0)
+	errs := make(map[k8s.ClusterType]error)
+
+	for _, fetcher := range fetchers {
+		clusters, err := fetcher.fetch()
+		if err != nil {
+			errs[fetcher.providerType] = err
+			continue
+		}
+		sort.Slice(clusters, func(i, j int) bool {
+			return clusters[i].Name < clusters[j].Name
+		})
+		for _, info := range clusters {
+			discovered = append(discovered, discoveredK8sCluster{
+				Provider: fetcher.providerType,
+				Info:     info,
+			})
+		}
+	}
+
+	return discovered, errs
+}
+
+func getDiscoveredClustersByProvider(ctx context.Context, providerCtx *multiProviderK8sContext) (map[k8s.ClusterType][]k8s.ClusterInfo, map[k8s.ClusterType]error) {
+	discovered, errs := listDiscoveredK8sClusters(ctx, providerCtx)
+	grouped := make(map[k8s.ClusterType][]k8s.ClusterInfo)
+	for _, item := range discovered {
+		grouped[item.Provider] = append(grouped[item.Provider], item.Info)
+	}
+	return grouped, errs
+}
+
+func providerDisplayName(clusterType k8s.ClusterType) string {
+	switch clusterType {
+	case k8s.ClusterTypeExisting:
+		return "existing"
+	default:
+		return string(clusterType)
+	}
+}
+
+func getResourcesFromContext(ctx context.Context, clusterName, kubeconfigPath, kubeContext string, debug bool) (*k8s.ClusterResources, error) {
+	agent := k8s.NewAgentWithOptions(k8s.AgentOptions{
+		Debug:      debug,
+		Kubeconfig: kubeconfigPath,
+	})
+	agent.SetClient(k8s.NewClient(kubeconfigPath, kubeContext, debug))
+
+	return agent.GetClusterResources(ctx, clusterName, k8s.QueryOptions{
+		ClusterName: clusterName,
+		Kubeconfig:  kubeconfigPath,
+	})
+}
+
+func findExistingClusterContext(ctx context.Context, providerCtx *multiProviderK8sContext, clusterName string) (string, bool, error) {
+	provider, ok := providerCtx.agent.GetClusterProvider(k8s.ClusterTypeExisting)
+	if !ok {
+		return "", false, nil
+	}
+
+	if _, err := provider.GetCluster(ctx, clusterName); err == nil {
+		return clusterName, true, nil
+	} else {
+		var notFound *cluster.ErrClusterNotFound
+		if errors.As(err, &notFound) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+}
+
+func findMatchingExistingClusterContext(ctx context.Context, providerCtx *multiProviderK8sContext, clusterName string) (string, bool, error) {
+	provider, ok := providerCtx.agent.GetClusterProvider(k8s.ClusterTypeExisting)
+	if !ok {
+		return "", false, nil
+	}
+
+	clusters, err := provider.ListClusters(ctx)
+	if err != nil {
+		return "", false, err
+	}
+
+	for _, info := range clusters {
+		if info.Name == clusterName {
+			return info.Name, true, nil
+		}
+	}
+
+	matches := make([]string, 0)
+	for _, info := range clusters {
+		if strings.Contains(info.Name, clusterName) {
+			matches = append(matches, info.Name)
+		}
+	}
+
+	if len(matches) == 1 {
+		return matches[0], true, nil
+	}
+	if len(matches) > 1 {
+		sort.Strings(matches)
+		return "", false, fmt.Errorf("multiple kubeconfig contexts match cluster %q: %s", clusterName, strings.Join(matches, ", "))
+	}
+
+	return "", false, nil
+}
+
+func resolveKubeContextName(ctx context.Context, providerCtx *multiProviderK8sContext, clusterName string) (string, error) {
+	currentContext := getCurrentContext(ctx)
+	if currentContext != "" && (currentContext == clusterName || strings.Contains(currentContext, clusterName)) {
+		return currentContext, nil
+	}
+
+	contextName, found, err := findMatchingExistingClusterContext(ctx, providerCtx, clusterName)
+	if err != nil {
+		return "", err
+	}
+	if found {
+		return contextName, nil
+	}
+	if currentContext != "" {
+		return currentContext, nil
+	}
+
+	return "", fmt.Errorf("unable to resolve kubeconfig context for cluster %q", clusterName)
+}
+
+func providerTypesInDisplayOrder() []k8s.ClusterType {
+	return []k8s.ClusterType{
+		k8s.ClusterTypeExisting,
+		k8s.ClusterTypeEKS,
+		k8s.ClusterTypeGKE,
+		k8s.ClusterTypeAKS,
+		k8s.ClusterTypeKubeadm,
+	}
+}
+
+func printClusterSection(clusterType k8s.ClusterType, clusters []k8s.ClusterInfo) {
+	fmt.Printf("=== %s Clusters ===\n\n", strings.ToUpper(providerDisplayName(clusterType)))
+	for _, info := range clusters {
+		fmt.Printf("Name:     %s\n", info.Name)
+		fmt.Printf("Status:   %s\n", info.Status)
+		if info.Region != "" {
+			fmt.Printf("Region:   %s\n", info.Region)
+		}
+		if info.KubernetesVersion != "" {
+			fmt.Printf("Version:  %s\n", info.KubernetesVersion)
+		}
+		if info.Endpoint != "" {
+			fmt.Printf("Endpoint: %s\n", info.Endpoint)
+		}
+		if len(info.WorkerNodes) > 0 {
+			fmt.Printf("Workers:  %d\n", len(info.WorkerNodes))
+		}
+		fmt.Println()
+	}
+}
+
+func printProviderWarnings(errs map[k8s.ClusterType]error) {
+	for _, clusterType := range providerTypesInDisplayOrder() {
+		err, ok := errs[clusterType]
+		if !ok || err == nil {
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "[k8s] warning: failed to list %s clusters: %v\n", providerDisplayName(clusterType), err)
+	}
+}
+
+func summarizeProviderErrors(errs map[k8s.ClusterType]error) string {
+	parts := make([]string, 0, len(errs))
+	for _, clusterType := range providerTypesInDisplayOrder() {
+		err, ok := errs[clusterType]
+		if !ok || err == nil {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s: %v", providerDisplayName(clusterType), err))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func hasClusterResourceData(resources *k8s.ClusterResources) bool {
+	return len(resources.Nodes) > 0 ||
+		len(resources.Pods) > 0 ||
+		len(resources.Services) > 0 ||
+		len(resources.PVs) > 0 ||
+		len(resources.PVCs) > 0 ||
+		len(resources.ConfigMaps) > 0 ||
+		len(resources.Ingresses) > 0
+}
+
+func writeK8sOutput(value interface{}) error {
+	var (
+		output []byte
+		err    error
+	)
+
+	if k8sOutputFormat == "yaml" {
+		output, err = yaml.Marshal(value)
+	} else {
+		output, err = json.MarshalIndent(value, "", "  ")
+	}
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(string(output))
+	return nil
+}
+
+func getNamedClusterResources(ctx context.Context, providerCtx *multiProviderK8sContext, clusterName string, debug bool) (*k8s.ClusterResources, error) {
+	if contextName, found, err := findMatchingExistingClusterContext(ctx, providerCtx, clusterName); err != nil {
+		return nil, err
+	} else if found {
+		resources, resourceErr := getResourcesFromContext(ctx, clusterName, providerCtx.kubeconfigPath, contextName, debug)
+		if resourceErr != nil {
+			return nil, fmt.Errorf("failed to get cluster resources from context %q: %w", contextName, resourceErr)
+		}
+		if !hasClusterResourceData(resources) {
+			return nil, fmt.Errorf("context %q did not return any cluster resources", contextName)
+		}
+		return resources, nil
+	}
+
+	discovered, errs := listDiscoveredK8sClusters(ctx, providerCtx)
+	for _, item := range discovered {
+		if item.Info.Name != clusterName {
+			continue
+		}
+
+		var (
+			kubeconfigPath string
+			kubeContext    string
+			err            error
+		)
+
+		switch item.Provider {
+		case k8s.ClusterTypeEKS:
+			kubeconfigPath, err = providerCtx.agent.GetEKSKubeconfig(ctx, clusterName)
+		case k8s.ClusterTypeGKE:
+			kubeconfigPath, err = providerCtx.agent.GetGKEKubeconfig(ctx, clusterName)
+		case k8s.ClusterTypeAKS:
+			if providerCtx.azureResourceGroup == "" {
+				return nil, fmt.Errorf("AKS cluster %q requires --azure-resource-group (or infra.azure.resource_group) to fetch kubeconfig", clusterName)
+			}
+			kubeconfigPath, err = providerCtx.agent.GetAKSKubeconfig(ctx, clusterName)
+		case k8s.ClusterTypeKubeadm:
+			provider, ok := providerCtx.agent.GetClusterProvider(k8s.ClusterTypeKubeadm)
+			if !ok {
+				return nil, fmt.Errorf("kubeadm provider not available")
+			}
+			kubeconfigPath, err = provider.GetKubeconfig(ctx, clusterName)
+		default:
+			continue
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to update kubeconfig for %s cluster %q: %w", providerDisplayName(item.Provider), clusterName, err)
+		}
+
+		if kubeconfigPath == "" {
+			kubeconfigPath = providerCtx.kubeconfigPath
+		}
+
+		if item.Provider != k8s.ClusterTypeKubeadm {
+			kubeContext, err = resolveKubeContextName(ctx, providerCtx, clusterName)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		resources, resourceErr := getResourcesFromContext(ctx, clusterName, kubeconfigPath, kubeContext, debug)
+		if resourceErr != nil {
+			return nil, fmt.Errorf("failed to get cluster resources for %s cluster %q: %w", providerDisplayName(item.Provider), clusterName, resourceErr)
+		}
+		resources.Region = item.Info.Region
+		resources.Status = item.Info.Status
+		if !hasClusterResourceData(resources) {
+			return nil, fmt.Errorf("cluster %q did not return any cluster resources", clusterName)
+		}
+		return resources, nil
+	}
+
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("cluster %q was not found in kubeconfig contexts or configured providers: %s", clusterName, summarizeProviderErrors(errs))
+	}
+
+	return nil, fmt.Errorf("cluster %q was not found in kubeconfig contexts or configured providers", clusterName)
 }
 
 // getK8sAgentWithGKE returns an agent with GKE provider registered
@@ -874,65 +1368,87 @@ func runDeleteCluster(cmd *cobra.Command, args []string) error {
 func runListClusters(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
-	clusterType := "eks"
+	clusterType := "all"
 	if len(args) > 0 {
-		clusterType = args[0]
+		clusterType = strings.ToLower(args[0])
 	}
 
-	var clusters []k8s.ClusterInfo
-	var err error
+	providerCtx := getK8sAgentWithAvailableProviders()
 
-	switch clusterType {
-	case "gke":
-		agent, gcpProject, _, gkeErr := getK8sAgentWithGKE()
-		if gkeErr != nil {
-			return gkeErr
+	if clusterType == "all" {
+		grouped, errs := getDiscoveredClustersByProvider(ctx, providerCtx)
+		printedAny := false
+		for _, providerType := range providerTypesInDisplayOrder() {
+			clusters := grouped[providerType]
+			if len(clusters) == 0 {
+				continue
+			}
+			printClusterSection(providerType, clusters)
+			printedAny = true
 		}
-		clusters, err = agent.ListGKEClusters(ctx)
-		if err == nil && len(clusters) == 0 {
-			fmt.Printf("No GKE clusters found in project '%s'.\n", gcpProject)
-			return nil
+		printProviderWarnings(errs)
+		if !printedAny {
+			if len(errs) > 0 {
+				return fmt.Errorf("failed to list clusters from configured providers: %s", summarizeProviderErrors(errs))
+			}
+			fmt.Println("No Kubernetes clusters found.")
 		}
-	case "eks":
-		agent, _, _ := getK8sAgent()
-		clusters, err = agent.ListEKSClusters(ctx)
-	case "kubeadm":
-		agent, awsProfile, awsRegion := getK8sAgent()
-		agent.RegisterKubeadmProvider(k8s.KubeadmProviderOptions{
-			AWSProfile: awsProfile,
-			Region:     awsRegion,
-		})
-		provider, ok := agent.GetClusterProvider(k8s.ClusterTypeKubeadm)
-		if !ok {
-			return fmt.Errorf("kubeadm provider not available")
-		}
-		clusters, err = provider.ListClusters(ctx)
-	default:
-		return fmt.Errorf("unsupported cluster type: %s (use 'eks', 'gke', or 'kubeadm')", clusterType)
-	}
-
-	if err != nil {
-		return fmt.Errorf("failed to list clusters: %w", err)
-	}
-
-	if len(clusters) == 0 {
-		fmt.Printf("No %s clusters found.\n", clusterType)
 		return nil
 	}
 
-	fmt.Printf("=== %s Clusters ===\n\n", strings.ToUpper(clusterType))
-	for _, c := range clusters {
-		fmt.Printf("Name:     %s\n", c.Name)
-		fmt.Printf("Status:   %s\n", c.Status)
-		fmt.Printf("Region:   %s\n", c.Region)
-		fmt.Printf("Version:  %s\n", c.KubernetesVersion)
-		fmt.Printf("Endpoint: %s\n", c.Endpoint)
-		if len(c.WorkerNodes) > 0 {
-			fmt.Printf("Workers:  %d\n", len(c.WorkerNodes))
+	var (
+		clusters []k8s.ClusterInfo
+		err      error
+	)
+
+	printType := k8s.ClusterType(clusterType)
+
+	switch clusterType {
+	case "existing":
+		provider, ok := providerCtx.agent.GetClusterProvider(k8s.ClusterTypeExisting)
+		if !ok {
+			return fmt.Errorf("existing kubeconfig provider not available")
 		}
-		fmt.Println()
+		clusters, err = provider.ListClusters(ctx)
+	case "gke":
+		if _, ok := providerCtx.agent.GetClusterProvider(k8s.ClusterTypeGKE); !ok {
+			return fmt.Errorf("GKE provider not available. Use --gcp-project or set GCP_PROJECT")
+		}
+		clusters, err = providerCtx.agent.ListGKEClusters(ctx)
+	case "eks":
+		if _, ok := providerCtx.agent.GetClusterProvider(k8s.ClusterTypeEKS); !ok {
+			return fmt.Errorf("EKS provider not available. Configure AWS CLI or use kubeconfig contexts instead")
+		}
+		clusters, err = providerCtx.agent.ListEKSClusters(ctx)
+	case "aks":
+		if _, ok := providerCtx.agent.GetClusterProvider(k8s.ClusterTypeAKS); !ok {
+			return fmt.Errorf("AKS provider not available. Use --azure-subscription or set AZURE_SUBSCRIPTION_ID")
+		}
+		clusters, err = providerCtx.agent.ListAKSClusters(ctx)
+	case "kubeadm":
+		provider, ok := providerCtx.agent.GetClusterProvider(k8s.ClusterTypeKubeadm)
+		if !ok {
+			return fmt.Errorf("kubeadm provider not available. Configure AWS CLI or use kubeconfig contexts instead")
+		}
+		clusters, err = provider.ListClusters(ctx)
+	default:
+		return fmt.Errorf("unsupported cluster type: %s (use 'all', 'existing', 'eks', 'gke', 'aks', or 'kubeadm')", clusterType)
 	}
 
+	if err != nil {
+		return fmt.Errorf("failed to list %s clusters: %w", providerDisplayName(printType), err)
+	}
+
+	sort.Slice(clusters, func(i, j int) bool {
+		return clusters[i].Name < clusters[j].Name
+	})
+
+	if len(clusters) == 0 {
+		fmt.Printf("No %s clusters found.\n", providerDisplayName(printType))
+		return nil
+	}
+
+	printClusterSection(printType, clusters)
 	return nil
 }
 
@@ -1039,7 +1555,7 @@ spec:
 }
 
 func runGetKubeconfig(cmd *cobra.Command, args []string) error {
-	clusterType := args[0]
+	clusterType := strings.ToLower(args[0])
 	clusterName := args[1]
 	ctx := context.Background()
 
@@ -1047,6 +1563,14 @@ func runGetKubeconfig(cmd *cobra.Command, args []string) error {
 	var err error
 
 	switch clusterType {
+	case "existing":
+		providerCtx := getK8sAgentWithAvailableProviders()
+		if _, found, findErr := findExistingClusterContext(ctx, providerCtx, clusterName); findErr != nil {
+			return fmt.Errorf("failed to inspect kubeconfig contexts: %w", findErr)
+		} else if !found {
+			return fmt.Errorf("kubeconfig context %q not found", clusterName)
+		}
+		kubeconfigPath = providerCtx.kubeconfigPath
 	case "gke":
 		agent, _, _, gkeErr := getK8sAgentWithGKE()
 		if gkeErr != nil {
@@ -1056,6 +1580,12 @@ func runGetKubeconfig(cmd *cobra.Command, args []string) error {
 	case "eks":
 		agent, _, _ := getK8sAgent()
 		kubeconfigPath, err = agent.GetEKSKubeconfig(ctx, clusterName)
+	case "aks":
+		providerCtx := getK8sAgentWithAvailableProviders()
+		if _, ok := providerCtx.agent.GetClusterProvider(k8s.ClusterTypeAKS); !ok {
+			return fmt.Errorf("AKS provider not available. Use --azure-subscription or set AZURE_SUBSCRIPTION_ID")
+		}
+		kubeconfigPath, err = providerCtx.agent.GetAKSKubeconfig(ctx, clusterName)
 	case "kubeadm":
 		agent, awsProfile, awsRegion := getK8sAgent()
 		agent.RegisterKubeadmProvider(k8s.KubeadmProviderOptions{
@@ -1068,7 +1598,7 @@ func runGetKubeconfig(cmd *cobra.Command, args []string) error {
 		}
 		kubeconfigPath, err = provider.GetKubeconfig(ctx, clusterName)
 	default:
-		return fmt.Errorf("unsupported cluster type: %s (use 'eks', 'gke', or 'kubeadm')", clusterType)
+		return fmt.Errorf("unsupported cluster type: %s (use 'existing', 'eks', 'gke', 'aks', or 'kubeadm')", clusterType)
 	}
 
 	if err != nil {
@@ -1089,173 +1619,39 @@ func runGetResources(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	debug := viper.GetBool("debug")
 
-	agent, awsProfile, awsRegion := getK8sAgent()
+	providerCtx := getK8sAgentWithAvailableProviders()
 
-	// If cluster name is specified, get resources for that cluster only
 	if k8sClusterName != "" {
-		// First verify the cluster exists
-		clusterExists, err := verifyEKSClusterExists(ctx, k8sClusterName, awsProfile, awsRegion)
+		resources, err := getNamedClusterResources(ctx, providerCtx, k8sClusterName, debug)
 		if err != nil {
-			return fmt.Errorf("failed to verify cluster: %w", err)
+			return err
 		}
-		if !clusterExists {
-			return fmt.Errorf("EKS cluster '%s' not found in region %s", k8sClusterName, awsRegion)
-		}
-
-		// Validate and fix kubeconfig if needed
-		if err := ensureValidKubeconfig(ctx, k8sClusterName, awsProfile, awsRegion, debug); err != nil {
-			return fmt.Errorf("failed to configure kubeconfig: %w", err)
-		}
-
-		// Create fresh agent after kubeconfig update
-		agent = k8s.NewAgent(debug)
-
-		opts := k8s.QueryOptions{
-			ClusterName: k8sClusterName,
-		}
-
-		resources, err := agent.GetClusterResources(ctx, k8sClusterName, opts)
-		if err != nil {
-			return fmt.Errorf("failed to get cluster resources: %w", err)
-		}
-
-		// Validate we got actual data
-		if len(resources.Nodes) == 0 && len(resources.Pods) == 0 {
-			// Try to fix kubeconfig and retry
-			if debug {
-				fmt.Fprintf(os.Stderr, "[k8s] no resources found, attempting kubeconfig refresh...\n")
-			}
-			if err := forceUpdateKubeconfig(ctx, k8sClusterName, awsProfile, awsRegion); err != nil {
-				return fmt.Errorf("failed to refresh kubeconfig: %w", err)
-			}
-
-			// Retry with fresh agent
-			agent = k8s.NewAgent(debug)
-			resources, err = agent.GetClusterResources(ctx, k8sClusterName, opts)
-			if err != nil {
-				return fmt.Errorf("failed to get cluster resources after kubeconfig refresh: %w", err)
-			}
-
-			if len(resources.Nodes) == 0 && len(resources.Pods) == 0 {
-				return fmt.Errorf("unable to fetch resources from cluster '%s' - check cluster status and permissions", k8sClusterName)
-			}
-		}
-
-		var output []byte
-		if k8sOutputFormat == "yaml" {
-			output, err = yaml.Marshal(resources)
-		} else {
-			output, err = json.MarshalIndent(resources, "", "  ")
-		}
-
-		if err != nil {
+		if err := writeK8sOutput(resources); err != nil {
 			return fmt.Errorf("failed to marshal resources: %w", err)
 		}
-
-		fmt.Println(string(output))
 		return nil
 	}
 
-	// No cluster specified - get resources from all EKS clusters
-	clusters, err := agent.ListEKSClusters(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to list EKS clusters: %w", err)
-	}
-
-	if len(clusters) == 0 {
-		return fmt.Errorf("no EKS clusters found")
-	}
-
-	// Backup kubeconfig and save original context before multi-cluster operations
-	backupPath, err := backupKubeconfig(debug)
-	if err != nil {
-		if debug {
-			fmt.Fprintf(os.Stderr, "[k8s] warning: failed to backup kubeconfig: %v\n", err)
-		}
-	}
-
 	originalContext := getCurrentContext(ctx)
-	if debug && originalContext != "" {
-		fmt.Fprintf(os.Stderr, "[k8s] saved original context: %s\n", originalContext)
+	if originalContext == "" {
+		return fmt.Errorf("no cluster specified and no current kubectl context is set")
 	}
 
-	multiResources := k8s.MultiClusterResources{
-		Clusters: make([]k8s.ClusterResources, 0, len(clusters)),
+	if debug {
+		fmt.Fprintf(os.Stderr, "[k8s] using current context: %s\n", originalContext)
 	}
 
-	for _, cluster := range clusters {
-		if debug {
-			fmt.Fprintf(os.Stderr, "[k8s] switching to cluster: %s\n", cluster.Name)
-		}
-
-		// Update kubeconfig and switch context for this cluster
-		if err := switchToCluster(ctx, cluster.Name, awsProfile, awsRegion, debug); err != nil {
-			if debug {
-				fmt.Fprintf(os.Stderr, "[k8s] warning: failed to switch to cluster %s: %v\n", cluster.Name, err)
-			}
-			continue
-		}
-
-		// Verify the context switch was successful
-		if !verifyContextSwitch(ctx, cluster.Name, debug) {
-			if debug {
-				fmt.Fprintf(os.Stderr, "[k8s] warning: context switch verification failed for %s\n", cluster.Name)
-			}
-			continue
-		}
-
-		opts := k8s.QueryOptions{
-			ClusterName: cluster.Name,
-		}
-
-		// Create a new agent with fresh client for this cluster
-		clusterAgent := k8s.NewAgent(debug)
-		resources, err := clusterAgent.GetClusterResources(ctx, cluster.Name, opts)
-		if err != nil {
-			if debug {
-				fmt.Fprintf(os.Stderr, "[k8s] warning: failed to get resources for %s: %v\n", cluster.Name, err)
-			}
-			continue
-		}
-
-		// Add cluster metadata
-		resources.Region = cluster.Region
-		resources.Status = cluster.Status
-
-		multiResources.Clusters = append(multiResources.Clusters, *resources)
-
-		if debug {
-			fmt.Fprintf(os.Stderr, "[k8s] successfully fetched resources from %s (%d nodes, %d pods)\n",
-				cluster.Name, len(resources.Nodes), len(resources.Pods))
-		}
-	}
-
-	// Restore original context if we had one
-	if originalContext != "" {
-		if err := restoreContext(ctx, originalContext, debug); err != nil {
-			if debug {
-				fmt.Fprintf(os.Stderr, "[k8s] warning: failed to restore original context: %v\n", err)
-			}
-		}
-	}
-
-	// Log backup location
-	if backupPath != "" && debug {
-		fmt.Fprintf(os.Stderr, "[k8s] kubeconfig backup saved at: %s\n", backupPath)
-	}
-
-	var output []byte
-	if k8sOutputFormat == "yaml" {
-		output, err = yaml.Marshal(multiResources)
-	} else {
-		output, err = json.MarshalIndent(multiResources, "", "  ")
-	}
-
+	resources, err := getResourcesFromContext(ctx, originalContext, providerCtx.kubeconfigPath, originalContext, debug)
 	if err != nil {
+		return fmt.Errorf("failed to get cluster resources from current context %q: %w", originalContext, err)
+	}
+	if !hasClusterResourceData(resources) {
+		return fmt.Errorf("current context %q did not return any cluster resources", originalContext)
+	}
+
+	if err := writeK8sOutput(resources); err != nil {
 		return fmt.Errorf("failed to marshal resources: %w", err)
 	}
-
-	fmt.Println(string(output))
 	return nil
 }
 
