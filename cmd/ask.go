@@ -14,6 +14,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/aws"
 	"github.com/bgdnvk/clanker/internal/azure"
 	"github.com/bgdnvk/clanker/internal/backend"
+	"github.com/bgdnvk/clanker/internal/claudecode"
 	"github.com/bgdnvk/clanker/internal/cloudflare"
 	cfanalytics "github.com/bgdnvk/clanker/internal/cloudflare/analytics"
 	cfdns "github.com/bgdnvk/clanker/internal/cloudflare/dns"
@@ -126,10 +127,12 @@ Examples:
 		agentName, _ := cmd.Flags().GetString("agent")
 		if agentName == "hermes" {
 			return handleHermesQuery(context.Background(), question, profile, debug)
+		} else if agentName == "claude-code" {
+			return handleClaudeCodeQuery(context.Background(), question, profile, debug)
 		} else if isGitHubCodingAgent(agentName) {
 			selectedGitHubCodingAgent = agentName
 		} else if agentName != "" {
-			return fmt.Errorf("unknown agent: %s (available: hermes, copilot, codex, claude)", agentName)
+			return fmt.Errorf("unknown agent: %s (available: hermes, claude-code, copilot, codex, claude)", agentName)
 		}
 
 		// Handle apply mode (independent of maker mode)
@@ -1188,7 +1191,7 @@ func init() {
 	askCmd.Flags().Bool("apply", false, "Apply an approved maker plan (reads from stdin unless --plan-file is provided)")
 	askCmd.Flags().String("plan-file", "", "Optional path to maker plan JSON file for --apply")
 	askCmd.Flags().Bool("route-only", false, "Return routing decision as JSON without executing (for backend integration)")
-	askCmd.Flags().String("agent", "", "Use a specific agent to handle the query (e.g., hermes, copilot, codex, claude)")
+	askCmd.Flags().String("agent", "", "Use a specific agent to handle the query (e.g., hermes, claude-code, copilot, codex, claude)")
 	askCmd.Flags().String("github-coding-agent-model", "", "Override the Copilot CLI model used for GitHub coding-agent delegation")
 }
 
@@ -2771,6 +2774,84 @@ func handleHermesQuery(ctx context.Context, question string, profile string, deb
 	}
 
 	fmt.Println(response)
+	return nil
+}
+
+// handleClaudeCodeQuery delegates a question to the locally installed Claude Code CLI.
+// When an AWS profile is available, it gathers infrastructure context first.
+func handleClaudeCodeQuery(ctx context.Context, question string, profile string, debug bool) error {
+	version, err := claudecode.CheckAvailable()
+	if err != nil {
+		return err
+	}
+	if debug {
+		fmt.Fprintf(os.Stderr, "[claude-code] version: %s\n", version)
+	}
+
+	runner := claudecode.NewRunner(debug)
+
+	// Gather AWS infrastructure context if a profile is available.
+	prompt := question
+	targetProfile := profile
+	if targetProfile == "" {
+		defaultEnv := viper.GetString("infra.default_environment")
+		if defaultEnv == "" {
+			defaultEnv = "dev"
+		}
+		targetProfile = viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
+		if targetProfile == "" {
+			targetProfile = viper.GetString("aws.default_profile")
+		}
+	}
+
+	if targetProfile != "" {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[claude-code] gathering AWS context with profile %s\n", targetProfile)
+		}
+		awsClient, err := aws.NewClientWithProfileAndDebug(ctx, targetProfile, debug)
+		if err == nil {
+			awsContext, err := awsClient.GetRelevantContext(ctx, question)
+			if err == nil && strings.TrimSpace(awsContext) != "" {
+				prompt = fmt.Sprintf("Here is the current AWS infrastructure context:\n\n%s\n\nUser question: %s", awsContext, question)
+			} else if debug && err != nil {
+				fmt.Fprintf(os.Stderr, "[claude-code] warning: failed to get AWS context: %v\n", err)
+			}
+		} else if debug {
+			fmt.Fprintf(os.Stderr, "[claude-code] warning: failed to create AWS client: %v\n", err)
+		}
+	}
+
+	events, err := runner.Ask(ctx, prompt)
+	if err != nil {
+		return fmt.Errorf("claude-code agent error: %w", err)
+	}
+
+	hadDelta := false
+	for event := range events {
+		switch {
+		case event.Error != nil:
+			return fmt.Errorf("claude-code agent error: %w", event.Error)
+		case event.Text != "":
+			fmt.Print(event.Text)
+			hadDelta = true
+		case event.ToolCall != nil:
+			if debug {
+				fmt.Fprintf(os.Stderr, "\n[tool: %s]\n", event.ToolCall.Name)
+			}
+		case event.Thought != "":
+			if debug {
+				fmt.Fprintf(os.Stderr, "\n[thinking: %s]\n", event.Thought)
+			}
+		case event.Final != nil:
+			if !hadDelta && event.Final.Text != "" {
+				fmt.Print(event.Final.Text)
+			}
+			if debug {
+				fmt.Fprintf(os.Stderr, "\n[duration: %dms, cost: $%.4f]\n", event.Final.DurationMS, event.Final.CostUSD)
+			}
+		}
+	}
+	fmt.Println()
 	return nil
 }
 
