@@ -11,6 +11,7 @@ import (
 
 	"github.com/bgdnvk/clanker/internal/backend"
 	"github.com/bgdnvk/clanker/internal/cloudflare"
+	"github.com/bgdnvk/clanker/internal/hetzner"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -35,13 +36,16 @@ var credentialsStoreCmd = &cobra.Command{
 	Short: "Store credentials in the backend",
 	Long: `Upload local credentials to the clanker backend.
 
-Supported providers: aws, gcp, cloudflare, k8s
+Supported providers: aws, gcp, hetzner, cloudflare, k8s
 
 AWS:
   Exports credentials from local AWS CLI profile using 'aws configure export-credentials'.
 
 GCP:
   Reads Application Default Credentials or specified service account file.
+
+Hetzner:
+  Uses api_token from config or HCLOUD_TOKEN.
 
 Cloudflare:
   Uses api_token and account_id from config or environment variables.
@@ -52,6 +56,7 @@ K8s:
 Examples:
   clanker credentials store aws --profile dev
   clanker credentials store gcp --project myproject
+  clanker credentials store hetzner
   clanker credentials store cloudflare
   clanker credentials store k8s --kubeconfig ~/.kube/config`,
 	Args: cobra.ExactArgs(1),
@@ -75,6 +80,7 @@ If no provider is specified, tests all stored credentials.
 Examples:
   clanker credentials test aws
   clanker credentials test gcp
+  clanker credentials test hetzner
   clanker credentials test cloudflare
   clanker credentials test k8s
   clanker credentials test`,
@@ -89,7 +95,8 @@ var credentialsDeleteCmd = &cobra.Command{
 
 Examples:
   clanker credentials delete aws
-  clanker credentials delete gcp`,
+  clanker credentials delete gcp
+  clanker credentials delete hetzner`,
 	Args: cobra.ExactArgs(1),
 	RunE: runCredentialsDelete,
 }
@@ -138,12 +145,14 @@ func runCredentialsStore(cmd *cobra.Command, args []string) error {
 		return storeAWSCredentials(ctx, cmd, client)
 	case "gcp":
 		return storeGCPCredentials(ctx, cmd, client)
+	case "hetzner":
+		return storeHetznerCredentials(ctx, cmd, client)
 	case "cloudflare", "cf":
 		return storeCloudflareCredentials(ctx, cmd, client)
 	case "k8s", "kubernetes":
 		return storeKubernetesCredentials(ctx, cmd, client)
 	default:
-		return fmt.Errorf("unsupported provider: %s (supported: aws, gcp, cloudflare, k8s)", provider)
+		return fmt.Errorf("unsupported provider: %s (supported: aws, gcp, hetzner, cloudflare, k8s)", provider)
 	}
 }
 
@@ -251,6 +260,24 @@ func storeGCPCredentials(ctx context.Context, cmd *cobra.Command, client *backen
 	return nil
 }
 
+func storeHetznerCredentials(ctx context.Context, cmd *cobra.Command, client *backend.Client) error {
+	apiToken := hetzner.ResolveAPIToken()
+	if apiToken == "" {
+		return fmt.Errorf("Hetzner API token required: set hetzner.api_token in config or HCLOUD_TOKEN env var")
+	}
+
+	creds := &backend.HetznerCredentials{
+		APIToken: apiToken,
+	}
+
+	if err := client.StoreHetznerCredentials(ctx, creds); err != nil {
+		return fmt.Errorf("failed to store Hetzner credentials: %w", err)
+	}
+
+	fmt.Println("Hetzner credentials stored successfully")
+	return nil
+}
+
 func storeCloudflareCredentials(ctx context.Context, cmd *cobra.Command, client *backend.Client) error {
 	apiToken := cloudflare.ResolveAPIToken()
 	accountID := cloudflare.ResolveAccountID()
@@ -337,6 +364,7 @@ func runCredentialsList(cmd *cobra.Command, args []string) error {
 		fmt.Println("\nTo store credentials, use:")
 		fmt.Println("  clanker credentials store aws --profile <profile>")
 		fmt.Println("  clanker credentials store gcp --project <project>")
+		fmt.Println("  clanker credentials store hetzner")
 		fmt.Println("  clanker credentials store cloudflare")
 		fmt.Println("  clanker credentials store k8s")
 		return nil
@@ -410,6 +438,8 @@ func testCredential(ctx context.Context, client *backend.Client, provider backen
 		return testAWSCredentials(ctx, client, debug)
 	case backend.ProviderGCP:
 		return testGCPCredentials(ctx, client, debug)
+	case backend.ProviderHetzner:
+		return testHetznerCredentials(ctx, client, debug)
 	case backend.ProviderCloudflare:
 		return testCloudflareCredentials(ctx, client, debug)
 	case backend.ProviderKubernetes:
@@ -518,6 +548,34 @@ func testGCPCredentials(ctx context.Context, client *backend.Client, debug bool)
 		}
 		fmt.Printf("  PASSED: Project %s\n", strings.TrimSpace(string(output)))
 	}
+	return nil
+}
+
+func testHetznerCredentials(ctx context.Context, client *backend.Client, debug bool) error {
+	creds, err := client.GetHetznerCredentials(ctx)
+	if err != nil {
+		fmt.Printf("  FAILED: %v\n", err)
+		return err
+	}
+
+	if creds.APIToken == "" {
+		fmt.Println("  FAILED: no API token stored")
+		return fmt.Errorf("no Hetzner API token")
+	}
+
+	cmd := exec.CommandContext(ctx, "hcloud", "server", "list", "--output", "json")
+	cmd.Env = append(os.Environ(), fmt.Sprintf("HCLOUD_TOKEN=%s", creds.APIToken))
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Printf("  FAILED: %v\n", err)
+		if debug {
+			fmt.Printf("  Output: %s\n", string(output))
+		}
+		return fmt.Errorf("Hetzner credential test failed")
+	}
+
+	fmt.Println("  PASSED: token accepted by hcloud")
 	return nil
 }
 
@@ -641,12 +699,14 @@ func runCredentialsDelete(cmd *cobra.Command, args []string) error {
 		credProvider = backend.ProviderAWS
 	case "gcp":
 		credProvider = backend.ProviderGCP
+	case "hetzner":
+		credProvider = backend.ProviderHetzner
 	case "cloudflare", "cf":
 		credProvider = backend.ProviderCloudflare
 	case "k8s", "kubernetes":
 		credProvider = backend.ProviderKubernetes
 	default:
-		return fmt.Errorf("unsupported provider: %s (supported: aws, gcp, cloudflare, k8s)", provider)
+		return fmt.Errorf("unsupported provider: %s (supported: aws, gcp, hetzner, cloudflare, k8s)", provider)
 	}
 
 	client := backend.NewClient(apiKey, debug)

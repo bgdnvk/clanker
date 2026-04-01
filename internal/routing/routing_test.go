@@ -2,9 +2,71 @@ package routing
 
 import (
 	"testing"
+
+	"github.com/spf13/viper"
 )
 
+func useDefaultProvider(t *testing.T, provider string) {
+	t.Helper()
+	previous := viper.GetString("infra.default_provider")
+	viper.Set("infra.default_provider", provider)
+	t.Cleanup(func() {
+		viper.Set("infra.default_provider", previous)
+	})
+}
+
+func TestInferContext_DefaultBehavior_ConfiguredAWS(t *testing.T) {
+	useDefaultProvider(t, "")
+
+	// Unknown queries should default to AWS + GitHub
+	ctx := InferContext("random question about nothing")
+
+	if !ctx.AWS {
+		t.Error("Unknown query should default to AWS=true")
+	}
+	if !ctx.GitHub {
+		t.Error("Unknown query should default to GitHub=true")
+	}
+	if ctx.Cloudflare {
+		t.Error("Unknown query should not trigger Cloudflare")
+	}
+	if ctx.K8s {
+		t.Error("Unknown query should not trigger K8s")
+	}
+}
+
+func TestInferContext_DefaultBehavior_ConfiguredHetzner(t *testing.T) {
+	useDefaultProvider(t, "hetzner")
+
+	ctx := InferContext("random question about nothing")
+
+	if !ctx.Hetzner {
+		t.Error("Unknown query should default to Hetzner=true when configured")
+	}
+	if ctx.AWS {
+		t.Error("Unknown query should not default to AWS when Hetzner is configured")
+	}
+	if ctx.GitHub {
+		t.Error("Unknown query should not default to GitHub when Hetzner is configured")
+	}
+}
+
+func TestInferContext_GenericDiscoveryUsesConfiguredHetzner(t *testing.T) {
+	useDefaultProvider(t, "hetzner")
+
+	ctx := InferContext("what is running right now?")
+
+	if !ctx.Hetzner {
+		t.Error("Generic discovery query should use Hetzner when configured")
+	}
+	if ctx.AWS {
+		t.Error("Generic discovery query should not force AWS when Hetzner is configured")
+	}
+}
+
 func TestInferContext_CloudflareExplicit(t *testing.T) {
+	useDefaultProvider(t, "")
+
 	tests := []struct {
 		name             string
 		query            string
@@ -155,25 +217,9 @@ func TestInferContext_NoCloudflarefalsePositives(t *testing.T) {
 	}
 }
 
-func TestInferContext_DefaultBehavior(t *testing.T) {
-	// Unknown queries should default to AWS + GitHub
-	ctx := InferContext("random question about nothing")
-
-	if !ctx.AWS {
-		t.Error("Unknown query should default to AWS=true")
-	}
-	if !ctx.GitHub {
-		t.Error("Unknown query should default to GitHub=true")
-	}
-	if ctx.Cloudflare {
-		t.Error("Unknown query should not trigger Cloudflare")
-	}
-	if ctx.K8s {
-		t.Error("Unknown query should not trigger K8s")
-	}
-}
-
 func TestGetClassificationPrompt(t *testing.T) {
+	useDefaultProvider(t, "")
+
 	prompt := GetClassificationPrompt("list my cloudflare zones")
 
 	if prompt == "" {
@@ -240,6 +286,8 @@ func TestNeedsLLMClassification(t *testing.T) {
 }
 
 func TestApplyLLMClassification(t *testing.T) {
+	useDefaultProvider(t, "")
+
 	tests := []struct {
 		name       string
 		llmService string
@@ -308,6 +356,23 @@ func TestApplyLLMClassification(t *testing.T) {
 				t.Errorf("ApplyLLMClassification(%q) GCP = %v, want %v", tt.llmService, ctx.GCP, tt.expectGCP)
 			}
 		})
+	}
+}
+
+func TestApplyLLMClassification_GeneralUsesConfiguredDefault(t *testing.T) {
+	useDefaultProvider(t, "hetzner")
+
+	ctx := ServiceContext{}
+	ApplyLLMClassification(&ctx, "general")
+
+	if !ctx.Hetzner {
+		t.Error("general classification should use configured Hetzner default")
+	}
+	if ctx.AWS {
+		t.Error("general classification should not force AWS when Hetzner is configured")
+	}
+	if ctx.GitHub {
+		t.Error("general classification should not enable GitHub when Hetzner is configured")
 	}
 }
 

@@ -35,10 +35,51 @@ type Classification struct {
 	Reason     string `json:"reason"`
 }
 
+// DefaultInfraProvider returns the configured default infrastructure provider.
+// Falls back to AWS for backward compatibility.
+func DefaultInfraProvider() string {
+	switch strings.ToLower(strings.TrimSpace(viper.GetString("infra.default_provider"))) {
+	case "aws", "gcp", "azure", "cloudflare", "digitalocean", "hetzner":
+		return strings.ToLower(strings.TrimSpace(viper.GetString("infra.default_provider")))
+	default:
+		return "aws"
+	}
+}
+
+func applyConfiguredDefaultContext(ctx *ServiceContext) {
+	ctx.AWS = false
+	ctx.GitHub = false
+	ctx.Terraform = false
+	ctx.K8s = false
+	ctx.GCP = false
+	ctx.Azure = false
+	ctx.Cloudflare = false
+	ctx.DigitalOcean = false
+	ctx.Hetzner = false
+	ctx.IAM = false
+
+	switch DefaultInfraProvider() {
+	case "gcp":
+		ctx.GCP = true
+	case "azure":
+		ctx.Azure = true
+	case "cloudflare":
+		ctx.Cloudflare = true
+	case "digitalocean":
+		ctx.DigitalOcean = true
+	case "hetzner":
+		ctx.Hetzner = true
+	default:
+		ctx.AWS = true
+		ctx.GitHub = true
+	}
+}
+
 // InferContext analyzes a question and determines which cloud service contexts are relevant.
 // Returns a ServiceContext with boolean flags for each detected service.
 func InferContext(question string) ServiceContext {
 	ctx := ServiceContext{}
+	defaultProvider := DefaultInfraProvider()
 
 	awsKeywords := []string{
 		// Core services
@@ -46,15 +87,20 @@ func InferContext(question string) ServiceContext {
 		"sqs", "sns", "dynamodb", "elasticache", "elb", "alb", "nlb", "route53",
 		"cloudfront", "api-gateway", "cognito", "iam", "vpc", "subnet",
 		"security-group", "nacl", "nat", "igw", "vpn", "direct-connect",
-		// General terms that strongly indicate AWS context
-		"instance", "bucket", "database", "aws", "resources", "infrastructure",
-		"running", "account", "error", "log", "job", "queue", "compute",
-		"storage", "network", "cdn", "load-balancer", "auto-scaling", "scaling",
-		"health", "metric", "alarm", "notification", "backup", "snapshot",
-		"ami", "volume", "ebs", "efs", "fsx",
+		// AWS-specific terms
+		"bucket", "aws", "ami", "ebs", "efs", "fsx",
 		// ML/GPU
 		"gpu", "cuda", "ml", "machine-learning", "training", "inference",
 		"p2", "p3", "p4", "g3", "g4", "g5", "spot", "reserved", "dedicated",
+	}
+
+	awsFallbackKeywords := []string{
+		// Generic infrastructure terms that should only imply AWS when AWS is
+		// the configured default provider.
+		"instance", "database", "resources", "infrastructure",
+		"running", "account", "error", "log", "job", "queue", "compute",
+		"storage", "network", "cdn", "load-balancer", "auto-scaling", "scaling",
+		"health", "metric", "alarm", "notification", "backup", "snapshot",
 		// Status keywords
 		"status", "state", "healthy", "unhealthy", "available", "pending",
 		"stopping", "stopped", "terminated", "creating", "deleting", "modifying",
@@ -214,6 +260,15 @@ func InferContext(question string) ServiceContext {
 		}
 	}
 
+	if !ctx.AWS && defaultProvider == "aws" {
+		for _, keyword := range awsFallbackKeywords {
+			if contains(questionLower, keyword) {
+				ctx.AWS = true
+				break
+			}
+		}
+	}
+
 	for _, keyword := range githubKeywords {
 		if contains(questionLower, keyword) {
 			ctx.GitHub = true
@@ -275,10 +330,10 @@ func InferContext(question string) ServiceContext {
 		}
 	}
 
-	// Default to AWS and GitHub context if nothing is detected
+	// Default to the configured provider if nothing is detected.
+	// AWS keeps GitHub enabled for backward compatibility.
 	if !ctx.AWS && !ctx.GitHub && !ctx.Terraform && !ctx.K8s && !ctx.GCP && !ctx.Azure && !ctx.Cloudflare && !ctx.DigitalOcean && !ctx.Hetzner && !ctx.IAM {
-		ctx.AWS = true
-		ctx.GitHub = true
+		applyConfiguredDefaultContext(&ctx)
 	}
 
 	return ctx
@@ -286,6 +341,7 @@ func InferContext(question string) ServiceContext {
 
 // GetClassificationPrompt returns a prompt for LLM to classify which service a query is about
 func GetClassificationPrompt(question string) string {
+	defaultProvider := DefaultInfraProvider()
 	return fmt.Sprintf(`Classify which cloud service or platform this user query is about.
 
 User Query: "%s"
@@ -305,19 +361,19 @@ Available services:
 
 IMPORTANT RULES:
 1. Only classify as "cloudflare" if the query EXPLICITLY mentions Cloudflare, wrangler, cloudflared, or Cloudflare-specific products
-2. Generic terms like "cdn", "cache", "dns", "worker", "waf", "rate limit", "tunnel" should default to AWS unless Cloudflare is explicitly mentioned
+2. Generic terms like "cdn", "cache", "dns", "worker", "waf", "rate limit", "tunnel" should prefer the configured default provider (%s) unless Cloudflare is explicitly mentioned
 3. If the query is specifically about IAM roles, policies, permissions, access keys, trust policies, or security analysis, classify as "iam"
 4. If the query mentions AWS services (EC2, Lambda, S3, CloudFront, Route53, etc.) but NOT IAM-specific topics, classify as "aws"
 5. Only classify as "digitalocean" if the query EXPLICITLY mentions Digital Ocean, doctl, droplets, DOKS, or Digital Ocean-specific products
 6. Only classify as "hetzner" if the query EXPLICITLY mentions Hetzner, hcloud, or Hetzner-specific products
-7. If uncertain, classify as "aws" (the default cloud provider)
+7. If uncertain, classify as "%s" (the configured default cloud provider)
 
 Respond with ONLY a JSON object:
 {
 	"service": "cloudflare|aws|iam|k8s|gcp|azure|digitalocean|hetzner|github|terraform|general",
     "confidence": "high|medium|low",
     "reason": "brief explanation of why this classification"
-}`, question)
+}`, question, defaultProvider, defaultProvider)
 }
 
 // ClassifyWithLLM uses the AI client to determine which service a query is about.
@@ -510,14 +566,8 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 	default:
-		// "general" - default to AWS
-		ctx.AWS = true
-		ctx.Cloudflare = false
-		ctx.K8s = false
-		ctx.Azure = false
-		ctx.DigitalOcean = false
-		ctx.Hetzner = false
-		ctx.IAM = false
+		// "general" - default to the configured infrastructure provider
+		applyConfiguredDefaultContext(ctx)
 	}
 }
 
