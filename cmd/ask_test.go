@@ -15,6 +15,48 @@ func useDefaultInfraProvider(t *testing.T, provider string) {
 	})
 }
 
+func useDefaultAIProvider(t *testing.T, provider string) {
+	t.Helper()
+	previous := viper.GetString("ai.default_provider")
+	viper.Set("ai.default_provider", provider)
+	t.Cleanup(func() {
+		viper.Set("ai.default_provider", previous)
+	})
+}
+
+func TestApplyCommandAIOverrides_DefaultsToBedrock(t *testing.T) {
+	useDefaultAIProvider(t, "")
+
+	applyCommandAIOverrides("", "", "", "", "", "", "", "", "", "", "", "", "", "")
+
+	got := viper.GetString("ai.default_provider")
+	if got != "bedrock" {
+		t.Fatalf("expected default AI provider to be 'bedrock', got %q", got)
+	}
+}
+
+func TestApplyCommandAIOverrides_RespectsExplicitProfile(t *testing.T) {
+	useDefaultAIProvider(t, "")
+
+	applyCommandAIOverrides("anthropic", "", "", "", "", "", "", "", "", "", "", "", "", "")
+
+	got := viper.GetString("ai.default_provider")
+	if got != "anthropic" {
+		t.Fatalf("expected AI provider to be 'anthropic', got %q", got)
+	}
+}
+
+func TestApplyCommandAIOverrides_RespectsConfiguredProvider(t *testing.T) {
+	useDefaultAIProvider(t, "openai")
+
+	applyCommandAIOverrides("", "", "", "", "", "", "", "", "", "", "", "", "", "")
+
+	got := viper.GetString("ai.default_provider")
+	if got != "openai" {
+		t.Fatalf("expected AI provider to remain 'openai', got %q", got)
+	}
+}
+
 func TestApplyDiscoveryContextDefaults_UsesConfiguredHetzner(t *testing.T) {
 	useDefaultInfraProvider(t, "hetzner")
 
