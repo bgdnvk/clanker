@@ -8,16 +8,16 @@ import (
 
 // DeployStrategy controls how we deploy
 type DeployStrategy struct {
-	Provider  string // aws, cloudflare
-	Method    string // ecs-fargate, ec2, lambda, s3-cloudfront, cf-pages, cf-workers, cf-containers
+	Provider  string // aws, cloudflare, gcp, azure, digitalocean, railway
+	Method    string // ecs-fargate, ec2, lambda, s3-cloudfront, cf-pages, cf-workers, cf-containers, do-droplet, railway-service
 	Region    string
 	Reasoning string // LLM's reasoning for the choice
 }
 
 // ArchitectDecision is the structured JSON response from the architect LLM call
 type ArchitectDecision struct {
-	Provider      string   `json:"provider"`                // aws, cloudflare, gcp, azure, digitalocean
-	Method        string   `json:"method"`                  // ecs-fargate, ec2, eks, lambda, s3-cloudfront, cf-pages, cf-workers, cf-containers, do-droplet, do-app-platform
+	Provider      string   `json:"provider"`                // aws, cloudflare, gcp, azure, digitalocean, railway
+	Method        string   `json:"method"`                  // ecs-fargate, ec2, eks, lambda, s3-cloudfront, cf-pages, cf-workers, cf-containers, do-droplet, do-app-platform, railway-service
 	Reasoning     string   `json:"reasoning"`               // why this architecture
 	BuildSteps    []string `json:"buildSteps"`              // how to build it
 	RunCmd        string   `json:"runCmd"`                  // simplest way to start it locally
@@ -104,6 +104,8 @@ func ParseArchitectDecision(raw string) (*ArchitectDecision, error) {
 			d.Provider = "cloudflare"
 		} else if strings.HasPrefix(d.Method, "do-") {
 			d.Provider = "digitalocean"
+		} else if strings.HasPrefix(d.Method, "railway-") {
+			d.Provider = "railway"
 		} else {
 			d.Provider = "aws"
 		}
@@ -140,6 +142,11 @@ func DefaultStrategy(p *RepoProfile) DeployStrategy {
 			} else {
 				s.Method = "cf-workers"
 			}
+			return s
+		}
+		if hint == "railway" {
+			s.Provider = "railway"
+			s.Method = "railway-service"
 			return s
 		}
 	}

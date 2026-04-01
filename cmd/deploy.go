@@ -19,6 +19,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/deploy"
 	"github.com/bgdnvk/clanker/internal/maker"
 	"github.com/bgdnvk/clanker/internal/openclaw"
+	"github.com/bgdnvk/clanker/internal/railway"
 	"github.com/bgdnvk/clanker/internal/resourcedb"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -35,6 +36,7 @@ Examples:
   clanker deploy https://github.com/user/repo --target ec2
   clanker deploy https://github.com/user/repo --target eks
   clanker deploy https://github.com/user/repo --provider cloudflare
+	clanker deploy https://github.com/user/repo --provider railway
   clanker deploy https://github.com/user/repo --profile prod`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -236,7 +238,7 @@ Examples:
 				// Skip cloud-provider creds and non-secret vars
 				if strings.HasPrefix(key, "AWS_") || strings.HasPrefix(key, "GOOGLE_") ||
 					strings.HasPrefix(key, "GCP_") || strings.HasPrefix(key, "AZURE_") ||
-					strings.HasPrefix(key, "CLOUDFLARE_") {
+					strings.HasPrefix(key, "CLOUDFLARE_") || strings.HasPrefix(key, "RAILWAY_") {
 					continue
 				}
 				if !strings.Contains(key, "_") {
@@ -1218,6 +1220,24 @@ Examples:
 				Destroyer:            false,
 				Debug:                debug,
 			})
+		case "railway":
+			railwayAPIToken := railway.ResolveAPIToken()
+			railwayToken := strings.TrimSpace(viper.GetString("railway.token"))
+			if railwayToken == "" {
+				railwayToken = strings.TrimSpace(os.Getenv("RAILWAY_TOKEN"))
+			}
+			if railwayAPIToken == "" && railwayToken == "" {
+				return fmt.Errorf("railway token is required for Railway deploy (set railway.api_token, railway.token, RAILWAY_API_TOKEN, or RAILWAY_TOKEN)")
+			}
+			fmt.Fprintf(os.Stderr, "[deploy] applying Railway plan (%d commands)...\n", len(plan.Commands))
+			return maker.ExecuteRailwayPlan(ctx, plan, maker.ExecOptions{
+				RailwayAPIToken: railwayAPIToken,
+				RailwayToken:    railwayToken,
+				WorkDir:         rp.ClonePath,
+				Writer:          os.Stdout,
+				Destroyer:       false,
+				Debug:           debug,
+			})
 		}
 
 		// apply mode: execute the plan in phases
@@ -2139,7 +2159,7 @@ func init() {
 	deployCmd.Flags().String("cohere-model", "", "Cohere model to use (overrides config)")
 	deployCmd.Flags().String("minimax-model", "", "MiniMax model to use (overrides config)")
 	deployCmd.Flags().Bool("apply", false, "Apply the plan immediately after generation")
-	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws, gcp, azure, cloudflare, digitalocean, or hetzner")
+	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws, gcp, azure, cloudflare, digitalocean, hetzner, or railway")
 	deployCmd.Flags().String("target", "fargate", "Deployment target: fargate (default), ec2, or eks")
 	deployCmd.Flags().String("instance-type", "t3.small", "EC2 instance type (only used with --target ec2)")
 	deployCmd.Flags().Bool("new-vpc", false, "Create a new VPC instead of using default")

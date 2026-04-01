@@ -231,6 +231,10 @@ func BuildPlanPagePrompt(provider string, enrichedPrompt string, currentPlan *ma
 	var b strings.Builder
 	// Provider-specific guard rails.
 	switch provider {
+	case "railway":
+		b.WriteString("You are generating a Railway deployment command plan in small pages.\n")
+		b.WriteString("Use only Railway CLI commands with args starting with 'railway'. Prefer whoami/list/status for discovery, variable set for env vars, and up --detach for deploys.\n")
+		b.WriteString("Use documented global options when needed: --service, --environment, --json, --yes.\n\n")
 	case "cloudflare":
 		b.WriteString("You are generating a Cloudflare deployment command plan in small pages.\n")
 		b.WriteString("Only use Cloudflare tooling: wrangler or cloudflared, or Cloudflare API tuples like [\"GET\",\"/zones\"].\n")

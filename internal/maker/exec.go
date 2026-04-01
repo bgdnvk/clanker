@@ -212,6 +212,7 @@ type ExecOptions struct {
 	Region              string
 	GCPProject          string
 	AzureSubscriptionID string
+	WorkDir             string
 	Writer              io.Writer
 	Destroyer           bool
 
@@ -230,6 +231,10 @@ type ExecOptions struct {
 
 	// Hetzner options
 	HetznerAPIToken string
+
+	// Railway options
+	RailwayAPIToken string
+	RailwayToken    string
 
 	CheckpointKey            string
 	DisableDurableCheckpoint bool

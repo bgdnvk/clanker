@@ -24,6 +24,7 @@ type ServiceContext struct {
 	Cloudflare   bool
 	DigitalOcean bool
 	Hetzner      bool
+	Railway      bool
 	IAM          bool
 	Code         bool
 }
@@ -193,6 +194,24 @@ func InferContext(question string) ServiceContext {
 		"hetzner load balancer",
 	}
 
+	railwayKeywords := []string{
+		"railway",
+		"railway app",
+		"railway project",
+		"railway service",
+		"railway environment",
+		"railway deployment",
+		"railway status",
+		"railway logs",
+		"railway up",
+		"railway link",
+		"railway run",
+		"railway volume",
+		"railway domain",
+		"railway function",
+		"railpack",
+	}
+
 	iamKeywords := []string{
 		// IAM specific queries
 		"iam role", "iam roles", "iam policy", "iam policies",
@@ -267,6 +286,13 @@ func InferContext(question string) ServiceContext {
 		}
 	}
 
+	for _, keyword := range railwayKeywords {
+		if contains(questionLower, keyword) {
+			ctx.Railway = true
+			break
+		}
+	}
+
 	// Check for IAM-specific queries (takes precedence over general AWS)
 	for _, keyword := range iamKeywords {
 		if contains(questionLower, keyword) {
@@ -276,7 +302,7 @@ func InferContext(question string) ServiceContext {
 	}
 
 	// Default to AWS and GitHub context if nothing is detected
-	if !ctx.AWS && !ctx.GitHub && !ctx.Terraform && !ctx.K8s && !ctx.GCP && !ctx.Azure && !ctx.Cloudflare && !ctx.DigitalOcean && !ctx.Hetzner && !ctx.IAM {
+	if !ctx.AWS && !ctx.GitHub && !ctx.Terraform && !ctx.K8s && !ctx.GCP && !ctx.Azure && !ctx.Cloudflare && !ctx.DigitalOcean && !ctx.Hetzner && !ctx.Railway && !ctx.IAM {
 		ctx.AWS = true
 		ctx.GitHub = true
 	}
@@ -299,6 +325,7 @@ Available services:
 - azure: Microsoft Azure (VMs, AKS, App Service, Storage, Key Vault, Cosmos DB, VNets, etc.)
 - digitalocean: Digital Ocean (Droplets, DOKS, Managed Databases, Spaces, App Platform, Load Balancers, VPCs, etc.)
 - hetzner: Hetzner Cloud (Servers, Load Balancers, Volumes, Networks, Firewalls, Floating IPs, Primary IPs, etc.)
+- railway: Railway (projects, services, environments, deployments, logs, domains, volumes, functions)
 - github: GitHub repositories, PRs, issues, actions, workflows
 - terraform: Infrastructure as code, Terraform plans, state, modules
 - general: General questions not specific to any cloud platform
@@ -310,11 +337,12 @@ IMPORTANT RULES:
 4. If the query mentions AWS services (EC2, Lambda, S3, CloudFront, Route53, etc.) but NOT IAM-specific topics, classify as "aws"
 5. Only classify as "digitalocean" if the query EXPLICITLY mentions Digital Ocean, doctl, droplets, DOKS, or Digital Ocean-specific products
 6. Only classify as "hetzner" if the query EXPLICITLY mentions Hetzner, hcloud, or Hetzner-specific products
-7. If uncertain, classify as "aws" (the default cloud provider)
+7. Only classify as "railway" if the query EXPLICITLY mentions Railway, railpack, or Railway-specific commands/products
+8. If uncertain, classify as "aws" (the default cloud provider)
 
 Respond with ONLY a JSON object:
 {
-	"service": "cloudflare|aws|iam|k8s|gcp|azure|digitalocean|hetzner|github|terraform|general",
+	"service": "cloudflare|aws|iam|k8s|gcp|azure|digitalocean|hetzner|railway|github|terraform|general",
     "confidence": "high|medium|low",
     "reason": "brief explanation of why this classification"
 }`, question)
@@ -413,6 +441,9 @@ func NeedsLLMClassification(ctx ServiceContext) bool {
 	if ctx.Hetzner {
 		count++
 	}
+	if ctx.Railway {
+		count++
+	}
 	if ctx.IAM {
 		count++
 	}
@@ -423,7 +454,7 @@ func NeedsLLMClassification(ctx ServiceContext) bool {
 	// 3. Digital Ocean was inferred (verify it's actually DO-related)
 	// 4. Hetzner was inferred (verify it's actually Hetzner-related)
 	// 5. IAM was inferred (verify it's actually IAM-related for disambiguation)
-	return count > 1 || ctx.Cloudflare || ctx.DigitalOcean || ctx.Hetzner || ctx.IAM
+	return count > 1 || ctx.Cloudflare || ctx.DigitalOcean || ctx.Hetzner || ctx.Railway || ctx.IAM
 }
 
 // ApplyLLMClassification updates the ServiceContext based on LLM classification result
@@ -437,6 +468,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.AWS = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Railway = false
 		ctx.IAM = false
 	case "k8s":
 		ctx.K8s = true
@@ -445,6 +477,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Azure = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Railway = false
 		ctx.IAM = false
 	case "gcp":
 		ctx.GCP = true
@@ -453,6 +486,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Azure = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Railway = false
 		ctx.IAM = false
 	case "azure":
 		ctx.Azure = true
@@ -462,6 +496,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.AWS = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Railway = false
 		ctx.IAM = false
 	case "digitalocean":
 		ctx.DigitalOcean = true
@@ -471,6 +506,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.K8s = false
 		ctx.Azure = false
 		ctx.Hetzner = false
+		ctx.Railway = false
 		ctx.IAM = false
 	case "hetzner":
 		ctx.Hetzner = true
@@ -480,6 +516,17 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.K8s = false
 		ctx.Azure = false
 		ctx.DigitalOcean = false
+		ctx.Railway = false
+		ctx.IAM = false
+	case "railway":
+		ctx.Railway = true
+		ctx.AWS = false
+		ctx.GCP = false
+		ctx.Cloudflare = false
+		ctx.K8s = false
+		ctx.Azure = false
+		ctx.DigitalOcean = false
+		ctx.Hetzner = false
 		ctx.IAM = false
 	case "aws":
 		ctx.AWS = true
@@ -489,6 +536,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Azure = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Railway = false
 		ctx.IAM = false
 	case "iam":
 		ctx.IAM = true
@@ -499,16 +547,19 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Azure = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Railway = false
 	case "terraform":
 		ctx.Terraform = true
 		ctx.Cloudflare = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Railway = false
 	case "github":
 		ctx.GitHub = true
 		ctx.Cloudflare = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Railway = false
 	default:
 		// "general" - default to AWS
 		ctx.AWS = true
@@ -517,6 +568,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Azure = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Railway = false
 		ctx.IAM = false
 	}
 }

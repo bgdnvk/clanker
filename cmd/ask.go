@@ -30,6 +30,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/k8s"
 	"github.com/bgdnvk/clanker/internal/k8s/plan"
 	"github.com/bgdnvk/clanker/internal/maker"
+	"github.com/bgdnvk/clanker/internal/railway"
 	"github.com/bgdnvk/clanker/internal/resourcedb"
 	"github.com/bgdnvk/clanker/internal/routing"
 	tfclient "github.com/bgdnvk/clanker/internal/terraform"
@@ -41,8 +42,9 @@ import (
 const defaultGeminiModel = "gemini-2.5-flash"
 
 var askCmd = &cobra.Command{
-	Use:   "ask [question]",
-	Short: "Ask AI about your cloud infrastructure or GitHub repository",
+	Use:          "ask [question]",
+	Short:        "Ask AI about your cloud infrastructure or GitHub repository",
+	SilenceUsage: true,
 	Long: `Ask natural language questions about your AWS or GCP infrastructure or GitHub repository.
 	
 Examples:
@@ -77,6 +79,7 @@ Examples:
 		includeCloudflare, _ := cmd.Flags().GetBool("cloudflare")
 		includeDigitalOcean, _ := cmd.Flags().GetBool("digitalocean")
 		includeHetzner, _ := cmd.Flags().GetBool("hetzner")
+		includeRailway, _ := cmd.Flags().GetBool("railway")
 		includeTerraform, _ := cmd.Flags().GetBool("terraform")
 		includeIAM, _ := cmd.Flags().GetBool("iam")
 		iamRoleARN, _ := cmd.Flags().GetString("role-arn")
@@ -245,6 +248,24 @@ Examples:
 				})
 			}
 
+			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "railway") {
+				railwayAPIToken := railway.ResolveAPIToken()
+				railwayToken := strings.TrimSpace(viper.GetString("railway.token"))
+				if railwayToken == "" {
+					railwayToken = strings.TrimSpace(os.Getenv("RAILWAY_TOKEN"))
+				}
+				if railwayAPIToken == "" && railwayToken == "" {
+					return fmt.Errorf("railway token is required (set railway.api_token, railway.token, RAILWAY_API_TOKEN, or RAILWAY_TOKEN)")
+				}
+				return maker.ExecuteRailwayPlan(ctx, makerPlan, maker.ExecOptions{
+					RailwayAPIToken: railwayAPIToken,
+					RailwayToken:    railwayToken,
+					Writer:          os.Stdout,
+					Destroyer:       destroyer,
+					Debug:           debug,
+				})
+			}
+
 			// Resolve AWS profile/region for execution.
 			targetProfile := resolveAWSProfile(profile)
 
@@ -379,6 +400,7 @@ Examples:
 			explicitDigitalOcean := cmd.Flags().Changed("digitalocean") && includeDigitalOcean
 			explicitHetzner := cmd.Flags().Changed("hetzner") && includeHetzner
 			explicitAzure := cmd.Flags().Changed("azure") && includeAzure
+			explicitRailway := cmd.Flags().Changed("railway") && includeRailway
 			explicitCount := 0
 			if explicitGCP {
 				explicitCount++
@@ -398,10 +420,16 @@ Examples:
 			if explicitAzure {
 				explicitCount++
 			}
+			if explicitRailway {
+				explicitCount++
+			}
 			if explicitCount > 1 {
-				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --azure, --cloudflare, --digitalocean, --hetzner) together with --maker")
+				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --azure, --cloudflare, --digitalocean, --hetzner, --railway) together with --maker")
 			}
 			switch {
+			case explicitRailway:
+				makerProvider = "railway"
+				makerProviderReason = "explicit"
 			case explicitHetzner:
 				makerProvider = "hetzner"
 				makerProviderReason = "explicit"
@@ -431,6 +459,9 @@ Examples:
 				} else if svcCtx.Hetzner {
 					makerProvider = "hetzner"
 					makerProviderReason = "inferred"
+				} else if svcCtx.Railway {
+					makerProvider = "railway"
+					makerProviderReason = "inferred"
 				} else if svcCtx.Azure {
 					makerProvider = "azure"
 					makerProviderReason = "inferred"
@@ -446,6 +477,8 @@ Examples:
 			aiClient := ai.NewClient(provider, apiKey, debug, aiProfile)
 			var prompt string
 			switch makerProvider {
+			case "railway":
+				prompt = maker.RailwayPlanPromptWithMode(question, destroyer)
 			case "cloudflare":
 				prompt = maker.CloudflarePlanPromptWithMode(question, destroyer)
 			case "digitalocean":
@@ -516,9 +549,9 @@ Examples:
 
 			plan.Provider = makerProvider
 
-			// Handle GCP, Azure, Cloudflare, and Digital Ocean plans (output directly, no enrichment)
+			// Handle non-AWS provider plans (output directly, no enrichment)
 			providerLower := strings.ToLower(strings.TrimSpace(plan.Provider))
-			if providerLower == "gcp" || providerLower == "azure" || providerLower == "cloudflare" || providerLower == "digitalocean" || providerLower == "hetzner" {
+			if providerLower == "gcp" || providerLower == "azure" || providerLower == "cloudflare" || providerLower == "digitalocean" || providerLower == "hetzner" || providerLower == "railway" {
 				if plan.CreatedAt.IsZero() {
 					plan.CreatedAt = time.Now().UTC()
 				}
@@ -635,7 +668,11 @@ Format as a professional compliance table suitable for government security docum
 			return handleHetznerQuery(context.Background(), question, debug)
 		}
 
-		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare && !includeDigitalOcean && !includeHetzner {
+		if includeRailway {
+			return handleRailwayQuery(context.Background(), question, debug)
+		}
+
+		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare && !includeDigitalOcean && !includeHetzner && !includeRailway {
 			routingQuestion := questionForRouting(question)
 
 			// First, do quick keyword check for explicit terms
@@ -644,8 +681,8 @@ Format as a professional compliance table suitable for government security docum
 			includeGitHub = svcCtx.GitHub
 
 			if debug {
-				fmt.Printf("Keyword inference: AWS=%v, GitHub=%v, Terraform=%v, K8s=%v, GCP=%v, Cloudflare=%v\n",
-					svcCtx.AWS, svcCtx.GitHub, svcCtx.Terraform, svcCtx.K8s, svcCtx.GCP, svcCtx.Cloudflare)
+				fmt.Printf("Keyword inference: AWS=%v, GitHub=%v, Terraform=%v, K8s=%v, GCP=%v, Cloudflare=%v, Railway=%v\n",
+					svcCtx.AWS, svcCtx.GitHub, svcCtx.Terraform, svcCtx.K8s, svcCtx.GCP, svcCtx.Cloudflare, svcCtx.Railway)
 			}
 
 			// For ambiguous queries (multiple services detected or Cloudflare detected),
@@ -667,8 +704,8 @@ Format as a professional compliance table suitable for government security docum
 					routing.ApplyLLMClassification(&svcCtx, llmService)
 
 					if debug {
-						fmt.Printf("LLM override: AWS=%v, K8s=%v, GCP=%v, Azure=%v, Cloudflare=%v\n",
-							svcCtx.AWS, svcCtx.K8s, svcCtx.GCP, svcCtx.Azure, svcCtx.Cloudflare)
+						fmt.Printf("LLM override: AWS=%v, K8s=%v, GCP=%v, Azure=%v, Cloudflare=%v, Railway=%v\n",
+							svcCtx.AWS, svcCtx.K8s, svcCtx.GCP, svcCtx.Azure, svcCtx.Cloudflare, svcCtx.Railway)
 					}
 				}
 			}
@@ -684,6 +721,10 @@ Format as a professional compliance table suitable for government security docum
 
 			if svcCtx.Azure {
 				includeAzure = true
+			}
+
+			if svcCtx.Railway {
+				includeRailway = true
 			}
 
 			// Update includeAWS and includeGitHub from service context
@@ -704,6 +745,10 @@ Format as a professional compliance table suitable for government security docum
 			// Handle Hetzner queries
 			if svcCtx.Hetzner {
 				return handleHetznerQuery(context.Background(), routingQuestion, debug)
+			}
+
+			if svcCtx.Railway {
+				return handleRailwayQuery(context.Background(), routingQuestion, debug)
 			}
 
 			// Handle IAM queries by delegating to IAM agent
@@ -1160,6 +1205,7 @@ func init() {
 	askCmd.Flags().Bool("cloudflare", false, "Include Cloudflare infrastructure context")
 	askCmd.Flags().Bool("digitalocean", false, "Include Digital Ocean infrastructure context")
 	askCmd.Flags().Bool("hetzner", false, "Include Hetzner Cloud infrastructure context")
+	askCmd.Flags().Bool("railway", false, "Include Railway infrastructure context")
 	askCmd.Flags().Bool("github", false, "Include GitHub repository context")
 	askCmd.Flags().Bool("terraform", false, "Include Terraform workspace context")
 	askCmd.Flags().Bool("iam", false, "Route query to IAM agent for security analysis")
@@ -1186,7 +1232,7 @@ func init() {
 	askCmd.Flags().String("minimax-model", "", "MiniMax model to use (overrides config)")
 	askCmd.Flags().String("github-model", "", "GitHub Models model to use (overrides config)")
 	askCmd.Flags().Bool("agent-trace", false, "Show detailed coordinator agent lifecycle logs (overrides config)")
-	askCmd.Flags().Bool("maker", false, "Generate an AWS, GCP, Azure, Cloudflare, Digital Ocean, or Hetzner CLI plan (JSON) for infrastructure changes")
+	askCmd.Flags().Bool("maker", false, "Generate an AWS, GCP, Azure, Cloudflare, Digital Ocean, Hetzner, or Railway CLI plan (JSON) for infrastructure changes")
 	askCmd.Flags().Bool("destroyer", false, "Allow destructive operations when using --maker (requires explicit confirmation in UI/workflow)")
 	askCmd.Flags().Bool("apply", false, "Apply an approved maker plan (reads from stdin unless --plan-file is provided)")
 	askCmd.Flags().String("plan-file", "", "Optional path to maker plan JSON file for --apply")
@@ -1981,6 +2027,70 @@ Hetzner Cloud Context:
 User Question: %s
 
 Provide a clear, concise answer based on the data above. If the data doesn't contain enough information to fully answer the question, say so and suggest what additional information might be needed.`, hetznerContext, question)
+
+	response, err := aiClient.AskPrompt(ctx, prompt)
+	if err != nil {
+		return fmt.Errorf("failed to get AI response: %w", err)
+	}
+
+	fmt.Println(response)
+	return nil
+}
+
+// handleRailwayQuery delegates a Railway query to the Railway client
+func handleRailwayQuery(ctx context.Context, question string, debug bool) error {
+	if debug {
+		fmt.Println("Delegating query to Railway agent...")
+	}
+
+	apiToken := railway.ResolveAPIToken()
+	client, err := railway.NewClient(apiToken, debug)
+	if err != nil {
+		return fmt.Errorf("failed to create Railway client: %w", err)
+	}
+
+	railwayContext, err := client.GetRelevantContext(ctx, question)
+	if err != nil {
+		return fmt.Errorf("failed to get Railway context: %w", err)
+	}
+
+	var provider string
+	aiProfile := viper.GetString("ai.default_provider")
+	if aiProfile == "" {
+		aiProfile = "openai"
+	}
+	provider = aiProfile
+
+	var apiKey string
+	switch provider {
+	case "gemini":
+		apiKey = ""
+	case "gemini-api":
+		apiKey = resolveGeminiAPIKey("")
+	case "openai":
+		apiKey = resolveOpenAIKey("")
+	case "anthropic":
+		apiKey = resolveAnthropicKey("")
+	case "cohere":
+		apiKey = resolveCohereKey("")
+	case "deepseek":
+		apiKey = resolveDeepSeekKey("")
+	case "minimax":
+		apiKey = resolveMiniMaxKey("")
+	default:
+		apiKey = viper.GetString("ai.api_key")
+	}
+
+	aiClient := ai.NewClient(provider, apiKey, debug, "")
+
+	prompt := fmt.Sprintf(`You are a Railway infrastructure expert. Answer the user's question based on the following Railway CLI context data.
+
+Railway Context:
+%s
+
+User Question: %s
+
+Provide a clear, concise answer based on the data above. If the data doesn't contain enough information to fully answer the question, say so and suggest what additional Railway command or linked project context is needed.`, railwayContext, question)
 
 	response, err := aiClient.AskPrompt(ctx, prompt)
 	if err != nil {

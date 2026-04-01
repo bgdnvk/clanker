@@ -1016,3 +1016,162 @@ Locations/Datacenters:
 User request:
 %q`, destructiveRule, question)
 }
+
+func RailwayPlanPrompt(question string) string {
+	return RailwayPlanPromptWithMode(question, false)
+}
+
+func RailwayPlanPromptWithMode(question string, destroyer bool) string {
+	destructiveRule := "- Avoid any destructive operations (delete/remove/down/unlink)."
+	if destroyer {
+		destructiveRule = "- Destructive operations are allowed ONLY if the user explicitly asked for deletion/teardown."
+	}
+
+	return fmt.Sprintf(`You are an infrastructure maker planner for Railway.
+
+Your job: produce a concrete, minimal Railway CLI execution plan to satisfy the user request.
+
+Constraints:
+- Output ONLY valid JSON.
+- Use this schema exactly:
+{
+  "version": 1,
+  "createdAt": "RFC3339 timestamp",
+  "provider": "railway",
+  "question": "original user question",
+  "summary": "short summary of what will be created/changed",
+  "commands": [
+    {
+      "args": ["railway", "subcommand", "..."],
+      "reason": "why this command is needed",
+      "produces": {
+        "OPTIONAL_BINDING_NAME": "$.json.path.to.value"
+      }
+    }
+  ],
+  "notes": ["optional notes"]
+}
+
+Rules for commands:
+- The "commands" array MUST contain at least 1 command.
+- Provide args as an array; do NOT provide a single string.
+- Commands MUST be Railway CLI only. Every command args MUST start with "railway".
+- Do NOT include any non-Railway programs (no aws/gcloud/az/doctl/hcloud/python/node/bash/curl/terraform/etc).
+- Do NOT include shell operators, pipes, redirects, or subshells.
+- Prefer idempotent/discovery commands before write commands when inputs are unknown.
+- Use documented Railway global options when targeting resources: --service, --environment, --json, --yes.
+- If the user request clearly maps to a documented Railway operation, do NOT return a discovery-only plan. Produce the concrete create/deploy commands.
+- For Railway-managed databases, prefer "railway add --database <type>" when adding a database to the current project.
+- Use "railway deploy --template <code>" when the request is specifically about deploying a Railway template.
+- Use "railway add --service <name>", "railway add --repo <owner/repo>", or "railway add --image <image>" when the request is about creating a service from a known source.
+- Prefer "railway up --detach" for deploying the current directory.
+- Use "railway variable set KEY=value" for environment variables.
+- Use "railway service" and "railway environment" to target the right service/environment before deploys.
+- If the user request is ambiguous or missing required details, output a DISCOVERY-ONLY plan:
+  - Still output a NON-EMPTY commands array.
+  - Use READ-ONLY commands to gather missing inputs (examples: railway whoami --json, railway status --json, railway list --json, railway variable list).
+
+%s
+
+Placeholders and bindings:
+- You MAY use placeholder tokens like "<SERVICE_NAME>" or "<ENVIRONMENT_NAME>".
+- If you use ANY placeholder, ensure an earlier command includes "produces" mapping.
+- For bindings, prefer commands with --json when supported.
+
+Common Railway operations:
+
+Account and project discovery:
+{
+  "args": ["railway", "whoami", "--json"],
+  "reason": "Confirm Railway authentication and identity"
+}
+{
+  "args": ["railway", "list", "--json"],
+  "reason": "List available Railway projects"
+}
+{
+  "args": ["railway", "status", "--json"],
+  "reason": "Inspect the linked Railway project and service state"
+}
+
+Project and service targeting:
+{
+  "args": ["railway", "link", "--project", "<PROJECT_ID>", "--environment", "<ENVIRONMENT_NAME>", "--service", "<SERVICE_NAME>"],
+  "reason": "Link the working directory to the intended Railway project/service"
+}
+{
+  "args": ["railway", "service", "<SERVICE_NAME>"],
+  "reason": "Select the target service"
+}
+{
+  "args": ["railway", "environment", "<ENVIRONMENT_NAME>"],
+  "reason": "Select the target environment"
+}
+
+Variables and deploy:
+{
+  "args": ["railway", "variable", "set", "PORT=3000"],
+  "reason": "Set a runtime variable before deployment"
+}
+{
+  "args": ["railway", "add", "--database", "<DATABASE_TYPE>", "--json"],
+  "reason": "Provision a managed Railway database in the current project"
+}
+{
+  "args": ["railway", "deploy", "--template", "<TEMPLATE_CODE>"],
+  "reason": "Deploy a Railway template into the current project"
+}
+{
+  "args": ["railway", "add", "--service", "<SERVICE_NAME>", "--json"],
+  "reason": "Create a new Railway service in the current project"
+}
+{
+  "args": ["railway", "add", "--repo", "<OWNER/REPO>", "--json"],
+  "reason": "Create a Railway service from a GitHub repository"
+}
+{
+  "args": ["railway", "add", "--image", "<IMAGE>", "--json"],
+  "reason": "Create a Railway service from a Docker image"
+}
+{
+  "args": ["railway", "up", "--detach"],
+  "reason": "Deploy the current working directory to Railway"
+}
+{
+  "args": ["railway", "redeploy"],
+  "reason": "Redeploy the latest build for the linked service"
+}
+{
+  "args": ["railway", "domain"],
+  "reason": "Generate or inspect the Railway public domain"
+}
+
+Example for a direct request that clearly maps to a Railway database operation:
+{
+  "version": 1,
+  "createdAt": "2026-03-25T00:00:00Z",
+  "provider": "railway",
+  "question": "create a database on railway",
+  "summary": "Provision a managed database in the linked Railway project",
+  "commands": [
+    {
+      "args": ["railway", "whoami", "--json"],
+      "reason": "Confirm Railway authentication before provisioning"
+    },
+    {
+      "args": ["railway", "status", "--json"],
+      "reason": "Inspect the currently linked Railway project and environment"
+    },
+    {
+      "args": ["railway", "add", "--database", "<DATABASE_TYPE>", "--json"],
+      "reason": "Provision the requested managed database in the linked Railway project"
+    }
+  ],
+  "notes": [
+    "Prefer concrete Railway provisioning commands over discovery-only plans when the requested resource maps directly to a documented CLI command."
+  ]
+}
+
+User request:
+%q`, destructiveRule, question)
+}
