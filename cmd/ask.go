@@ -40,6 +40,30 @@ import (
 // askCmd represents the ask command
 const defaultGeminiModel = "gemini-2.5-flash"
 
+func applyDiscoveryContextDefaults(includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform bool) (bool, bool, bool, bool, bool, bool, bool) {
+	includeTerraform = true
+	if includeAWS || includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeHetzner {
+		return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform
+	}
+
+	switch routing.DefaultInfraProvider() {
+	case "gcp":
+		includeGCP = true
+	case "azure":
+		includeAzure = true
+	case "cloudflare":
+		includeCloudflare = true
+	case "digitalocean":
+		includeDigitalOcean = true
+	case "hetzner":
+		includeHetzner = true
+	default:
+		includeAWS = true
+	}
+
+	return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform
+}
+
 var askCmd = &cobra.Command{
 	Use:   "ask [question]",
 	Short: "Ask AI about your cloud infrastructure or GitHub repository",
@@ -610,10 +634,17 @@ Format as a professional compliance table suitable for government security docum
 
 		// Discovery mode enables comprehensive infrastructure analysis
 		if discovery {
-			includeAWS = true
-			includeTerraform = true
+			includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform = applyDiscoveryContextDefaults(
+				includeAWS,
+				includeGCP,
+				includeAzure,
+				includeCloudflare,
+				includeDigitalOcean,
+				includeHetzner,
+				includeTerraform,
+			)
 			if debug {
-				fmt.Println("Discovery mode enabled: AWS and Terraform contexts activated")
+				fmt.Println("Discovery mode enabled: Terraform context activated alongside the selected infrastructure provider(s)")
 			}
 		}
 
