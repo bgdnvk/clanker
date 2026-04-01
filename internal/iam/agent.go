@@ -350,6 +350,8 @@ func (a *Agent) getAIClient() *ai.Client {
 		apiKey = viper.GetString("ai.providers.anthropic.api_key")
 	case "cohere":
 		apiKey = viper.GetString("ai.providers.cohere.api_key")
+	case "minimax":
+		apiKey = viper.GetString("ai.providers.minimax.api_key")
 	case "gemini", "gemini-api":
 		apiKey = "" // Uses ADC
 	}

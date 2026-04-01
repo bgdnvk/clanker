@@ -1748,6 +1748,8 @@ func handleCloudflareQuery(ctx context.Context, question string, debug bool) err
 		}
 	case "cohere":
 		apiKey = resolveCohereKey("")
+	case "minimax":
+		apiKey = resolveMiniMaxKey("")
 	default:
 		apiKey = viper.GetString("ai.api_key")
 	}
