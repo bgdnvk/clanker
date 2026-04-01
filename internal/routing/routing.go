@@ -38,9 +38,10 @@ type Classification struct {
 // DefaultInfraProvider returns the configured default infrastructure provider.
 // Falls back to AWS for backward compatibility.
 func DefaultInfraProvider() string {
-	switch strings.ToLower(strings.TrimSpace(viper.GetString("infra.default_provider"))) {
+	p := strings.ToLower(strings.TrimSpace(viper.GetString("infra.default_provider")))
+	switch p {
 	case "aws", "gcp", "azure", "cloudflare", "digitalocean", "hetzner":
-		return strings.ToLower(strings.TrimSpace(viper.GetString("infra.default_provider")))
+		return p
 	default:
 		return "aws"
 	}
@@ -567,7 +568,28 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Hetzner = false
 	default:
 		// "general" - default to the configured infrastructure provider
-		applyConfiguredDefaultContext(ctx)
+		// Only zero cloud provider flags, preserving GitHub/Terraform/K8s context
+		ctx.Cloudflare = false
+		ctx.DigitalOcean = false
+		ctx.Hetzner = false
+		ctx.Azure = false
+		ctx.GCP = false
+		ctx.IAM = false
+		switch DefaultInfraProvider() {
+		case "gcp":
+			ctx.GCP = true
+		case "azure":
+			ctx.Azure = true
+		case "cloudflare":
+			ctx.Cloudflare = true
+		case "digitalocean":
+			ctx.DigitalOcean = true
+		case "hetzner":
+			ctx.Hetzner = true
+		default:
+			ctx.AWS = true
+			ctx.GitHub = true
+		}
 	}
 }
 

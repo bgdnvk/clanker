@@ -1448,7 +1448,7 @@ func applyCommandAIOverrides(aiProfile, openaiKey, anthropicKey, geminiKey, deep
 	} else {
 		provider = strings.TrimSpace(viper.GetString("ai.default_provider"))
 		if provider == "" {
-			provider = "openai"
+			provider = "bedrock"
 			viper.Set("ai.default_provider", provider)
 		}
 	}
@@ -1806,10 +1806,8 @@ func handleCloudflareQuery(ctx context.Context, question string, debug bool) err
 
 	var apiKey string
 	switch aiProfile {
-	case "gemini":
+	case "gemini", "gemini-api":
 		apiKey = ""
-	case "gemini-api":
-		apiKey = resolveGeminiAPIKey("")
 	case "openai":
 		apiKey = resolveOpenAIKey("")
 	case "anthropic":
@@ -1954,10 +1952,8 @@ func handleDigitalOceanQuery(ctx context.Context, question string, debug bool) e
 
 	var apiKey string
 	switch provider {
-	case "gemini":
+	case "gemini", "gemini-api":
 		apiKey = ""
-	case "gemini-api":
-		apiKey = resolveGeminiAPIKey("")
 	case "openai":
 		apiKey = resolveOpenAIKey("")
 	case "anthropic":
@@ -2047,10 +2043,8 @@ func handleHetznerQuery(ctx context.Context, question string, debug bool) error 
 
 	var apiKey string
 	switch provider {
-	case "gemini":
+	case "gemini", "gemini-api":
 		apiKey = ""
-	case "gemini-api":
-		apiKey = resolveGeminiAPIKey("")
 	case "openai":
 		apiKey = resolveOpenAIKey("")
 	case "anthropic":

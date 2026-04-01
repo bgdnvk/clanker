@@ -371,8 +371,47 @@ func TestApplyLLMClassification_GeneralUsesConfiguredDefault(t *testing.T) {
 	if ctx.AWS {
 		t.Error("general classification should not force AWS when Hetzner is configured")
 	}
-	if ctx.GitHub {
-		t.Error("general classification should not enable GitHub when Hetzner is configured")
+}
+
+func TestApplyLLMClassification_GeneralPreservesGitHubContext(t *testing.T) {
+	useDefaultProvider(t, "hetzner")
+
+	ctx := ServiceContext{GitHub: true}
+	ApplyLLMClassification(&ctx, "general")
+
+	if !ctx.GitHub {
+		t.Error("general classification should preserve previously inferred GitHub context")
+	}
+	if !ctx.Hetzner {
+		t.Error("general classification should enable configured default provider")
+	}
+}
+
+func TestApplyLLMClassification_GeneralPreservesTerraformContext(t *testing.T) {
+	useDefaultProvider(t, "hetzner")
+
+	ctx := ServiceContext{Terraform: true}
+	ApplyLLMClassification(&ctx, "general")
+
+	if !ctx.Terraform {
+		t.Error("general classification should preserve previously inferred Terraform context")
+	}
+	if !ctx.Hetzner {
+		t.Error("general classification should enable configured default provider")
+	}
+}
+
+func TestApplyLLMClassification_GeneralPreservesK8sContext(t *testing.T) {
+	useDefaultProvider(t, "")
+
+	ctx := ServiceContext{K8s: true}
+	ApplyLLMClassification(&ctx, "general")
+
+	if !ctx.K8s {
+		t.Error("general classification should preserve previously inferred K8s context")
+	}
+	if !ctx.AWS {
+		t.Error("general classification should enable default AWS provider")
 	}
 }
 

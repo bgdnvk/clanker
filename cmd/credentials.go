@@ -563,6 +563,11 @@ func testHetznerCredentials(ctx context.Context, client *backend.Client, debug b
 		return fmt.Errorf("no Hetzner API token")
 	}
 
+	if _, err := exec.LookPath("hcloud"); err != nil {
+		fmt.Println("  SKIPPED: hcloud CLI not found (install from: https://github.com/hetznercloud/cli)")
+		return nil
+	}
+
 	cmd := exec.CommandContext(ctx, "hcloud", "server", "list", "--output", "json")
 	cmd.Env = append(os.Environ(), fmt.Sprintf("HCLOUD_TOKEN=%s", creds.APIToken))
 
