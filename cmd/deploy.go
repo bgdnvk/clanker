@@ -2043,6 +2043,8 @@ func maxPlanningPromptChars(provider string) int {
 		return 230000
 	case "cohere":
 		return 200000
+	case "minimax":
+		return 200000
 	case "anthropic":
 		return 170000
 	default:

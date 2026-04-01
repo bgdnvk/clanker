@@ -555,6 +555,8 @@ func (c *Client) askWithDynamicAnalysis(ctx context.Context, question, awsContex
 		analysisResponse, err = c.askAnthropic(ctx, analysisPrompt)
 	case "cohere":
 		analysisResponse, err = c.askCohere(ctx, analysisPrompt)
+	case "minimax":
+		analysisResponse, err = c.askMiniMax(ctx, analysisPrompt)
 	case "gemini", "gemini-api":
 		analysisResponse, err = c.askGemini(ctx, analysisPrompt)
 	default:
@@ -720,6 +722,8 @@ Please provide a comprehensive answer based on the live data above.`, question, 
 		return c.askAnthropic(ctx, finalPrompt)
 	case "cohere":
 		return c.askCohere(ctx, finalPrompt)
+	case "minimax":
+		return c.askMiniMax(ctx, finalPrompt)
 	case "gemini", "gemini-api":
 		return c.askGemini(ctx, finalPrompt)
 	default:
@@ -780,6 +784,8 @@ func (c *Client) AskOriginal(ctx context.Context, question, awsContext, codeCont
 		return c.askAnthropic(ctx, prompt)
 	case "cohere":
 		return c.askCohere(ctx, prompt)
+	case "minimax":
+		return c.askMiniMax(ctx, prompt)
 	case "openai":
 		return c.askOpenAI(ctx, prompt)
 	default:
@@ -1402,6 +1408,96 @@ func (c *Client) askAnthropic(ctx context.Context, prompt string) (string, error
 	return "", fmt.Errorf("no response content from Anthropic")
 }
 
+// askMiniMax sends a prompt to MiniMax using the Anthropic-compatible API.
+func (c *Client) askMiniMax(ctx context.Context, prompt string) (string, error) {
+	profileLLMCall, err := c.getAIProfile(c.aiProfile)
+	if err != nil {
+		return "", fmt.Errorf("failed to get AI profile for LLM calls: %w", err)
+	}
+
+	if strings.TrimSpace(c.apiKey) == "" {
+		return "", fmt.Errorf("MiniMax API key not configured")
+	}
+
+	model := strings.TrimSpace(profileLLMCall.Model)
+	if model == "" {
+		model = "MiniMax-M2.5"
+	}
+
+	reqBody := anthropicRequest{
+		Model:       model,
+		MaxTokens:   4000,
+		Temperature: 0.1,
+		Messages: []anthropicMessage{{
+			Role:    "user",
+			Content: []map[string]any{{"type": "text", "text": sanitizeASCII(prompt)}},
+		}},
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	client := &http.Client{Timeout: aiHTTPClientTimeout}
+	var body []byte
+	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
+		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.baseURL, "/")+"/v1/messages", bytes.NewBuffer(jsonData))
+		if reqErr != nil {
+			return "", fmt.Errorf("failed to create request: %w", reqErr)
+		}
+
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("x-api-key", strings.TrimSpace(c.apiKey))
+
+		resp, doErr := client.Do(httpReq)
+		if doErr != nil {
+			if attempt == aiRetryMaxAttempts || !isRetryableProviderErrorText(doErr.Error()) {
+				return "", fmt.Errorf("failed to send request: %w", doErr)
+			}
+			if wErr := waitForAIRetry(ctx, aiRetryDelay(attempt-1)); wErr != nil {
+				return "", wErr
+			}
+			continue
+		}
+
+		body, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return "", fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+
+		if attempt == aiRetryMaxAttempts || !(isRetryableHTTPStatus(resp.StatusCode) || isRetryableProviderErrorText(string(body))) {
+			return "", fmt.Errorf("MiniMax API request failed with status %d: %s", resp.StatusCode, string(body))
+		}
+
+		delay := aiRetryDelay(attempt - 1)
+		if ra, ok := retryAfterDelay(resp.Header); ok {
+			delay = ra
+		}
+		if wErr := waitForAIRetry(ctx, delay); wErr != nil {
+			return "", wErr
+		}
+	}
+
+	var parsed anthropicResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	for _, c := range parsed.Content {
+		if strings.TrimSpace(c.Text) != "" {
+			return c.Text, nil
+		}
+	}
+
+	return "", fmt.Errorf("no response content from MiniMax")
+}
+
 func anthropicModelNotFound(statusCode int, body []byte) bool {
 	if statusCode != http.StatusNotFound {
 		return false
@@ -1623,6 +1719,8 @@ func (c *Client) AskPrompt(ctx context.Context, prompt string) (string, error) {
 		return c.askAnthropic(ctx, prompt)
 	case "cohere":
 		return c.askCohere(ctx, prompt)
+	case "minimax":
+		return c.askMiniMax(ctx, prompt)
 	case "gemini", "gemini-api":
 		return c.askGemini(ctx, prompt)
 	default:
@@ -1650,6 +1748,8 @@ func (c *Client) AskWithContext(ctx context.Context, conv *ConversationContext, 
 		response, err = c.askGitHubModelsWithHistory(ctx, conv)
 	case "cohere":
 		response, err = c.askCohereWithHistory(ctx, conv)
+	case "minimax":
+		response, err = c.askMiniMaxWithHistory(ctx, conv)
 	case "gemini", "gemini-api":
 		response, err = c.askGeminiWithHistory(ctx, conv)
 	default:
@@ -1875,6 +1975,113 @@ func (c *Client) askAnthropicWithHistory(ctx context.Context, conv *Conversation
 	}
 
 	return "", fmt.Errorf("no response content from Anthropic")
+}
+
+// askMiniMaxWithHistory sends a multi-turn request to MiniMax using the Anthropic-compatible API.
+func (c *Client) askMiniMaxWithHistory(ctx context.Context, conv *ConversationContext) (string, error) {
+	profileLLMCall, err := c.getAIProfile(c.aiProfile)
+	if err != nil {
+		return "", fmt.Errorf("failed to get AI profile: %w", err)
+	}
+
+	if strings.TrimSpace(c.apiKey) == "" {
+		return "", fmt.Errorf("MiniMax API key not configured")
+	}
+
+	model := strings.TrimSpace(profileLLMCall.Model)
+	if model == "" {
+		model = "MiniMax-M2.5"
+	}
+
+	messages := make([]anthropicMessage, 0, len(conv.Messages)+1)
+
+	if conv.SystemPrompt != "" {
+		messages = append(messages, anthropicMessage{
+			Role:    "user",
+			Content: []map[string]any{{"type": "text", "text": sanitizeASCII(conv.SystemPrompt)}},
+		})
+		messages = append(messages, anthropicMessage{
+			Role:    "assistant",
+			Content: []map[string]any{{"type": "text", "text": "Understood. I will follow these instructions."}},
+		})
+	}
+
+	for _, m := range conv.Messages {
+		messages = append(messages, anthropicMessage{
+			Role:    m.Role,
+			Content: []map[string]any{{"type": "text", "text": sanitizeASCII(m.Content)}},
+		})
+	}
+
+	reqBody := anthropicRequest{
+		Model:       model,
+		MaxTokens:   4000,
+		Temperature: 0.1,
+		Messages:    messages,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	client := &http.Client{Timeout: aiHTTPClientTimeout}
+	var body []byte
+	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
+		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.baseURL, "/")+"/v1/messages", bytes.NewBuffer(jsonData))
+		if reqErr != nil {
+			return "", fmt.Errorf("failed to create request: %w", reqErr)
+		}
+
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("x-api-key", strings.TrimSpace(c.apiKey))
+
+		resp, doErr := client.Do(httpReq)
+		if doErr != nil {
+			if attempt == aiRetryMaxAttempts || !isRetryableProviderErrorText(doErr.Error()) {
+				return "", fmt.Errorf("failed to send request: %w", doErr)
+			}
+			if wErr := waitForAIRetry(ctx, aiRetryDelay(attempt-1)); wErr != nil {
+				return "", wErr
+			}
+			continue
+		}
+
+		body, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return "", fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+
+		if attempt == aiRetryMaxAttempts || !(isRetryableHTTPStatus(resp.StatusCode) || isRetryableProviderErrorText(string(body))) {
+			return "", fmt.Errorf("MiniMax API request failed with status %d: %s", resp.StatusCode, string(body))
+		}
+
+		delay := aiRetryDelay(attempt - 1)
+		if ra, ok := retryAfterDelay(resp.Header); ok {
+			delay = ra
+		}
+		if wErr := waitForAIRetry(ctx, delay); wErr != nil {
+			return "", wErr
+		}
+	}
+
+	var parsed anthropicResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	for _, c := range parsed.Content {
+		if strings.TrimSpace(c.Text) != "" {
+			return c.Text, nil
+		}
+	}
+
+	return "", fmt.Errorf("no response content from MiniMax")
 }
 
 // askOpenAIWithHistory sends a multi-turn request to OpenAI API
@@ -2359,6 +2566,8 @@ Take your time to thoroughly analyze the data. Think extremely hard about what t
 		response, err = c.askAnthropic(ctx, finalPrompt)
 	case "cohere":
 		response, err = c.askCohere(ctx, finalPrompt)
+	case "minimax":
+		response, err = c.askMiniMax(ctx, finalPrompt)
 	case "gemini", "gemini-api":
 		response, err = c.askGemini(ctx, finalPrompt)
 	default:
@@ -2485,6 +2694,8 @@ func (c *Client) dispatchLLM(ctx context.Context, prompt string) (string, error)
 		return c.askAnthropic(ctx, prompt)
 	case "cohere":
 		return c.askCohere(ctx, prompt)
+	case "minimax":
+		return c.askMiniMax(ctx, prompt)
 	case "gemini", "gemini-api":
 		return c.askGemini(ctx, prompt)
 	default:
