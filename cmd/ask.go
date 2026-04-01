@@ -113,6 +113,8 @@ Examples:
 		}
 		routeOnly, _ := cmd.Flags().GetBool("route-only")
 
+		applyCommandAIOverrides(aiProfile, openaiKey, anthropicKey, geminiKey, deepseekKey, cohereKey, minimaxKey, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel, githubModel)
+
 		// Handle route-only mode: return routing decision as JSON without executing
 		if routeOnly {
 			agent, reason := determineRoutingDecision(question)
@@ -233,9 +235,9 @@ Examples:
 			}
 
 			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "hetzner") {
-				hetznerToken := hetzner.ResolveAPIToken()
-				if hetznerToken == "" {
-					return fmt.Errorf("hetzner api_token is required (set hetzner.api_token or HCLOUD_TOKEN)")
+				hetznerToken, err := resolveHetznerToken(ctx, debug)
+				if err != nil {
+					return err
 				}
 				return maker.ExecuteHetznerPlan(ctx, makerPlan, maker.ExecOptions{
 					HetznerAPIToken: hetznerToken,
@@ -371,7 +373,7 @@ Examples:
 			// Priority:
 			//  1) Explicit flags win (--gcp / --aws / --cloudflare)
 			//  2) Infer from question (cheap heuristic)
-			makerProvider := "aws"
+			makerProvider := routing.DefaultInfraProvider()
 			makerProviderReason := "default"
 			explicitGCP := cmd.Flags().Changed("gcp") && includeGCP
 			explicitAWS := cmd.Flags().Changed("aws") && includeAWS
@@ -1408,6 +1410,40 @@ func maybeRunTerraformCommand(ctx context.Context, question string, tfClient *tf
 	return true, nil
 }
 
+func applyCommandAIOverrides(aiProfile, openaiKey, anthropicKey, geminiKey, deepseekKey, cohereKey, minimaxKey, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel, githubModel string) {
+	provider := strings.TrimSpace(aiProfile)
+	if provider != "" {
+		viper.Set("ai.default_provider", provider)
+	} else {
+		provider = strings.TrimSpace(viper.GetString("ai.default_provider"))
+		if provider == "" {
+			provider = "openai"
+			viper.Set("ai.default_provider", provider)
+		}
+	}
+
+	if strings.TrimSpace(openaiKey) != "" {
+		viper.Set("ai.providers.openai.api_key", strings.TrimSpace(openaiKey))
+	}
+	if strings.TrimSpace(anthropicKey) != "" {
+		viper.Set("ai.providers.anthropic.api_key", strings.TrimSpace(anthropicKey))
+	}
+	if strings.TrimSpace(geminiKey) != "" {
+		viper.Set("ai.providers.gemini-api.api_key", strings.TrimSpace(geminiKey))
+	}
+	if strings.TrimSpace(deepseekKey) != "" {
+		viper.Set("ai.providers.deepseek.api_key", strings.TrimSpace(deepseekKey))
+	}
+	if strings.TrimSpace(cohereKey) != "" {
+		viper.Set("ai.providers.cohere.api_key", strings.TrimSpace(cohereKey))
+	}
+	if strings.TrimSpace(minimaxKey) != "" {
+		viper.Set("ai.providers.minimax.api_key", strings.TrimSpace(minimaxKey))
+	}
+
+	maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel, githubModel)
+}
+
 func maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel, githubModel string) {
 	switch provider {
 	case "openai":
@@ -1739,15 +1775,18 @@ func handleCloudflareQuery(ctx context.Context, question string, debug bool) err
 
 	var apiKey string
 	switch aiProfile {
-	case "gemini", "gemini-api":
+	case "gemini":
 		apiKey = ""
+	case "gemini-api":
+		apiKey = resolveGeminiAPIKey("")
 	case "openai":
-		apiKey = viper.GetString("ai.providers.openai.api_key")
-		if apiKey == "" {
-			apiKey = os.Getenv("OPENAI_API_KEY")
-		}
+		apiKey = resolveOpenAIKey("")
+	case "anthropic":
+		apiKey = resolveAnthropicKey("")
 	case "cohere":
 		apiKey = resolveCohereKey("")
+	case "deepseek":
+		apiKey = resolveDeepSeekKey("")
 	case "minimax":
 		apiKey = resolveMiniMaxKey("")
 	default:
@@ -1902,7 +1941,7 @@ func handleDigitalOceanQuery(ctx context.Context, question string, debug bool) e
 		apiKey = viper.GetString("ai.api_key")
 	}
 
-	aiClient := ai.NewClient(provider, apiKey, debug, "")
+	aiClient := ai.NewClient(provider, apiKey, debug, provider)
 
 	prompt := fmt.Sprintf(`You are a Digital Ocean infrastructure expert. Answer the user's question based on the following Digital Ocean context data.
 
@@ -1922,15 +1961,39 @@ Provide a clear, concise answer based on the data above. If the data doesn't con
 	return nil
 }
 
+func resolveHetznerToken(ctx context.Context, debug bool) (string, error) {
+	apiToken := hetzner.ResolveAPIToken()
+	if apiToken != "" {
+		return apiToken, nil
+	}
+
+	backendAPIKey := backend.ResolveAPIKey("")
+	if backendAPIKey != "" {
+		backendClient := backend.NewClient(backendAPIKey, debug)
+		backendCreds, backendErr := backendClient.GetHetznerCredentials(ctx)
+		if backendErr == nil && strings.TrimSpace(backendCreds.APIToken) != "" {
+			if debug {
+				fmt.Println("[backend] Using Hetzner credentials from backend")
+			}
+			return strings.TrimSpace(backendCreds.APIToken), nil
+		}
+		if debug {
+			fmt.Printf("[backend] No Hetzner credentials available (%v), falling back to local\n", backendErr)
+		}
+	}
+
+	return "", fmt.Errorf("hetzner api_token is required (set hetzner.api_token or HCLOUD_TOKEN)")
+}
+
 // handleHetznerQuery delegates a Hetzner Cloud query to the Hetzner client
 func handleHetznerQuery(ctx context.Context, question string, debug bool) error {
 	if debug {
 		fmt.Println("Delegating query to Hetzner Cloud agent...")
 	}
 
-	apiToken := hetzner.ResolveAPIToken()
-	if apiToken == "" {
-		return fmt.Errorf("hetzner api_token is required (set hetzner.api_token or HCLOUD_TOKEN)")
+	apiToken, err := resolveHetznerToken(ctx, debug)
+	if err != nil {
+		return err
 	}
 
 	client, err := hetzner.NewClient(apiToken, debug)
@@ -1971,7 +2034,7 @@ func handleHetznerQuery(ctx context.Context, question string, debug bool) error 
 		apiKey = viper.GetString("ai.api_key")
 	}
 
-	aiClient := ai.NewClient(provider, apiKey, debug, "")
+	aiClient := ai.NewClient(provider, apiKey, debug, provider)
 
 	prompt := fmt.Sprintf(`You are a Hetzner Cloud infrastructure expert. Answer the user's question based on the following Hetzner Cloud context data.
 
