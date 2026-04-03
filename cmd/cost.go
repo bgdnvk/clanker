@@ -464,6 +464,16 @@ func getCostAggregator(ctx context.Context, debug bool) *cost.Aggregator {
 		aggregator.RegisterProvider(cfProvider)
 	}
 
+	// Initialize Hetzner provider
+	hzProvider, err := cost.NewHetznerProvider("", debug)
+	if err != nil {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[cost] Hetzner provider not available: %v\n", err)
+		}
+	} else {
+		aggregator.RegisterProvider(hzProvider)
+	}
+
 	return aggregator
 }
 
