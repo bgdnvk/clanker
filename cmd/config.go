@@ -60,6 +60,7 @@ ai:
     openai:
       model: gpt-5
       api_key_env: OPENAI_API_KEY
+			# local_model_inference_url: http://127.0.0.1:8080/v1
 
     anthropic:
       model: claude-opus-4-6

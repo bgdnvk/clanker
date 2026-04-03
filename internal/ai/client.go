@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -89,10 +91,11 @@ type Client struct {
 }
 
 const (
-	aiRetryMaxAttempts  = 5
-	aiRetryBaseDelay    = 1 * time.Second
-	aiRetryMaxDelay     = 16 * time.Second
-	aiHTTPClientTimeout = 120 * time.Second
+	aiRetryMaxAttempts   = 5
+	aiRetryBaseDelay     = 1 * time.Second
+	aiRetryMaxDelay      = 16 * time.Second
+	aiHTTPClientTimeout  = 120 * time.Second
+	defaultOpenAIBaseURL = "https://api.openai.com/v1"
 )
 
 func aiRetryDelay(retryIndex int) time.Duration {
@@ -114,6 +117,55 @@ func waitForAIRetry(ctx context.Context, d time.Duration) error {
 		return ctx.Err()
 	case <-t.C:
 		return nil
+	}
+}
+
+func normalizeLocalModelInferenceURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return strings.TrimRight(trimmed, "/")
+	}
+
+	if parsed.Path == "" || parsed.Path == "/" {
+		parsed.Path = "/v1"
+	}
+
+	return strings.TrimRight(parsed.String(), "/")
+}
+
+func isLocalModelInferenceEndpoint(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+
+	return ip.IsLoopback() || ip.IsUnspecified()
+}
+
+func applyModelProviderAuthHeader(req *http.Request, apiKey string) {
+	if req == nil {
+		return
+	}
+	if key := strings.TrimSpace(apiKey); key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
 	}
 }
 
@@ -395,7 +447,7 @@ func NewClient(provider, apiKey string, debug bool, aiProfile ...string) *Client
 			client.tryFallbackToOpenAI(err)
 		}
 	case "openai":
-		client.baseURL = "https://api.openai.com/v1"
+		client.baseURL = defaultOpenAIBaseURL
 	case "github-models":
 		client.baseURL = "https://models.github.ai"
 	case "anthropic":
@@ -409,7 +461,7 @@ func NewClient(provider, apiKey string, debug bool, aiProfile ...string) *Client
 	default:
 		// Default to OpenAI for best compatibility when no provider specified
 		client.provider = "openai"
-		client.baseURL = "https://api.openai.com/v1"
+		client.baseURL = defaultOpenAIBaseURL
 	}
 
 	return client
@@ -979,7 +1031,7 @@ func (c *Client) tryFallbackToOpenAI(reason error) {
 
 	c.provider = "openai"
 	c.apiKey = fallbackKey
-	c.baseURL = "https://api.openai.com/v1"
+	c.baseURL = defaultOpenAIBaseURL
 	c.geminiClient = nil
 }
 
@@ -1001,14 +1053,31 @@ func resolveFallbackOpenAIKey(existing string) string {
 	return ""
 }
 
+func (c *Client) resolveLocalModelInferenceURL(profile *awsclient.AIProfile) string {
+	if profile != nil && strings.TrimSpace(profile.LocalModelInferenceURL) != "" {
+		return normalizeLocalModelInferenceURL(profile.LocalModelInferenceURL)
+	}
+	if endpoint := strings.TrimSpace(viper.GetString("ai.providers.openai.local_model_inference_url")); endpoint != "" {
+		return normalizeLocalModelInferenceURL(endpoint)
+	}
+	if endpoint := strings.TrimSpace(os.Getenv("LOCAL_MODEL_INFERENCE_URL")); endpoint != "" {
+		return normalizeLocalModelInferenceURL(endpoint)
+	}
+	return ""
+}
+
 func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
 	// Get the AI profile configuration (this is the profileLLMCall for OpenAI API access)
 	profileLLMCall, err := c.getAIProfile(c.aiProfile)
 	if err != nil {
 		return "", fmt.Errorf("failed to get AI profile for LLM calls: %w", err)
 	}
+	c.baseURL = defaultOpenAIBaseURL
+	if localModelInferenceURL := c.resolveLocalModelInferenceURL(profileLLMCall); localModelInferenceURL != "" {
+		c.baseURL = localModelInferenceURL
+	}
 
-	if c.apiKey == "" {
+	if strings.TrimSpace(c.apiKey) == "" && !isLocalModelInferenceEndpoint(c.baseURL) {
 		return "", fmt.Errorf("OpenAI API key not configured")
 	}
 
@@ -1027,13 +1096,15 @@ func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/chat/completions", bytes.NewBuffer(jsonData))
+	endpoint := strings.TrimRight(c.baseURL, "/") + "/chat/completions"
+
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	applyModelProviderAuthHeader(req, c.apiKey)
 
 	client := &http.Client{Timeout: aiHTTPClientTimeout}
 	var body []byte
@@ -1046,12 +1117,12 @@ func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
 			if wErr := waitForAIRetry(ctx, aiRetryDelay(attempt-1)); wErr != nil {
 				return "", wErr
 			}
-			req, err = http.NewRequestWithContext(ctx, "POST", c.baseURL+"/chat/completions", bytes.NewBuffer(jsonData))
+			req, err = http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(jsonData))
 			if err != nil {
 				return "", fmt.Errorf("failed to create request: %w", err)
 			}
 			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("Authorization", "Bearer "+c.apiKey)
+			applyModelProviderAuthHeader(req, c.apiKey)
 			continue
 		}
 
@@ -1077,12 +1148,12 @@ func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
 			return "", wErr
 		}
 
-		req, err = http.NewRequestWithContext(ctx, "POST", c.baseURL+"/chat/completions", bytes.NewBuffer(jsonData))
+		req, err = http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(jsonData))
 		if err != nil {
 			return "", fmt.Errorf("failed to create request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		applyModelProviderAuthHeader(req, c.apiKey)
 	}
 
 	var response OpenAIResponse
@@ -2103,6 +2174,13 @@ func (c *Client) askOpenAIWithHistory(ctx context.Context, conv *ConversationCon
 	if err != nil {
 		return "", fmt.Errorf("failed to get AI profile: %w", err)
 	}
+	c.baseURL = defaultOpenAIBaseURL
+	if localModelInferenceURL := c.resolveLocalModelInferenceURL(profileLLMCall); localModelInferenceURL != "" {
+		c.baseURL = localModelInferenceURL
+	}
+	if strings.TrimSpace(c.apiKey) == "" && !isLocalModelInferenceEndpoint(c.baseURL) {
+		return "", fmt.Errorf("OpenAI API key not configured")
+	}
 
 	model := strings.TrimSpace(profileLLMCall.Model)
 	if model == "" {
@@ -2128,7 +2206,7 @@ func (c *Client) askOpenAIWithHistory(ctx context.Context, conv *ConversationCon
 		}
 
 		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Authorization", "Bearer "+strings.TrimSpace(c.apiKey))
+		applyModelProviderAuthHeader(httpReq, c.apiKey)
 
 		resp, doErr := client.Do(httpReq)
 		if doErr != nil {

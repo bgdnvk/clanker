@@ -114,6 +114,7 @@ Examples:
 		azureSubscription, _ := cmd.Flags().GetString("azure-subscription")
 		aiProfile, _ := cmd.Flags().GetString("ai-profile")
 		openaiKey, _ := cmd.Flags().GetString("openai-key")
+		localModelInferenceURL, _ := cmd.Flags().GetString("local-model-inference-url")
 		anthropicKey, _ := cmd.Flags().GetString("anthropic-key")
 		geminiKey, _ := cmd.Flags().GetString("gemini-key")
 		deepseekKey, _ := cmd.Flags().GetString("deepseek-key")
@@ -136,6 +137,10 @@ Examples:
 			viper.Set("agent.trace", agentTrace)
 		}
 		routeOnly, _ := cmd.Flags().GetBool("route-only")
+
+		if strings.TrimSpace(localModelInferenceURL) != "" {
+			viper.Set("ai.providers.openai.local_model_inference_url", strings.TrimSpace(localModelInferenceURL))
+		}
 
 		applyCommandAIOverrides(aiProfile, openaiKey, anthropicKey, geminiKey, deepseekKey, cohereKey, minimaxKey, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel, githubModel)
 
@@ -1206,6 +1211,7 @@ func init() {
 	askCmd.Flags().String("workspace", "", "Terraform workspace to use for infrastructure queries")
 	askCmd.Flags().String("ai-profile", "", "AI profile to use (default: 'default')")
 	askCmd.Flags().String("openai-key", "", "OpenAI API key (overrides config)")
+	askCmd.Flags().String("local-model-inference-url", "", "Local model inference URL for OpenAI-compatible servers (for example http://127.0.0.1:8080/v1)")
 	askCmd.Flags().String("anthropic-key", "", "Anthropic API key (overrides config)")
 	askCmd.Flags().String("gemini-key", "", "Gemini API key (overrides config and env vars)")
 	askCmd.Flags().String("deepseek-key", "", "DeepSeek API key (overrides config)")

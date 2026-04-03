@@ -47,6 +47,7 @@ Examples:
 		applyMode, _ := cmd.Flags().GetBool("apply")
 		aiProfile, _ := cmd.Flags().GetString("ai-profile")
 		openaiKey, _ := cmd.Flags().GetString("openai-key")
+		localModelInferenceURL, _ := cmd.Flags().GetString("local-model-inference-url")
 		anthropicKey, _ := cmd.Flags().GetString("anthropic-key")
 		geminiKey, _ := cmd.Flags().GetString("gemini-key")
 		deepseekKey, _ := cmd.Flags().GetString("deepseek-key")
@@ -67,6 +68,10 @@ Examples:
 		doAccessToken, _ := cmd.Flags().GetString("do-token")
 		hetznerToken, _ := cmd.Flags().GetString("hetzner-token")
 		enforceImageDeploy, _ := cmd.Flags().GetBool("enforce-image-deploy")
+
+		if strings.TrimSpace(localModelInferenceURL) != "" {
+			viper.Set("ai.providers.openai.local_model_inference_url", strings.TrimSpace(localModelInferenceURL))
+		}
 
 		// 1. Clone + analyze
 		fmt.Fprintf(os.Stderr, "[deploy] cloning %s ...\n", repoURL)
@@ -2127,6 +2132,7 @@ func init() {
 	deployCmd.Flags().String("profile", "", "AWS profile to use")
 	deployCmd.Flags().String("ai-profile", "", "AI profile to use")
 	deployCmd.Flags().String("openai-key", "", "OpenAI API key")
+	deployCmd.Flags().String("local-model-inference-url", "", "Local model inference URL for OpenAI-compatible servers (for example http://127.0.0.1:8080/v1)")
 	deployCmd.Flags().String("anthropic-key", "", "Anthropic API key")
 	deployCmd.Flags().String("gemini-key", "", "Gemini API key")
 	deployCmd.Flags().String("deepseek-key", "", "DeepSeek API key")
