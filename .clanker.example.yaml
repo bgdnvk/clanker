@@ -18,6 +18,9 @@ ai:
     openai:
       model: gpt-5
       api_key: ""
+      # Optional for OpenAI-compatible local servers such as llama-server.
+      # If the endpoint is localhost, api_key can stay empty.
+      # local_model_inference_url: "http://127.0.0.1:8080/v1"
 
     # DeepSeek example:
     # deepseek:
@@ -66,6 +69,7 @@ infra:
 #     openai:
 #       model: gpt-5
 #       api_key: "sk-..."  # or pass at runtime: clanker ask --openai-key "$OPENAI_API_KEY" ...
+#       # local_model_inference_url: "http://127.0.0.1:8080/v1"  # optional for local model inference servers
 
 # Use DeepSeek:
 # ai:

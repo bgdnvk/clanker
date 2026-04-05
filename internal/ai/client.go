@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -88,11 +90,20 @@ type Client struct {
 	// awsConfig     aws.Config
 }
 
+type contextPromptBudget struct {
+	maxChars           int
+	chunkChars         int
+	maxChunks          int
+	fallbackChars      int
+	chunkFallbackChars int
+}
+
 const (
-	aiRetryMaxAttempts  = 5
-	aiRetryBaseDelay    = 1 * time.Second
-	aiRetryMaxDelay     = 16 * time.Second
-	aiHTTPClientTimeout = 120 * time.Second
+	aiRetryMaxAttempts   = 5
+	aiRetryBaseDelay     = 1 * time.Second
+	aiRetryMaxDelay      = 16 * time.Second
+	aiHTTPClientTimeout  = 120 * time.Second
+	defaultOpenAIBaseURL = "https://api.openai.com/v1"
 )
 
 func aiRetryDelay(retryIndex int) time.Duration {
@@ -114,6 +125,55 @@ func waitForAIRetry(ctx context.Context, d time.Duration) error {
 		return ctx.Err()
 	case <-t.C:
 		return nil
+	}
+}
+
+func normalizeLocalModelInferenceURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return strings.TrimRight(trimmed, "/")
+	}
+
+	if parsed.Path == "" || parsed.Path == "/" {
+		parsed.Path = "/v1"
+	}
+
+	return strings.TrimRight(parsed.String(), "/")
+}
+
+func isLocalModelInferenceEndpoint(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+
+	return ip.IsLoopback() || ip.IsUnspecified()
+}
+
+func applyModelProviderAuthHeader(req *http.Request, apiKey string) {
+	if req == nil {
+		return
+	}
+	if key := strings.TrimSpace(apiKey); key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
 	}
 }
 
@@ -395,7 +455,7 @@ func NewClient(provider, apiKey string, debug bool, aiProfile ...string) *Client
 			client.tryFallbackToOpenAI(err)
 		}
 	case "openai":
-		client.baseURL = "https://api.openai.com/v1"
+		client.baseURL = defaultOpenAIBaseURL
 	case "github-models":
 		client.baseURL = "https://models.github.ai"
 	case "anthropic":
@@ -409,7 +469,7 @@ func NewClient(provider, apiKey string, debug bool, aiProfile ...string) *Client
 	default:
 		// Default to OpenAI for best compatibility when no provider specified
 		client.provider = "openai"
-		client.baseURL = "https://api.openai.com/v1"
+		client.baseURL = defaultOpenAIBaseURL
 	}
 
 	return client
@@ -688,7 +748,7 @@ func (c *Client) askWithDynamicAnalysis(ctx context.Context, question, awsContex
 	summarizedContext, err := c.summarizeContextIfNeeded(ctx, question, finalContext.String())
 	if err != nil {
 		// Fallback: truncate context if summarization fails
-		const fallbackLimit = 80000
+		fallbackLimit := c.contextPromptBudget().fallbackChars
 		if len(finalContext.String()) > fallbackLimit {
 			summarizedContext = finalContext.String()[:fallbackLimit]
 		} else {
@@ -979,7 +1039,7 @@ func (c *Client) tryFallbackToOpenAI(reason error) {
 
 	c.provider = "openai"
 	c.apiKey = fallbackKey
-	c.baseURL = "https://api.openai.com/v1"
+	c.baseURL = defaultOpenAIBaseURL
 	c.geminiClient = nil
 }
 
@@ -1001,14 +1061,31 @@ func resolveFallbackOpenAIKey(existing string) string {
 	return ""
 }
 
+func (c *Client) resolveLocalModelInferenceURL(profile *awsclient.AIProfile) string {
+	if profile != nil && strings.TrimSpace(profile.LocalModelInferenceURL) != "" {
+		return normalizeLocalModelInferenceURL(profile.LocalModelInferenceURL)
+	}
+	if endpoint := strings.TrimSpace(viper.GetString("ai.providers.openai.local_model_inference_url")); endpoint != "" {
+		return normalizeLocalModelInferenceURL(endpoint)
+	}
+	if endpoint := strings.TrimSpace(os.Getenv("LOCAL_MODEL_INFERENCE_URL")); endpoint != "" {
+		return normalizeLocalModelInferenceURL(endpoint)
+	}
+	return ""
+}
+
 func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
 	// Get the AI profile configuration (this is the profileLLMCall for OpenAI API access)
 	profileLLMCall, err := c.getAIProfile(c.aiProfile)
 	if err != nil {
 		return "", fmt.Errorf("failed to get AI profile for LLM calls: %w", err)
 	}
+	c.baseURL = defaultOpenAIBaseURL
+	if localModelInferenceURL := c.resolveLocalModelInferenceURL(profileLLMCall); localModelInferenceURL != "" {
+		c.baseURL = localModelInferenceURL
+	}
 
-	if c.apiKey == "" {
+	if strings.TrimSpace(c.apiKey) == "" && !isLocalModelInferenceEndpoint(c.baseURL) {
 		return "", fmt.Errorf("OpenAI API key not configured")
 	}
 
@@ -1027,13 +1104,15 @@ func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
 		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/chat/completions", bytes.NewBuffer(jsonData))
+	endpoint := strings.TrimRight(c.baseURL, "/") + "/chat/completions"
+
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	applyModelProviderAuthHeader(req, c.apiKey)
 
 	client := &http.Client{Timeout: aiHTTPClientTimeout}
 	var body []byte
@@ -1046,12 +1125,12 @@ func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
 			if wErr := waitForAIRetry(ctx, aiRetryDelay(attempt-1)); wErr != nil {
 				return "", wErr
 			}
-			req, err = http.NewRequestWithContext(ctx, "POST", c.baseURL+"/chat/completions", bytes.NewBuffer(jsonData))
+			req, err = http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(jsonData))
 			if err != nil {
 				return "", fmt.Errorf("failed to create request: %w", err)
 			}
 			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("Authorization", "Bearer "+c.apiKey)
+			applyModelProviderAuthHeader(req, c.apiKey)
 			continue
 		}
 
@@ -1077,12 +1156,12 @@ func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
 			return "", wErr
 		}
 
-		req, err = http.NewRequestWithContext(ctx, "POST", c.baseURL+"/chat/completions", bytes.NewBuffer(jsonData))
+		req, err = http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(jsonData))
 		if err != nil {
 			return "", fmt.Errorf("failed to create request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		applyModelProviderAuthHeader(req, c.apiKey)
 	}
 
 	var response OpenAIResponse
@@ -2103,6 +2182,13 @@ func (c *Client) askOpenAIWithHistory(ctx context.Context, conv *ConversationCon
 	if err != nil {
 		return "", fmt.Errorf("failed to get AI profile: %w", err)
 	}
+	c.baseURL = defaultOpenAIBaseURL
+	if localModelInferenceURL := c.resolveLocalModelInferenceURL(profileLLMCall); localModelInferenceURL != "" {
+		c.baseURL = localModelInferenceURL
+	}
+	if strings.TrimSpace(c.apiKey) == "" && !isLocalModelInferenceEndpoint(c.baseURL) {
+		return "", fmt.Errorf("OpenAI API key not configured")
+	}
 
 	model := strings.TrimSpace(profileLLMCall.Model)
 	if model == "" {
@@ -2128,7 +2214,7 @@ func (c *Client) askOpenAIWithHistory(ctx context.Context, conv *ConversationCon
 		}
 
 		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Authorization", "Bearer "+strings.TrimSpace(c.apiKey))
+		applyModelProviderAuthHeader(httpReq, c.apiKey)
 
 		resp, doErr := client.Do(httpReq)
 		if doErr != nil {
@@ -2532,7 +2618,7 @@ func (c *Client) askWithAgentInvestigation(ctx context.Context, question, awsCon
 		if c.debug {
 			fmt.Printf("⚠️  Summarization failed: %v. Falling back to truncation.\n", sErr)
 		}
-		const fallbackLimit = 80000
+		fallbackLimit := c.contextPromptBudget().fallbackChars
 		if len(combinedContext) > fallbackLimit {
 			summarizedContext = combinedContext[:fallbackLimit]
 		} else {
@@ -2581,38 +2667,102 @@ Take your time to thoroughly analyze the data. Think extremely hard about what t
 	return response, nil
 }
 
-// summarizeContextIfNeeded reduces context size by chunking and summarizing when it exceeds limits
-func (c *Client) summarizeContextIfNeeded(ctx context.Context, question, contextText string) (string, error) {
-	// Allow override via config, else default safe limit under macOS arg max
-	maxChars := viper.GetInt("ai.max_prompt_chars")
-	if maxChars <= 0 {
-		maxChars = 120000
+func (c *Client) contextPromptBudget() contextPromptBudget {
+	budget := contextPromptBudget{
+		maxChars:           120000,
+		chunkChars:         120000,
+		maxChunks:          6,
+		fallbackChars:      80000,
+		chunkFallbackChars: 5000,
 	}
 
-	if len(contextText) <= maxChars {
+	if configured := viper.GetInt("ai.max_prompt_chars"); configured > 0 {
+		budget.maxChars = configured
+	}
+	if configured := viper.GetInt("ai.chunk_chars"); configured > 0 {
+		budget.chunkChars = configured
+	}
+	if configured := viper.GetInt("ai.max_chunks"); configured > 0 {
+		budget.maxChunks = configured
+	}
+
+	if c.provider == "github-models" {
+		if budget.maxChars > 12000 {
+			budget.maxChars = 12000
+		}
+		if budget.chunkChars > 9000 {
+			budget.chunkChars = 9000
+		}
+		budget.fallbackChars = budget.maxChars
+		budget.chunkFallbackChars = 2000
+
+		if strings.Contains(c.githubModelsActiveModel(), "gpt-5-chat") {
+			if budget.maxChars > 8000 {
+				budget.maxChars = 8000
+			}
+			if budget.chunkChars > 6000 {
+				budget.chunkChars = 6000
+			}
+			budget.fallbackChars = budget.maxChars
+			budget.chunkFallbackChars = 1500
+		}
+	}
+
+	if budget.maxChars <= 0 {
+		budget.maxChars = 120000
+	}
+	if budget.chunkChars <= 0 || budget.chunkChars > budget.maxChars {
+		budget.chunkChars = budget.maxChars
+	}
+	if budget.maxChunks <= 0 {
+		budget.maxChunks = 6
+	}
+	if budget.fallbackChars <= 0 || budget.fallbackChars > budget.maxChars {
+		budget.fallbackChars = budget.maxChars
+	}
+	if budget.chunkFallbackChars <= 0 || budget.chunkFallbackChars > budget.chunkChars {
+		budget.chunkFallbackChars = budget.chunkChars
+	}
+
+	return budget
+}
+
+func (c *Client) githubModelsActiveModel() string {
+	if c.provider != "github-models" {
+		return ""
+	}
+
+	profileLLMCall, err := c.getAIProfile(c.aiProfile)
+	if err != nil {
+		return ""
+	}
+
+	model := strings.TrimSpace(profileLLMCall.Model)
+	if model == "" {
+		return "openai/gpt-5.4"
+	}
+	return model
+}
+
+// summarizeContextIfNeeded reduces context size by chunking and summarizing when it exceeds limits
+func (c *Client) summarizeContextIfNeeded(ctx context.Context, question, contextText string) (string, error) {
+	budget := c.contextPromptBudget()
+
+	if len(contextText) <= budget.maxChars {
 		return contextText, nil
 	}
 
 	// Chunk the context
-	chunkSize := viper.GetInt("ai.chunk_chars")
-	if chunkSize <= 0 {
-		chunkSize = 120000
-	}
-
-	chunks := chunkString(contextText, chunkSize)
+	chunks := chunkString(contextText, budget.chunkChars)
 	// Limit total chunks to keep latency reasonable
-	maxChunks := viper.GetInt("ai.max_chunks")
-	if maxChunks <= 0 {
-		maxChunks = 6
-	}
-	if len(chunks) > maxChunks {
+	if len(chunks) > budget.maxChunks {
 		if c.debug {
-			fmt.Printf("🧩 Context split into %d chunks; sampling to %d for summarization...\n", len(chunks), maxChunks)
+			fmt.Printf("🧩 Context split into %d chunks; sampling to %d for summarization...\n", len(chunks), budget.maxChunks)
 		}
-		chunks = sampleChunks(chunks, maxChunks)
+		chunks = sampleChunks(chunks, budget.maxChunks)
 	}
 	if c.debug {
-		fmt.Printf("🧠 Summarizing %d chunk(s), ~%d chars each (target <= %d chars)\n", len(chunks), chunkSize, maxChars)
+		fmt.Printf("🧠 Summarizing %d chunk(s), ~%d chars each (target <= %d chars)\n", len(chunks), budget.chunkChars, budget.maxChars)
 	}
 
 	summaries := make([]string, 0, len(chunks))
@@ -2623,7 +2773,7 @@ func (c *Client) summarizeContextIfNeeded(ctx context.Context, question, context
 		sum, err := c.summarizeChunk(ctx, question, ch, i+1, len(chunks))
 		if err != nil {
 			// Fallback: truncate chunk
-			const chunkFallback = 5000
+			chunkFallback := budget.chunkFallbackChars
 			if len(ch) > chunkFallback {
 				summaries = append(summaries, ch[:chunkFallback])
 			} else {
@@ -2636,17 +2786,17 @@ func (c *Client) summarizeContextIfNeeded(ctx context.Context, question, context
 
 	// Merge summaries and, if still too big, do a final pass summarization
 	merged := strings.Join(summaries, "\n\n")
-	if len(merged) > maxChars {
+	if len(merged) > budget.maxChars {
 		final, err := c.summarizeText(ctx, question, merged, "MERGE")
 		if err == nil {
 			// Ensure within limit
-			if len(final) > maxChars {
-				return final[:maxChars], nil
+			if len(final) > budget.maxChars {
+				return final[:budget.maxChars], nil
 			}
 			return final, nil
 		}
 		// Fallback: truncate merged summaries
-		return merged[:maxChars], nil
+		return merged[:budget.maxChars], nil
 	}
 	return merged, nil
 }

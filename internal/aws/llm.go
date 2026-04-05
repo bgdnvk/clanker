@@ -34,11 +34,12 @@ type LLMAnalysis struct {
 
 // AIProfile represents an AI provider configuration
 type AIProfile struct {
-	Provider   string `mapstructure:"provider"`
-	AWSProfile string `mapstructure:"aws_profile"`
-	Model      string `mapstructure:"model"`
-	Region     string `mapstructure:"region"`
-	APIKeyEnv  string `mapstructure:"api_key_env"`
+	Provider               string `mapstructure:"provider"`
+	AWSProfile             string `mapstructure:"aws_profile"`
+	Model                  string `mapstructure:"model"`
+	Region                 string `mapstructure:"region"`
+	APIKeyEnv              string `mapstructure:"api_key_env"`
+	LocalModelInferenceURL string `mapstructure:"local_model_inference_url"`
 }
 
 // GetAIProfile returns the AI configuration for the given provider name

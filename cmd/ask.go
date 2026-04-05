@@ -114,6 +114,7 @@ Examples:
 		azureSubscription, _ := cmd.Flags().GetString("azure-subscription")
 		aiProfile, _ := cmd.Flags().GetString("ai-profile")
 		openaiKey, _ := cmd.Flags().GetString("openai-key")
+		localModelInferenceURL, _ := cmd.Flags().GetString("local-model-inference-url")
 		anthropicKey, _ := cmd.Flags().GetString("anthropic-key")
 		geminiKey, _ := cmd.Flags().GetString("gemini-key")
 		deepseekKey, _ := cmd.Flags().GetString("deepseek-key")
@@ -136,6 +137,12 @@ Examples:
 			viper.Set("agent.trace", agentTrace)
 		}
 		routeOnly, _ := cmd.Flags().GetBool("route-only")
+
+		if strings.TrimSpace(localModelInferenceURL) != "" {
+			viper.Set("ai.providers.openai.local_model_inference_url", strings.TrimSpace(localModelInferenceURL))
+		}
+
+		routingQuestion := questionForRouting(question)
 
 		applyCommandAIOverrides(aiProfile, openaiKey, anthropicKey, geminiKey, deepseekKey, cohereKey, minimaxKey, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel, githubModel)
 
@@ -803,7 +810,7 @@ Format as a professional compliance table suitable for government security docum
 				}
 			}
 
-			awsContext, err = awsClient.GetRelevantContext(ctx, question)
+			awsContext, err = awsClient.GetRelevantContext(ctx, routingQuestion)
 			if err != nil {
 				return fmt.Errorf("failed to get AWS context: %w", err)
 			}
@@ -826,7 +833,7 @@ Format as a professional compliance table suitable for government security docum
 			repo := viper.GetString("github.repo")
 			githubClient := ghclient.NewClient(token, owner, repo)
 			var err error
-			githubContext, err = githubClient.GetRelevantContext(ctx, question)
+			githubContext, err = githubClient.GetRelevantContext(ctx, routingQuestion)
 			if err != nil {
 				if debug {
 					fmt.Printf("warning: failed to get GitHub context: %v\n", err)
@@ -847,7 +854,7 @@ Format as a professional compliance table suitable for government security docum
 					return fmt.Errorf("failed to create Terraform client: %w", err)
 				}
 
-				ran, err := maybeRunTerraformCommand(ctx, question, tfClient)
+				ran, err := maybeRunTerraformCommand(ctx, routingQuestion, tfClient)
 				if err != nil {
 					return err
 				}
@@ -855,7 +862,7 @@ Format as a professional compliance table suitable for government security docum
 					return nil
 				}
 
-				terraformContext, err = tfClient.GetRelevantContext(ctx, question)
+				terraformContext, err = tfClient.GetRelevantContext(ctx, routingQuestion)
 				if err != nil {
 					return fmt.Errorf("failed to get Terraform context: %w", err)
 				}
@@ -915,7 +922,7 @@ Format as a professional compliance table suitable for government security docum
 			}
 
 			var err error
-			gcpContext, err = gcpClient.GetRelevantContext(ctx, question)
+			gcpContext, err = gcpClient.GetRelevantContext(ctx, routingQuestion)
 			if err != nil {
 				return fmt.Errorf("failed to get GCP context: %w", err)
 			}
@@ -971,7 +978,7 @@ Format as a professional compliance table suitable for government security docum
 			}
 
 			var err error
-			azureContext, err = azureClient.GetRelevantContext(ctx, question)
+			azureContext, err = azureClient.GetRelevantContext(ctx, routingQuestion)
 			if err != nil {
 				return fmt.Errorf("failed to get Azure context: %w", err)
 			}
@@ -1206,6 +1213,7 @@ func init() {
 	askCmd.Flags().String("workspace", "", "Terraform workspace to use for infrastructure queries")
 	askCmd.Flags().String("ai-profile", "", "AI profile to use (default: 'default')")
 	askCmd.Flags().String("openai-key", "", "OpenAI API key (overrides config)")
+	askCmd.Flags().String("local-model-inference-url", "", "Local model inference URL for OpenAI-compatible servers (for example http://127.0.0.1:8080/v1)")
 	askCmd.Flags().String("anthropic-key", "", "Anthropic API key (overrides config)")
 	askCmd.Flags().String("gemini-key", "", "Gemini API key (overrides config and env vars)")
 	askCmd.Flags().String("deepseek-key", "", "DeepSeek API key (overrides config)")
