@@ -112,9 +112,13 @@ func RefreshOAuthToken(refreshToken string) (*OAuthTokens, error) {
 		return nil, fmt.Errorf("failed to parse refresh response: %w", err)
 	}
 
+	newRefreshToken := raw.RefreshToken
+	if newRefreshToken == "" {
+		newRefreshToken = refreshToken // preserve original when server omits it
+	}
 	tokens := &OAuthTokens{
 		AccessToken:  raw.AccessToken,
-		RefreshToken: raw.RefreshToken,
+		RefreshToken: newRefreshToken,
 		ExpiresAt:    time.Now().Unix() + raw.ExpiresIn,
 	}
 
@@ -130,7 +134,13 @@ func RefreshOAuthToken(refreshToken string) (*OAuthTokens, error) {
 
 // GetValidOAuthToken loads the stored tokens, refreshes if they expire within
 // 5 minutes, saves updated tokens back to disk, and returns the access token.
+// If OPENAI_OAUTH_TOKEN is set in the environment (forwarded by the backend),
+// it takes precedence over the saved token file.
 func GetValidOAuthToken() (string, error) {
+	if envToken := strings.TrimSpace(os.Getenv("OPENAI_OAUTH_TOKEN")); envToken != "" {
+		return envToken, nil
+	}
+
 	tokens, err := LoadOAuthTokens()
 	if err != nil {
 		return "", err

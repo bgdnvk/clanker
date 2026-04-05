@@ -207,6 +207,39 @@ func AskCodexStream(ctx context.Context, oauthToken, model, prompt string) (<-ch
 	return textCh, errCh
 }
 
+// askCodexWithHistory sends a multi-turn conversation to the Codex Responses API.
+func (c *Client) askCodexWithHistory(ctx context.Context, conv *ConversationContext) (string, error) {
+	oauthToken, err := GetValidOAuthToken()
+	if err != nil {
+		return "", fmt.Errorf("failed to get oauth token: %w", err)
+	}
+
+	profileLLMCall, err := c.getAIProfile(c.aiProfile)
+	if err != nil {
+		return "", fmt.Errorf("failed to get AI profile: %w", err)
+	}
+	model := profileLLMCall.Model
+	if model == "" {
+		model = "gpt-5.4"
+	}
+
+	// Build messages: system prompt as instructions is handled by askCodexWithToken
+	// but we merge them into a single prompt for simplicity.
+	var sb strings.Builder
+	if conv.SystemPrompt != "" {
+		sb.WriteString(conv.SystemPrompt)
+		sb.WriteString("\n\n")
+	}
+	for _, m := range conv.Messages {
+		sb.WriteString(m.Role)
+		sb.WriteString(": ")
+		sb.WriteString(m.Content)
+		sb.WriteString("\n\n")
+	}
+
+	return askCodexWithToken(ctx, oauthToken, model, sb.String())
+}
+
 // IsOpenAIOAuthActive returns true if the user has a saved OAuth token
 // or an OPENAI_OAUTH_TOKEN environment variable.
 func IsOpenAIOAuthActive() bool {
