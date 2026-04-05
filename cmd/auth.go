@@ -73,10 +73,10 @@ func runAuthLogin(_ *cobra.Command, _ []string) error {
 	// Build the authorization URL.
 	params := url.Values{
 		"client_id":             {oauthClientID},
-		"redirect_uri":         {oauthRedirectURI},
-		"response_type":        {"code"},
-		"scope":                {"openid profile email offline_access"},
-		"code_challenge":       {codeChallenge},
+		"redirect_uri":          {oauthRedirectURI},
+		"response_type":         {"code"},
+		"scope":                 {"openid profile email offline_access"},
+		"code_challenge":        {codeChallenge},
 		"code_challenge_method": {"S256"},
 	}
 	authURL := oauthAuthorizeURL + "?" + params.Encode()
