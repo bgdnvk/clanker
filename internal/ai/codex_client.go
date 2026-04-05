@@ -13,9 +13,7 @@ import (
 	"time"
 )
 
-const (
-	codexResponsesURL = "https://chatgpt.com/backend-api/codex/responses"
-)
+var codexResponsesURL = "https://chatgpt.com/backend-api/codex/responses"
 
 // CodexRequest is the Responses API request format.
 type CodexRequest struct {

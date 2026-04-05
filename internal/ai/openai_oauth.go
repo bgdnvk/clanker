@@ -21,10 +21,11 @@ type OAuthTokens struct {
 	Email        string `json:"email"`
 }
 
+var openAIOAuthTokenEndpoint = "https://auth.openai.com/oauth/token"
+
 const (
-	openAIOAuthTokenEndpoint = "https://auth.openai.com/oauth/token"
-	openAIOAuthClientID      = "app_EMoamEEZ73f0CkXaXp7hrann"
-	oauthTokenFileName       = "openai-auth.json"
+	openAIOAuthClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
+	oauthTokenFileName  = "openai-auth.json"
 )
 
 func oauthTokenFilePath() (string, error) {
