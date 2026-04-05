@@ -18,6 +18,7 @@ ai:
     openai:
       model: gpt-5
       api_key: ""
+      auth_method: ""  # "apiKey" or "oauth" -- oauth uses ChatGPT account login
       # Optional for OpenAI-compatible local servers such as llama-server.
       # If the endpoint is localhost, api_key can stay empty.
       # local_model_inference_url: "http://127.0.0.1:8080/v1"
