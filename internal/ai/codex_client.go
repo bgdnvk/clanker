@@ -205,7 +205,9 @@ func AskCodexStream(ctx context.Context, oauthToken, model, prompt string) (<-ch
 	return textCh, errCh
 }
 
-// askCodexWithHistory sends a multi-turn conversation to the Codex Responses API.
+// askCodexWithHistory sends a multi-turn conversation to the Codex Responses API
+// using structured message roles (system prompt becomes instructions, messages
+// become the input array).
 func (c *Client) askCodexWithHistory(ctx context.Context, conv *ConversationContext) (string, error) {
 	oauthToken, err := GetValidOAuthToken()
 	if err != nil {
@@ -221,21 +223,81 @@ func (c *Client) askCodexWithHistory(ctx context.Context, conv *ConversationCont
 		model = "gpt-5.4"
 	}
 
-	// Build messages: system prompt as instructions is handled by askCodexWithToken
-	// but we merge them into a single prompt for simplicity.
-	var sb strings.Builder
-	if conv.SystemPrompt != "" {
-		sb.WriteString(conv.SystemPrompt)
-		sb.WriteString("\n\n")
+	codexReq := CodexRequest{
+		Model:  model,
+		Stream: false,
 	}
-	for _, m := range conv.Messages {
-		sb.WriteString(m.Role)
-		sb.WriteString(": ")
-		sb.WriteString(m.Content)
-		sb.WriteString("\n\n")
+	if conv.SystemPrompt != "" {
+		codexReq.Instructions = conv.SystemPrompt
+	}
+	codexReq.Input = make([]Message, len(conv.Messages))
+	for i, m := range conv.Messages {
+		codexReq.Input[i] = Message{Role: m.Role, Content: sanitizeASCII(m.Content)}
+	}
+	if codexReq.Input == nil {
+		codexReq.Input = []Message{}
 	}
 
-	return askCodexWithToken(ctx, oauthToken, model, sb.String())
+	body, err := json.Marshal(codexReq)
+	if err != nil {
+		return "", fmt.Errorf("marshal codex request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, codexResponsesURL, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("create codex request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+oauthToken)
+
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("codex request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read codex response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("codex returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Output []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+		Error *struct {
+			Message string `json:"message"`
+			Code    string `json:"code"`
+		} `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("decode codex response: %w", err)
+	}
+	if result.Error != nil {
+		return "", fmt.Errorf("codex api error (%s): %s", result.Error.Code, result.Error.Message)
+	}
+
+	var sb strings.Builder
+	for _, item := range result.Output {
+		if item.Type != "message" {
+			continue
+		}
+		for _, part := range item.Content {
+			if part.Type == "output_text" || part.Type == "text" {
+				sb.WriteString(part.Text)
+			}
+		}
+	}
+	return sb.String(), nil
 }
 
 // IsOpenAIOAuthActive returns true if the user has a saved OAuth token

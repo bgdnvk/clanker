@@ -104,7 +104,7 @@ func runAuthLogin(_ *cobra.Command, _ []string) error {
 	})
 
 	server := &http.Server{
-		Addr:    ":" + oauthCallbackPort,
+		Addr:    "127.0.0.1:" + oauthCallbackPort,
 		Handler: mux,
 	}
 
