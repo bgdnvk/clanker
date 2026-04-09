@@ -21,6 +21,7 @@ import (
 	cfwaf "github.com/bgdnvk/clanker/internal/cloudflare/waf"
 	cfworkers "github.com/bgdnvk/clanker/internal/cloudflare/workers"
 	cfzerotrust "github.com/bgdnvk/clanker/internal/cloudflare/zerotrust"
+	"github.com/bgdnvk/clanker/internal/dbcontext"
 	"github.com/bgdnvk/clanker/internal/digitalocean"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	ghclient "github.com/bgdnvk/clanker/internal/github"
@@ -96,6 +97,8 @@ Examples:
 		// Get context from flags
 		includeAWS, _ := cmd.Flags().GetBool("aws")
 		includeGitHub, _ := cmd.Flags().GetBool("github")
+		includeCICD, _ := cmd.Flags().GetBool("cicd")
+		includeDB, _ := cmd.Flags().GetBool("db")
 		includeGCP, _ := cmd.Flags().GetBool("gcp")
 		includeAzure, _ := cmd.Flags().GetBool("azure")
 		includeCloudflare, _ := cmd.Flags().GetBool("cloudflare")
@@ -103,6 +106,7 @@ Examples:
 		includeHetzner, _ := cmd.Flags().GetBool("hetzner")
 		includeTerraform, _ := cmd.Flags().GetBool("terraform")
 		includeIAM, _ := cmd.Flags().GetBool("iam")
+		dbConnection, _ := cmd.Flags().GetString("db-connection")
 		iamRoleARN, _ := cmd.Flags().GetString("role-arn")
 		iamPolicyARN, _ := cmd.Flags().GetString("policy-arn")
 		debug := viper.GetBool("debug")
@@ -143,6 +147,16 @@ Examples:
 		}
 
 		routingQuestion := questionForRouting(question)
+		if includeCICD {
+			includeGitHub = true
+		}
+		if strings.TrimSpace(dbConnection) != "" {
+			includeDB = true
+		}
+		if !includeDB && shouldIncludeDatabaseContext(routingQuestion) {
+			includeDB = true
+		}
+		dbRequestedExplicitly := cmd.Flags().Changed("db") || cmd.Flags().Changed("db-connection")
 
 		applyCommandAIOverrides(aiProfile, openaiKey, anthropicKey, geminiKey, deepseekKey, cohereKey, minimaxKey, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel, githubModel)
 
@@ -162,10 +176,14 @@ Examples:
 			return handleHermesQuery(context.Background(), question, profile, debug)
 		} else if agentName == "claude-code" {
 			return handleClaudeCodeQuery(context.Background(), question, profile, debug)
+		} else if agentName == "database" {
+			return handleDatabaseQuery(context.Background(), question, debug, dbConnection)
+		} else if agentName == "cicd" {
+			return handleCICDQuery(context.Background(), question, debug)
 		} else if isGitHubCodingAgent(agentName) {
 			selectedGitHubCodingAgent = agentName
 		} else if agentName != "" {
-			return fmt.Errorf("unknown agent: %s (available: hermes, claude-code, copilot, codex, claude)", agentName)
+			return fmt.Errorf("unknown agent: %s (available: hermes, claude-code, database, cicd, copilot, codex, claude)", agentName)
 		}
 
 		// Handle apply mode (independent of maker mode)
@@ -675,7 +693,7 @@ Format as a professional compliance table suitable for government security docum
 			return handleHetznerQuery(context.Background(), question, debug)
 		}
 
-		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare && !includeDigitalOcean && !includeHetzner {
+		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare && !includeDigitalOcean && !includeHetzner && !includeDB {
 			routingQuestion := questionForRouting(question)
 
 			// First, do quick keyword check for explicit terms
@@ -751,6 +769,14 @@ Format as a professional compliance table suitable for government security docum
 				return handleIAMQuery(context.Background(), routingQuestion, debug, iamRoleARN, iamPolicyARN)
 			}
 
+			if shouldRouteToDatabaseAgent(routingQuestion) {
+				return handleDatabaseQuery(context.Background(), routingQuestion, debug, dbConnection)
+			}
+
+			if shouldRouteToCICDAgent(routingQuestion) {
+				return handleCICDQuery(context.Background(), routingQuestion, debug)
+			}
+
 			// Handle K8s queries by delegating to K8s agent
 			if svcCtx.K8s {
 				return handleK8sQuery(context.Background(), routingQuestion, debug, viper.GetString("kubernetes.kubeconfig"))
@@ -765,6 +791,7 @@ Format as a professional compliance table suitable for government security docum
 		var terraformContext string
 		var gcpContext string
 		var azureContext string
+		var dbContext string
 
 		if includeAWS {
 			var awsClient *aws.Client
@@ -984,6 +1011,20 @@ Format as a professional compliance table suitable for government security docum
 			}
 		}
 
+		if includeDB {
+			var err error
+			dbContext, err = dbcontext.BuildRelevantContext(ctx, routingQuestion, dbConnection)
+			if err != nil {
+				if dbRequestedExplicitly {
+					return fmt.Errorf("failed to get database context: %w", err)
+				}
+				if debug {
+					fmt.Printf("warning: failed to get database context: %v\n", err)
+				}
+				dbContext = ""
+			}
+		}
+
 		// Only Terraform context is supported here (code scanning disabled).
 		combinedCodeContext := terraformContext
 		if strings.TrimSpace(gcpContext) != "" {
@@ -997,6 +1038,12 @@ Format as a professional compliance table suitable for government security docum
 				combinedCodeContext += "\n"
 			}
 			combinedCodeContext += "Azure Context:\n" + azureContext
+		}
+		if strings.TrimSpace(dbContext) != "" {
+			if combinedCodeContext != "" {
+				combinedCodeContext += "\n"
+			}
+			combinedCodeContext += "Database Context:\n" + dbContext
 		}
 
 		if selectedGitHubCodingAgent != "" {
@@ -1201,6 +1248,9 @@ func init() {
 	askCmd.Flags().Bool("digitalocean", false, "Include Digital Ocean infrastructure context")
 	askCmd.Flags().Bool("hetzner", false, "Include Hetzner Cloud infrastructure context")
 	askCmd.Flags().Bool("github", false, "Include GitHub repository context")
+	askCmd.Flags().Bool("cicd", false, "Include CI/CD context (currently GitHub Actions)")
+	askCmd.Flags().Bool("db", false, "Include configured database context")
+	askCmd.Flags().String("db-connection", "", "Database connection name to inspect when using --db")
 	askCmd.Flags().Bool("terraform", false, "Include Terraform workspace context")
 	askCmd.Flags().Bool("iam", false, "Route query to IAM agent for security analysis")
 	askCmd.Flags().String("role-arn", "", "Scope IAM query to a specific role ARN")
@@ -1232,7 +1282,7 @@ func init() {
 	askCmd.Flags().Bool("apply", false, "Apply an approved maker plan (reads from stdin unless --plan-file is provided)")
 	askCmd.Flags().String("plan-file", "", "Optional path to maker plan JSON file for --apply")
 	askCmd.Flags().Bool("route-only", false, "Return routing decision as JSON without executing (for backend integration)")
-	askCmd.Flags().String("agent", "", "Use a specific agent to handle the query (e.g., hermes, claude-code, copilot, codex, claude)")
+	askCmd.Flags().String("agent", "", "Use a specific agent to handle the query (e.g., hermes, claude-code, database, cicd, copilot, codex, claude)")
 	askCmd.Flags().String("github-coding-agent-model", "", "Override the Copilot CLI model used for GitHub coding-agent delegation")
 }
 
@@ -1574,6 +1624,32 @@ func questionForRouting(question string) string {
 	}
 
 	return trimmed
+}
+
+func shouldIncludeDatabaseContext(question string) bool {
+	q := strings.ToLower(strings.TrimSpace(question))
+	if q == "" {
+		return false
+	}
+	if containsAnyPhrase(q, "supabase", "neon", "sqlite", "sqlite3", "database connection", "db connection", "schema", "schemas", "column", "columns", "migration", "migrations") {
+		return true
+	}
+	if containsAnyPhrase(q, "table", "tables", "sql query", "sql schema", "foreign key", "primary key", "index", "indexes") {
+		return true
+	}
+	if containsAnyPhrase(q, "postgres", "postgresql", "mysql") && containsAnyPhrase(q, "table", "tables", "schema", "schemas", "column", "columns", "sql", "query", "connect", "connection") {
+		return true
+	}
+	return false
+}
+
+func containsAnyPhrase(input string, phrases ...string) bool {
+	for _, phrase := range phrases {
+		if strings.Contains(input, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 // handleCloudflareQuery delegates a Cloudflare query to the Cloudflare agent
@@ -2765,6 +2841,14 @@ func determineRoutingDecision(question string) (agent string, reason string) {
 				return "maker", "AWS infrastructure provisioning or modification request"
 			}
 		}
+	}
+
+	if shouldRouteToDatabaseAgent(questionLower) {
+		return "agent-database", "Database agent request detected"
+	}
+
+	if shouldRouteToCICDAgent(questionLower) {
+		return "agent-cicd", "CI/CD agent request detected"
 	}
 
 	// K8s read queries (no action keyword but mentions K8s resources)

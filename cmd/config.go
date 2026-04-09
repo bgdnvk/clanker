@@ -125,21 +125,46 @@ github:
       repo: your-app-repo
       description: Application repository
 
-postgres:
-  default_connection: dev  # Default PostgreSQL connection
-  connections:               # PostgreSQL connections
-    dev:
-      host: localhost
-      port: 5432
-      database: your_dev_db
-      username: postgres
-      description: Development database
-    stage:
-      host: your-stage-db.example.com
-      port: 5432
-      database: your_stage_db
-      username: app_user
-      description: Staging database
+databases:
+	default_connection: dev  # Default database connection
+	connections:
+		dev:
+			driver: postgres
+			host: localhost
+			port: 5432
+			database: your_dev_db
+			username: postgres
+			description: Local PostgreSQL database
+		supabase:
+			vendor: supabase
+			host: your-project.supabase.co
+			port: 5432
+			database: postgres
+			username: postgres
+			password_env: SUPABASE_DB_PASSWORD
+			pool_mode: session
+			description: Supabase PostgreSQL database
+		neon:
+			vendor: neon
+			host: ep-example.us-east-1.aws.neon.tech
+			port: 5432
+			database: neondb
+			username: neon_user
+			password_env: NEON_DB_PASSWORD
+			sslmode: verify-full
+			description: Neon PostgreSQL database
+		mysql:
+			driver: mysql
+			host: mysql.example.com
+			port: 3306
+			database: app
+			username: app_user
+			password_env: MYSQL_DB_PASSWORD
+			description: MySQL database
+		sqlite:
+			driver: sqlite
+			path: ./local-dev.sqlite
+			description: Local SQLite database
 
 terraform:
   default_workspace: dev  # Default Terraform workspace
