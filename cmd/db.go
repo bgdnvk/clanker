@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -26,6 +27,35 @@ var dbInspectCmd = &cobra.Command{
 	Short: "Inspect a configured database connection",
 	Args:  cobra.MaximumNArgs(1),
 	RunE:  runDBInspect,
+}
+
+var dbInspectJSONOutput bool
+
+type dbInspectResponse struct {
+	Connection      dbInspectConnection `json:"connection"`
+	PingMillis      int64               `json:"pingMillis"`
+	Version         string              `json:"version,omitempty"`
+	CurrentDatabase string              `json:"currentDatabase,omitempty"`
+	Objects         []dbInspectObject   `json:"objects,omitempty"`
+}
+
+type dbInspectConnection struct {
+	Name   string `json:"name"`
+	Kind   string `json:"kind"`
+	Target string `json:"target"`
+}
+
+type dbInspectObject struct {
+	Schema  string            `json:"schema,omitempty"`
+	Name    string            `json:"name"`
+	Type    string            `json:"type"`
+	Columns []dbInspectColumn `json:"columns,omitempty"`
+}
+
+type dbInspectColumn struct {
+	Name     string `json:"name"`
+	Type     string `json:"type,omitempty"`
+	Nullable bool   `json:"nullable"`
 }
 
 func runDBList(cmd *cobra.Command, args []string) error {
@@ -65,6 +95,11 @@ func runDBInspect(cmd *cobra.Command, args []string) error {
 	inspection, err := dbcontext.Inspect(context.Background(), name)
 	if err != nil {
 		return err
+	}
+
+	if dbInspectJSONOutput {
+		encoder := json.NewEncoder(cmd.OutOrStdout())
+		return encoder.Encode(dbInspectResponseFromInspection(inspection))
 	}
 
 	fmt.Printf("Connection: %s\n", inspection.Connection.Name)
@@ -110,8 +145,48 @@ func runDBInspect(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func dbInspectResponseFromInspection(inspection dbcontext.Inspection) dbInspectResponse {
+	response := dbInspectResponse{
+		Connection: dbInspectConnection{
+			Name:   inspection.Connection.Name,
+			Kind:   inspection.Connection.Kind(),
+			Target: inspection.Connection.Target(),
+		},
+		PingMillis:      inspection.PingMillis,
+		Version:         inspection.Version,
+		CurrentDatabase: inspection.CurrentDatabase,
+	}
+
+	if len(inspection.Objects) == 0 {
+		return response
+	}
+
+	response.Objects = make([]dbInspectObject, 0, len(inspection.Objects))
+	for _, object := range inspection.Objects {
+		item := dbInspectObject{
+			Schema: object.Schema,
+			Name:   object.Name,
+			Type:   object.Type,
+		}
+		if len(object.Columns) > 0 {
+			item.Columns = make([]dbInspectColumn, 0, len(object.Columns))
+			for _, column := range object.Columns {
+				item.Columns = append(item.Columns, dbInspectColumn{
+					Name:     column.Name,
+					Type:     strings.TrimSpace(column.Type),
+					Nullable: column.Nullable,
+				})
+			}
+		}
+		response.Objects = append(response.Objects, item)
+	}
+
+	return response
+}
+
 func init() {
 	rootCmd.AddCommand(dbCmd)
 	dbCmd.AddCommand(dbListCmd)
 	dbCmd.AddCommand(dbInspectCmd)
+	dbInspectCmd.Flags().BoolVar(&dbInspectJSONOutput, "json", false, "Output inspection as JSON")
 }

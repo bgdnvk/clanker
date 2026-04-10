@@ -12,8 +12,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	cloudsqlconn "cloud.google.com/go/cloudsqlconn"
+	cloudsqlmysql "cloud.google.com/go/cloudsqlconn/mysql/mysql"
+	cloudsqlpgxv5 "cloud.google.com/go/cloudsqlconn/postgres/pgxv5"
 	mysql "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/spf13/viper"
@@ -21,33 +25,79 @@ import (
 )
 
 const (
-	defaultPostgresPort    = 5432
-	defaultMySQLPort       = 3306
-	maxObjects             = 8
-	maxColumns             = 6
-	maxQueryRows           = 50
-	maxQueryValueChars     = 240
-	runtimeDBConnectionEnv = "CLANKER_RUNTIME_DB_CONNECTION_JSON"
+	defaultPostgresPort     = 5432
+	defaultMySQLPort        = 3306
+	maxObjects              = 8
+	maxColumns              = 6
+	maxQueryRows            = 50
+	maxQueryValueChars      = 240
+	runtimeDBConnectionEnv  = "CLANKER_RUNTIME_DB_CONNECTION_JSON"
+	cloudSQLPostgresAuto    = "clanker-cloudsql-postgres-auto"
+	cloudSQLPostgresPublic  = "clanker-cloudsql-postgres-public"
+	cloudSQLPostgresPrivate = "clanker-cloudsql-postgres-private"
+	cloudSQLMySQLAuto       = "clanker-cloudsql-mysql-auto"
+	cloudSQLMySQLPublic     = "clanker-cloudsql-mysql-public"
+	cloudSQLMySQLPrivate    = "clanker-cloudsql-mysql-private"
 )
 
+type cloudSQLDriverRegistration struct {
+	once     sync.Once
+	err      error
+	register func(string) (func() error, error)
+}
+
+var cloudSQLDriverRegistrations = map[string]*cloudSQLDriverRegistration{
+	cloudSQLPostgresAuto: {
+		register: func(name string) (func() error, error) {
+			return cloudsqlpgxv5.RegisterDriver(name, cloudsqlconn.WithDefaultDialOptions(cloudsqlconn.WithAutoIP()))
+		},
+	},
+	cloudSQLPostgresPublic: {
+		register: func(name string) (func() error, error) {
+			return cloudsqlpgxv5.RegisterDriver(name, cloudsqlconn.WithDefaultDialOptions(cloudsqlconn.WithPublicIP()))
+		},
+	},
+	cloudSQLPostgresPrivate: {
+		register: func(name string) (func() error, error) {
+			return cloudsqlpgxv5.RegisterDriver(name, cloudsqlconn.WithDefaultDialOptions(cloudsqlconn.WithPrivateIP()))
+		},
+	},
+	cloudSQLMySQLAuto: {
+		register: func(name string) (func() error, error) {
+			return cloudsqlmysql.RegisterDriver(name, cloudsqlconn.WithDefaultDialOptions(cloudsqlconn.WithAutoIP()))
+		},
+	},
+	cloudSQLMySQLPublic: {
+		register: func(name string) (func() error, error) {
+			return cloudsqlmysql.RegisterDriver(name, cloudsqlconn.WithDefaultDialOptions(cloudsqlconn.WithPublicIP()))
+		},
+	},
+	cloudSQLMySQLPrivate: {
+		register: func(name string) (func() error, error) {
+			return cloudsqlmysql.RegisterDriver(name, cloudsqlconn.WithDefaultDialOptions(cloudsqlconn.WithPrivateIP()))
+		},
+	},
+}
+
 type Connection struct {
-	Name          string
-	Driver        string
-	Vendor        string
-	Host          string
-	Port          int
-	Database      string
-	Username      string
-	Password      string
-	PasswordEnv   string
-	Path          string
-	DSN           string
-	DSNEnv        string
-	Description   string
-	SSLMode       string
-	PoolMode      string
-	QueryExecMode string
-	Params        map[string]string
+	Name           string
+	Driver         string
+	Vendor         string
+	Host           string
+	ConnectionName string
+	Port           int
+	Database       string
+	Username       string
+	Password       string
+	PasswordEnv    string
+	Path           string
+	DSN            string
+	DSNEnv         string
+	Description    string
+	SSLMode        string
+	PoolMode       string
+	QueryExecMode  string
+	Params         map[string]string
 }
 
 type Column struct {
@@ -161,7 +211,7 @@ func ExecuteReadQueryOnConnection(ctx context.Context, connection Connection, qu
 	db.SetConnMaxLifetime(2 * time.Minute)
 
 	if err := db.PingContext(ctx); err != nil {
-		return QueryResult{}, fmt.Errorf("ping %s: %w", connection.Name, err)
+		return QueryResult{}, wrapConnectionError(connection, "ping", err)
 	}
 
 	runner, cleanup, err := prepareInspectionRunner(ctx, db, connection)
@@ -172,7 +222,7 @@ func ExecuteReadQueryOnConnection(ctx context.Context, connection Connection, qu
 
 	rows, err := runner.QueryContext(ctx, normalizedQuery)
 	if err != nil {
-		return QueryResult{}, fmt.Errorf("query %s: %w", connection.Name, err)
+		return QueryResult{}, wrapConnectionError(connection, "query", err)
 	}
 	defer rows.Close()
 
@@ -209,7 +259,7 @@ func ExecuteReadQueryOnConnection(ctx context.Context, connection Connection, qu
 	}
 
 	if err := rows.Err(); err != nil {
-		return QueryResult{}, fmt.Errorf("iterate %s: %w", connection.Name, err)
+		return QueryResult{}, wrapConnectionError(connection, "iterate", err)
 	}
 
 	return result, nil
@@ -310,6 +360,13 @@ func (c Connection) Target() string {
 		return "sqlite"
 	}
 
+	if strings.TrimSpace(c.ConnectionName) != "" {
+		if c.Database != "" {
+			return c.ConnectionName + "/" + c.Database
+		}
+		return c.ConnectionName
+	}
+
 	if strings.TrimSpace(c.Host) != "" {
 		hostPort := c.Host
 		if c.Port > 0 {
@@ -401,7 +458,7 @@ func loadRuntimeConnection() *Connection {
 	if connection.resolveDSN() != "" {
 		return &connection
 	}
-	if connection.Host == "" || connection.Database == "" {
+	if (connection.Host == "" && connection.ConnectionName == "") || connection.Database == "" {
 		return nil
 	}
 	return &connection
@@ -409,10 +466,16 @@ func loadRuntimeConnection() *Connection {
 
 func connectionFromMap(name string, entry map[string]interface{}, legacy bool) (Connection, error) {
 	connection := Connection{
-		Name:          name,
-		Driver:        firstNonEmpty(stringValue(entry, "driver"), stringValue(entry, "type"), stringValue(entry, "engine")),
-		Vendor:        stringValue(entry, "vendor"),
-		Host:          stringValue(entry, "host"),
+		Name:   name,
+		Driver: firstNonEmpty(stringValue(entry, "driver"), stringValue(entry, "type"), stringValue(entry, "engine")),
+		Vendor: stringValue(entry, "vendor"),
+		Host:   stringValue(entry, "host"),
+		ConnectionName: firstNonEmpty(
+			stringValue(entry, "connection_name"),
+			stringValue(entry, "connectionName"),
+			stringValue(entry, "instance_connection_name"),
+			stringValue(entry, "instanceConnectionName"),
+		),
 		Port:          intValue(entry, "port"),
 		Database:      firstNonEmpty(stringValue(entry, "database"), stringValue(entry, "dbname")),
 		Username:      firstNonEmpty(stringValue(entry, "username"), stringValue(entry, "user")),
@@ -453,13 +516,29 @@ func connectionFromMap(name string, entry map[string]interface{}, legacy bool) (
 	if connection.resolveDSN() != "" {
 		return connection, nil
 	}
-	if connection.Host == "" || connection.Database == "" {
-		return Connection{}, fmt.Errorf("database connection %q requires host and database", connection.Name)
+	if (connection.Host == "" && connection.ConnectionName == "") || connection.Database == "" {
+		return Connection{}, fmt.Errorf("database connection %q requires host or connection name and database", connection.Name)
 	}
 	return connection, nil
 }
 
 func normalizeConnection(connection *Connection) {
+	connection.Name = strings.TrimSpace(connection.Name)
+	connection.Driver = strings.TrimSpace(connection.Driver)
+	connection.Vendor = strings.TrimSpace(connection.Vendor)
+	connection.Host = strings.TrimSpace(connection.Host)
+	connection.ConnectionName = strings.TrimSpace(connection.ConnectionName)
+	connection.Database = strings.TrimSpace(connection.Database)
+	connection.Username = strings.TrimSpace(connection.Username)
+	connection.Password = strings.TrimSpace(connection.Password)
+	connection.PasswordEnv = strings.TrimSpace(connection.PasswordEnv)
+	connection.Path = strings.TrimSpace(connection.Path)
+	connection.DSN = strings.TrimSpace(connection.DSN)
+	connection.DSNEnv = strings.TrimSpace(connection.DSNEnv)
+	connection.Description = strings.TrimSpace(connection.Description)
+	connection.SSLMode = strings.TrimSpace(connection.SSLMode)
+	connection.PoolMode = strings.TrimSpace(connection.PoolMode)
+	connection.QueryExecMode = strings.TrimSpace(connection.QueryExecMode)
 	raw := strings.ToLower(strings.TrimSpace(firstNonEmpty(connection.Driver, connection.Vendor, guessDriverFromDSN(connection.resolveDSN()))))
 	switch raw {
 	case "postgresql", "postgres", "supabase", "neon":
@@ -493,6 +572,60 @@ func normalizeConnection(connection *Connection) {
 	}
 }
 
+func wrapConnectionError(connection Connection, operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if message := privateCloudSQLReachabilityMessage(connection, err); message != "" {
+		return fmt.Errorf("%s %s: %s", operation, connection.Name, message)
+	}
+	return fmt.Errorf("%s %s: %w", operation, connection.Name, err)
+}
+
+func privateCloudSQLReachabilityMessage(connection Connection, err error) string {
+	if strings.TrimSpace(connection.ConnectionName) == "" || cloudSQLIPMode(connection) != "private" || err == nil {
+		return ""
+	}
+
+	lower := strings.ToLower(strings.TrimSpace(err.Error()))
+	if lower == "" {
+		return ""
+	}
+
+	if !containsConnectionErrorFragment(lower,
+		"3307",
+		"localhost:5432",
+		"127.0.0.1:5432",
+		"[::1]:5432",
+		"localhost:3306",
+		"127.0.0.1:3306",
+		"[::1]:3306",
+		"connection refused",
+		"i/o timeout",
+		"context deadline exceeded",
+		"no route to host",
+		"network is unreachable",
+		"connect: cannot assign requested address",
+		"failed to dial",
+	) {
+		return ""
+	}
+
+	return fmt.Sprintf(
+		"private Cloud SQL requires VPC reachability. The Cloud SQL connector started for %s but could not reach the private instance from this machine or backend. Use a VPC-connected environment, bastion or IAP tunnel, VPN, or a public IP path.",
+		connection.ConnectionName,
+	)
+}
+
+func containsConnectionErrorFragment(raw string, fragments ...string) bool {
+	for _, fragment := range fragments {
+		if fragment != "" && strings.Contains(raw, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
 func resolveFocusedConnection(connections []Connection, defaultName string, question string, explicitName string) (Connection, error) {
 	if strings.TrimSpace(explicitName) != "" {
 		return ResolveConnection(explicitName)
@@ -521,7 +654,7 @@ func inspectConnection(ctx context.Context, connection Connection) (Inspection, 
 
 	db, err := sql.Open(driverName, dsn)
 	if err != nil {
-		return Inspection{}, fmt.Errorf("open %s: %w", connection.Name, err)
+		return Inspection{}, wrapConnectionError(connection, "open", err)
 	}
 	defer db.Close()
 
@@ -531,7 +664,7 @@ func inspectConnection(ctx context.Context, connection Connection) (Inspection, 
 
 	start := time.Now()
 	if err := db.PingContext(ctx); err != nil {
-		return Inspection{}, fmt.Errorf("ping %s: %w", connection.Name, err)
+		return Inspection{}, wrapConnectionError(connection, "ping", err)
 	}
 
 	runner, cleanup, err := prepareInspectionRunner(ctx, db, connection)
@@ -608,9 +741,15 @@ func prepareInspectionRunner(ctx context.Context, db *sql.DB, connection Connect
 func openConfig(connection Connection) (string, string, error) {
 	switch connection.Driver {
 	case "postgres":
+		if connection.resolveDSN() == "" && connection.ConnectionName != "" {
+			return cloudSQLPostgresConfig(connection)
+		}
 		dsn, err := postgresDSN(connection)
 		return "pgx", dsn, err
 	case "mysql":
+		if connection.resolveDSN() == "" && connection.ConnectionName != "" {
+			return cloudSQLMySQLConfig(connection)
+		}
 		dsn, err := mysqlDSN(connection)
 		return "mysql", dsn, err
 	case "sqlite":
@@ -624,6 +763,139 @@ func openConfig(connection Connection) (string, string, error) {
 	default:
 		return "", "", fmt.Errorf("unsupported database driver %q", connection.Driver)
 	}
+}
+
+func cloudSQLPostgresConfig(connection Connection) (string, string, error) {
+	driverName, err := ensureCloudSQLDriver(connection)
+	if err != nil {
+		return "", "", err
+	}
+	return driverName, cloudSQLPostgresDSN(connection), nil
+}
+
+func cloudSQLMySQLConfig(connection Connection) (string, string, error) {
+	driverName, err := ensureCloudSQLDriver(connection)
+	if err != nil {
+		return "", "", err
+	}
+	return driverName, cloudSQLMySQLDSN(connection, driverName), nil
+}
+
+func ensureCloudSQLDriver(connection Connection) (string, error) {
+	driverName, err := cloudSQLDriverName(connection)
+	if err != nil {
+		return "", err
+	}
+	registration, ok := cloudSQLDriverRegistrations[driverName]
+	if !ok {
+		return "", fmt.Errorf("unsupported Cloud SQL driver registration %q", driverName)
+	}
+	registration.once.Do(func() {
+		cleanup, err := registration.register(driverName)
+		registration.err = err
+		_ = cleanup
+	})
+	if registration.err != nil {
+		return "", fmt.Errorf("register Cloud SQL %s driver: %w", connection.Driver, registration.err)
+	}
+	return driverName, nil
+}
+
+func cloudSQLDriverName(connection Connection) (string, error) {
+	mode := cloudSQLIPMode(connection)
+	switch connection.Driver {
+	case "postgres":
+		switch mode {
+		case "public":
+			return cloudSQLPostgresPublic, nil
+		case "private":
+			return cloudSQLPostgresPrivate, nil
+		default:
+			return cloudSQLPostgresAuto, nil
+		}
+	case "mysql":
+		switch mode {
+		case "public":
+			return cloudSQLMySQLPublic, nil
+		case "private":
+			return cloudSQLMySQLPrivate, nil
+		default:
+			return cloudSQLMySQLAuto, nil
+		}
+	default:
+		return "", fmt.Errorf("unsupported Cloud SQL driver %q", connection.Driver)
+	}
+}
+
+func cloudSQLIPMode(connection Connection) string {
+	host := strings.TrimSpace(connection.Host)
+	if host == "" {
+		return "auto"
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return "auto"
+	}
+	if ip.IsPrivate() {
+		return "private"
+	}
+	return "public"
+}
+
+func cloudSQLPostgresDSN(connection Connection) string {
+	parts := []string{postgresKeywordArg("host", connection.ConnectionName)}
+	if connection.Username != "" {
+		parts = append(parts, postgresKeywordArg("user", connection.Username))
+	}
+	if password := connection.resolvePassword(); password != "" {
+		parts = append(parts, postgresKeywordArg("password", password))
+	}
+	if connection.Database != "" {
+		parts = append(parts, postgresKeywordArg("dbname", connection.Database))
+	}
+	parts = append(parts, postgresKeywordArg("sslmode", "disable"))
+	parts = append(parts, postgresKeywordArg("default_transaction_read_only", "on"))
+	if execMode := defaultPostgresQueryExecMode(connection); execMode != "" {
+		parts = append(parts, postgresKeywordArg("default_query_exec_mode", execMode))
+	}
+	for _, key := range sortedConnectionParamKeys(connection.Params) {
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "host", "user", "password", "dbname", "sslmode", "default_transaction_read_only":
+			continue
+		}
+		parts = append(parts, postgresKeywordArg(key, connection.Params[key]))
+	}
+	return strings.Join(parts, " ")
+}
+
+func cloudSQLMySQLDSN(connection Connection, driverName string) string {
+	config := mysql.NewConfig()
+	config.Net = driverName
+	config.Addr = connection.ConnectionName
+	config.DBName = connection.Database
+	config.User = connection.Username
+	config.Passwd = connection.resolvePassword()
+	applyMySQLDefaults(config, connection)
+	config.TLSConfig = "false"
+	return config.FormatDSN()
+}
+
+func postgresKeywordArg(key string, value string) string {
+	escaped := strings.ReplaceAll(value, `\\`, `\\\\`)
+	escaped = strings.ReplaceAll(escaped, `'`, `\\'`)
+	return key + "='" + escaped + "'"
+}
+
+func sortedConnectionParamKeys(params map[string]string) []string {
+	if len(params) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(params))
+	for key := range params {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func postgresDSN(connection Connection) (string, error) {
