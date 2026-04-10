@@ -153,7 +153,7 @@ Examples:
 		if strings.TrimSpace(dbConnection) != "" {
 			includeDB = true
 		}
-		if !includeDB && shouldIncludeDatabaseContext(routingQuestion) {
+		if !includeDB && shouldIncludeDatabaseContextWithContext(routingQuestion, dbConnection) {
 			includeDB = true
 		}
 		dbRequestedExplicitly := cmd.Flags().Changed("db") || cmd.Flags().Changed("db-connection")
@@ -162,7 +162,7 @@ Examples:
 
 		// Handle route-only mode: return routing decision as JSON without executing
 		if routeOnly {
-			agent, reason := determineRoutingDecision(question)
+			agent, reason := determineRoutingDecisionWithContext(question, dbConnection)
 			result := map[string]string{
 				"agent":  agent,
 				"reason": reason,
@@ -769,7 +769,7 @@ Format as a professional compliance table suitable for government security docum
 				return handleIAMQuery(context.Background(), routingQuestion, debug, iamRoleARN, iamPolicyARN)
 			}
 
-			if shouldRouteToDatabaseAgent(routingQuestion) {
+			if shouldRouteToDatabaseAgentWithContext(routingQuestion, dbConnection) {
 				return handleDatabaseQuery(context.Background(), routingQuestion, debug, dbConnection)
 			}
 
@@ -1627,9 +1627,16 @@ func questionForRouting(question string) string {
 }
 
 func shouldIncludeDatabaseContext(question string) bool {
+	return shouldIncludeDatabaseContextWithContext(question, "")
+}
+
+func shouldIncludeDatabaseContextWithContext(question string, dbConnection string) bool {
 	q := strings.ToLower(strings.TrimSpace(question))
 	if q == "" {
 		return false
+	}
+	if shouldRouteToDatabaseAgentWithContext(q, dbConnection) {
+		return true
 	}
 	if containsAnyPhrase(q, "supabase", "neon", "sqlite", "sqlite3", "database connection", "db connection", "schema", "schemas", "column", "columns", "migration", "migrations") {
 		return true
@@ -2729,6 +2736,10 @@ func executeK8sPlan(ctx context.Context, rawPlan string, profile string, debug b
 // determineRoutingDecision analyzes a question and returns which agent should handle it.
 // This is used by the --route-only flag to return routing decisions without executing.
 func determineRoutingDecision(question string) (agent string, reason string) {
+	return determineRoutingDecisionWithContext(question, "")
+}
+
+func determineRoutingDecisionWithContext(question string, dbConnection string) (agent string, reason string) {
 	questionLower := strings.ToLower(question)
 	if isClankerCloudQuestion(questionLower) {
 		return "clanker-cloud", "Explicit Clanker Cloud app request detected"
@@ -2843,7 +2854,7 @@ func determineRoutingDecision(question string) (agent string, reason string) {
 		}
 	}
 
-	if shouldRouteToDatabaseAgent(questionLower) {
+	if shouldRouteToDatabaseAgentWithContext(questionLower, dbConnection) {
 		return "agent-database", "Database agent request detected"
 	}
 

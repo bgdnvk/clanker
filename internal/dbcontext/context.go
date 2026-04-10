@@ -3,6 +3,7 @@ package dbcontext
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
@@ -20,10 +21,13 @@ import (
 )
 
 const (
-	defaultPostgresPort = 5432
-	defaultMySQLPort    = 3306
-	maxObjects          = 8
-	maxColumns          = 6
+	defaultPostgresPort    = 5432
+	defaultMySQLPort       = 3306
+	maxObjects             = 8
+	maxColumns             = 6
+	maxQueryRows           = 50
+	maxQueryValueChars     = 240
+	runtimeDBConnectionEnv = "CLANKER_RUNTIME_DB_CONNECTION_JSON"
 )
 
 type Connection struct {
@@ -65,6 +69,19 @@ type Inspection struct {
 	Version         string
 	CurrentDatabase string
 	Objects         []Object
+}
+
+type QueryResult struct {
+	Connection Connection
+	Query      string
+	Columns    []string
+	Rows       []map[string]string
+	Truncated  bool
+}
+
+type queryRunner interface {
+	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
 }
 
 func ListConnections() ([]Connection, string, error) {
@@ -112,6 +129,90 @@ func Inspect(ctx context.Context, name string) (Inspection, error) {
 		return Inspection{}, err
 	}
 	return inspectConnection(ctx, connection)
+}
+
+func ExecuteReadQuery(ctx context.Context, name string, query string) (QueryResult, error) {
+	connection, err := ResolveConnection(name)
+	if err != nil {
+		return QueryResult{}, err
+	}
+	return ExecuteReadQueryOnConnection(ctx, connection, query)
+}
+
+func ExecuteReadQueryOnConnection(ctx context.Context, connection Connection, query string) (QueryResult, error) {
+	normalizedQuery, err := normalizeReadOnlyQuery(query)
+	if err != nil {
+		return QueryResult{}, err
+	}
+
+	driverName, dsn, err := openConfig(connection)
+	if err != nil {
+		return QueryResult{}, err
+	}
+
+	db, err := sql.Open(driverName, dsn)
+	if err != nil {
+		return QueryResult{}, fmt.Errorf("open %s: %w", connection.Name, err)
+	}
+	defer db.Close()
+
+	db.SetMaxOpenConns(2)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(2 * time.Minute)
+
+	if err := db.PingContext(ctx); err != nil {
+		return QueryResult{}, fmt.Errorf("ping %s: %w", connection.Name, err)
+	}
+
+	runner, cleanup, err := prepareInspectionRunner(ctx, db, connection)
+	if err != nil {
+		return QueryResult{}, err
+	}
+	defer cleanup()
+
+	rows, err := runner.QueryContext(ctx, normalizedQuery)
+	if err != nil {
+		return QueryResult{}, fmt.Errorf("query %s: %w", connection.Name, err)
+	}
+	defer rows.Close()
+
+	columns, err := rows.Columns()
+	if err != nil {
+		return QueryResult{}, fmt.Errorf("columns %s: %w", connection.Name, err)
+	}
+
+	result := QueryResult{
+		Connection: connection,
+		Query:      normalizedQuery,
+		Columns:    columns,
+		Rows:       make([]map[string]string, 0, maxQueryRows),
+	}
+
+	for rows.Next() {
+		values := make([]interface{}, len(columns))
+		scanTargets := make([]interface{}, len(columns))
+		for i := range values {
+			scanTargets[i] = &values[i]
+		}
+		if err := rows.Scan(scanTargets...); err != nil {
+			return QueryResult{}, fmt.Errorf("scan %s: %w", connection.Name, err)
+		}
+		if len(result.Rows) >= maxQueryRows {
+			result.Truncated = true
+			break
+		}
+		row := make(map[string]string, len(columns))
+		for i, columnName := range columns {
+			row[columnName] = formatQueryValue(values[i])
+		}
+		result.Rows = append(result.Rows, row)
+	}
+
+	if err := rows.Err(); err != nil {
+		return QueryResult{}, fmt.Errorf("iterate %s: %w", connection.Name, err)
+	}
+
+	return result, nil
 }
 
 func BuildRelevantContext(ctx context.Context, question string, name string) (string, error) {
@@ -260,7 +361,50 @@ func loadConnections() ([]Connection, string) {
 		}
 		connections = append(connections, connection)
 	}
+	if runtimeConnection := loadRuntimeConnection(); runtimeConnection != nil {
+		defaultName = runtimeConnection.Name
+		replaced := false
+		for i := range connections {
+			if strings.EqualFold(connections[i].Name, runtimeConnection.Name) {
+				connections[i] = *runtimeConnection
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			connections = append(connections, *runtimeConnection)
+		}
+	}
 	return connections, defaultName
+}
+
+func loadRuntimeConnection() *Connection {
+	raw := strings.TrimSpace(os.Getenv(runtimeDBConnectionEnv))
+	if raw == "" {
+		return nil
+	}
+
+	var connection Connection
+	if err := json.Unmarshal([]byte(raw), &connection); err != nil {
+		return nil
+	}
+	if strings.TrimSpace(connection.Name) == "" {
+		connection.Name = "default"
+	}
+	normalizeConnection(&connection)
+	if connection.Driver == "sqlite" {
+		if connection.resolvePath() == "" && connection.resolveDSN() == "" {
+			return nil
+		}
+		return &connection
+	}
+	if connection.resolveDSN() != "" {
+		return &connection
+	}
+	if connection.Host == "" || connection.Database == "" {
+		return nil
+	}
+	return &connection
 }
 
 func connectionFromMap(name string, entry map[string]interface{}, legacy bool) (Connection, error) {
@@ -390,19 +534,75 @@ func inspectConnection(ctx context.Context, connection Connection) (Inspection, 
 		return Inspection{}, fmt.Errorf("ping %s: %w", connection.Name, err)
 	}
 
+	runner, cleanup, err := prepareInspectionRunner(ctx, db, connection)
+	if err != nil {
+		return Inspection{}, err
+	}
+	defer cleanup()
+
 	inspection := Inspection{
 		Connection: connection,
 		PingMillis: time.Since(start).Milliseconds(),
 	}
 
-	inspection.Version = queryVersion(ctx, db, connection)
-	inspection.CurrentDatabase = queryCurrentDatabase(ctx, db, connection)
-	objects, err := queryObjects(ctx, db, connection)
+	inspection.Version = queryVersion(ctx, runner, connection)
+	inspection.CurrentDatabase = queryCurrentDatabase(ctx, runner, connection)
+	objects, err := queryObjects(ctx, runner, connection)
 	if err == nil {
 		inspection.Objects = objects
 	}
 
 	return inspection, nil
+}
+
+func prepareInspectionRunner(ctx context.Context, db *sql.DB, connection Connection) (queryRunner, func(), error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open %s inspection session: %w", connection.Name, err)
+	}
+
+	cleanupConn := func() {
+		_ = conn.Close()
+	}
+
+	switch connection.Driver {
+	case "postgres":
+		if _, err := conn.ExecContext(ctx, "set default_transaction_read_only = on"); err != nil {
+			cleanupConn()
+			return nil, nil, fmt.Errorf("set %s inspection session read-only: %w", connection.Name, err)
+		}
+		tx, err := conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+		if err != nil {
+			cleanupConn()
+			return nil, nil, fmt.Errorf("start %s read-only transaction: %w", connection.Name, err)
+		}
+		return tx, func() {
+			_ = tx.Rollback()
+			cleanupConn()
+		}, nil
+	case "mysql":
+		if _, err := conn.ExecContext(ctx, "SET SESSION TRANSACTION READ ONLY"); err != nil {
+			cleanupConn()
+			return nil, nil, fmt.Errorf("set %s inspection session read-only: %w", connection.Name, err)
+		}
+		tx, err := conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+		if err != nil {
+			cleanupConn()
+			return nil, nil, fmt.Errorf("start %s read-only transaction: %w", connection.Name, err)
+		}
+		return tx, func() {
+			_ = tx.Rollback()
+			cleanupConn()
+		}, nil
+	case "sqlite":
+		if _, err := conn.ExecContext(ctx, "PRAGMA query_only = 1"); err != nil {
+			cleanupConn()
+			return nil, nil, fmt.Errorf("set %s inspection session query_only: %w", connection.Name, err)
+		}
+		return conn, cleanupConn, nil
+	default:
+		return conn, cleanupConn, nil
+	}
 }
 
 func openConfig(connection Connection) (string, string, error) {
@@ -415,10 +615,10 @@ func openConfig(connection Connection) (string, string, error) {
 		return "mysql", dsn, err
 	case "sqlite":
 		if resolved := connection.resolvePath(); resolved != "" {
-			return "sqlite", resolved, nil
+			return "sqlite", sqliteReadOnlyDSN(resolved), nil
 		}
 		if resolved := connection.resolveDSN(); resolved != "" {
-			return "sqlite", resolved, nil
+			return "sqlite", sqliteReadOnlyDSN(resolved), nil
 		}
 		return "", "", fmt.Errorf("sqlite connection %q is missing a path", connection.Name)
 	default:
@@ -433,6 +633,9 @@ func postgresDSN(connection Connection) (string, error) {
 			return raw, nil
 		}
 		query := parsed.Query()
+		if query.Get("default_transaction_read_only") == "" {
+			query.Set("default_transaction_read_only", "on")
+		}
 		if query.Get("sslmode") == "" {
 			query.Set("sslmode", defaultPostgresSSLMode(connection))
 		}
@@ -447,6 +650,7 @@ func postgresDSN(connection Connection) (string, error) {
 	}
 
 	query := url.Values{}
+	query.Set("default_transaction_read_only", "on")
 	query.Set("sslmode", defaultPostgresSSLMode(connection))
 	if execMode := defaultPostgresQueryExecMode(connection); execMode != "" {
 		query.Set("default_query_exec_mode", execMode)
@@ -542,7 +746,108 @@ func defaultPostgresQueryExecMode(connection Connection) string {
 	return ""
 }
 
-func queryVersion(ctx context.Context, db *sql.DB, connection Connection) string {
+func sqliteReadOnlyDSN(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+
+	if strings.HasPrefix(trimmed, "file:") {
+		parsed, err := url.Parse(trimmed)
+		if err == nil {
+			query := parsed.Query()
+			if query.Get("mode") == "" {
+				query.Set("mode", "ro")
+			}
+			parsed.RawQuery = query.Encode()
+			return parsed.String()
+		}
+		if strings.Contains(trimmed, "?") {
+			return trimmed + "&mode=ro"
+		}
+		return trimmed + "?mode=ro"
+	}
+
+	resolvedPath := trimmed
+	if abs, err := filepath.Abs(trimmed); err == nil {
+		resolvedPath = abs
+	}
+
+	parsed := &url.URL{Scheme: "file", Path: resolvedPath}
+	query := parsed.Query()
+	query.Set("mode", "ro")
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func normalizeReadOnlyQuery(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	trimmed = strings.TrimSuffix(trimmed, ";")
+	trimmed = strings.TrimSpace(trimmed)
+	if trimmed == "" {
+		return "", fmt.Errorf("query is required")
+	}
+	if strings.Contains(trimmed, ";") {
+		return "", fmt.Errorf("only a single SQL statement is allowed")
+	}
+	if strings.Contains(trimmed, "--") || strings.Contains(trimmed, "/*") || strings.Contains(trimmed, "*/") {
+		return "", fmt.Errorf("comments are not allowed in read queries")
+	}
+
+	lower := strings.ToLower(trimmed)
+	if !strings.HasPrefix(lower, "select") && !strings.HasPrefix(lower, "with") {
+		return "", fmt.Errorf("only SELECT queries are allowed")
+	}
+
+	disallowedFragments := []string{
+		" insert ", " update ", " delete ", " drop ", " alter ", " create ", " truncate ",
+		" replace ", " merge ", " grant ", " revoke ", " call ", " execute ", " exec ",
+		" copy ", " attach ", " detach ", " pragma ", " vacuum ", " analyze ", " reindex ",
+		" begin ", " commit ", " rollback ", " savepoint ", " release ", " lock table ",
+		" for update", " into outfile", " load_file", "pg_terminate_backend", "pg_reload_conf",
+	}
+	padded := " " + lower + " "
+	for _, fragment := range disallowedFragments {
+		if strings.Contains(padded, fragment) {
+			return "", fmt.Errorf("read query contains a forbidden operation")
+		}
+	}
+
+	return trimmed, nil
+}
+
+func formatQueryValue(value interface{}) string {
+	switch typed := value.(type) {
+	case nil:
+		return "NULL"
+	case []byte:
+		return truncateQueryValue(string(typed))
+	case string:
+		return truncateQueryValue(typed)
+	case time.Time:
+		return typed.UTC().Format(time.RFC3339Nano)
+	case bool:
+		if typed {
+			return "true"
+		}
+		return "false"
+	default:
+		return truncateQueryValue(fmt.Sprint(typed))
+	}
+}
+
+func truncateQueryValue(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return trimmed
+	}
+	if len(trimmed) <= maxQueryValueChars {
+		return trimmed
+	}
+	return trimmed[:maxQueryValueChars] + "...<truncated>"
+}
+
+func queryVersion(ctx context.Context, runner queryRunner, connection Connection) string {
 	query := ""
 	switch connection.Driver {
 	case "postgres", "mysql":
@@ -554,13 +859,13 @@ func queryVersion(ctx context.Context, db *sql.DB, connection Connection) string
 		return ""
 	}
 	var value sql.NullString
-	if err := db.QueryRowContext(ctx, query).Scan(&value); err != nil || !value.Valid {
+	if err := runner.QueryRowContext(ctx, query).Scan(&value); err != nil || !value.Valid {
 		return ""
 	}
 	return strings.TrimSpace(value.String)
 }
 
-func queryCurrentDatabase(ctx context.Context, db *sql.DB, connection Connection) string {
+func queryCurrentDatabase(ctx context.Context, runner queryRunner, connection Connection) string {
 	query := ""
 	switch connection.Driver {
 	case "postgres":
@@ -574,27 +879,27 @@ func queryCurrentDatabase(ctx context.Context, db *sql.DB, connection Connection
 		return ""
 	}
 	var value sql.NullString
-	if err := db.QueryRowContext(ctx, query).Scan(&value); err != nil || !value.Valid {
+	if err := runner.QueryRowContext(ctx, query).Scan(&value); err != nil || !value.Valid {
 		return connection.Database
 	}
 	return strings.TrimSpace(value.String)
 }
 
-func queryObjects(ctx context.Context, db *sql.DB, connection Connection) ([]Object, error) {
+func queryObjects(ctx context.Context, runner queryRunner, connection Connection) ([]Object, error) {
 	switch connection.Driver {
 	case "postgres":
-		return queryPostgresObjects(ctx, db)
+		return queryPostgresObjects(ctx, runner)
 	case "mysql":
-		return queryMySQLObjects(ctx, db)
+		return queryMySQLObjects(ctx, runner)
 	case "sqlite":
-		return querySQLiteObjects(ctx, db)
+		return querySQLiteObjects(ctx, runner)
 	default:
 		return nil, fmt.Errorf("unsupported database driver %q", connection.Driver)
 	}
 }
 
-func queryPostgresObjects(ctx context.Context, db *sql.DB) ([]Object, error) {
-	rows, err := db.QueryContext(ctx, `
+func queryPostgresObjects(ctx context.Context, runner queryRunner) ([]Object, error) {
+	rows, err := runner.QueryContext(ctx, `
 		select table_schema, table_name, table_type
 		from information_schema.tables
 		where table_schema not in ('pg_catalog', 'information_schema')
@@ -614,14 +919,14 @@ func queryPostgresObjects(ctx context.Context, db *sql.DB) ([]Object, error) {
 			return nil, err
 		}
 		object.Type = normalizeObjectType(tableType)
-		object.Columns = queryPostgresColumns(ctx, db, object.Schema, object.Name)
+		object.Columns = queryPostgresColumns(ctx, runner, object.Schema, object.Name)
 		objects = append(objects, object)
 	}
 	return objects, rows.Err()
 }
 
-func queryPostgresColumns(ctx context.Context, db *sql.DB, schema string, table string) []Column {
-	rows, err := db.QueryContext(ctx, `
+func queryPostgresColumns(ctx context.Context, runner queryRunner, schema string, table string) []Column {
+	rows, err := runner.QueryContext(ctx, `
 		select column_name, data_type, is_nullable
 		from information_schema.columns
 		where table_schema = $1 and table_name = $2
@@ -641,8 +946,8 @@ func queryPostgresColumns(ctx context.Context, db *sql.DB, schema string, table 
 	})
 }
 
-func queryMySQLObjects(ctx context.Context, db *sql.DB) ([]Object, error) {
-	rows, err := db.QueryContext(ctx, `
+func queryMySQLObjects(ctx context.Context, runner queryRunner) ([]Object, error) {
+	rows, err := runner.QueryContext(ctx, `
 		select table_schema, table_name, table_type
 		from information_schema.tables
 		where table_schema = database()
@@ -662,14 +967,14 @@ func queryMySQLObjects(ctx context.Context, db *sql.DB) ([]Object, error) {
 			return nil, err
 		}
 		object.Type = normalizeObjectType(tableType)
-		object.Columns = queryMySQLColumns(ctx, db, object.Name)
+		object.Columns = queryMySQLColumns(ctx, runner, object.Name)
 		objects = append(objects, object)
 	}
 	return objects, rows.Err()
 }
 
-func queryMySQLColumns(ctx context.Context, db *sql.DB, table string) []Column {
-	rows, err := db.QueryContext(ctx, `
+func queryMySQLColumns(ctx context.Context, runner queryRunner, table string) []Column {
+	rows, err := runner.QueryContext(ctx, `
 		select column_name, data_type, is_nullable
 		from information_schema.columns
 		where table_schema = database() and table_name = ?
@@ -689,8 +994,8 @@ func queryMySQLColumns(ctx context.Context, db *sql.DB, table string) []Column {
 	})
 }
 
-func querySQLiteObjects(ctx context.Context, db *sql.DB) ([]Object, error) {
-	rows, err := db.QueryContext(ctx, `
+func querySQLiteObjects(ctx context.Context, runner queryRunner) ([]Object, error) {
+	rows, err := runner.QueryContext(ctx, `
 		select name, type
 		from sqlite_master
 		where type in ('table', 'view') and name not like 'sqlite_%'
@@ -709,15 +1014,15 @@ func querySQLiteObjects(ctx context.Context, db *sql.DB) ([]Object, error) {
 			return nil, err
 		}
 		object.Type = normalizeObjectType(object.Type)
-		object.Columns = querySQLiteColumns(ctx, db, object.Name)
+		object.Columns = querySQLiteColumns(ctx, runner, object.Name)
 		objects = append(objects, object)
 	}
 	return objects, rows.Err()
 }
 
-func querySQLiteColumns(ctx context.Context, db *sql.DB, table string) []Column {
+func querySQLiteColumns(ctx context.Context, runner queryRunner, table string) []Column {
 	quotedTable := strings.ReplaceAll(table, `"`, `""`)
-	rows, err := db.QueryContext(ctx, fmt.Sprintf(`pragma table_info("%s")`, quotedTable))
+	rows, err := runner.QueryContext(ctx, fmt.Sprintf(`pragma table_info("%s")`, quotedTable))
 	if err != nil {
 		return nil
 	}

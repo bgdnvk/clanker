@@ -111,6 +111,12 @@ infra:
   gcp:
     project_id: your-gcp-project-id
 
+	azure:
+		subscription_id: your-azure-subscription-id
+		devops:
+			organization: your-azure-devops-org
+			project: your-azure-devops-project
+
 github:
   token: ""                      # GitHub personal access token (optional for public repos)
   default_repo: your-repo      # Default repository to use
@@ -127,6 +133,7 @@ github:
 
 databases:
 	default_connection: dev  # Default database connection
+	# Inspection is read-only. Clanker only opens database metadata sessions for SELECT and schema discovery.
 	connections:
 		dev:
 			driver: postgres

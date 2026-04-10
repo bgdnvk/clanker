@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/bgdnvk/clanker/internal/ai"
 	"github.com/bgdnvk/clanker/internal/aws"
@@ -18,11 +20,20 @@ import (
 	"github.com/spf13/viper"
 )
 
-const maxDomainAgentSectionChars = 8000
+const (
+	maxDomainAgentSectionChars = 8000
+	maxDatabaseQueryPromptRows = 12
+)
 
 type domainContextSection struct {
 	Title   string
 	Content string
+}
+
+type databaseReadPlan struct {
+	ShouldQuery bool   `json:"should_query"`
+	SQL         string `json:"sql"`
+	Reason      string `json:"reason"`
 }
 
 func handleDatabaseQuery(ctx context.Context, question string, debug bool, dbConnection string) error {
@@ -45,6 +56,11 @@ func collectDatabaseAgentContext(ctx context.Context, question string, dbConnect
 		warnings = appendDomainWarning(warnings, "Configured database connections", err)
 	} else {
 		sections = appendDomainSection(sections, "Configured Database Connections", dbInfo)
+	}
+
+	if querySections, queryWarnings := collectDatabaseQueryResults(ctx, question, dbConnection, debug); len(querySections) > 0 || len(queryWarnings) > 0 {
+		sections = append(sections, querySections...)
+		warnings = append(warnings, queryWarnings...)
 	}
 
 	if shouldQueryDomainProvider(question, "aws") && hasAWSDomainAccess() {
@@ -85,19 +101,12 @@ func collectDatabaseAgentContext(ctx context.Context, question string, dbConnect
 	}
 
 	if shouldQueryDomainProvider(question, "azure") {
-		subscriptionID := strings.TrimSpace(azure.ResolveSubscriptionID())
-		if subscriptionID != "" {
-			azureClient, err := azure.NewClient(subscriptionID, debug)
-			if err != nil {
-				warnings = appendDomainWarning(warnings, "Azure database inventory", err)
-			} else {
-				azureInfo, azureErr := azureClient.GetRelevantContext(ctx, "azure cosmos db database")
-				if azureErr != nil {
-					warnings = appendDomainWarning(warnings, "Azure database inventory", azureErr)
-				} else {
-					sections = appendDomainSection(sections, "Azure Databases", azureInfo)
-				}
-			}
+		azureClient := azure.NewClientWithOptionalSubscription(strings.TrimSpace(azure.ResolveSubscriptionID()), debug)
+		azureInfo, azureErr := azureClient.GetRelevantContext(ctx, "azure cosmos db azure sql sql database postgresql flexible server mysql flexible server redis database")
+		if azureErr != nil {
+			warnings = appendDomainWarning(warnings, "Azure database inventory", azureErr)
+		} else {
+			sections = appendDomainSection(sections, "Azure Databases", azureInfo)
 		}
 	}
 
@@ -140,6 +149,311 @@ func collectDatabaseAgentContext(ctx context.Context, question string, dbConnect
 	}
 
 	return sections, warnings
+}
+
+func collectDatabaseQueryResults(ctx context.Context, question string, dbConnection string, debug bool) ([]domainContextSection, []string) {
+	if !shouldAttemptLiveDatabaseReads(question) {
+		return nil, nil
+	}
+
+	connections, _, err := dbcontext.ListConnections()
+	if err != nil {
+		return nil, []string{fmt.Sprintf("Live database query planning: %v", err)}
+	}
+	if len(connections) == 0 {
+		return nil, nil
+	}
+
+	targetConnections, err := selectDatabaseQueryConnections(connections, question, dbConnection)
+	if err != nil {
+		return nil, []string{fmt.Sprintf("Live database query planning: %v", err)}
+	}
+	if len(targetConnections) == 0 {
+		return nil, nil
+	}
+
+	aiClient := newConfiguredAIClient(debug)
+	directSQL := extractDirectReadOnlySQL(question)
+	sections := make([]domainContextSection, 0, len(targetConnections))
+	warnings := make([]string, 0, len(targetConnections))
+	skippedNames := make([]string, 0, len(targetConnections))
+	executedAny := false
+
+	for _, connection := range targetConnections {
+		plannedSQL := directSQL
+		planReason := ""
+
+		if plannedSQL == "" {
+			inspectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			inspection, inspectErr := dbcontext.Inspect(inspectCtx, connection.Name)
+			cancel()
+			if inspectErr != nil {
+				warnings = append(warnings, fmt.Sprintf("Live query inspection (%s): %v", connection.Name, inspectErr))
+				continue
+			}
+
+			planCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+			plan, planErr := planDatabaseReadQuery(planCtx, aiClient, question, inspection)
+			cancel()
+			if planErr != nil {
+				warnings = append(warnings, fmt.Sprintf("Live query planning (%s): %v", connection.Name, planErr))
+				continue
+			}
+
+			plannedSQL = strings.TrimSpace(plan.SQL)
+			planReason = strings.TrimSpace(plan.Reason)
+			if !plan.ShouldQuery || plannedSQL == "" {
+				skippedNames = append(skippedNames, connection.Name)
+				continue
+			}
+		} else {
+			planReason = "Executed the user's explicit read-only SQL against this connection."
+		}
+
+		queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		result, queryErr := dbcontext.ExecuteReadQueryOnConnection(queryCtx, connection, plannedSQL)
+		cancel()
+		if queryErr != nil {
+			warnings = append(warnings, fmt.Sprintf("Live read query (%s): %v", connection.Name, queryErr))
+			continue
+		}
+
+		executedAny = true
+		sections = appendDomainSection(sections, fmt.Sprintf("Live Read Query Result (%s)", connection.Name), formatDatabaseQueryResult(result, planReason))
+	}
+
+	if !executedAny && len(skippedNames) == len(targetConnections) {
+		warnings = append(warnings, fmt.Sprintf("No safe live SQL read query matched the available schemas for: %s", strings.Join(skippedNames, ", ")))
+	}
+
+	return sections, warnings
+}
+
+func selectDatabaseQueryConnections(connections []dbcontext.Connection, question string, explicitConnection string) ([]dbcontext.Connection, error) {
+	trimmedConnection := strings.TrimSpace(explicitConnection)
+	if trimmedConnection != "" {
+		connection, err := dbcontext.ResolveConnection(trimmedConnection)
+		if err != nil {
+			return nil, err
+		}
+		return []dbcontext.Connection{connection}, nil
+	}
+
+	lowerQuestion := strings.ToLower(strings.TrimSpace(question))
+	if lowerQuestion == "" {
+		return connections, nil
+	}
+
+	matches := make([]dbcontext.Connection, 0, len(connections))
+	for _, connection := range connections {
+		if databaseConnectionMatchesQuestion(connection, lowerQuestion) {
+			matches = append(matches, connection)
+		}
+	}
+	if len(matches) > 0 {
+		return matches, nil
+	}
+
+	return connections, nil
+}
+
+func databaseConnectionMatchesQuestion(connection dbcontext.Connection, lowerQuestion string) bool {
+	fields := []string{
+		connection.Name,
+		connection.Driver,
+		connection.Vendor,
+		connection.Host,
+		connection.Database,
+		connection.Description,
+		connection.Kind(),
+		connection.Target(),
+	}
+	for _, field := range fields {
+		trimmed := strings.ToLower(strings.TrimSpace(field))
+		if trimmed == "" {
+			continue
+		}
+		if strings.Contains(lowerQuestion, trimmed) {
+			return true
+		}
+	}
+	return false
+}
+
+func extractDirectReadOnlySQL(question string) string {
+	trimmed := strings.TrimSpace(question)
+	if trimmed == "" {
+		return ""
+	}
+
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "select ") || strings.HasPrefix(lower, "with ") {
+		return trimmed
+	}
+
+	lines := strings.Split(trimmed, "\n")
+	inFence := false
+	fenced := make([]string, 0, len(lines))
+	for _, line := range lines {
+		lineTrimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(lineTrimmed, "```") {
+			if inFence {
+				candidate := strings.TrimSpace(strings.Join(fenced, "\n"))
+				lowerCandidate := strings.ToLower(candidate)
+				if strings.HasPrefix(lowerCandidate, "select ") || strings.HasPrefix(lowerCandidate, "with ") {
+					return candidate
+				}
+				break
+			}
+			inFence = true
+			continue
+		}
+		if inFence {
+			fenced = append(fenced, line)
+		}
+	}
+
+	return ""
+}
+
+func planDatabaseReadQuery(ctx context.Context, aiClient *ai.Client, question string, inspection dbcontext.Inspection) (databaseReadPlan, error) {
+	prompt := fmt.Sprintf(`You are preparing a single live read-only SQL query for Clanker's database agent.
+
+Return strict JSON only with these keys:
+- should_query: boolean
+- sql: string
+- reason: string
+
+Rules:
+- Only emit one SELECT statement, or one WITH ... SELECT statement.
+- Never emit comments, semicolons, transaction control, EXPLAIN, PRAGMA, DDL, DML, CALL, COPY, ATTACH, DETACH, or any write operation.
+- Use only the tables and columns shown in the schema summary.
+- If this connection cannot answer the question safely, set should_query to false and sql to an empty string.
+- For "how many" or count questions, prefer COUNT(*).
+- For record listings or searches, include LIMIT 50.
+- Do not guess missing tables, columns, or filters.
+
+Connection:
+Name: %s
+Kind: %s
+Target: %s
+Current Database: %s
+
+Schema Summary:
+%s
+
+User Question:
+%s`,
+		inspection.Connection.Name,
+		inspection.Connection.Kind(),
+		inspection.Connection.Target(),
+		inspection.CurrentDatabase,
+		formatInspectionForQueryPlanning(inspection),
+		strings.TrimSpace(question),
+	)
+
+	raw, err := aiClient.AskPrompt(ctx, prompt)
+	if err != nil {
+		return databaseReadPlan{}, err
+	}
+
+	cleaned := strings.TrimSpace(aiClient.CleanJSONResponse(raw))
+	if cleaned == "" {
+		cleaned = strings.TrimSpace(raw)
+	}
+
+	var plan databaseReadPlan
+	if err := json.Unmarshal([]byte(cleaned), &plan); err != nil {
+		return databaseReadPlan{}, fmt.Errorf("invalid live-query plan JSON: %w", err)
+	}
+
+	plan.SQL = strings.TrimSpace(plan.SQL)
+	plan.Reason = strings.TrimSpace(plan.Reason)
+	if !plan.ShouldQuery && plan.SQL != "" {
+		plan.ShouldQuery = true
+	}
+
+	return plan, nil
+}
+
+func formatInspectionForQueryPlanning(inspection dbcontext.Inspection) string {
+	b := &strings.Builder{}
+	if inspection.Version != "" {
+		b.WriteString(fmt.Sprintf("Engine Version: %s\n", inspection.Version))
+	}
+	if inspection.CurrentDatabase != "" {
+		b.WriteString(fmt.Sprintf("Current Database: %s\n", inspection.CurrentDatabase))
+	}
+	if len(inspection.Objects) == 0 {
+		b.WriteString("Objects: none discovered\n")
+		return b.String()
+	}
+
+	b.WriteString("Objects:\n")
+	for _, object := range inspection.Objects {
+		name := object.Name
+		if object.Schema != "" {
+			name = object.Schema + "." + object.Name
+		}
+		b.WriteString(fmt.Sprintf("- %s [%s]\n", name, object.Type))
+		if len(object.Columns) == 0 {
+			continue
+		}
+		parts := make([]string, 0, len(object.Columns))
+		for _, column := range object.Columns {
+			nullability := "not null"
+			if column.Nullable {
+				nullability = "nullable"
+			}
+			parts = append(parts, fmt.Sprintf("%s %s %s", column.Name, column.Type, nullability))
+		}
+		b.WriteString("  Columns: ")
+		b.WriteString(strings.Join(parts, ", "))
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+func formatDatabaseQueryResult(result dbcontext.QueryResult, reason string) string {
+	b := &strings.Builder{}
+	b.WriteString(fmt.Sprintf("Connection: %s [%s] %s\n", result.Connection.Name, result.Connection.Kind(), result.Connection.Target()))
+	if reason != "" {
+		b.WriteString(fmt.Sprintf("Reason: %s\n", reason))
+	}
+	b.WriteString(fmt.Sprintf("SQL: %s\n", result.Query))
+	if len(result.Columns) > 0 {
+		b.WriteString(fmt.Sprintf("Columns: %s\n", strings.Join(result.Columns, ", ")))
+	}
+	b.WriteString(fmt.Sprintf("Rows Returned: %d\n", len(result.Rows)))
+	if len(result.Rows) == 0 {
+		b.WriteString("Result: no rows\n")
+		return b.String()
+	}
+
+	limit := len(result.Rows)
+	if limit > maxDatabaseQueryPromptRows {
+		limit = maxDatabaseQueryPromptRows
+	}
+
+	b.WriteString("Rows:\n")
+	for i := 0; i < limit; i++ {
+		parts := make([]string, 0, len(result.Columns))
+		for _, column := range result.Columns {
+			parts = append(parts, fmt.Sprintf("%s=%s", column, result.Rows[i][column]))
+		}
+		b.WriteString("- ")
+		b.WriteString(strings.Join(parts, "; "))
+		b.WriteString("\n")
+	}
+	if len(result.Rows) > limit {
+		b.WriteString(fmt.Sprintf("- ... %d additional rows omitted\n", len(result.Rows)-limit))
+	}
+	if result.Truncated {
+		b.WriteString("- Additional rows were truncated at the read safety limit\n")
+	}
+
+	return b.String()
 }
 
 func collectCICDAgentContext(ctx context.Context, question string, debug bool) ([]domainContextSection, []string) {
@@ -234,8 +548,14 @@ func collectCICDAgentContext(ctx context.Context, question string, debug bool) (
 		}
 	}
 
-	if shouldQueryDomainProvider(question, "azure") && strings.TrimSpace(azure.ResolveSubscriptionID()) != "" {
-		warnings = append(warnings, "Azure DevOps pipeline inventory is not implemented in the current CLI integrations")
+	if shouldQueryDomainProvider(question, "azure") {
+		azureClient := azure.NewClientWithOptionalSubscription(strings.TrimSpace(azure.ResolveSubscriptionID()), debug)
+		azureInfo, azureErr := azureClient.GetRelevantContext(ctx, "azure devops pipelines runs builds releases repositories")
+		if azureErr != nil {
+			warnings = appendDomainWarning(warnings, "Azure DevOps inventory", azureErr)
+		} else {
+			sections = appendDomainSection(sections, "Azure DevOps", azureInfo)
+		}
 	}
 	if shouldQueryDomainProvider(question, "hetzner") && hasHetznerDomainAccess() {
 		warnings = append(warnings, "Hetzner build or deployment inventory is not implemented in the current CLI integrations")
@@ -268,12 +588,15 @@ Coverage in this repo can include:
 - configured SQL connections from clanker config
 - AWS RDS, DynamoDB, ElastiCache
 - GCP Cloud SQL, Firestore, Spanner, Bigtable, Memorystore
-- Azure Cosmos DB
+- Azure SQL, Azure Database for PostgreSQL/MySQL, Cosmos DB, Azure Cache for Redis
 - DigitalOcean managed databases
 - Cloudflare D1
 
 Rules:
 - Separate observed facts from recommendations.
+- This agent is strictly read-only. Never propose or imply running write or migration commands during inspection.
+- When live SQL read results are present, use them as the primary answer and identify the connection they came from.
+- If multiple connections returned results, report them per connection. Only provide an aggregate if it is obviously additive.
 - If a provider or engine is missing, say it was not available from current credentials or integrations.
 - Do not invent schema details, table names, counts, or status.
 - Be concrete about engines, tables, columns, state, and obvious gaps.`
@@ -286,6 +609,7 @@ Coverage in this repo can include:
 - GitHub Actions workflows, runs, and runners
 - AWS CodeBuild and CodePipeline
 - GCP Cloud Build and Cloud Deploy
+- Azure DevOps pipelines, runs, and repositories
 - Cloudflare deployments and Pages projects
 - DigitalOcean App Platform deployments
 
@@ -441,6 +765,9 @@ func shouldRouteToDatabaseAgent(question string) bool {
 	if lower == "" {
 		return false
 	}
+	if extractDirectReadOnlySQL(question) != "" {
+		return true
+	}
 	if containsAnyPhrase(lower, "pod", "pods", "deployment", "deployments", "statefulset", "daemonset", "helm", "kubectl", "namespace") &&
 		!containsAnyPhrase(lower, "database", "schema", "sql", "nosql", "table", "tables", "column", "columns", "migration", "migrations", "connection", "query") {
 		return false
@@ -460,6 +787,66 @@ func shouldRouteToDatabaseAgent(question string) bool {
 		"database", "databases", "postgres", "postgresql", "mysql", "mariadb", "sqlite", "sqlite3",
 		"supabase", "neon", "mongo", "mongodb", "redis", "dynamodb", "rds", "firestore", "cloud sql",
 		"spanner", "bigtable", "cosmos", "cosmos db", "d1")
+}
+
+func shouldRouteToDatabaseAgentWithContext(question string, dbConnection string) bool {
+	if shouldRouteToDatabaseAgent(question) {
+		return true
+	}
+	if !hasConfiguredDatabaseConnection(dbConnection) {
+		return false
+	}
+	if hasConflictingDatabaseReadIntent(question) {
+		return false
+	}
+	return shouldAttemptLiveDatabaseReads(question)
+}
+
+func shouldAttemptLiveDatabaseReads(question string) bool {
+	lower := strings.ToLower(strings.TrimSpace(question))
+	if lower == "" {
+		return false
+	}
+	if extractDirectReadOnlySQL(question) != "" {
+		return true
+	}
+	if containsAnyPhrase(lower, "schema", "schemas", "migration", "migrations", "foreign key", "primary key", "index", "indexes", "connection string", "database connection", "db connection") &&
+		!containsAnyPhrase(lower, "how many", "count", "number of", "total", "show me", "list ", "find ", "search ", "latest ", "recent ", "newest ", "oldest ", "top ", "sample ", "first ", "last ", "do i have any", "are there any") {
+		return false
+	}
+	return containsAnyPhrase(lower,
+		"how many", "count", "number of", "total", "show me", "list ", "find ", "search ",
+		"latest ", "recent ", "newest ", "oldest ", "top ", "sample ", "first ", "last ",
+		"do i have any", "are there any", "which ", "who ")
+}
+
+func hasConfiguredDatabaseConnection(dbConnection string) bool {
+	if strings.TrimSpace(dbConnection) != "" {
+		_, err := dbcontext.ResolveConnection(dbConnection)
+		return err == nil
+	}
+	connections, _, err := dbcontext.ListConnections()
+	return err == nil && len(connections) > 0
+}
+
+func hasConflictingDatabaseReadIntent(question string) bool {
+	lower := strings.ToLower(strings.TrimSpace(question))
+	if lower == "" {
+		return false
+	}
+	if containsAnyPhrase(lower, "github actions", "workflow", "workflow run", "codebuild", "codepipeline", "cloud build", "cloud deploy", "pipeline", "pipelines", "runner", "runners") &&
+		!containsAnyPhrase(lower, "database", "schema", "sql", "nosql", "table", "tables", "column", "columns", "migration", "postgres", "mysql", "sqlite", "supabase", "neon", "dynamodb", "firestore", "spanner", "bigtable", "cosmos", "d1", "redis", "mongo") {
+		return true
+	}
+	if containsAnyPhrase(lower, "pod", "pods", "deployment", "deployments", "statefulset", "daemonset", "helm", "kubectl", "namespace", "service", "services", "cluster", "node", "nodes") &&
+		!containsAnyPhrase(lower, "database", "schema", "sql", "nosql", "table", "tables", "column", "columns", "migration", "migrations", "connection", "query") {
+		return true
+	}
+	if containsAnyPhrase(lower, "iam", "role", "policy", "access key", "github", "gitlab") &&
+		!containsAnyPhrase(lower, "database", "sql", "table", "tables", "postgres", "mysql", "sqlite", "supabase", "neon") {
+		return true
+	}
+	return false
 }
 
 func shouldRouteToCICDAgent(question string) bool {
