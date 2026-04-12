@@ -2,11 +2,9 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/bgdnvk/clanker/internal/ai"
 	"github.com/bgdnvk/clanker/internal/aws"
@@ -21,8 +19,10 @@ import (
 )
 
 const (
-	maxDomainAgentSectionChars = 8000
-	maxDatabaseQueryPromptRows = 12
+	maxDomainAgentSectionChars   = 8000
+	maxDatabaseQueryPromptRows   = 12
+	defaultDatabasePreviewRows   = 20
+	maxDeterministicTableQueries = 3
 )
 
 type domainContextSection struct {
@@ -34,6 +34,7 @@ type databaseReadPlan struct {
 	ShouldQuery bool   `json:"should_query"`
 	SQL         string `json:"sql"`
 	Reason      string `json:"reason"`
+	Target      string `json:"-"`
 }
 
 func handleDatabaseQuery(ctx context.Context, question string, debug bool, dbConnection string) error {
@@ -152,81 +153,7 @@ func collectDatabaseAgentContext(ctx context.Context, question string, dbConnect
 }
 
 func collectDatabaseQueryResults(ctx context.Context, question string, dbConnection string, debug bool) ([]domainContextSection, []string) {
-	if !shouldAttemptLiveDatabaseReads(question) {
-		return nil, nil
-	}
-
-	connections, _, err := dbcontext.ListConnections()
-	if err != nil {
-		return nil, []string{fmt.Sprintf("Live database query planning: %v", err)}
-	}
-	if len(connections) == 0 {
-		return nil, nil
-	}
-
-	targetConnections, err := selectDatabaseQueryConnections(connections, question, dbConnection)
-	if err != nil {
-		return nil, []string{fmt.Sprintf("Live database query planning: %v", err)}
-	}
-	if len(targetConnections) == 0 {
-		return nil, nil
-	}
-
-	aiClient := newConfiguredAIClient(debug)
-	directSQL := extractDirectReadOnlySQL(question)
-	sections := make([]domainContextSection, 0, len(targetConnections))
-	warnings := make([]string, 0, len(targetConnections))
-	skippedNames := make([]string, 0, len(targetConnections))
-	executedAny := false
-
-	for _, connection := range targetConnections {
-		plannedSQL := directSQL
-		planReason := ""
-
-		if plannedSQL == "" {
-			inspectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			inspection, inspectErr := dbcontext.Inspect(inspectCtx, connection.Name)
-			cancel()
-			if inspectErr != nil {
-				warnings = append(warnings, fmt.Sprintf("Live query inspection (%s): %v", connection.Name, inspectErr))
-				continue
-			}
-
-			planCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
-			plan, planErr := planDatabaseReadQuery(planCtx, aiClient, question, inspection)
-			cancel()
-			if planErr != nil {
-				warnings = append(warnings, fmt.Sprintf("Live query planning (%s): %v", connection.Name, planErr))
-				continue
-			}
-
-			plannedSQL = strings.TrimSpace(plan.SQL)
-			planReason = strings.TrimSpace(plan.Reason)
-			if !plan.ShouldQuery || plannedSQL == "" {
-				skippedNames = append(skippedNames, connection.Name)
-				continue
-			}
-		} else {
-			planReason = "Executed the user's explicit read-only SQL against this connection."
-		}
-
-		queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		result, queryErr := dbcontext.ExecuteReadQueryOnConnection(queryCtx, connection, plannedSQL)
-		cancel()
-		if queryErr != nil {
-			warnings = append(warnings, fmt.Sprintf("Live read query (%s): %v", connection.Name, queryErr))
-			continue
-		}
-
-		executedAny = true
-		sections = appendDomainSection(sections, fmt.Sprintf("Live Read Query Result (%s)", connection.Name), formatDatabaseQueryResult(result, planReason))
-	}
-
-	if !executedAny && len(skippedNames) == len(targetConnections) {
-		warnings = append(warnings, fmt.Sprintf("No safe live SQL read query matched the available schemas for: %s", strings.Join(skippedNames, ", ")))
-	}
-
-	return sections, warnings
+	return newDatabaseQuerySubAgent(debug).collectQueryResults(ctx, question, dbConnection)
 }
 
 func selectDatabaseQueryConnections(connections []dbcontext.Connection, question string, explicitConnection string) ([]dbcontext.Connection, error) {
@@ -280,6 +207,331 @@ func databaseConnectionMatchesQuestion(connection dbcontext.Connection, lowerQue
 	return false
 }
 
+func planDeterministicDatabaseReadQueries(question string, inspection dbcontext.Inspection) ([]databaseReadPlan, bool) {
+	lowerQuestion := strings.ToLower(strings.TrimSpace(question))
+	if lowerQuestion == "" {
+		return nil, false
+	}
+
+	if hasDeterministicSchemaInventoryIntent(lowerQuestion) {
+		if query, ok := deterministicSchemaInventoryQuery(inspection.Connection.Driver); ok {
+			return []databaseReadPlan{{
+				ShouldQuery: true,
+				SQL:         query,
+				Reason:      "Listed live schemas and tables because the request asked to inspect the database structure before querying data.",
+				Target:      "schema inventory",
+			}}, true
+		}
+	}
+
+	if len(inspection.Objects) == 0 {
+		return nil, false
+	}
+
+	objects := selectDeterministicDatabaseObjects(lowerQuestion, inspection.Objects)
+	if len(objects) == 0 {
+		return nil, false
+	}
+	if len(objects) > maxDeterministicTableQueries {
+		objects = objects[:maxDeterministicTableQueries]
+	}
+
+	plans := make([]databaseReadPlan, 0, len(objects)*2)
+	wantsCounts := hasDeterministicCountIntent(lowerQuestion)
+	wantsLatest := hasDeterministicLatestIntent(lowerQuestion)
+	wantsPreview := hasDeterministicPreviewIntent(lowerQuestion)
+
+	if wantsCounts {
+		for _, object := range objects {
+			qualifiedName := qualifiedDatabaseObjectName(inspection.Connection.Driver, object)
+			if qualifiedName == "" {
+				continue
+			}
+			plans = append(plans, databaseReadPlan{
+				ShouldQuery: true,
+				SQL:         fmt.Sprintf("SELECT COUNT(*) AS row_count FROM %s", qualifiedName),
+				Reason:      fmt.Sprintf("Counted rows from %s because the request asked for database totals.", renderObjectName(object)),
+				Target:      renderObjectName(object),
+			})
+		}
+	}
+
+	if wantsLatest {
+		for _, object := range objects {
+			qualifiedName := qualifiedDatabaseObjectName(inspection.Connection.Driver, object)
+			if qualifiedName == "" {
+				continue
+			}
+
+			previewColumns := previewColumnList(inspection.Connection.Driver, object)
+			if previewColumns == "" {
+				previewColumns = "*"
+			}
+
+			if orderColumn := preferredOrderColumn(inspection.Connection.Driver, object); orderColumn != "" {
+				plans = append(plans, databaseReadPlan{
+					ShouldQuery: true,
+					SQL:         fmt.Sprintf("SELECT %s FROM %s ORDER BY %s DESC LIMIT %d", previewColumns, qualifiedName, orderColumn, defaultDatabasePreviewRows),
+					Reason:      fmt.Sprintf("Previewed recent rows from %s using the most likely ordering column.", renderObjectName(object)),
+					Target:      renderObjectName(object),
+				})
+			}
+		}
+	}
+
+	if wantsPreview && !wantsLatest {
+		for _, object := range objects {
+			qualifiedName := qualifiedDatabaseObjectName(inspection.Connection.Driver, object)
+			if qualifiedName == "" {
+				continue
+			}
+
+			previewColumns := previewColumnList(inspection.Connection.Driver, object)
+			if previewColumns == "" {
+				previewColumns = "*"
+			}
+
+			plans = append(plans, databaseReadPlan{
+				ShouldQuery: true,
+				SQL:         fmt.Sprintf("SELECT %s FROM %s LIMIT %d", previewColumns, qualifiedName, defaultDatabasePreviewRows),
+				Reason:      fmt.Sprintf("Previewed rows from %s because the request asked to inspect live data.", renderObjectName(object)),
+				Target:      renderObjectName(object),
+			})
+		}
+	}
+
+	if len(plans) > 0 {
+		return plans, true
+	}
+
+	return nil, false
+}
+
+func selectDeterministicDatabaseObject(lowerQuestion string, objects []dbcontext.Object) (dbcontext.Object, bool) {
+	matches := selectDeterministicDatabaseObjects(lowerQuestion, objects)
+	if len(matches) != 1 {
+		return dbcontext.Object{}, false
+	}
+	return matches[0], true
+}
+
+func selectDeterministicDatabaseObjects(lowerQuestion string, objects []dbcontext.Object) []dbcontext.Object {
+	if len(objects) == 0 {
+		return nil
+	}
+
+	candidates := make([]dbcontext.Object, 0, len(objects))
+	for _, object := range objects {
+		if object.Type != "table" && object.Type != "view" {
+			continue
+		}
+		candidates = append(candidates, object)
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	if len(candidates) == 1 {
+		return candidates
+	}
+
+	matches := make([]dbcontext.Object, 0, len(candidates))
+	for _, object := range candidates {
+		if databaseObjectMatchesQuestion(object, lowerQuestion) {
+			matches = append(matches, object)
+		}
+	}
+	if len(matches) > 0 {
+		tableMatches := make([]dbcontext.Object, 0, len(matches))
+		for _, object := range matches {
+			if object.Type == "table" {
+				tableMatches = append(tableMatches, object)
+			}
+		}
+		if len(tableMatches) > 0 {
+			return tableMatches
+		}
+		return matches
+	}
+
+	tables := make([]dbcontext.Object, 0, len(candidates))
+	for _, object := range candidates {
+		if object.Type == "table" {
+			tables = append(tables, object)
+		}
+	}
+	if len(tables) == 1 {
+		return tables
+	}
+
+	return nil
+}
+
+func databaseObjectMatchesQuestion(object dbcontext.Object, lowerQuestion string) bool {
+	qualifiedName := strings.ToLower(strings.TrimSpace(renderObjectName(object)))
+	if qualifiedName != "" && strings.Contains(lowerQuestion, qualifiedName) {
+		return true
+	}
+
+	name := strings.ToLower(strings.TrimSpace(object.Name))
+	if name != "" && strings.Contains(lowerQuestion, name) {
+		return true
+	}
+
+	for _, column := range object.Columns {
+		columnName := strings.ToLower(strings.TrimSpace(column.Name))
+		if columnName != "" && strings.Contains(lowerQuestion, columnName) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func hasDeterministicPreviewIntent(lowerQuestion string) bool {
+	return containsAnyPhrase(lowerQuestion,
+		"show me all", "all the ", "everything in", "everything from",
+		"tell me about", "what are they about", "what is it about", "what are these about",
+		"what is this about", "what do they contain", "what does it contain", "describe ",
+		"tell me what i have", "tell me what i have in", "query ",
+		"tell me what data", "what data", "what rows", "what's in", "what is in",
+		"preview", "preview rows", "show rows", "sample rows", "query some columns",
+		"query some", "read some", "show me data", "list rows", "inspect rows")
+}
+
+func hasDeterministicSchemaInventoryIntent(lowerQuestion string) bool {
+	if !containsAnyPhrase(lowerQuestion, "database", "schema", "schemas", "table", "tables", "inspect", "query") {
+		return false
+	}
+
+	return containsAnyPhrase(lowerQuestion,
+		"inspect the selected database",
+		"inspect this database",
+		"summarize the schemas",
+		"summarize schemas",
+		"main tables",
+		"list tables",
+		"show tables",
+		"what tables",
+		"what schemas",
+		"schema inventory",
+		"table inventory",
+		"help me query it",
+		"help me query this")
+}
+
+func hasDeterministicCountIntent(lowerQuestion string) bool {
+	return containsAnyPhrase(lowerQuestion, "how many", "count", "number of", "total")
+}
+
+func hasDeterministicLatestIntent(lowerQuestion string) bool {
+	return containsAnyPhrase(lowerQuestion, "latest ", "recent ", "newest ", "last ", "most recent")
+}
+
+func qualifiedDatabaseObjectName(driver string, object dbcontext.Object) string {
+	quotedName := quoteDatabaseIdentifier(driver, object.Name)
+	if quotedName == "" {
+		return ""
+	}
+	if strings.TrimSpace(object.Schema) == "" {
+		return quotedName
+	}
+	return quoteDatabaseIdentifier(driver, object.Schema) + "." + quotedName
+}
+
+func previewColumnList(driver string, object dbcontext.Object) string {
+	if len(object.Columns) == 0 {
+		return "*"
+	}
+
+	columns := make([]string, 0, len(object.Columns))
+	for _, column := range object.Columns {
+		quoted := quoteDatabaseIdentifier(driver, column.Name)
+		if quoted == "" {
+			continue
+		}
+		columns = append(columns, quoted)
+	}
+	if len(columns) == 0 {
+		return "*"
+	}
+	return strings.Join(columns, ", ")
+}
+
+func preferredOrderColumn(driver string, object dbcontext.Object) string {
+	for _, column := range object.Columns {
+		name := strings.ToLower(strings.TrimSpace(column.Name))
+		if name == "created_at" || name == "updated_at" || name == "checked_at" || name == "timestamp" || name == "time" || name == "date" {
+			return quoteDatabaseIdentifier(driver, column.Name)
+		}
+		if strings.HasSuffix(name, "_at") || strings.HasSuffix(name, "_time") || strings.HasSuffix(name, "_date") {
+			return quoteDatabaseIdentifier(driver, column.Name)
+		}
+		typeName := strings.ToLower(strings.TrimSpace(column.Type))
+		if strings.Contains(typeName, "timestamp") || strings.Contains(typeName, "date") || strings.Contains(typeName, "time") {
+			return quoteDatabaseIdentifier(driver, column.Name)
+		}
+	}
+
+	for _, column := range object.Columns {
+		name := strings.ToLower(strings.TrimSpace(column.Name))
+		if name == "id" || strings.HasSuffix(name, "_id") {
+			return quoteDatabaseIdentifier(driver, column.Name)
+		}
+	}
+
+	return ""
+}
+
+func quoteDatabaseIdentifier(driver string, identifier string) string {
+	trimmed := strings.TrimSpace(identifier)
+	if trimmed == "" {
+		return ""
+	}
+
+	if driver == "mysql" {
+		return "`" + strings.ReplaceAll(trimmed, "`", "``") + "`"
+	}
+	return `"` + strings.ReplaceAll(trimmed, `"`, `""`) + `"`
+}
+
+func renderObjectName(object dbcontext.Object) string {
+	if strings.TrimSpace(object.Schema) == "" {
+		return object.Name
+	}
+	return object.Schema + "." + object.Name
+}
+
+func deterministicSchemaInventoryQuery(driver string) (string, bool) {
+	switch strings.TrimSpace(driver) {
+	case "postgres":
+		return strings.Join([]string{
+			"SELECT table_schema, table_name, table_type",
+			"FROM information_schema.tables",
+			"WHERE table_schema NOT IN ('pg_catalog', 'information_schema')",
+			"ORDER BY CASE WHEN table_schema = 'public' THEN 0 ELSE 1 END, table_schema, table_name",
+			fmt.Sprintf("LIMIT %d", defaultDatabasePreviewRows*3),
+		}, " "), true
+	case "mysql":
+		return strings.Join([]string{
+			"SELECT table_schema, table_name, table_type",
+			"FROM information_schema.tables",
+			"WHERE table_schema = DATABASE()",
+			"ORDER BY table_name",
+			fmt.Sprintf("LIMIT %d", defaultDatabasePreviewRows*3),
+		}, " "), true
+	case "sqlite":
+		return strings.Join([]string{
+			"SELECT 'main' AS table_schema, name AS table_name, type AS table_type",
+			"FROM sqlite_master",
+			"WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'",
+			"ORDER BY name",
+			fmt.Sprintf("LIMIT %d", defaultDatabasePreviewRows*3),
+		}, " "), true
+	default:
+		return "", false
+	}
+}
+
 func extractDirectReadOnlySQL(question string) string {
 	trimmed := strings.TrimSpace(question)
 	if trimmed == "" {
@@ -317,63 +569,7 @@ func extractDirectReadOnlySQL(question string) string {
 }
 
 func planDatabaseReadQuery(ctx context.Context, aiClient *ai.Client, question string, inspection dbcontext.Inspection) (databaseReadPlan, error) {
-	prompt := fmt.Sprintf(`You are preparing a single live read-only SQL query for Clanker's database agent.
-
-Return strict JSON only with these keys:
-- should_query: boolean
-- sql: string
-- reason: string
-
-Rules:
-- Only emit one SELECT statement, or one WITH ... SELECT statement.
-- Never emit comments, semicolons, transaction control, EXPLAIN, PRAGMA, DDL, DML, CALL, COPY, ATTACH, DETACH, or any write operation.
-- Use only the tables and columns shown in the schema summary.
-- If this connection cannot answer the question safely, set should_query to false and sql to an empty string.
-- For "how many" or count questions, prefer COUNT(*).
-- For record listings or searches, include LIMIT 50.
-- Do not guess missing tables, columns, or filters.
-
-Connection:
-Name: %s
-Kind: %s
-Target: %s
-Current Database: %s
-
-Schema Summary:
-%s
-
-User Question:
-%s`,
-		inspection.Connection.Name,
-		inspection.Connection.Kind(),
-		inspection.Connection.Target(),
-		inspection.CurrentDatabase,
-		formatInspectionForQueryPlanning(inspection),
-		strings.TrimSpace(question),
-	)
-
-	raw, err := aiClient.AskPrompt(ctx, prompt)
-	if err != nil {
-		return databaseReadPlan{}, err
-	}
-
-	cleaned := strings.TrimSpace(aiClient.CleanJSONResponse(raw))
-	if cleaned == "" {
-		cleaned = strings.TrimSpace(raw)
-	}
-
-	var plan databaseReadPlan
-	if err := json.Unmarshal([]byte(cleaned), &plan); err != nil {
-		return databaseReadPlan{}, fmt.Errorf("invalid live-query plan JSON: %w", err)
-	}
-
-	plan.SQL = strings.TrimSpace(plan.SQL)
-	plan.Reason = strings.TrimSpace(plan.Reason)
-	if !plan.ShouldQuery && plan.SQL != "" {
-		plan.ShouldQuery = true
-	}
-
-	return plan, nil
+	return planDatabaseReadQueryWithContext(ctx, aiClient, question, inspection, "")
 }
 
 func formatInspectionForQueryPlanning(inspection dbcontext.Inspection) string {
@@ -383,6 +579,25 @@ func formatInspectionForQueryPlanning(inspection dbcontext.Inspection) string {
 	}
 	if inspection.CurrentDatabase != "" {
 		b.WriteString(fmt.Sprintf("Current Database: %s\n", inspection.CurrentDatabase))
+	}
+	if inspection.SchemaCount > 0 || inspection.TableCount > 0 || inspection.ViewCount > 0 {
+		b.WriteString(fmt.Sprintf("Schema Summary: %d schemas, %d tables, %d views\n", inspection.SchemaCount, inspection.TableCount, inspection.ViewCount))
+	}
+	if len(inspection.TopSchemas) > 0 {
+		b.WriteString("Top Schemas:\n")
+		for _, schema := range inspection.TopSchemas {
+			b.WriteString(fmt.Sprintf("- %s: %d tables, %d views\n", schema.Schema, schema.TableCount, schema.ViewCount))
+		}
+	}
+	if len(inspection.LargestTables) > 0 {
+		b.WriteString("Largest Tables:\n")
+		for _, table := range inspection.LargestTables {
+			name := table.Name
+			if table.Schema != "" {
+				name = table.Schema + "." + table.Name
+			}
+			b.WriteString(fmt.Sprintf("- %s [%s] size=%d bytes rows≈%d\n", name, table.Type, table.SizeBytes, table.RowEstimate))
+		}
 	}
 	if len(inspection.Objects) == 0 {
 		b.WriteString("Objects: none discovered\n")
@@ -596,6 +811,7 @@ Rules:
 - Separate observed facts from recommendations.
 - This agent is strictly read-only. Never propose or imply running write or migration commands during inspection.
 - When live SQL read results are present, use them as the primary answer and identify the connection they came from.
+- When a Database Query Retry Outcome section is present, report the last observed failure and explicitly note that the query self-heal budget was exhausted after 3 attempts.
 - If multiple connections returned results, report them per connection. Only provide an aggregate if it is obviously additive.
 - If a provider or engine is missing, say it was not available from current credentials or integrations.
 - Do not invent schema details, table names, counts, or status.
@@ -817,7 +1033,13 @@ func shouldAttemptLiveDatabaseReads(question string) bool {
 	return containsAnyPhrase(lower,
 		"how many", "count", "number of", "total", "show me", "list ", "find ", "search ",
 		"latest ", "recent ", "newest ", "oldest ", "top ", "sample ", "first ", "last ",
-		"do i have any", "are there any", "which ", "who ")
+		"best ", "highest ", "most ", "largest ", "lowest ", "ranking", "rank ", "leaderboard", "revenue",
+		"do i have any", "are there any", "which ", "who ",
+		"show me all", "all the ", "everything in", "everything from",
+		"tell me what i have", "tell me what i have in", "query ",
+		"tell me what data", "what data", "what rows", "what's in", "what is in",
+		"preview", "preview rows", "show rows", "sample rows", "query some columns",
+		"query some", "read some", "show me data", "list rows", "inspect rows")
 }
 
 func hasConfiguredDatabaseConnection(dbConnection string) bool {

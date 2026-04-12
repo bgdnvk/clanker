@@ -27,8 +27,8 @@ import (
 const (
 	defaultPostgresPort     = 5432
 	defaultMySQLPort        = 3306
-	maxObjects              = 8
-	maxColumns              = 6
+	maxObjects              = 16
+	maxColumns              = 8
 	maxQueryRows            = 50
 	maxQueryValueChars      = 240
 	runtimeDBConnectionEnv  = "CLANKER_RUNTIME_DB_CONNECTION_JSON"
@@ -113,12 +113,41 @@ type Object struct {
 	Columns []Column
 }
 
+type SchemaSummary struct {
+	Schema     string
+	TableCount int
+	ViewCount  int
+}
+
+type TableSummary struct {
+	Schema      string
+	Name        string
+	Type        string
+	SizeBytes   int64
+	RowEstimate int64
+}
+
 type Inspection struct {
 	Connection      Connection
 	PingMillis      int64
 	Version         string
 	CurrentDatabase string
+	SchemaCount     int
+	TableCount      int
+	ViewCount       int
+	TotalSizeBytes  int64
+	TopSchemas      []SchemaSummary
+	LargestTables   []TableSummary
 	Objects         []Object
+}
+
+type inspectionSummary struct {
+	SchemaCount    int
+	TableCount     int
+	ViewCount      int
+	TotalSizeBytes int64
+	TopSchemas     []SchemaSummary
+	LargestTables  []TableSummary
 }
 
 type QueryResult struct {
@@ -308,6 +337,25 @@ func BuildRelevantContext(ctx context.Context, question string, name string) (st
 	}
 	if inspection.CurrentDatabase != "" {
 		b.WriteString(fmt.Sprintf("Current Database: %s\n", inspection.CurrentDatabase))
+	}
+	if inspection.SchemaCount > 0 || inspection.TableCount > 0 || inspection.ViewCount > 0 {
+		b.WriteString(fmt.Sprintf("Schema Summary: %d schemas, %d tables, %d views\n", inspection.SchemaCount, inspection.TableCount, inspection.ViewCount))
+	}
+	if len(inspection.TopSchemas) > 0 {
+		b.WriteString("Top Schemas:\n")
+		for _, schema := range inspection.TopSchemas {
+			b.WriteString(fmt.Sprintf("- %s: %d tables, %d views\n", schema.Schema, schema.TableCount, schema.ViewCount))
+		}
+	}
+	if len(inspection.LargestTables) > 0 {
+		b.WriteString("Largest Tables:\n")
+		for _, table := range inspection.LargestTables {
+			qualifiedName := table.Name
+			if table.Schema != "" {
+				qualifiedName = table.Schema + "." + table.Name
+			}
+			b.WriteString(fmt.Sprintf("- %s [%s] size=%d bytes rows≈%d\n", qualifiedName, table.Type, table.SizeBytes, table.RowEstimate))
+		}
 	}
 	if len(inspection.Objects) == 0 {
 		b.WriteString("Objects: none discovered\n")
@@ -680,6 +728,14 @@ func inspectConnection(ctx context.Context, connection Connection) (Inspection, 
 
 	inspection.Version = queryVersion(ctx, runner, connection)
 	inspection.CurrentDatabase = queryCurrentDatabase(ctx, runner, connection)
+	if summary, err := queryInspectionSummary(ctx, runner, connection); err == nil {
+		inspection.SchemaCount = summary.SchemaCount
+		inspection.TableCount = summary.TableCount
+		inspection.ViewCount = summary.ViewCount
+		inspection.TotalSizeBytes = summary.TotalSizeBytes
+		inspection.TopSchemas = summary.TopSchemas
+		inspection.LargestTables = summary.LargestTables
+	}
 	objects, err := queryObjects(ctx, runner, connection)
 	if err == nil {
 		inspection.Objects = objects
@@ -1157,6 +1213,205 @@ func queryCurrentDatabase(ctx context.Context, runner queryRunner, connection Co
 	return strings.TrimSpace(value.String)
 }
 
+func queryInspectionSummary(ctx context.Context, runner queryRunner, connection Connection) (inspectionSummary, error) {
+	switch connection.Driver {
+	case "postgres":
+		return queryPostgresInspectionSummary(ctx, runner)
+	case "mysql":
+		return queryMySQLInspectionSummary(ctx, runner)
+	case "sqlite":
+		return querySQLiteInspectionSummary(ctx, runner)
+	default:
+		return inspectionSummary{}, fmt.Errorf("unsupported database driver %q", connection.Driver)
+	}
+}
+
+func queryPostgresInspectionSummary(ctx context.Context, runner queryRunner) (inspectionSummary, error) {
+	summary := inspectionSummary{}
+	if err := runner.QueryRowContext(ctx, `
+		select
+			count(distinct table_schema)::int as schema_count,
+			coalesce(sum(case when table_type = 'BASE TABLE' then 1 else 0 end), 0)::int as table_count,
+			coalesce(sum(case when table_type = 'VIEW' then 1 else 0 end), 0)::int as view_count,
+			coalesce((
+				select sum(pg_total_relation_size(c.oid))::bigint
+				from pg_class c
+				join pg_namespace n on n.oid = c.relnamespace
+				where c.relkind in ('r', 'p', 'm')
+				  and n.nspname not in ('pg_catalog', 'information_schema')
+			), 0)::bigint as total_size_bytes
+		from information_schema.tables
+		where table_schema not in ('pg_catalog', 'information_schema')
+	`).Scan(&summary.SchemaCount, &summary.TableCount, &summary.ViewCount, &summary.TotalSizeBytes); err != nil {
+		return inspectionSummary{}, err
+	}
+
+	topSchemaRows, err := runner.QueryContext(ctx, `
+		select
+			table_schema,
+			coalesce(sum(case when table_type = 'BASE TABLE' then 1 else 0 end), 0)::int as table_count,
+			coalesce(sum(case when table_type = 'VIEW' then 1 else 0 end), 0)::int as view_count
+		from information_schema.tables
+		where table_schema not in ('pg_catalog', 'information_schema')
+		group by table_schema
+		order by table_count desc, view_count desc, table_schema asc
+		limit 4
+	`)
+	if err != nil {
+		return inspectionSummary{}, err
+	}
+	defer topSchemaRows.Close()
+
+	for topSchemaRows.Next() {
+		var item SchemaSummary
+		if err := topSchemaRows.Scan(&item.Schema, &item.TableCount, &item.ViewCount); err != nil {
+			return inspectionSummary{}, err
+		}
+		summary.TopSchemas = append(summary.TopSchemas, item)
+	}
+	if err := topSchemaRows.Err(); err != nil {
+		return inspectionSummary{}, err
+	}
+
+	largestTableRows, err := runner.QueryContext(ctx, `
+		select
+			n.nspname as schema_name,
+			c.relname as table_name,
+			case
+				when c.relkind = 'm' then 'materialized view'
+				when c.relkind = 'p' then 'partitioned table'
+				else 'table'
+			end as object_type,
+			pg_total_relation_size(c.oid)::bigint as size_bytes,
+			coalesce(s.n_live_tup::bigint, c.reltuples::bigint, 0)::bigint as row_estimate
+		from pg_class c
+		join pg_namespace n on n.oid = c.relnamespace
+		left join pg_stat_user_tables s on s.relid = c.oid
+		where c.relkind in ('r', 'p', 'm')
+		  and n.nspname not in ('pg_catalog', 'information_schema')
+		order by pg_total_relation_size(c.oid) desc, n.nspname asc, c.relname asc
+		limit 3
+	`)
+	if err != nil {
+		return inspectionSummary{}, err
+	}
+	defer largestTableRows.Close()
+
+	for largestTableRows.Next() {
+		var item TableSummary
+		if err := largestTableRows.Scan(&item.Schema, &item.Name, &item.Type, &item.SizeBytes, &item.RowEstimate); err != nil {
+			return inspectionSummary{}, err
+		}
+		summary.LargestTables = append(summary.LargestTables, item)
+	}
+	if err := largestTableRows.Err(); err != nil {
+		return inspectionSummary{}, err
+	}
+
+	return summary, nil
+}
+
+func queryMySQLInspectionSummary(ctx context.Context, runner queryRunner) (inspectionSummary, error) {
+	summary := inspectionSummary{}
+	if err := runner.QueryRowContext(ctx, `
+		select
+			count(distinct table_schema) as schema_count,
+			coalesce(sum(case when table_type = 'BASE TABLE' then 1 else 0 end), 0) as table_count,
+			coalesce(sum(case when table_type = 'VIEW' then 1 else 0 end), 0) as view_count,
+			coalesce(sum(case when table_type = 'BASE TABLE' then coalesce(data_length, 0) + coalesce(index_length, 0) else 0 end), 0) as total_size_bytes
+		from information_schema.tables
+		where table_schema = database()
+	`).Scan(&summary.SchemaCount, &summary.TableCount, &summary.ViewCount, &summary.TotalSizeBytes); err != nil {
+		return inspectionSummary{}, err
+	}
+
+	topSchemaRows, err := runner.QueryContext(ctx, `
+		select
+			table_schema,
+			coalesce(sum(case when table_type = 'BASE TABLE' then 1 else 0 end), 0) as table_count,
+			coalesce(sum(case when table_type = 'VIEW' then 1 else 0 end), 0) as view_count
+		from information_schema.tables
+		where table_schema = database()
+		group by table_schema
+		order by table_schema asc
+		limit 1
+	`)
+	if err != nil {
+		return inspectionSummary{}, err
+	}
+	defer topSchemaRows.Close()
+
+	for topSchemaRows.Next() {
+		var item SchemaSummary
+		if err := topSchemaRows.Scan(&item.Schema, &item.TableCount, &item.ViewCount); err != nil {
+			return inspectionSummary{}, err
+		}
+		summary.TopSchemas = append(summary.TopSchemas, item)
+	}
+	if err := topSchemaRows.Err(); err != nil {
+		return inspectionSummary{}, err
+	}
+
+	largestTableRows, err := runner.QueryContext(ctx, `
+		select
+			table_schema,
+			table_name,
+			lower(table_type) as object_type,
+			coalesce(data_length, 0) + coalesce(index_length, 0) as size_bytes,
+			coalesce(table_rows, 0) as row_estimate
+		from information_schema.tables
+		where table_schema = database()
+		  and table_type = 'BASE TABLE'
+		order by size_bytes desc, table_name asc
+		limit 3
+	`)
+	if err != nil {
+		return inspectionSummary{}, err
+	}
+	defer largestTableRows.Close()
+
+	for largestTableRows.Next() {
+		var item TableSummary
+		if err := largestTableRows.Scan(&item.Schema, &item.Name, &item.Type, &item.SizeBytes, &item.RowEstimate); err != nil {
+			return inspectionSummary{}, err
+		}
+		summary.LargestTables = append(summary.LargestTables, item)
+	}
+	if err := largestTableRows.Err(); err != nil {
+		return inspectionSummary{}, err
+	}
+
+	return summary, nil
+}
+
+func querySQLiteInspectionSummary(ctx context.Context, runner queryRunner) (inspectionSummary, error) {
+	summary := inspectionSummary{}
+	if err := runner.QueryRowContext(ctx, `
+		select
+			case when count(*) > 0 then 1 else 0 end as schema_count,
+			coalesce(sum(case when type = 'table' then 1 else 0 end), 0) as table_count,
+			coalesce(sum(case when type = 'view' then 1 else 0 end), 0) as view_count
+		from sqlite_master
+		where name not like 'sqlite_%'
+	`).Scan(&summary.SchemaCount, &summary.TableCount, &summary.ViewCount); err != nil {
+		return inspectionSummary{}, err
+	}
+
+	if err := runner.QueryRowContext(ctx, `select coalesce((select page_count from pragma_page_count), 0) * coalesce((select page_size from pragma_page_size), 0)`).Scan(&summary.TotalSizeBytes); err != nil {
+		summary.TotalSizeBytes = 0
+	}
+
+	if summary.SchemaCount > 0 {
+		summary.TopSchemas = append(summary.TopSchemas, SchemaSummary{
+			Schema:     "main",
+			TableCount: summary.TableCount,
+			ViewCount:  summary.ViewCount,
+		})
+	}
+
+	return summary, nil
+}
+
 func queryObjects(ctx context.Context, runner queryRunner, connection Connection) ([]Object, error) {
 	switch connection.Driver {
 	case "postgres":
@@ -1175,7 +1430,14 @@ func queryPostgresObjects(ctx context.Context, runner queryRunner) ([]Object, er
 		select table_schema, table_name, table_type
 		from information_schema.tables
 		where table_schema not in ('pg_catalog', 'information_schema')
-		order by table_schema, table_name
+		order by
+			case
+				when table_schema = 'public' then 0
+				when table_schema in ('auth', 'storage', 'realtime', 'supabase_functions', 'supabase_migrations') then 2
+				else 1
+			end,
+			table_schema,
+			table_name
 		limit $1
 	`, maxObjects)
 	if err != nil {

@@ -36,6 +36,12 @@ type dbInspectResponse struct {
 	PingMillis      int64               `json:"pingMillis"`
 	Version         string              `json:"version,omitempty"`
 	CurrentDatabase string              `json:"currentDatabase,omitempty"`
+	SchemaCount     int                 `json:"schemaCount,omitempty"`
+	TableCount      int                 `json:"tableCount,omitempty"`
+	ViewCount       int                 `json:"viewCount,omitempty"`
+	TotalSizeBytes  int64               `json:"totalSizeBytes,omitempty"`
+	TopSchemas      []dbInspectSchema   `json:"topSchemas,omitempty"`
+	LargestTables   []dbInspectTable    `json:"largestTables,omitempty"`
 	Objects         []dbInspectObject   `json:"objects,omitempty"`
 }
 
@@ -50,6 +56,20 @@ type dbInspectObject struct {
 	Name    string            `json:"name"`
 	Type    string            `json:"type"`
 	Columns []dbInspectColumn `json:"columns,omitempty"`
+}
+
+type dbInspectSchema struct {
+	Schema     string `json:"schema"`
+	TableCount int    `json:"tableCount,omitempty"`
+	ViewCount  int    `json:"viewCount,omitempty"`
+}
+
+type dbInspectTable struct {
+	Schema      string `json:"schema,omitempty"`
+	Name        string `json:"name"`
+	Type        string `json:"type,omitempty"`
+	SizeBytes   int64  `json:"sizeBytes,omitempty"`
+	RowEstimate int64  `json:"rowEstimate,omitempty"`
 }
 
 type dbInspectColumn struct {
@@ -155,6 +175,34 @@ func dbInspectResponseFromInspection(inspection dbcontext.Inspection) dbInspectR
 		PingMillis:      inspection.PingMillis,
 		Version:         inspection.Version,
 		CurrentDatabase: inspection.CurrentDatabase,
+		SchemaCount:     inspection.SchemaCount,
+		TableCount:      inspection.TableCount,
+		ViewCount:       inspection.ViewCount,
+		TotalSizeBytes:  inspection.TotalSizeBytes,
+	}
+
+	if len(inspection.TopSchemas) > 0 {
+		response.TopSchemas = make([]dbInspectSchema, 0, len(inspection.TopSchemas))
+		for _, schema := range inspection.TopSchemas {
+			response.TopSchemas = append(response.TopSchemas, dbInspectSchema{
+				Schema:     schema.Schema,
+				TableCount: schema.TableCount,
+				ViewCount:  schema.ViewCount,
+			})
+		}
+	}
+
+	if len(inspection.LargestTables) > 0 {
+		response.LargestTables = make([]dbInspectTable, 0, len(inspection.LargestTables))
+		for _, table := range inspection.LargestTables {
+			response.LargestTables = append(response.LargestTables, dbInspectTable{
+				Schema:      table.Schema,
+				Name:        table.Name,
+				Type:        table.Type,
+				SizeBytes:   table.SizeBytes,
+				RowEstimate: table.RowEstimate,
+			})
+		}
 	}
 
 	if len(inspection.Objects) == 0 {

@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -291,7 +292,7 @@ func (c *SSHClient) DownloadBytes(ctx context.Context, remotePath string) ([]byt
 // WaitForSSH waits for SSH to become available
 func WaitForSSH(ctx context.Context, host string, port int, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	addr := fmt.Sprintf("%s:%d", host, port)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
 
 	for time.Now().Before(deadline) {
 		select {
