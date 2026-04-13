@@ -162,10 +162,13 @@ Examples:
 
 		// Handle route-only mode: return routing decision as JSON without executing
 		if routeOnly {
-			agent, reason := determineRoutingDecisionWithContext(question, dbConnection)
+			decision := determineRoutingDecisionDetailsWithContext(question, dbConnection)
 			result := map[string]string{
-				"agent":  agent,
-				"reason": reason,
+				"agent":  decision.Agent,
+				"reason": decision.Reason,
+			}
+			if decision.DatabaseMode != "" {
+				result["databaseMode"] = decision.DatabaseMode
 			}
 			return json.NewEncoder(os.Stdout).Encode(result)
 		}
@@ -2736,20 +2739,39 @@ func executeK8sPlan(ctx context.Context, rawPlan string, profile string, debug b
 // determineRoutingDecision analyzes a question and returns which agent should handle it.
 // This is used by the --route-only flag to return routing decisions without executing.
 func determineRoutingDecision(question string) (agent string, reason string) {
-	return determineRoutingDecisionWithContext(question, "")
+	decision := determineRoutingDecisionDetailsWithContext(question, "")
+	return decision.Agent, decision.Reason
 }
 
 func determineRoutingDecisionWithContext(question string, dbConnection string) (agent string, reason string) {
+	decision := determineRoutingDecisionDetailsWithContext(question, dbConnection)
+	return decision.Agent, decision.Reason
+}
+
+type routingDecisionDetails struct {
+	Agent        string
+	Reason       string
+	DatabaseMode string
+}
+
+func determineDatabaseRouteMode(questionLower string) string {
+	if isDatabaseInfrastructureInventoryQuestion(questionLower) {
+		return "inventory"
+	}
+	return "query"
+}
+
+func determineRoutingDecisionDetailsWithContext(question string, dbConnection string) routingDecisionDetails {
 	questionLower := strings.ToLower(question)
 	if isClankerCloudQuestion(questionLower) {
-		return "clanker-cloud", "Explicit Clanker Cloud app request detected"
+		return routingDecisionDetails{Agent: "clanker-cloud", Reason: "Explicit Clanker Cloud app request detected"}
 	}
 
 	// Check for explicit Hermes agent requests
 	hermesKeywords := []string{"hermes", "hermes agent", "talk to hermes", "use hermes"}
 	for _, kw := range hermesKeywords {
 		if strings.Contains(questionLower, kw) {
-			return "hermes", "Hermes agent explicitly requested"
+			return routingDecisionDetails{Agent: "hermes", Reason: "Hermes agent explicitly requested"}
 		}
 	}
 
@@ -2767,7 +2789,7 @@ func determineRoutingDecisionWithContext(question string, dbConnection string) (
 	}
 	for _, kw := range iamKeywords {
 		if strings.Contains(questionLower, kw) {
-			return "iam", "IAM query or security analysis request"
+			return routingDecisionDetails{Agent: "iam", Reason: "IAM query or security analysis request"}
 		}
 	}
 
@@ -2778,7 +2800,7 @@ func determineRoutingDecisionWithContext(question string, dbConnection string) (
 	}
 	for _, kw := range terraformSignals {
 		if strings.Contains(questionLower, kw) {
-			return "terraform", "Terraform query or analysis request"
+			return routingDecisionDetails{Agent: "terraform", Reason: "Terraform query or analysis request"}
 		}
 	}
 
@@ -2790,7 +2812,7 @@ func determineRoutingDecisionWithContext(question string, dbConnection string) (
 	}
 	for _, kw := range diagramKeywords {
 		if strings.Contains(questionLower, kw) {
-			return "diagram", "Diagram or visualization request detected"
+			return routingDecisionDetails{Agent: "diagram", Reason: "Diagram or visualization request detected"}
 		}
 	}
 
@@ -2844,31 +2866,31 @@ func determineRoutingDecisionWithContext(question string, dbConnection string) (
 	if hasAction {
 		// Check K8s resources first (more specific)
 		if hasK8sResource {
-			return "k8s-maker", "K8s infrastructure provisioning or modification request"
+			return routingDecisionDetails{Agent: "k8s-maker", Reason: "K8s infrastructure provisioning or modification request"}
 		}
 		// Check AWS resources
 		for _, resource := range awsResources {
 			if strings.Contains(questionLower, resource) {
-				return "maker", "AWS infrastructure provisioning or modification request"
+				return routingDecisionDetails{Agent: "maker", Reason: "AWS infrastructure provisioning or modification request"}
 			}
 		}
 	}
 
 	if shouldRouteToDatabaseAgentWithContext(questionLower, dbConnection) {
-		return "agent-database", "Database agent request detected"
+		return routingDecisionDetails{Agent: "agent-database", Reason: "Database agent request detected", DatabaseMode: determineDatabaseRouteMode(questionLower)}
 	}
 
 	if shouldRouteToCICDAgent(questionLower) {
-		return "agent-cicd", "CI/CD agent request detected"
+		return routingDecisionDetails{Agent: "agent-cicd", Reason: "CI/CD agent request detected"}
 	}
 
 	// K8s read queries (no action keyword but mentions K8s resources)
 	if hasK8sResource {
-		return "k8s", "K8s query or analysis request"
+		return routingDecisionDetails{Agent: "k8s", Reason: "K8s query or analysis request"}
 	}
 
 	// Default to CLI for general queries
-	return "cli", "General infrastructure query or analysis"
+	return routingDecisionDetails{Agent: "cli", Reason: "General infrastructure query or analysis"}
 }
 
 func isClankerCloudQuestion(questionLower string) bool {

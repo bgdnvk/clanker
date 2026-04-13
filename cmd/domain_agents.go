@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/bgdnvk/clanker/internal/ai"
 	"github.com/bgdnvk/clanker/internal/aws"
@@ -23,6 +24,8 @@ const (
 	maxDatabaseQueryPromptRows   = 12
 	defaultDatabasePreviewRows   = 20
 	maxDeterministicTableQueries = 3
+	runtimeDatabaseModeEnv       = "CLANKER_RUNTIME_DB_MODE"
+	runtimeDatabaseResourceEnv   = "CLANKER_RUNTIME_DB_RESOURCE_CONTEXT"
 )
 
 type domainContextSection struct {
@@ -49,22 +52,81 @@ func handleCICDQuery(ctx context.Context, question string, debug bool) error {
 	return runDomainAgentQuery(ctx, "cicd", question, sections, warnings, debug)
 }
 
+func configuredDatabaseAgentMode() string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(runtimeDatabaseModeEnv))) {
+	case "inventory":
+		return "inventory"
+	case "query":
+		return "query"
+	default:
+		return ""
+	}
+}
+
+func shouldAnalyzeAllConfiguredDatabases(question string) bool {
+	lower := strings.ToLower(strings.TrimSpace(question))
+	if lower == "" {
+		return false
+	}
+	if !containsAnyPhrase(lower, "my databases", "my dbs", "all databases", "all dbs", "across my databases", "across my dbs") {
+		return false
+	}
+	return containsAnyPhrase(lower,
+		"what's in", "whats in", "what is in", "inside", "contents", "content",
+		"inspect", "analyze", "analyse", "explore", "tell me about", "what do they contain",
+		"what's in them", "what is in them")
+}
+
 func collectDatabaseAgentContext(ctx context.Context, question string, dbConnection string, debug bool) ([]domainContextSection, []string) {
 	sections := make([]domainContextSection, 0, 8)
 	warnings := make([]string, 0, 8)
+	requestedMode := configuredDatabaseAgentMode()
+	inventoryMode := requestedMode == "inventory"
+	if requestedMode == "" {
+		inventoryMode = isDatabaseInfrastructureInventoryQuestion(question)
+	}
+	swarmMode := inventoryMode && shouldAnalyzeAllConfiguredDatabases(question)
 
-	if dbInfo, err := dbcontext.BuildRelevantContext(ctx, question, dbConnection); err != nil {
-		warnings = appendDomainWarning(warnings, "Configured database connections", err)
+	if inventoryMode {
+		if dbInfo, err := buildDatabaseConnectionInventoryContext(ctx); err != nil {
+			warnings = appendDomainWarning(warnings, "Configured database connections", err)
+		} else {
+			sections = appendDomainSection(sections, "Configured Database Connections", dbInfo)
+		}
 	} else {
-		sections = appendDomainSection(sections, "Configured Database Connections", dbInfo)
+		if dbInfo, err := dbcontext.BuildRelevantContext(ctx, question, dbConnection); err != nil {
+			warnings = appendDomainWarning(warnings, "Configured database connections", err)
+		} else {
+			sections = appendDomainSection(sections, "Configured Database Connections", dbInfo)
+		}
 	}
 
-	if querySections, queryWarnings := collectDatabaseQueryResults(ctx, question, dbConnection, debug); len(querySections) > 0 || len(queryWarnings) > 0 {
-		sections = append(sections, querySections...)
-		warnings = append(warnings, queryWarnings...)
+	if swarmMode {
+		if inspectionSections, inspectionWarnings := buildConfiguredDatabaseInspectionSections(ctx); len(inspectionSections) > 0 || len(inspectionWarnings) > 0 {
+			sections = append(sections, inspectionSections...)
+			warnings = append(warnings, inspectionWarnings...)
+		}
 	}
 
-	if shouldQueryDomainProvider(question, "aws") && hasAWSDomainAccess() {
+	if resourceContext := strings.TrimSpace(os.Getenv(runtimeDatabaseResourceEnv)); resourceContext != "" {
+		sections = appendDomainSection(sections, "Database Estate Resources", resourceContext)
+	}
+
+	if requestedMode != "inventory" {
+		if querySections, queryWarnings := collectDatabaseQueryResults(ctx, question, dbConnection, debug); len(querySections) > 0 || len(queryWarnings) > 0 {
+			sections = append(sections, querySections...)
+			warnings = append(warnings, queryWarnings...)
+		}
+	} else if swarmMode {
+		if querySections, queryWarnings := collectAllDatabaseQueryResults(ctx, question, dbConnection, debug); len(querySections) > 0 || len(queryWarnings) > 0 {
+			sections = append(sections, querySections...)
+			warnings = append(warnings, queryWarnings...)
+		}
+	}
+
+	queryAllProviders := inventoryMode
+
+	if (queryAllProviders || shouldQueryDomainProvider(question, "aws")) && hasAWSDomainAccess() {
 		awsProfile := resolveAWSProfile("")
 		awsRegion := resolveAWSRegion(ctx, awsProfile)
 		awsClient, err := aws.NewClientWithProfileAndDebug(ctx, awsProfile, debug)
@@ -84,7 +146,7 @@ func collectDatabaseAgentContext(ctx context.Context, question string, dbConnect
 		}
 	}
 
-	if shouldQueryDomainProvider(question, "gcp") {
+	if queryAllProviders || shouldQueryDomainProvider(question, "gcp") {
 		projectID := strings.TrimSpace(gcp.ResolveProjectID())
 		if projectID != "" {
 			gcpClient, err := gcp.NewClient(projectID, debug)
@@ -101,7 +163,7 @@ func collectDatabaseAgentContext(ctx context.Context, question string, dbConnect
 		}
 	}
 
-	if shouldQueryDomainProvider(question, "azure") {
+	if queryAllProviders || shouldQueryDomainProvider(question, "azure") {
 		azureClient := azure.NewClientWithOptionalSubscription(strings.TrimSpace(azure.ResolveSubscriptionID()), debug)
 		azureInfo, azureErr := azureClient.GetRelevantContext(ctx, "azure cosmos db azure sql sql database postgresql flexible server mysql flexible server redis database")
 		if azureErr != nil {
@@ -111,7 +173,7 @@ func collectDatabaseAgentContext(ctx context.Context, question string, dbConnect
 		}
 	}
 
-	if shouldQueryDomainProvider(question, "digitalocean") {
+	if queryAllProviders || shouldQueryDomainProvider(question, "digitalocean") {
 		apiToken := strings.TrimSpace(digitalocean.ResolveAPIToken())
 		if apiToken != "" {
 			doClient, err := digitalocean.NewClient(apiToken, debug)
@@ -128,7 +190,7 @@ func collectDatabaseAgentContext(ctx context.Context, question string, dbConnect
 		}
 	}
 
-	if shouldQueryDomainProvider(question, "cloudflare") {
+	if queryAllProviders || shouldQueryDomainProvider(question, "cloudflare") {
 		apiToken := strings.TrimSpace(cloudflare.ResolveAPIToken())
 		if apiToken != "" {
 			cfClient, err := cloudflare.NewClient(cloudflare.ResolveAccountID(), apiToken, debug)
@@ -145,15 +207,93 @@ func collectDatabaseAgentContext(ctx context.Context, question string, dbConnect
 		}
 	}
 
-	if shouldQueryDomainProvider(question, "hetzner") && hasHetznerDomainAccess() {
+	if (queryAllProviders || shouldQueryDomainProvider(question, "hetzner")) && hasHetznerDomainAccess() {
 		warnings = append(warnings, "Hetzner database inventory is not implemented in the current CLI integrations")
 	}
 
 	return sections, warnings
 }
 
+func buildDatabaseConnectionInventoryContext(ctx context.Context) (string, error) {
+	connections, defaultName, err := dbcontext.ListConnections()
+	if err != nil {
+		return "", err
+	}
+
+	b := &strings.Builder{}
+	if len(connections) == 0 {
+		b.WriteString("Configured Database Connections:\n- none configured\n")
+		return b.String(), nil
+	}
+
+	b.WriteString(fmt.Sprintf("Configured Database Connections (default: %s):\n", defaultName))
+	for _, connection := range connections {
+		marker := ""
+		if connection.Name == defaultName {
+			marker = " (default)"
+		}
+		status := "status=unknown"
+		inspectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		inspection, inspectErr := dbcontext.Inspect(inspectCtx, connection.Name)
+		cancel()
+		if inspectErr != nil {
+			status = fmt.Sprintf("status=unavailable error=%q", strings.TrimSpace(inspectErr.Error()))
+		} else {
+			status = fmt.Sprintf("status=reachable ping=%dms", inspection.PingMillis)
+			if strings.TrimSpace(inspection.Version) != "" {
+				status += fmt.Sprintf(" engine=%q", strings.TrimSpace(inspection.Version))
+			}
+			if strings.TrimSpace(inspection.CurrentDatabase) != "" {
+				status += fmt.Sprintf(" database=%q", strings.TrimSpace(inspection.CurrentDatabase))
+			}
+		}
+
+		b.WriteString(fmt.Sprintf("- %s%s [%s] %s %s\n", connection.Name, marker, connection.Kind(), connection.Target(), status))
+		if connection.Description != "" {
+			b.WriteString(fmt.Sprintf("  Description: %s\n", connection.Description))
+		}
+	}
+
+	return b.String(), nil
+}
+
+func buildConfiguredDatabaseInspectionSections(ctx context.Context) ([]domainContextSection, []string) {
+	connections, defaultName, err := dbcontext.ListConnections()
+	if err != nil {
+		return nil, []string{fmt.Sprintf("Configured database inspection: %v", err)}
+	}
+	if len(connections) == 0 {
+		return nil, nil
+	}
+
+	sections := make([]domainContextSection, 0, len(connections))
+	warnings := make([]string, 0, len(connections))
+	for _, connection := range connections {
+		inspectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		inspection, inspectErr := dbcontext.Inspect(inspectCtx, connection.Name)
+		cancel()
+		if inspectErr != nil {
+			warnings = append(warnings, fmt.Sprintf("Configured database inspection (%s): %v", connection.Name, inspectErr))
+			continue
+		}
+
+		title := fmt.Sprintf("Database Inspection (%s)", connection.Name)
+		if connection.Name == defaultName {
+			title = fmt.Sprintf("Database Inspection (%s, default)", connection.Name)
+		}
+		content := fmt.Sprintf("Connection: %s [%s] %s\n%s", connection.Name, connection.Kind(), connection.Target(), formatInspectionForQueryPlanning(inspection))
+		sections = appendDomainSection(sections, title, content)
+	}
+
+	return sections, warnings
+}
+
 func collectDatabaseQueryResults(ctx context.Context, question string, dbConnection string, debug bool) ([]domainContextSection, []string) {
-	return newDatabaseQuerySubAgent(debug).collectQueryResults(ctx, question, dbConnection)
+	return newDatabaseQuerySubAgent(debug).collectQueryResults(ctx, question, dbConnection, false)
+}
+
+func collectAllDatabaseQueryResults(ctx context.Context, question string, dbConnection string, debug bool) ([]domainContextSection, []string) {
+	return newDatabaseQuerySubAgent(debug).collectQueryResults(ctx, question, dbConnection, true)
 }
 
 func selectDatabaseQueryConnections(connections []dbcontext.Connection, question string, explicitConnection string) ([]dbcontext.Connection, error) {
@@ -810,6 +950,7 @@ Coverage in this repo can include:
 Rules:
 - Separate observed facts from recommendations.
 - This agent is strictly read-only. Never propose or imply running write or migration commands during inspection.
+- For database estate or inventory questions about multiple databases or "my dbs/databases", prioritize configured connection status and cloud-managed database inventory over any single selected database connection.
 - When live SQL read results are present, use them as the primary answer and identify the connection they came from.
 - When a Database Query Retry Outcome section is present, report the last observed failure and explicitly note that the query self-heal budget was exhausted after 3 attempts.
 - If multiple connections returned results, report them per connection. Only provide an aggregate if it is obviously additive.
@@ -984,6 +1125,9 @@ func shouldRouteToDatabaseAgent(question string) bool {
 	if extractDirectReadOnlySQL(question) != "" {
 		return true
 	}
+	if isDatabaseInfrastructureInventoryQuestion(question) {
+		return true
+	}
 	if containsAnyPhrase(lower, "pod", "pods", "deployment", "deployments", "statefulset", "daemonset", "helm", "kubectl", "namespace") &&
 		!containsAnyPhrase(lower, "database", "schema", "sql", "nosql", "table", "tables", "column", "columns", "migration", "migrations", "connection", "query") {
 		return false
@@ -1023,6 +1167,9 @@ func shouldAttemptLiveDatabaseReads(question string) bool {
 	if lower == "" {
 		return false
 	}
+	if isDatabaseInfrastructureInventoryQuestion(lower) {
+		return false
+	}
 	if extractDirectReadOnlySQL(question) != "" {
 		return true
 	}
@@ -1040,6 +1187,34 @@ func shouldAttemptLiveDatabaseReads(question string) bool {
 		"tell me what data", "what data", "what rows", "what's in", "what is in",
 		"preview", "preview rows", "show rows", "sample rows", "query some columns",
 		"query some", "read some", "show me data", "list rows", "inspect rows")
+}
+
+func isDatabaseInfrastructureInventoryQuestion(question string) bool {
+	lower := strings.ToLower(strings.TrimSpace(question))
+	if lower == "" {
+		return false
+	}
+	if extractDirectReadOnlySQL(question) != "" {
+		return false
+	}
+	if containsAnyPhrase(lower,
+		"schema", "schemas", "table", "tables", "column", "columns", "row", "rows",
+		"foreign key", "primary key", "index", "indexes", "sql", "select ", "with ",
+		"query ", "join ", "group by", "order by", "customer", "customers", "order", "orders") {
+		return false
+	}
+	if containsAnyPhrase(lower,
+		"how many databases", "how many dbs", "how are my dbs", "how are my databases",
+		"how many database", "what database do i have", "which database do i have",
+		"status of my dbs", "status of my databases", "health of my dbs", "health of my databases",
+		"show me my databases", "show my databases", "show me my dbs", "show my dbs",
+		"list my databases", "list databases", "list my dbs", "list dbs",
+		"what databases do i have", "which databases do i have", "database inventory", "db inventory",
+		"my databases", "my dbs", "managed databases", "database estate", "db estate") {
+		return true
+	}
+	return (containsAnyPhrase(lower, "databases", "dbs") || containsAnyPhrase(lower, "my database", "my databases", "my dbs")) &&
+		containsAnyPhrase(lower, "how many", "how are", "status", "health", "show", "list ", "what ", "which ")
 }
 
 func hasConfiguredDatabaseConnection(dbConnection string) bool {

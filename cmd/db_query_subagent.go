@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bgdnvk/clanker/internal/ai"
@@ -15,6 +16,7 @@ import (
 const (
 	maxDatabaseQueryHealAttempts = 3
 	runtimeDBChatHistoryEnv      = "CLANKER_RUNTIME_DB_CHAT_HISTORY"
+	maxDatabaseQueryFanout       = 4
 )
 
 type databaseQueryAttempt struct {
@@ -22,6 +24,12 @@ type databaseQueryAttempt struct {
 	SQL     string
 	Reason  string
 	Error   string
+}
+
+type databaseConnectionQueryResult struct {
+	Sections  []domainContextSection
+	Warnings  []string
+	Attempted bool
 }
 
 type databaseQuerySubAgent struct {
@@ -37,8 +45,8 @@ func newDatabaseQuerySubAgent(debug bool) *databaseQuerySubAgent {
 	}
 }
 
-func (s *databaseQuerySubAgent) collectQueryResults(ctx context.Context, question string, dbConnection string) ([]domainContextSection, []string) {
-	if !shouldAttemptLiveDatabaseReads(question) {
+func (s *databaseQuerySubAgent) collectQueryResults(ctx context.Context, question string, dbConnection string, allConnections bool) ([]domainContextSection, []string) {
+	if !allConnections && !shouldAttemptLiveDatabaseReads(question) {
 		return nil, nil
 	}
 
@@ -50,54 +58,52 @@ func (s *databaseQuerySubAgent) collectQueryResults(ctx context.Context, questio
 		return nil, nil
 	}
 
-	targetConnections, err := selectDatabaseQueryConnections(connections, question, dbConnection)
-	if err != nil {
-		return nil, []string{fmt.Sprintf("Live database query planning: %v", err)}
+	targetConnections := connections
+	if !allConnections {
+		targetConnections, err = selectDatabaseQueryConnections(connections, question, dbConnection)
+		if err != nil {
+			return nil, []string{fmt.Sprintf("Live database query planning: %v", err)}
+		}
 	}
 	if len(targetConnections) == 0 {
 		return nil, nil
 	}
 
 	directSQL := extractDirectReadOnlySQL(question)
+	results := make([]databaseConnectionQueryResult, len(targetConnections))
+	var waitGroup sync.WaitGroup
+	fanoutLimiter := make(chan struct{}, maxDatabaseQueryFanout)
+
+	for i, connection := range targetConnections {
+		waitGroup.Add(1)
+		go func(index int, connection dbcontext.Connection) {
+			defer waitGroup.Done()
+			select {
+			case fanoutLimiter <- struct{}{}:
+			case <-ctx.Done():
+				results[index] = databaseConnectionQueryResult{Warnings: []string{fmt.Sprintf("Live database query planning (%s): %v", connection.Name, ctx.Err())}}
+				return
+			}
+			defer func() {
+				<-fanoutLimiter
+			}()
+
+			worker := &databaseQuerySubAgent{debug: s.debug, chatHistory: s.chatHistory}
+			sections, warnings, attempted := worker.collectConnectionQueryResults(ctx, question, connection, directSQL)
+			results[index] = databaseConnectionQueryResult{Sections: sections, Warnings: warnings, Attempted: attempted}
+		}(i, connection)
+	}
+	waitGroup.Wait()
+
 	sections := make([]domainContextSection, 0, len(targetConnections))
 	warnings := make([]string, 0, len(targetConnections))
 	attemptedAny := false
-
-	for _, connection := range targetConnections {
-		inspectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		inspection, inspectErr := dbcontext.Inspect(inspectCtx, connection.Name)
-		cancel()
-		if inspectErr != nil {
-			warnings = append(warnings, fmt.Sprintf("Live query inspection (%s): %v", connection.Name, inspectErr))
-			continue
+	for _, result := range results {
+		if result.Attempted {
+			attemptedAny = true
 		}
-
-		plannedQueries := make([]databaseReadPlan, 0, maxDeterministicTableQueries)
-		switch {
-		case directSQL != "":
-			plannedQueries = append(plannedQueries, databaseReadPlan{
-				ShouldQuery: true,
-				SQL:         directSQL,
-				Reason:      "Executed the user's explicit read-only SQL against this connection.",
-			})
-		case len(inspection.Objects) > 0:
-			if deterministicPlans, ok := planDeterministicDatabaseReadQueries(question, inspection); ok && len(deterministicPlans) > 0 {
-				plannedQueries = append(plannedQueries, deterministicPlans...)
-			}
-		}
-
-		if len(plannedQueries) == 0 {
-			plannedQueries = append(plannedQueries, databaseReadPlan{ShouldQuery: true})
-		}
-
-		for _, plan := range plannedQueries {
-			attemptSections, attemptWarnings, _, tried := s.executePlanWithSelfHeal(ctx, question, connection, inspection, plan)
-			if tried {
-				attemptedAny = true
-			}
-			sections = append(sections, attemptSections...)
-			warnings = append(warnings, attemptWarnings...)
-		}
+		sections = append(sections, result.Sections...)
+		warnings = append(warnings, result.Warnings...)
 	}
 
 	if !attemptedAny {
@@ -105,6 +111,47 @@ func (s *databaseQuerySubAgent) collectQueryResults(ctx context.Context, questio
 	}
 
 	return sections, warnings
+}
+
+func (s *databaseQuerySubAgent) collectConnectionQueryResults(ctx context.Context, question string, connection dbcontext.Connection, directSQL string) ([]domainContextSection, []string, bool) {
+	inspectCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	inspection, inspectErr := dbcontext.Inspect(inspectCtx, connection.Name)
+	cancel()
+	if inspectErr != nil {
+		return nil, []string{fmt.Sprintf("Live query inspection (%s): %v", connection.Name, inspectErr)}, false
+	}
+
+	plannedQueries := make([]databaseReadPlan, 0, maxDeterministicTableQueries)
+	switch {
+	case directSQL != "":
+		plannedQueries = append(plannedQueries, databaseReadPlan{
+			ShouldQuery: true,
+			SQL:         directSQL,
+			Reason:      "Executed the user's explicit read-only SQL against this connection.",
+		})
+	case len(inspection.Objects) > 0:
+		if deterministicPlans, ok := planDeterministicDatabaseReadQueries(question, inspection); ok && len(deterministicPlans) > 0 {
+			plannedQueries = append(plannedQueries, deterministicPlans...)
+		}
+	}
+
+	if len(plannedQueries) == 0 {
+		plannedQueries = append(plannedQueries, databaseReadPlan{ShouldQuery: true})
+	}
+
+	sections := make([]domainContextSection, 0, len(plannedQueries))
+	warnings := make([]string, 0, len(plannedQueries))
+	attempted := false
+	for _, plan := range plannedQueries {
+		attemptSections, attemptWarnings, _, tried := s.executePlanWithSelfHeal(ctx, question, connection, inspection, plan)
+		if tried {
+			attempted = true
+		}
+		sections = append(sections, attemptSections...)
+		warnings = append(warnings, attemptWarnings...)
+	}
+
+	return sections, warnings, attempted
 }
 
 func (s *databaseQuerySubAgent) executePlanWithSelfHeal(ctx context.Context, question string, connection dbcontext.Connection, inspection dbcontext.Inspection, seedPlan databaseReadPlan) ([]domainContextSection, []string, bool, bool) {
