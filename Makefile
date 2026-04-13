@@ -1,14 +1,36 @@
 BINARY_NAME=clanker
-BUILD_DIR=./bin
-MAIN_PATH=./main.go
+BUILD_DIR=bin
+MAIN_PATH=main.go
 
-# Install settings
-# - If Homebrew is available, install into $(brew --prefix)/bin so it wins on PATH.
-# - Otherwise fall back to /usr/local/bin.
+# Platform-specific command helpers
+ifeq ($(OS),Windows_NT)
+SHELL := cmd.exe
+BREW_PREFIX :=
+ifneq ($(HOME),)
+WINDOWS_HOME := $(HOME)
+else
+WINDOWS_HOME := $(USERPROFILE)
+endif
+INSTALL_PREFIX ?= $(WINDOWS_HOME)
+INSTALL_BIN ?= $(INSTALL_PREFIX)\bin
+MKDIR = mkdir
+RM_RF = rmdir /s /q
+RM_F = del /q
+INSTALL_CMD = copy /Y
+else
 BREW_PREFIX := $(shell brew --prefix 2>/dev/null)
 INSTALL_PREFIX ?= $(if $(BREW_PREFIX),$(BREW_PREFIX),/usr/local)
 INSTALL_BIN ?= $(INSTALL_PREFIX)/bin
+MKDIR = mkdir -p
+RM_RF = rm -rf
+RM_F = rm -f
+INSTALL_CMD = install -m 0755
+endif
+ifeq ($(OS),Windows_NT)
+INSTALL_PATH ?= $(INSTALL_BIN)\$(BINARY_NAME)
+else
 INSTALL_PATH ?= $(INSTALL_BIN)/$(BINARY_NAME)
+endif
 
 # Release settings (override at runtime)
 # Example:
@@ -16,6 +38,12 @@ INSTALL_PATH ?= $(INSTALL_BIN)/$(BINARY_NAME)
 #   make release-create TAG=v0.0.2
 TAG ?= v0.0.0
 DIST_DIR ?= ./dist
+
+ifeq ($(OS),Windows_NT)
+DEV_VERSION := dev
+else
+DEV_VERSION := dev:$(shell date +%Y%m%d%H%M%S)
+endif
 
 .PHONY: build build-all clean test test-short run install uninstall dev deps fmt vet lint docs quick ci help \
 	release-clean release-build-macos release-tar-macos release-sha release release-create release-upload \
@@ -27,15 +55,24 @@ all: build
 # Build the binary
 build:
 	@echo "Building $(BINARY_NAME)..."
-	@mkdir -p $(BUILD_DIR)
+ifeq ($(OS),Windows_NT)
+	@$(MKDIR) "$(BUILD_DIR)"
+else
+	@$(MKDIR) "$(BUILD_DIR)"
+endif
 	@go build -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
 	@echo "Build complete: $(BUILD_DIR)/$(BINARY_NAME)"
 
 # Clean build artifacts
 clean:
 	@echo "Cleaning..."
-	@rm -rf $(BUILD_DIR)
-	@rm -f $(BINARY_NAME)
+ifeq ($(OS),Windows_NT)
+	@if exist "$(BUILD_DIR)" $(RM_RF) "$(BUILD_DIR)"
+	@if exist "$(BINARY_NAME)" $(RM_F) "$(BINARY_NAME)"
+else
+	@$(RM_RF) "$(BUILD_DIR)"
+	@$(RM_F) "$(BINARY_NAME)"
+endif
 	@echo "Clean complete"
 
 # Run tests
@@ -51,7 +88,7 @@ test-short:
 # Build for multiple platforms
 build-all: clean
 	@echo "Building for multiple platforms..."
-	@mkdir -p $(BUILD_DIR)
+	@$(MKDIR) "$(BUILD_DIR)"
 	
 	@echo "Building for Linux AMD64..."
 	@GOOS=linux GOARCH=amd64 go build -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 $(MAIN_PATH)
@@ -85,25 +122,41 @@ run: build
 
 install: build
 	@echo "Installing $(BINARY_NAME) to $(INSTALL_PATH)..."
-	@mkdir -p $(INSTALL_BIN)
+ifeq ($(OS),Windows_NT)
+	@$(MKDIR) "$(INSTALL_BIN)"
+	@$(INSTALL_CMD) "$(BUILD_DIR)\$(BINARY_NAME)" "$(INSTALL_PATH)"
+	@echo "Installation complete. You can now run '$(BINARY_NAME)' from anywhere."
+else
+	@mkdir -p $(INSTALL_BIN) 2>nul || mkdir $(INSTALL_BIN)
 	@if [ -w "$(INSTALL_BIN)" ]; then \
 		install -m 0755 "$(BUILD_DIR)/$(BINARY_NAME)" "$(INSTALL_PATH)"; \
 	else \
 		sudo install -m 0755 "$(BUILD_DIR)/$(BINARY_NAME)" "$(INSTALL_PATH)"; \
 	fi
 	@echo "Installation complete. You can now run '$(BINARY_NAME)' from anywhere."
+endif
 
 uninstall:
 	@echo "Removing $(BINARY_NAME) from $(INSTALL_PATH)..."
+ifeq ($(OS),Windows_NT)
+	@if exist "$(INSTALL_PATH)" del /q "$(INSTALL_PATH)"
+else
 	@if [ -w "$(INSTALL_BIN)" ]; then \
 		rm -f "$(INSTALL_PATH)"; \
 	else \
 		sudo rm -f "$(INSTALL_PATH)"; \
 	fi
+endif
 	@echo "Uninstallation complete"
 
 # Development build (builds in current directory with timestamp version)
+# On Windows, avoid POSIX `date` during makefile parsing.
+ifeq ($(OS),Windows_NT)
+DEV_VERSION := dev
+else
 DEV_VERSION := dev:$(shell date +%Y%m%d%H%M%S)
+endif
+
 dev:
 	@echo "Building for development ($(DEV_VERSION))..."
 	@go build -ldflags "-X github.com/bgdnvk/clanker/cmd.Version=$(DEV_VERSION)" -o $(BINARY_NAME) $(MAIN_PATH)
