@@ -97,8 +97,9 @@ func CleanupCredentialsFile(path string) {
 }
 
 func (c *Client) execGcloud(ctx context.Context, args ...string) (string, error) {
-	if _, err := exec.LookPath("gcloud"); err != nil {
-		return "", fmt.Errorf("gcloud not found in PATH")
+	bin, err := FindGcloudBinary()
+	if err != nil {
+		return "", err
 	}
 
 	args = append(args, "--project", c.projectID)
@@ -108,7 +109,7 @@ func (c *Client) execGcloud(ctx context.Context, args ...string) (string, error)
 	var lastStderr string
 
 	for attempt := 0; attempt < len(backoffs); attempt++ {
-		cmd := exec.CommandContext(ctx, "gcloud", args...)
+		cmd := exec.CommandContext(ctx, bin, args...)
 
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
@@ -256,8 +257,13 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 		}
 		result, err := c.execGcloud(ctx, s.args...)
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("%s: %v", s.name, err))
-			continue
+			fallback, fallbackErr := c.sdkFallbackSection(ctx, s.name)
+			if strings.TrimSpace(fallback) != "" && fallbackErr == nil {
+				result = fallback
+			} else {
+				warnings = append(warnings, fmt.Sprintf("%s: %v", s.name, err))
+				continue
+			}
 		}
 		if strings.TrimSpace(result) == "" {
 			continue
@@ -275,8 +281,13 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 			}
 			result, err := c.execGcloud(ctx, s.args...)
 			if err != nil {
-				warnings = append(warnings, fmt.Sprintf("%s: %v", s.name, err))
-				continue
+				fallback, fallbackErr := c.sdkFallbackSection(ctx, s.name)
+				if strings.TrimSpace(fallback) != "" && fallbackErr == nil {
+					result = fallback
+				} else {
+					warnings = append(warnings, fmt.Sprintf("%s: %v", s.name, err))
+					continue
+				}
 			}
 			if strings.TrimSpace(result) == "" {
 				continue
