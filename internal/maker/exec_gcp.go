@@ -7,6 +7,8 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+
+	gcpinfra "github.com/bgdnvk/clanker/internal/gcp"
 )
 
 func ExecuteGCPPlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
@@ -130,9 +132,9 @@ func formatGCloudArgsForLog(args []string) string {
 }
 
 func runGCloudCommandStreaming(ctx context.Context, args []string, w io.Writer) (string, error) {
-	bin, err := exec.LookPath("gcloud")
+	bin, err := gcpinfra.FindGcloudBinary()
 	if err != nil {
-		return "", fmt.Errorf("gcloud not found in PATH: %w", err)
+		return "", err
 	}
 
 	cmd := exec.CommandContext(ctx, bin, args...)

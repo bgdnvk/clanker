@@ -30,11 +30,59 @@ func ResolveSubscriptionID() string {
 	return ""
 }
 
+func ResolveDevOpsOrganization() string {
+	for _, candidate := range []string{
+		strings.TrimSpace(viper.GetString("infra.azure.devops.organization")),
+		strings.TrimSpace(os.Getenv("AZURE_DEVOPS_ORGANIZATION")),
+		strings.TrimSpace(os.Getenv("AZURE_DEVOPS_ORG_URL")),
+		strings.TrimSpace(os.Getenv("AZDO_ORG_SERVICE_URL")),
+	} {
+		if candidate == "" {
+			continue
+		}
+		return normalizeDevOpsOrganization(candidate)
+	}
+	return ""
+}
+
+func ResolveDevOpsProject() string {
+	for _, candidate := range []string{
+		strings.TrimSpace(viper.GetString("infra.azure.devops.project")),
+		strings.TrimSpace(os.Getenv("AZURE_DEVOPS_PROJECT")),
+		strings.TrimSpace(os.Getenv("AZDO_PROJECT_NAME")),
+	} {
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func normalizeDevOpsOrganization(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
+		return strings.TrimRight(trimmed, "/")
+	}
+	trimmed = strings.TrimPrefix(trimmed, "dev.azure.com/")
+	trimmed = strings.Trim(trimmed, "/")
+	if trimmed == "" {
+		return ""
+	}
+	return "https://dev.azure.com/" + trimmed
+}
+
 func NewClient(subscriptionID string, debug bool) (*Client, error) {
 	if strings.TrimSpace(subscriptionID) == "" {
 		return nil, fmt.Errorf("azure subscription_id is required")
 	}
 	return &Client{subscriptionID: strings.TrimSpace(subscriptionID), debug: debug}, nil
+}
+
+func NewClientWithOptionalSubscription(subscriptionID string, debug bool) *Client {
+	return &Client{subscriptionID: strings.TrimSpace(subscriptionID), debug: debug}
 }
 
 // BackendAzureCredentials represents Azure credentials from the backend
@@ -92,7 +140,7 @@ func (c *Client) execAz(ctx context.Context, args ...string) (string, error) {
 		return "", fmt.Errorf("az not found in PATH")
 	}
 
-	if c.subscriptionID != "" && !hasFlag(args, "--subscription") {
+	if c.subscriptionID != "" && commandSupportsSubscription(args) && !hasFlag(args, "--subscription") {
 		args = append(args, "--subscription", c.subscriptionID)
 	}
 	if !hasFlag(args, "--only-show-errors") {
@@ -166,11 +214,14 @@ func azErrorHint(stderr string) string {
 
 func (c *Client) GetRelevantContext(ctx context.Context, question string) (string, error) {
 	questionLower := strings.ToLower(strings.TrimSpace(question))
+	devOpsOrg := ResolveDevOpsOrganization()
+	devOpsProject := ResolveDevOpsProject()
 
 	type section struct {
-		name string
-		args []string
-		keys []string
+		name           string
+		args           []string
+		keys           []string
+		requiresDevOps bool
 	}
 
 	sections := []section{
@@ -183,6 +234,14 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 		{name: "Storage Accounts", args: []string{"storage", "account", "list", "--output", "table"}, keys: []string{"storage", "storage account", "blob"}},
 		{name: "Key Vaults", args: []string{"keyvault", "list", "--output", "table"}, keys: []string{"key vault", "keyvault", "vault"}},
 		{name: "Cosmos DB", args: []string{"cosmosdb", "list", "--output", "table"}, keys: []string{"cosmos", "cosmosdb"}},
+		{name: "Azure SQL Servers", args: []string{"resource", "list", "--resource-type", "Microsoft.Sql/servers", "--query", "[:50].{name:name,location:location,resourceGroup:resourceGroup}", "--output", "table"}, keys: []string{"azure sql", "sql server", "sql servers", "managed sql", "database", "databases"}},
+		{name: "Azure SQL Databases", args: []string{"resource", "list", "--resource-type", "Microsoft.Sql/servers/databases", "--query", "[:50].{name:name,location:location,resourceGroup:resourceGroup}", "--output", "table"}, keys: []string{"azure sql", "sql database", "sql databases", "database", "databases"}},
+		{name: "Azure PostgreSQL Flexible Servers", args: []string{"resource", "list", "--resource-type", "Microsoft.DBforPostgreSQL/flexibleServers", "--query", "[:50].{name:name,location:location,resourceGroup:resourceGroup}", "--output", "table"}, keys: []string{"postgres", "postgresql", "azure postgres", "postgres flexible", "database", "databases"}},
+		{name: "Azure MySQL Flexible Servers", args: []string{"resource", "list", "--resource-type", "Microsoft.DBforMySQL/flexibleServers", "--query", "[:50].{name:name,location:location,resourceGroup:resourceGroup}", "--output", "table"}, keys: []string{"mysql", "azure mysql", "mysql flexible", "database", "databases"}},
+		{name: "Azure Cache for Redis", args: []string{"resource", "list", "--resource-type", "Microsoft.Cache/Redis", "--query", "[:50].{name:name,location:location,resourceGroup:resourceGroup}", "--output", "table"}, keys: []string{"redis", "cache", "database", "databases"}},
+		{name: "Azure DevOps Pipelines", args: devOpsArgs(devOpsOrg, devOpsProject, "pipelines", "list", "--top", "25", "--output", "table"), keys: []string{"azure devops", "pipeline", "pipelines", "build", "builds", "release", "releases"}, requiresDevOps: true},
+		{name: "Azure DevOps Runs", args: devOpsArgs(devOpsOrg, devOpsProject, "pipelines", "runs", "list", "--top", "25", "--output", "table"), keys: []string{"azure devops", "pipeline", "pipelines", "run", "runs", "build", "builds", "release", "releases"}, requiresDevOps: true},
+		{name: "Azure DevOps Repositories", args: devOpsArgs(devOpsOrg, devOpsProject, "repos", "list", "--output", "table"), keys: []string{"azure devops", "repo", "repos", "repository", "repositories"}, requiresDevOps: true},
 		{name: "Azure Resources (top)", args: []string{"resource", "list", "--query", "[:50].{name:name,type:type,location:location,resourceGroup:resourceGroup}", "--output", "table"}, keys: []string{"resources", "inventory", "list all"}},
 	}
 
@@ -194,6 +253,9 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 	var out strings.Builder
 	var warnings []string
 	for _, s := range sections {
+		if s.requiresDevOps && (devOpsOrg == "" || devOpsProject == "") {
+			continue
+		}
 		if questionLower != "" && len(s.keys) > 0 {
 			matched := false
 			for _, key := range s.keys {
@@ -241,6 +303,10 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 		}
 	}
 
+	if questionLower != "" && strings.Contains(questionLower, "azure devops") && (devOpsOrg == "" || devOpsProject == "") {
+		warnings = append(warnings, "Azure DevOps collectors require infra.azure.devops.organization and infra.azure.devops.project (or AZURE_DEVOPS_ORG_URL / AZURE_DEVOPS_PROJECT)")
+	}
+
 	if len(warnings) > 0 {
 		out.WriteString("Warnings:\n")
 		for _, w := range warnings {
@@ -251,6 +317,29 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 	}
 
 	return out.String(), nil
+}
+
+func devOpsArgs(organization string, project string, args ...string) []string {
+	result := append([]string{}, args...)
+	if organization != "" {
+		result = append(result, "--organization", organization)
+	}
+	if project != "" {
+		result = append(result, "--project", project)
+	}
+	return result
+}
+
+func commandSupportsSubscription(args []string) bool {
+	if len(args) == 0 {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "pipelines", "repos", "boards", "artifacts", "devops":
+		return false
+	default:
+		return true
+	}
 }
 
 func hasFlag(args []string, name string) bool {

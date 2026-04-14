@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -40,7 +41,8 @@ func VerifyNodeJSDeployment(ctx context.Context, cfg HealthCheckConfig, maxWait 
 			if endpoint == "" {
 				endpoint = "/"
 			}
-			url := fmt.Sprintf("http://%s:%d%s", cfg.Host, cfg.Port, endpoint)
+			hostPort := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+			url := fmt.Sprintf("http://%s%s", hostPort, endpoint)
 
 			client := &http.Client{Timeout: 10 * time.Second}
 			resp, err := client.Get(url)
@@ -57,7 +59,7 @@ func VerifyNodeJSDeployment(ctx context.Context, cfg HealthCheckConfig, maxWait 
 			}
 		} else {
 			// TCP port check for non-HTTP apps (WebSocket, workers, etc.)
-			addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+			addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 			conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 			if err == nil {
 				conn.Close()

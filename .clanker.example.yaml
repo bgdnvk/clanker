@@ -109,6 +109,14 @@ infra:
 #       stage: { profile: your-stage-profile, region: us-east-1 }
 #       prod:  { profile: your-prod-profile,  region: us-east-1 }
 
+# Azure infrastructure and Azure DevOps context:
+# infra:
+#   azure:
+#     subscription_id: your-azure-subscription-id
+#     devops:
+#       organization: your-azure-devops-org   # or full URL such as https://dev.azure.com/your-org
+#       project: your-azure-devops-project
+
 # GitHub context for `clanker ask --github ...`:
 # github:
 #   token: "ghp_..."   # optional for public repos
@@ -121,11 +129,12 @@ infra:
 #     api: [api, gateway]
 #     serverless: [lambda, step-functions]
 
-# Postgres (for `clanker postgres ...`):
-# postgres:
+# Databases (read-only inspection only; clanker does not modify data):
+# databases:
 #   default_connection: dev
 #   connections:
 #     dev:
+#       driver: postgres
 #       host: localhost
 #       port: 5432
 #       database: your_db

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	gcpinfra "github.com/bgdnvk/clanker/internal/gcp"
 )
 
 // GKEProvider manages Google Kubernetes Engine clusters
@@ -644,8 +646,9 @@ func (p *GKEProvider) getNodesViaKubectl(ctx context.Context) ([]NodeInfo, error
 }
 
 func (p *GKEProvider) runGcloud(ctx context.Context, project string, args ...string) (string, error) {
-	if _, err := exec.LookPath("gcloud"); err != nil {
-		return "", fmt.Errorf("gcloud not found in PATH (hint: install Google Cloud SDK)")
+	bin, err := gcpinfra.FindGcloudBinary()
+	if err != nil {
+		return "", err
 	}
 
 	// Add project flag
@@ -656,7 +659,7 @@ func (p *GKEProvider) runGcloud(ctx context.Context, project string, args ...str
 	var lastStderr string
 
 	for attempt := 0; attempt <= len(backoffs); attempt++ {
-		cmd := exec.CommandContext(ctx, "gcloud", args...)
+		cmd := exec.CommandContext(ctx, bin, args...)
 		cmd.Env = os.Environ()
 
 		var stdout, stderr bytes.Buffer
