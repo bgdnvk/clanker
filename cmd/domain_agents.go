@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -26,6 +27,7 @@ const (
 	maxDeterministicTableQueries = 3
 	runtimeDatabaseModeEnv       = "CLANKER_RUNTIME_DB_MODE"
 	runtimeDatabaseResourceEnv   = "CLANKER_RUNTIME_DB_RESOURCE_CONTEXT"
+	runtimeGitHubTrackedReposEnv = "CLANKER_RUNTIME_GITHUB_TRACKED_REPOS_JSON"
 )
 
 type domainContextSection struct {
@@ -61,6 +63,86 @@ func configuredDatabaseAgentMode() string {
 	default:
 		return ""
 	}
+}
+
+func normalizeGitHubTrackedRepoNames(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		owner, repo, ok := splitGitHubTrackedRepo(value)
+		if !ok {
+			continue
+		}
+		fullName := owner + "/" + repo
+		if _, exists := seen[fullName]; exists {
+			continue
+		}
+		seen[fullName] = struct{}{}
+		normalized = append(normalized, fullName)
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
+}
+
+func splitGitHubTrackedRepo(value string) (string, string, bool) {
+	parts := strings.Split(strings.TrimSpace(value), "/")
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	owner := strings.TrimSpace(parts[0])
+	repo := strings.TrimSpace(parts[1])
+	if owner == "" || repo == "" {
+		return "", "", false
+	}
+	return owner, repo, true
+}
+
+func configuredGitHubTrackedRepos() []string {
+	raw := strings.TrimSpace(os.Getenv(runtimeGitHubTrackedReposEnv))
+	if raw == "" {
+		return nil
+	}
+	var repos []string
+	if err := json.Unmarshal([]byte(raw), &repos); err != nil {
+		return nil
+	}
+	return normalizeGitHubTrackedRepoNames(repos)
+}
+
+func configuredGitHubReposForCICDAgent() []string {
+	if tracked := configuredGitHubTrackedRepos(); len(tracked) > 0 {
+		return tracked
+	}
+	owner := strings.TrimSpace(viper.GetString("github.owner"))
+	repo := strings.TrimSpace(viper.GetString("github.repo"))
+	if owner != "" && repo != "" {
+		return []string{owner + "/" + repo}
+	}
+	return nil
+}
+
+func buildGitHubCICDContextQuestion(question string) string {
+	base := strings.TrimSpace(question)
+	suffix := "github actions workflow runs runners jobs failed steps annotations artifacts logs"
+	if base == "" {
+		return suffix
+	}
+	return base + " " + suffix
+}
+
+func hasGitHubActionsEvidence(info string) bool {
+	lower := strings.ToLower(strings.TrimSpace(info))
+	if lower == "" {
+		return false
+	}
+	return !(strings.Contains(lower, "no github actions workflows found") &&
+		strings.Contains(lower, "no recent workflow runs found") &&
+		strings.Contains(lower, "no self-hosted runners found"))
 }
 
 func shouldAnalyzeAllConfiguredDatabases(question string) bool {
@@ -816,12 +898,39 @@ func collectCICDAgentContext(ctx context.Context, question string, debug bool) (
 	warnings := make([]string, 0, 8)
 
 	if shouldQueryDomainProvider(question, "github") {
-		githubClient := ghclient.NewClient(viper.GetString("github.token"), viper.GetString("github.owner"), viper.GetString("github.repo"))
-		githubInfo, err := githubClient.GetRelevantContext(ctx, "github actions workflow runs runners repository")
-		if err != nil {
-			warnings = appendDomainWarning(warnings, "GitHub CI/CD inventory", err)
+		githubQuestion := buildGitHubCICDContextQuestion(question)
+		githubToken := viper.GetString("github.token")
+		trackedRepos := configuredGitHubReposForCICDAgent()
+		if len(trackedRepos) == 0 {
+			githubClient := ghclient.NewClient(githubToken, viper.GetString("github.owner"), viper.GetString("github.repo"))
+			githubInfo, err := githubClient.GetRelevantContext(ctx, githubQuestion)
+			if err != nil {
+				warnings = appendDomainWarning(warnings, "GitHub CI/CD inventory", err)
+			} else if hasGitHubActionsEvidence(githubInfo) {
+				sections = appendDomainSection(sections, "GitHub Actions", githubInfo)
+			}
 		} else {
-			sections = appendDomainSection(sections, "GitHub Actions", githubInfo)
+			foundGitHubEvidence := false
+			for _, fullName := range trackedRepos {
+				owner, repo, ok := splitGitHubTrackedRepo(fullName)
+				if !ok {
+					continue
+				}
+				githubClient := ghclient.NewClient(githubToken, owner, repo)
+				githubInfo, err := githubClient.GetRelevantContext(ctx, githubQuestion)
+				if err != nil {
+					warnings = appendDomainWarning(warnings, fmt.Sprintf("GitHub CI/CD inventory (%s)", fullName), err)
+					continue
+				}
+				if !hasGitHubActionsEvidence(githubInfo) {
+					continue
+				}
+				sections = appendDomainSection(sections, fmt.Sprintf("GitHub Actions (%s)", fullName), githubInfo)
+				foundGitHubEvidence = true
+			}
+			if !foundGitHubEvidence {
+				warnings = append(warnings, "GitHub CI/CD inventory: no GitHub Actions workflows or runners found in tracked repositories")
+			}
 		}
 	}
 
@@ -972,6 +1081,8 @@ Coverage in this repo can include:
 
 Rules:
 - Separate observed facts from recommendations.
+- When GitHub Actions evidence spans multiple repositories, report findings per repository instead of collapsing them together.
+- Prefer detailed run, job, failed-step, annotation, artifact, and log evidence over generic workflow summaries when it is available.
 - If a provider is missing, say it was not available from current credentials or integrations.
 - Do not invent workflow names, pipeline state, run results, or deployment history.
 - Be concrete about failing runs, pipeline state, runner availability, and missing coverage.`
