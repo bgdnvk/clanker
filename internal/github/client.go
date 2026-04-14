@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,6 +38,59 @@ type AuthStatus struct {
 	Authenticated  bool
 	Login          string
 	CopilotEnabled bool
+}
+
+type workflowRunSummary struct {
+	ID           int64
+	RunNumber    int
+	Name         string
+	DisplayTitle string
+	Status       string
+	Conclusion   string
+	HeadBranch   string
+	Event        string
+	HTMLURL      string
+	LogsURL      string
+	ArtifactsURL string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	Actor        string
+}
+
+type workflowJobSummary struct {
+	ID          int64
+	Name        string
+	Status      string
+	Conclusion  string
+	HTMLURL     string
+	CheckRunURL string
+	Steps       []workflowJobStepSummary
+}
+
+type workflowJobStepSummary struct {
+	Number     int
+	Name       string
+	Status     string
+	Conclusion string
+}
+
+type workflowArtifactSummary struct {
+	ID                 int64
+	Name               string
+	SizeInBytes        int64
+	Expired            bool
+	CreatedAt          time.Time
+	ExpiresAt          time.Time
+	ArchiveDownloadURL string
+}
+
+type workflowAnnotationSummary struct {
+	Path            string
+	StartLine       int
+	EndLine         int
+	AnnotationLevel string
+	Message         string
+	Title           string
 }
 
 type Client struct {
@@ -445,6 +499,115 @@ func FormatRunners(runners []Runner) string {
 	return info.String()
 }
 
+func containsAnyGitHubPhrase(input string, phrases ...string) bool {
+	for _, phrase := range phrases {
+		if strings.Contains(input, strings.ToLower(strings.TrimSpace(phrase))) {
+			return true
+		}
+	}
+	return false
+}
+
+func formatWorkflowRunLabel(run workflowRunSummary) string {
+	if strings.TrimSpace(run.DisplayTitle) != "" {
+		return strings.TrimSpace(run.DisplayTitle)
+	}
+	if strings.TrimSpace(run.Name) != "" {
+		return strings.TrimSpace(run.Name)
+	}
+	return "workflow run"
+}
+
+func workflowRunNeedsAttention(run workflowRunSummary) bool {
+	status := strings.ToLower(strings.TrimSpace(run.Status))
+	if status != "" && status != "completed" {
+		return true
+	}
+	conclusion := strings.ToLower(strings.TrimSpace(run.Conclusion))
+	switch conclusion {
+	case "", "success", "neutral", "skipped":
+		return false
+	default:
+		return true
+	}
+}
+
+func workflowJobNeedsAttention(job workflowJobSummary) bool {
+	status := strings.ToLower(strings.TrimSpace(job.Status))
+	if status != "" && status != "completed" {
+		return true
+	}
+	conclusion := strings.ToLower(strings.TrimSpace(job.Conclusion))
+	switch conclusion {
+	case "", "success", "neutral", "skipped":
+		return false
+	default:
+		return true
+	}
+}
+
+func failedWorkflowJobSteps(steps []workflowJobStepSummary) []workflowJobStepSummary {
+	failed := make([]workflowJobStepSummary, 0, len(steps))
+	for _, step := range steps {
+		status := strings.ToLower(strings.TrimSpace(step.Status))
+		conclusion := strings.ToLower(strings.TrimSpace(step.Conclusion))
+		if status == "completed" && (conclusion == "success" || conclusion == "skipped") {
+			continue
+		}
+		if status == "" && conclusion == "" {
+			continue
+		}
+		failed = append(failed, step)
+	}
+	return failed
+}
+
+func parseCheckRunID(checkRunURL string) int64 {
+	trimmed := strings.TrimSpace(checkRunURL)
+	if trimmed == "" {
+		return 0
+	}
+	idx := strings.LastIndex(trimmed, "/")
+	if idx < 0 || idx >= len(trimmed)-1 {
+		return 0
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(trimmed[idx+1:]), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return id
+}
+
+func selectWorkflowRunsForDetail(runs []workflowRunSummary, limit int) []workflowRunSummary {
+	if limit <= 0 || len(runs) == 0 {
+		return nil
+	}
+	selected := make([]workflowRunSummary, 0, limit)
+	seen := make(map[int64]struct{}, limit)
+	appendRun := func(run workflowRunSummary) bool {
+		if run.ID == 0 {
+			return false
+		}
+		if _, ok := seen[run.ID]; ok {
+			return false
+		}
+		seen[run.ID] = struct{}{}
+		selected = append(selected, run)
+		return len(selected) >= limit
+	}
+	for _, run := range runs {
+		if workflowRunNeedsAttention(run) && appendRun(run) {
+			return selected
+		}
+	}
+	for _, run := range runs {
+		if appendRun(run) {
+			return selected
+		}
+	}
+	return selected
+}
+
 func (c *Client) GetRelevantContext(ctx context.Context, question string) (string, error) {
 	owner, repo, err := c.ResolveRepository(ctx)
 	if err != nil {
@@ -455,6 +618,9 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 
 	var contextText strings.Builder
 	questionLower := strings.ToLower(question)
+	includeDetailedRunContext := containsAnyGitHubPhrase(questionLower,
+		"job", "jobs", "step", "steps", "failed", "failure", "failing", "annotation", "annotations", "artifact", "artifacts", "log", "logs", "debug",
+	)
 
 	if strings.Contains(questionLower, "repo") || strings.Contains(questionLower, "repository") {
 		repos, err := c.ListRepositories(ctx, 25)
@@ -494,6 +660,16 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 		contextText.WriteString("\n\n")
 	}
 
+	if includeDetailedRunContext {
+		detailInfo, err := c.getWorkflowRunDetailsInfo(ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed to get workflow run detail info: %w", err)
+		}
+		contextText.WriteString("Workflow Run Details:\n")
+		contextText.WriteString(detailInfo)
+		contextText.WriteString("\n\n")
+	}
+
 	if strings.Contains(questionLower, "pull") || strings.Contains(questionLower, "pr") {
 		prInfo, err := c.getPullRequestInfo(ctx)
 		if err != nil {
@@ -512,6 +688,9 @@ func (c *Client) getWorkflowInfo(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if len(workflows.Workflows) == 0 {
+		return "No GitHub Actions workflows found.\n", nil
+	}
 
 	var info strings.Builder
 	for _, workflow := range workflows.Workflows {
@@ -527,24 +706,354 @@ func (c *Client) getWorkflowInfo(ctx context.Context) (string, error) {
 }
 
 func (c *Client) getWorkflowRunsInfo(ctx context.Context) (string, error) {
-	runs, _, err := c.client.Actions.ListRepositoryWorkflowRuns(ctx, c.owner, c.repo, &github.ListWorkflowRunsOptions{ListOptions: github.ListOptions{PerPage: 10}})
+	runs, err := c.listWorkflowRuns(ctx, 10)
 	if err != nil {
 		return "", err
 	}
+	if len(runs) == 0 {
+		return "No recent workflow runs found.\n", nil
+	}
 
 	var info strings.Builder
-	for _, run := range runs.WorkflowRuns {
-		info.WriteString(fmt.Sprintf("- Run #%d: %s", run.GetRunNumber(), run.GetDisplayTitle()))
-		info.WriteString(fmt.Sprintf(", Status: %s", run.GetStatus()))
-		info.WriteString(fmt.Sprintf(", Conclusion: %s", run.GetConclusion()))
-		info.WriteString(fmt.Sprintf(", Branch: %s", run.GetHeadBranch()))
-		if run.CreatedAt != nil {
+	for _, run := range runs {
+		info.WriteString(fmt.Sprintf("- Run #%d: %s", run.RunNumber, formatWorkflowRunLabel(run)))
+		info.WriteString(fmt.Sprintf(", Status: %s", run.Status))
+		info.WriteString(fmt.Sprintf(", Conclusion: %s", run.Conclusion))
+		info.WriteString(fmt.Sprintf(", Branch: %s", run.HeadBranch))
+		if !run.CreatedAt.IsZero() {
 			info.WriteString(fmt.Sprintf(", Created: %s", run.CreatedAt.Format(time.RFC3339)))
 		}
-		if run.GetHTMLURL() != "" {
-			info.WriteString(fmt.Sprintf(", URL: %s", run.GetHTMLURL()))
+		if strings.TrimSpace(run.Actor) != "" {
+			info.WriteString(fmt.Sprintf(", Actor: %s", run.Actor))
+		}
+		if run.HTMLURL != "" {
+			info.WriteString(fmt.Sprintf(", URL: %s", run.HTMLURL))
+		}
+		if run.LogsURL != "" {
+			info.WriteString(fmt.Sprintf(", Logs: %s", run.LogsURL))
 		}
 		info.WriteString("\n")
+	}
+
+	return info.String(), nil
+}
+
+func (c *Client) listWorkflowRuns(ctx context.Context, perPage int) ([]workflowRunSummary, error) {
+	owner, repo, err := c.ResolveRepository(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if perPage <= 0 {
+		perPage = 10
+	}
+
+	output, err := runGitHubCLIWithRetry(ctx, "api", fmt.Sprintf("repos/%s/%s/actions/runs?per_page=%d", owner, repo, perPage))
+	if err != nil {
+		return nil, err
+	}
+
+	var raw struct {
+		WorkflowRuns []struct {
+			ID           int64     `json:"id"`
+			RunNumber    int       `json:"run_number"`
+			Name         string    `json:"name"`
+			DisplayTitle string    `json:"display_title"`
+			Status       string    `json:"status"`
+			Conclusion   string    `json:"conclusion"`
+			HeadBranch   string    `json:"head_branch"`
+			Event        string    `json:"event"`
+			HTMLURL      string    `json:"html_url"`
+			LogsURL      string    `json:"logs_url"`
+			ArtifactsURL string    `json:"artifacts_url"`
+			CreatedAt    time.Time `json:"created_at"`
+			UpdatedAt    time.Time `json:"updated_at"`
+			Actor        struct {
+				Login string `json:"login"`
+			} `json:"actor"`
+		} `json:"workflow_runs"`
+	}
+	if err := json.Unmarshal([]byte(output), &raw); err != nil {
+		return nil, fmt.Errorf("failed to parse GitHub workflow runs: %w", err)
+	}
+
+	runs := make([]workflowRunSummary, 0, len(raw.WorkflowRuns))
+	for _, item := range raw.WorkflowRuns {
+		runs = append(runs, workflowRunSummary{
+			ID:           item.ID,
+			RunNumber:    item.RunNumber,
+			Name:         strings.TrimSpace(item.Name),
+			DisplayTitle: strings.TrimSpace(item.DisplayTitle),
+			Status:       strings.TrimSpace(item.Status),
+			Conclusion:   strings.TrimSpace(item.Conclusion),
+			HeadBranch:   strings.TrimSpace(item.HeadBranch),
+			Event:        strings.TrimSpace(item.Event),
+			HTMLURL:      strings.TrimSpace(item.HTMLURL),
+			LogsURL:      strings.TrimSpace(item.LogsURL),
+			ArtifactsURL: strings.TrimSpace(item.ArtifactsURL),
+			CreatedAt:    item.CreatedAt,
+			UpdatedAt:    item.UpdatedAt,
+			Actor:        strings.TrimSpace(item.Actor.Login),
+		})
+	}
+	return runs, nil
+}
+
+func (c *Client) listWorkflowJobs(ctx context.Context, runID int64) ([]workflowJobSummary, error) {
+	owner, repo, err := c.ResolveRepository(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	output, err := runGitHubCLIWithRetry(ctx, "api", fmt.Sprintf("repos/%s/%s/actions/runs/%d/jobs?per_page=100", owner, repo, runID))
+	if err != nil {
+		return nil, err
+	}
+
+	var raw struct {
+		Jobs []struct {
+			ID          int64  `json:"id"`
+			Name        string `json:"name"`
+			Status      string `json:"status"`
+			Conclusion  string `json:"conclusion"`
+			HTMLURL     string `json:"html_url"`
+			CheckRunURL string `json:"check_run_url"`
+			Steps       []struct {
+				Number     int    `json:"number"`
+				Name       string `json:"name"`
+				Status     string `json:"status"`
+				Conclusion string `json:"conclusion"`
+			} `json:"steps"`
+		} `json:"jobs"`
+	}
+	if err := json.Unmarshal([]byte(output), &raw); err != nil {
+		return nil, fmt.Errorf("failed to parse GitHub workflow jobs: %w", err)
+	}
+
+	jobs := make([]workflowJobSummary, 0, len(raw.Jobs))
+	for _, item := range raw.Jobs {
+		steps := make([]workflowJobStepSummary, 0, len(item.Steps))
+		for _, step := range item.Steps {
+			steps = append(steps, workflowJobStepSummary{
+				Number:     step.Number,
+				Name:       strings.TrimSpace(step.Name),
+				Status:     strings.TrimSpace(step.Status),
+				Conclusion: strings.TrimSpace(step.Conclusion),
+			})
+		}
+		jobs = append(jobs, workflowJobSummary{
+			ID:          item.ID,
+			Name:        strings.TrimSpace(item.Name),
+			Status:      strings.TrimSpace(item.Status),
+			Conclusion:  strings.TrimSpace(item.Conclusion),
+			HTMLURL:     strings.TrimSpace(item.HTMLURL),
+			CheckRunURL: strings.TrimSpace(item.CheckRunURL),
+			Steps:       steps,
+		})
+	}
+	return jobs, nil
+}
+
+func (c *Client) listWorkflowRunArtifacts(ctx context.Context, runID int64) ([]workflowArtifactSummary, error) {
+	owner, repo, err := c.ResolveRepository(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	output, err := runGitHubCLIWithRetry(ctx, "api", fmt.Sprintf("repos/%s/%s/actions/runs/%d/artifacts?per_page=100", owner, repo, runID))
+	if err != nil {
+		return nil, err
+	}
+
+	var raw struct {
+		Artifacts []struct {
+			ID                 int64     `json:"id"`
+			Name               string    `json:"name"`
+			SizeInBytes        int64     `json:"size_in_bytes"`
+			Expired            bool      `json:"expired"`
+			CreatedAt          time.Time `json:"created_at"`
+			ExpiresAt          time.Time `json:"expires_at"`
+			ArchiveDownloadURL string    `json:"archive_download_url"`
+		} `json:"artifacts"`
+	}
+	if err := json.Unmarshal([]byte(output), &raw); err != nil {
+		return nil, fmt.Errorf("failed to parse GitHub workflow artifacts: %w", err)
+	}
+
+	artifacts := make([]workflowArtifactSummary, 0, len(raw.Artifacts))
+	for _, item := range raw.Artifacts {
+		artifacts = append(artifacts, workflowArtifactSummary{
+			ID:                 item.ID,
+			Name:               strings.TrimSpace(item.Name),
+			SizeInBytes:        item.SizeInBytes,
+			Expired:            item.Expired,
+			CreatedAt:          item.CreatedAt,
+			ExpiresAt:          item.ExpiresAt,
+			ArchiveDownloadURL: strings.TrimSpace(item.ArchiveDownloadURL),
+		})
+	}
+	return artifacts, nil
+}
+
+func (c *Client) listCheckRunAnnotations(ctx context.Context, checkRunURL string, limit int) ([]workflowAnnotationSummary, error) {
+	owner, repo, err := c.ResolveRepository(ctx)
+	if err != nil {
+		return nil, err
+	}
+	checkRunID := parseCheckRunID(checkRunURL)
+	if checkRunID == 0 {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+
+	output, err := runGitHubCLIWithRetry(ctx, "api", fmt.Sprintf("repos/%s/%s/check-runs/%d/annotations?per_page=%d", owner, repo, checkRunID, limit))
+	if err != nil {
+		return nil, err
+	}
+
+	var raw []struct {
+		Path            string `json:"path"`
+		StartLine       int    `json:"start_line"`
+		EndLine         int    `json:"end_line"`
+		AnnotationLevel string `json:"annotation_level"`
+		Message         string `json:"message"`
+		Title           string `json:"title"`
+	}
+	if err := json.Unmarshal([]byte(output), &raw); err != nil {
+		return nil, fmt.Errorf("failed to parse GitHub workflow annotations: %w", err)
+	}
+
+	annotations := make([]workflowAnnotationSummary, 0, len(raw))
+	for _, item := range raw {
+		annotations = append(annotations, workflowAnnotationSummary{
+			Path:            strings.TrimSpace(item.Path),
+			StartLine:       item.StartLine,
+			EndLine:         item.EndLine,
+			AnnotationLevel: strings.TrimSpace(item.AnnotationLevel),
+			Message:         strings.TrimSpace(item.Message),
+			Title:           strings.TrimSpace(item.Title),
+		})
+	}
+	return annotations, nil
+}
+
+func (c *Client) getWorkflowRunDetailsInfo(ctx context.Context) (string, error) {
+	runs, err := c.listWorkflowRuns(ctx, 8)
+	if err != nil {
+		return "", err
+	}
+	selectedRuns := selectWorkflowRunsForDetail(runs, 3)
+	if len(selectedRuns) == 0 {
+		return "No detailed workflow run data found.\n", nil
+	}
+
+	var info strings.Builder
+	for _, run := range selectedRuns {
+		info.WriteString(fmt.Sprintf("- Run #%d: %s", run.RunNumber, formatWorkflowRunLabel(run)))
+		info.WriteString(fmt.Sprintf(", status=%s", run.Status))
+		if strings.TrimSpace(run.Conclusion) != "" {
+			info.WriteString(fmt.Sprintf(", conclusion=%s", run.Conclusion))
+		}
+		if strings.TrimSpace(run.HeadBranch) != "" {
+			info.WriteString(fmt.Sprintf(", branch=%s", run.HeadBranch))
+		}
+		if strings.TrimSpace(run.Event) != "" {
+			info.WriteString(fmt.Sprintf(", event=%s", run.Event))
+		}
+		if strings.TrimSpace(run.Actor) != "" {
+			info.WriteString(fmt.Sprintf(", actor=%s", run.Actor))
+		}
+		if !run.CreatedAt.IsZero() {
+			info.WriteString(fmt.Sprintf(", created=%s", run.CreatedAt.Format(time.RFC3339)))
+		}
+		if run.HTMLURL != "" {
+			info.WriteString(fmt.Sprintf(", url=%s", run.HTMLURL))
+		}
+		if run.LogsURL != "" {
+			info.WriteString(fmt.Sprintf(", logs=%s", run.LogsURL))
+		}
+		info.WriteString("\n")
+
+		jobs, err := c.listWorkflowJobs(ctx, run.ID)
+		if err != nil {
+			return "", err
+		}
+		if len(jobs) == 0 {
+			info.WriteString("  jobs: none reported\n")
+		} else {
+			jobLimit := len(jobs)
+			if jobLimit > 6 {
+				jobLimit = 6
+			}
+			for i := 0; i < jobLimit; i++ {
+				job := jobs[i]
+				info.WriteString(fmt.Sprintf("  - Job: %s, status=%s, conclusion=%s", job.Name, job.Status, job.Conclusion))
+				if job.HTMLURL != "" {
+					info.WriteString(fmt.Sprintf(", url=%s", job.HTMLURL))
+				}
+				info.WriteString("\n")
+
+				failedSteps := failedWorkflowJobSteps(job.Steps)
+				for _, step := range failedSteps {
+					info.WriteString(fmt.Sprintf("    failed step: #%d %s, status=%s, conclusion=%s\n", step.Number, step.Name, step.Status, step.Conclusion))
+				}
+
+				if workflowJobNeedsAttention(job) {
+					annotations, err := c.listCheckRunAnnotations(ctx, job.CheckRunURL, 3)
+					if err == nil {
+						for _, annotation := range annotations {
+							location := strings.TrimSpace(annotation.Path)
+							if location != "" && annotation.StartLine > 0 {
+								location = fmt.Sprintf("%s:%d", location, annotation.StartLine)
+							}
+							if annotation.EndLine > annotation.StartLine && location != "" {
+								location = fmt.Sprintf("%s-%d", location, annotation.EndLine)
+							}
+							info.WriteString(fmt.Sprintf("    annotation: level=%s", annotation.AnnotationLevel))
+							if strings.TrimSpace(annotation.Title) != "" {
+								info.WriteString(fmt.Sprintf(", title=%s", annotation.Title))
+							}
+							if location != "" {
+								info.WriteString(fmt.Sprintf(", location=%s", location))
+							}
+							if strings.TrimSpace(annotation.Message) != "" {
+								info.WriteString(fmt.Sprintf(", message=%s", annotation.Message))
+							}
+							info.WriteString("\n")
+						}
+					}
+				}
+			}
+			if len(jobs) > jobLimit {
+				info.WriteString(fmt.Sprintf("  - ... %d additional jobs omitted\n", len(jobs)-jobLimit))
+			}
+		}
+
+		artifacts, err := c.listWorkflowRunArtifacts(ctx, run.ID)
+		if err != nil {
+			return "", err
+		}
+		if len(artifacts) > 0 {
+			artifactLimit := len(artifacts)
+			if artifactLimit > 5 {
+				artifactLimit = 5
+			}
+			for i := 0; i < artifactLimit; i++ {
+				artifact := artifacts[i]
+				info.WriteString(fmt.Sprintf("  - Artifact: %s, sizeBytes=%d, expired=%t", artifact.Name, artifact.SizeInBytes, artifact.Expired))
+				if !artifact.ExpiresAt.IsZero() {
+					info.WriteString(fmt.Sprintf(", expires=%s", artifact.ExpiresAt.Format(time.RFC3339)))
+				}
+				if artifact.ArchiveDownloadURL != "" {
+					info.WriteString(fmt.Sprintf(", download=%s", artifact.ArchiveDownloadURL))
+				}
+				info.WriteString("\n")
+			}
+			if len(artifacts) > artifactLimit {
+				info.WriteString(fmt.Sprintf("  - ... %d additional artifacts omitted\n", len(artifacts)-artifactLimit))
+			}
+		}
 	}
 
 	return info.String(), nil
