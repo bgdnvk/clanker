@@ -29,6 +29,12 @@ func CreateVercelCommands() *cobra.Command {
 	vercelCmd.AddCommand(createVercelGetCmd())
 	vercelCmd.AddCommand(createVercelLogsCmd())
 	vercelCmd.AddCommand(createVercelAnalyticsCmd())
+	vercelCmd.AddCommand(createVercelDeployCmd())
+	vercelCmd.AddCommand(createVercelRedeployCmd())
+	vercelCmd.AddCommand(createVercelRollbackCmd())
+	vercelCmd.AddCommand(createVercelCancelCmd())
+	vercelCmd.AddCommand(createVercelEnvCmd())
+	vercelCmd.AddCommand(createVercelDomainCmd())
 
 	return vercelCmd
 }
@@ -647,4 +653,315 @@ func getUsage(ctx context.Context, client *Client, period string) error {
 	}
 	fmt.Println(out)
 	return nil
+}
+
+// --- Deploy / Redeploy / Rollback / Cancel ---
+
+func createVercelDeployCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "deploy [path]",
+		Short: "Deploy the current directory (or a specific path) to Vercel",
+		Long: `Deploy a project to Vercel. By default creates a preview deployment.
+Use --prod to deploy directly to production.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := newClientFromFlags(cmd)
+			if err != nil {
+				return err
+			}
+
+			cliArgs := []string{"deploy"}
+			if len(args) > 0 {
+				cliArgs = append(cliArgs, args[0])
+			}
+			if prod, _ := cmd.Flags().GetBool("prod"); prod {
+				cliArgs = append(cliArgs, "--prod")
+			}
+			if project, _ := cmd.Flags().GetString("project"); project != "" {
+				cliArgs = append(cliArgs, "--scope", project)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+
+			out, err := client.RunVercelCLIWithContext(ctx, cliArgs...)
+			if err != nil {
+				return err
+			}
+			fmt.Print(out)
+			return nil
+		},
+	}
+	cmd.Flags().Bool("prod", false, "Deploy to production")
+	cmd.Flags().String("project", "", "Project ID or team scope")
+	return cmd
+}
+
+func createVercelRedeployCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "redeploy <deployment-url-or-id>",
+		Short: "Redeploy an existing Vercel deployment",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := newClientFromFlags(cmd)
+			if err != nil {
+				return err
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+
+			out, err := client.RunVercelCLIWithContext(ctx, "redeploy", args[0])
+			if err != nil {
+				return err
+			}
+			fmt.Print(out)
+			return nil
+		},
+	}
+	return cmd
+}
+
+func createVercelRollbackCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "rollback",
+		Short: "Rollback to the previous production deployment",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := newClientFromFlags(cmd)
+			if err != nil {
+				return err
+			}
+
+			cliArgs := []string{"rollback"}
+			if project, _ := cmd.Flags().GetString("project"); project != "" {
+				cliArgs = append(cliArgs, "--scope", project)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+
+			out, err := client.RunVercelCLIWithContext(ctx, cliArgs...)
+			if err != nil {
+				return err
+			}
+			fmt.Print(out)
+			return nil
+		},
+	}
+	cmd.Flags().String("project", "", "Project ID or team scope")
+	return cmd
+}
+
+func createVercelCancelCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "cancel <deployment-id>",
+		Short: "Cancel an in-progress Vercel deployment",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := newClientFromFlags(cmd)
+			if err != nil {
+				return err
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+
+			return client.CancelDeployment(ctx, args[0])
+		},
+	}
+	return cmd
+}
+
+// --- Env subcommands ---
+
+func createVercelEnvCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "env",
+		Short: "Manage Vercel environment variables",
+	}
+	cmd.AddCommand(createVercelEnvAddCmd())
+	cmd.AddCommand(createVercelEnvRmCmd())
+	cmd.AddCommand(createVercelEnvPullCmd())
+	return cmd
+}
+
+func createVercelEnvAddCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "add <key> <value>",
+		Short: "Add an environment variable",
+		Long: `Add an environment variable to a Vercel project.
+
+By default targets all environments (production, preview, development).
+Use --target to restrict to specific environments.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := newClientFromFlags(cmd)
+			if err != nil {
+				return err
+			}
+
+			cliArgs := []string{"env", "add", args[0], args[1]}
+			if target, _ := cmd.Flags().GetString("target"); target != "" {
+				cliArgs = append(cliArgs, target)
+			}
+			if project, _ := cmd.Flags().GetString("project"); project != "" {
+				cliArgs = append(cliArgs, "--scope", project)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			out, err := client.RunVercelCLIWithContext(ctx, cliArgs...)
+			if err != nil {
+				return err
+			}
+			fmt.Print(out)
+			return nil
+		},
+	}
+	cmd.Flags().String("target", "", "Comma-separated targets: production,preview,development")
+	cmd.Flags().String("project", "", "Project ID or team scope")
+	return cmd
+}
+
+func createVercelEnvRmCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "rm <key>",
+		Short: "Remove an environment variable",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := newClientFromFlags(cmd)
+			if err != nil {
+				return err
+			}
+
+			cliArgs := []string{"env", "rm", args[0]}
+			if target, _ := cmd.Flags().GetString("target"); target != "" {
+				cliArgs = append(cliArgs, target)
+			}
+			cliArgs = append(cliArgs, "--yes")
+			if project, _ := cmd.Flags().GetString("project"); project != "" {
+				cliArgs = append(cliArgs, "--scope", project)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			out, err := client.RunVercelCLIWithContext(ctx, cliArgs...)
+			if err != nil {
+				return err
+			}
+			fmt.Print(out)
+			return nil
+		},
+	}
+	cmd.Flags().String("target", "production", "Target environment: production, preview, or development")
+	cmd.Flags().String("project", "", "Project ID or team scope")
+	return cmd
+}
+
+func createVercelEnvPullCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "pull",
+		Short: "Pull environment variables to a local .env file",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := newClientFromFlags(cmd)
+			if err != nil {
+				return err
+			}
+
+			cliArgs := []string{"env", "pull"}
+			if project, _ := cmd.Flags().GetString("project"); project != "" {
+				cliArgs = append(cliArgs, "--scope", project)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			out, err := client.RunVercelCLIWithContext(ctx, cliArgs...)
+			if err != nil {
+				return err
+			}
+			fmt.Print(out)
+			return nil
+		},
+	}
+	cmd.Flags().String("project", "", "Project ID or team scope")
+	return cmd
+}
+
+// --- Domain subcommands ---
+
+func createVercelDomainCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "domain",
+		Short: "Manage Vercel domains",
+	}
+	cmd.AddCommand(createVercelDomainAddCmd())
+	cmd.AddCommand(createVercelDomainRmCmd())
+	return cmd
+}
+
+func createVercelDomainAddCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "add <domain>",
+		Short: "Add a custom domain to a Vercel project",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := newClientFromFlags(cmd)
+			if err != nil {
+				return err
+			}
+
+			cliArgs := []string{"domains", "add", args[0]}
+			if project, _ := cmd.Flags().GetString("project"); project != "" {
+				cliArgs = append(cliArgs, "--scope", project)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			out, err := client.RunVercelCLIWithContext(ctx, cliArgs...)
+			if err != nil {
+				return err
+			}
+			fmt.Print(out)
+			return nil
+		},
+	}
+	cmd.Flags().String("project", "", "Project ID or team scope")
+	return cmd
+}
+
+func createVercelDomainRmCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "rm <domain>",
+		Short: "Remove a custom domain from Vercel",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := newClientFromFlags(cmd)
+			if err != nil {
+				return err
+			}
+
+			cliArgs := []string{"domains", "rm", args[0], "--yes"}
+			if project, _ := cmd.Flags().GetString("project"); project != "" {
+				cliArgs = append(cliArgs, "--scope", project)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			out, err := client.RunVercelCLIWithContext(ctx, cliArgs...)
+			if err != nil {
+				return err
+			}
+			fmt.Print(out)
+			return nil
+		},
+	}
+	cmd.Flags().String("project", "", "Project ID or team scope")
+	return cmd
 }

@@ -237,6 +237,29 @@ func (c *Client) RunVercelCLIWithContext(ctx context.Context, args ...string) (s
 	return stdout.String(), nil
 }
 
+// PromoteDeployment promotes a deployment to production using the Vercel REST API.
+// This is equivalent to `vercel promote <deploymentId>` but uses the API directly
+// for programmatic use (maker plans, backend handlers, etc.).
+func (c *Client) PromoteDeployment(ctx context.Context, projectID, deploymentID string) error {
+	endpoint := fmt.Sprintf("/v10/projects/%s/promote/%s", projectID, deploymentID)
+	_, err := c.RunAPIWithContext(ctx, "POST", endpoint, "")
+	if err != nil {
+		return fmt.Errorf("promote deployment %s: %w", deploymentID, err)
+	}
+	return nil
+}
+
+// CancelDeployment cancels an in-progress deployment using the Vercel REST API.
+func (c *Client) CancelDeployment(ctx context.Context, deploymentID string) error {
+	endpoint := fmt.Sprintf("/v12/deployments/%s/cancel", deploymentID)
+	result, err := c.RunAPIWithContext(ctx, "PATCH", endpoint, "")
+	if err != nil {
+		return fmt.Errorf("cancel deployment %s: %w", deploymentID, err)
+	}
+	fmt.Println(result)
+	return nil
+}
+
 // GetRelevantContext gathers Vercel context for LLM queries. The output is a
 // best-effort dump of the resources most likely to be relevant to the user's
 // question. Sections are keyword-gated to keep the context compact.
