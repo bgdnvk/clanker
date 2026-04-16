@@ -73,6 +73,19 @@ type Team struct {
 	Slug string `json:"slug"`
 }
 
+// Alias represents a Vercel deployment alias (/v4/aliases response).
+type Alias struct {
+	UID          string `json:"uid"`
+	Alias        string `json:"alias"`
+	ProjectID    string `json:"projectId,omitempty"`
+	DeploymentID string `json:"deploymentId,omitempty"`
+	Created      int64  `json:"created,omitempty"`
+	Deployment   *struct {
+		ID  string `json:"id,omitempty"`
+		URL string `json:"url,omitempty"`
+	} `json:"deployment,omitempty"`
+}
+
 // User represents the authenticated Vercel user.
 type User struct {
 	UID      string `json:"uid"`

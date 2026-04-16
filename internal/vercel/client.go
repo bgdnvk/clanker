@@ -24,6 +24,9 @@ type Client struct {
 	apiToken string
 	teamID   string
 	debug    bool
+	// raw, when set, causes the static CLI commands to print unformatted JSON
+	// responses instead of pretty-printed summaries.
+	raw bool
 }
 
 // ResolveAPIToken returns the Vercel API token from config or environment.
