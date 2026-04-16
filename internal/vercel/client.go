@@ -237,12 +237,47 @@ func (c *Client) RunVercelCLIWithContext(ctx context.Context, args ...string) (s
 	return stdout.String(), nil
 }
 
+// RunVercelCLIWithStdin executes the Vercel CLI piping stdinData to the
+// process's standard input. Used for commands like `env add` where the CLI
+// reads values from stdin rather than from positional arguments.
+func (c *Client) RunVercelCLIWithStdin(ctx context.Context, stdinData string, args ...string) (string, error) {
+	if _, err := exec.LookPath("vercel"); err != nil {
+		return "", fmt.Errorf("vercel not found in PATH (required for deploy operations, install with: npm install -g vercel)")
+	}
+
+	cmd := exec.CommandContext(ctx, "vercel", args...)
+	cmd.Env = append(os.Environ(), fmt.Sprintf("VERCEL_TOKEN=%s", c.apiToken))
+	if c.teamID != "" {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("VERCEL_ORG_ID=%s", c.teamID))
+	}
+
+	cmd.Stdin = strings.NewReader(stdinData)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if c.debug {
+		fmt.Printf("[vercel] vercel %s (stdin piped)\n", strings.Join(args, " "))
+	}
+
+	if err := cmd.Run(); err != nil {
+		stderrStr := strings.TrimSpace(stderr.String())
+		return "", fmt.Errorf("vercel CLI failed: %w, stderr: %s%s", err, stderrStr, errorHint(stderrStr))
+	}
+
+	return stdout.String(), nil
+}
+
 // PromoteDeployment promotes a deployment to production using the Vercel REST API.
 // This is equivalent to `vercel promote <deploymentId>` but uses the API directly
 // for programmatic use (maker plans, backend handlers, etc.).
+//
+// Vercel API: POST /v10/projects/{projectID}/promote  body: {"id":"<deploymentID>"}
 func (c *Client) PromoteDeployment(ctx context.Context, projectID, deploymentID string) error {
-	endpoint := fmt.Sprintf("/v10/projects/%s/promote/%s", projectID, deploymentID)
-	_, err := c.RunAPIWithContext(ctx, "POST", endpoint, "")
+	endpoint := fmt.Sprintf("/v10/projects/%s/promote", projectID)
+	body := fmt.Sprintf(`{"id":%q}`, deploymentID)
+	_, err := c.RunAPIWithContext(ctx, "POST", endpoint, body)
 	if err != nil {
 		return fmt.Errorf("promote deployment %s: %w", deploymentID, err)
 	}
@@ -250,14 +285,14 @@ func (c *Client) PromoteDeployment(ctx context.Context, projectID, deploymentID 
 }
 
 // CancelDeployment cancels an in-progress deployment using the Vercel REST API.
-func (c *Client) CancelDeployment(ctx context.Context, deploymentID string) error {
+// Returns the raw API response so the caller can decide how to present it.
+func (c *Client) CancelDeployment(ctx context.Context, deploymentID string) (string, error) {
 	endpoint := fmt.Sprintf("/v12/deployments/%s/cancel", deploymentID)
 	result, err := c.RunAPIWithContext(ctx, "PATCH", endpoint, "")
 	if err != nil {
-		return fmt.Errorf("cancel deployment %s: %w", deploymentID, err)
+		return "", fmt.Errorf("cancel deployment %s: %w", deploymentID, err)
 	}
-	fmt.Println(result)
-	return nil
+	return result, nil
 }
 
 // GetRelevantContext gathers Vercel context for LLM queries. The output is a
@@ -335,6 +370,11 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 		}
 		out.WriteString("\n")
 	}
+
+	// TODO(phase3): When the question mentions a specific project, fetch its
+	// env var keys (never values) via GET /v10/projects/{id}/env and include
+	// a "Environment Variables (keys only)" section. Requires lightweight
+	// project-name-to-ID inference from the projects list above.
 
 	if strings.TrimSpace(out.String()) == "" {
 		return "No Vercel data available (missing permissions or no resources).", nil
