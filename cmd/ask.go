@@ -2246,8 +2246,8 @@ Provide a clear, concise answer based on the data above. If the data doesn't con
 	return nil
 }
 
-// handleVercelQuery delegates a Vercel query to the Vercel agent.
-// One-shot Q&A (no conversation history) — full history lands in phase 4.
+// handleVercelQuery delegates a Vercel query to the Vercel agent with
+// per-team conversation history for multi-turn context.
 func handleVercelQuery(ctx context.Context, question string, debug bool) error {
 	if debug {
 		fmt.Println("Delegating query to Vercel agent...")
@@ -2261,6 +2261,16 @@ func handleVercelQuery(ctx context.Context, question string, debug bool) error {
 	client, err := vercel.NewClient(apiToken, teamID, debug)
 	if err != nil {
 		return fmt.Errorf("failed to create Vercel client: %w", err)
+	}
+
+	// Load conversation history keyed by team (or "personal" for non-team accounts).
+	conversationID := teamID
+	if conversationID == "" {
+		conversationID = "personal"
+	}
+	history := vercel.NewConversationHistory(conversationID)
+	if err := history.Load(); err != nil && debug {
+		fmt.Fprintf(os.Stderr, "[debug] conversation history: %v\n", err)
 	}
 
 	vercelContext, err := client.GetRelevantContext(ctx, question)
@@ -2299,14 +2309,8 @@ func handleVercelQuery(ctx context.Context, question string, debug bool) error {
 
 	aiClient := ai.NewClient(provider, apiKey, debug, provider)
 
-	prompt := fmt.Sprintf(`You are a Vercel infrastructure assistant. Answer questions about the user's Vercel account based on the provided context.
-
-Vercel Context:
-%s
-
-User Question: %s
-
-Provide a helpful, concise response in markdown format.`, vercelContext, question)
+	historyContext := history.GetRecentContext(5)
+	prompt := buildVercelPrompt(question, vercelContext, historyContext)
 
 	response, err := aiClient.AskPrompt(ctx, prompt)
 	if err != nil {
@@ -2314,7 +2318,37 @@ Provide a helpful, concise response in markdown format.`, vercelContext, questio
 	}
 
 	fmt.Println(response)
+
+	// Persist the exchange so subsequent invocations see the conversation.
+	history.AddEntry(question, response)
+	if err := history.Save(); err != nil && debug {
+		fmt.Fprintf(os.Stderr, "[debug] save history: %v\n", err)
+	}
+
 	return nil
+}
+
+// buildVercelPrompt assembles the system prompt for a Vercel ask query,
+// injecting infrastructure context and recent conversation history when
+// available.
+func buildVercelPrompt(question, vercelContext, historyContext string) string {
+	var sb strings.Builder
+	sb.WriteString("You are a Vercel infrastructure assistant. ")
+	sb.WriteString("Answer questions about the user's Vercel account based on the provided context.\n\n")
+	if vercelContext != "" {
+		sb.WriteString("Vercel Context:\n")
+		sb.WriteString(vercelContext)
+		sb.WriteString("\n\n")
+	}
+	if historyContext != "" {
+		sb.WriteString("Recent Conversation:\n")
+		sb.WriteString(historyContext)
+		sb.WriteString("\n\n")
+	}
+	sb.WriteString("User Question: ")
+	sb.WriteString(question)
+	sb.WriteString("\n\nProvide a helpful, concise response in markdown format.")
+	return sb.String()
 }
 
 // handleK8sQuery delegates a Kubernetes query to the K8s agent
