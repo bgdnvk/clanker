@@ -37,12 +37,5 @@ func runVercelAsk(cmd *cobra.Command, args []string) error {
 	if question == "" {
 		return fmt.Errorf("question cannot be empty")
 	}
-	fmt.Println("The dedicated Vercel ask subcommand (with conversation history) arrives in phase 4.")
-	fmt.Println("For one-shot queries today, use:")
-	fmt.Printf("  clanker ask --vercel %q\n", question)
-	fmt.Println("Or the raw data commands:")
-	fmt.Println("  clanker vercel list projects")
-	fmt.Println("  clanker vercel list deployments --project <id>")
-	fmt.Println("  clanker vercel analytics --period 30d")
-	return nil
+	return fmt.Errorf("vercel ask subcommand not yet implemented — use 'clanker ask --vercel %s' instead", question)
 }

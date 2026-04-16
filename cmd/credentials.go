@@ -5,9 +5,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/bgdnvk/clanker/internal/backend"
 	"github.com/bgdnvk/clanker/internal/cloudflare"
@@ -688,10 +690,14 @@ func testVercelCredentials(ctx context.Context, client *backend.Client, debug bo
 		return fmt.Errorf("no Vercel API token")
 	}
 
+	// Use a bounded context so a hanging curl does not block forever.
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
 	// Verify the token by fetching the authenticated user.
 	endpoint := "https://api.vercel.com/v2/user"
 	if creds.TeamID != "" {
-		endpoint += "?teamId=" + creds.TeamID
+		endpoint += "?teamId=" + url.QueryEscape(creds.TeamID)
 	}
 
 	cmd := exec.CommandContext(ctx, "curl", "-s", "-o", "/dev/stdout", "-w", "\n%{http_code}",

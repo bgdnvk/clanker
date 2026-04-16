@@ -2266,6 +2266,9 @@ func handleVercelQuery(ctx context.Context, question string, debug bool) error {
 	vercelContext, err := client.GetRelevantContext(ctx, question)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[vercel] warning: failed to fetch context: %v\n", err)
+		if strings.TrimSpace(vercelContext) == "" {
+			return fmt.Errorf("failed to fetch Vercel context: %w", err)
+		}
 	}
 
 	// Resolve AI provider + key using the same pattern as other handlers.
