@@ -222,6 +222,7 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 		{name: "Cloud KMS Keyrings", args: []string{"kms", "keyrings", "list", "--location", "global", "--format", "table(name,locationId)"}, keys: []string{"kms", "keyring", "keyrings", "key management"}},
 		{name: "Cloud Build Triggers", args: []string{"builds", "triggers", "list", "--format", "table(name,description,createTime)"}, keys: []string{"cloud build", "build trigger", "build triggers"}},
 		{name: "Cloud Deploy Pipelines", args: []string{"deploy", "delivery-pipelines", "list", "--format", "table(name,region,createTime)"}, keys: []string{"cloud deploy", "deploy pipeline"}},
+		{name: "Recent Error Logs", args: []string{"logging", "read", "severity>=ERROR", "--limit", "20", "--format", "table(timestamp,severity,resource.type,logName,textPayload)"}, keys: []string{"log", "logs", "error", "errors", "incident"}},
 		{name: "Logging Sinks", args: []string{"logging", "sinks", "list", "--format", "table(name,destination,filter)"}, keys: []string{"cloud logging", "logging sink"}},
 		{name: "Monitoring Alert Policies", args: []string{"monitoring", "alert-policies", "list", "--format", "table(name,displayName,enabled)"}, keys: []string{"cloud monitoring", "alert policy", "alerts"}},
 		{name: "API Gateway APIs", args: []string{"api-gateway", "apis", "list", "--format", "table(name,displayName,createTime)"}, keys: []string{"api gateway", "apigateway"}},
