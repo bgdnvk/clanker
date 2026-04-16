@@ -38,6 +38,9 @@ type Command struct {
 	Args     []string          `json:"args"`
 	Reason   string            `json:"reason,omitempty"`
 	Produces map[string]string `json:"produces,omitempty"`
+	// Stdin is optional data piped to the command's standard input.
+	// Used by commands like `vercel env add` that read values from stdin.
+	Stdin string `json:"stdin,omitempty"`
 }
 
 func ParsePlan(raw string) (*Plan, error) {
@@ -73,7 +76,7 @@ func ParsePlan(raw string) (*Plan, error) {
 	}
 
 	if strings.TrimSpace(p.Provider) == "" {
-		p.Provider = "aws"
+		p.Provider = inferProviderFromCommands(p.Commands)
 	}
 
 	if len(p.Commands) == 0 {
@@ -103,7 +106,7 @@ func parsePlanFromAlternativeShapes(trimmed string) (*Plan, error) {
 				out := &Plan{
 					Version:   CurrentPlanVersion,
 					CreatedAt: time.Now().UTC(),
-					Provider:  "aws",
+					Provider:  inferProviderFromCommands([]Command{cmd}),
 					Question:  "",
 					Summary:   "generated plan",
 					Commands:  []Command{cmd},
@@ -132,7 +135,7 @@ func parsePlanFromAlternativeShapes(trimmed string) (*Plan, error) {
 				out := &Plan{
 					Version:   CurrentPlanVersion,
 					CreatedAt: time.Now().UTC(),
-					Provider:  "aws",
+					Provider:  inferProviderFromCommands(filtered),
 					Question:  "",
 					Summary:   "generated plan",
 					Commands:  filtered,
@@ -143,6 +146,35 @@ func parsePlanFromAlternativeShapes(trimmed string) (*Plan, error) {
 	}
 
 	return nil, fmt.Errorf("unrecognized plan shape")
+}
+
+// inferProviderFromCommands inspects the first arg of each command to infer the
+// target provider. When the plan was generated for a non-AWS provider (vercel,
+// cloudflare, hetzner, etc.) but arrives as a bare Command or []Command without
+// a provider field, we need to avoid defaulting to "aws" which would route the
+// plan to the wrong executor.
+func inferProviderFromCommands(cmds []Command) string {
+	for _, cmd := range cmds {
+		if len(cmd.Args) == 0 {
+			continue
+		}
+		first := strings.ToLower(strings.TrimSpace(cmd.Args[0]))
+		switch first {
+		case "vercel":
+			return "vercel"
+		case "wrangler":
+			return "cloudflare"
+		case "hcloud":
+			return "hetzner"
+		case "doctl":
+			return "digitalocean"
+		case "gcloud":
+			return "gcp"
+		case "az":
+			return "azure"
+		}
+	}
+	return "aws"
 }
 
 func normalizeArgs(args []string) []string {

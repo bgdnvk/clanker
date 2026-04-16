@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/spf13/viper"
@@ -235,8 +236,10 @@ func TestGetClassificationPrompt(t *testing.T) {
 		"service",
 	}
 
+	// contains expects an already-lowercased haystack.
+	lowerPrompt := strings.ToLower(prompt)
 	for _, phrase := range expectedPhrases {
-		if !contains(prompt, phrase) {
+		if !contains(lowerPrompt, phrase) {
 			t.Errorf("GetClassificationPrompt missing expected phrase: %s", phrase)
 		}
 	}
@@ -416,13 +419,16 @@ func TestApplyLLMClassification_GeneralPreservesK8sContext(t *testing.T) {
 }
 
 func TestContains(t *testing.T) {
+	// contains expects its first argument to already be lowercased — callers
+	// in InferContext normalize the question once up front. Only the keyword
+	// argument is lowercased defensively.
 	tests := []struct {
 		s      string
 		substr string
 		expect bool
 	}{
-		{"Hello World", "world", true},
-		{"Hello World", "WORLD", true},
+		{"hello world", "world", true},
+		{"hello world", "WORLD", true},
 		{"cloudflare zones", "cloudflare", true},
 		{"list ec2", "EC2", true},
 		{"kubernetes pods", "k8s", false},

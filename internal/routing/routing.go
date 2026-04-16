@@ -24,6 +24,7 @@ type ServiceContext struct {
 	Cloudflare   bool
 	DigitalOcean bool
 	Hetzner      bool
+	Vercel       bool
 	IAM          bool
 	Code         bool
 }
@@ -40,7 +41,7 @@ type Classification struct {
 func DefaultInfraProvider() string {
 	p := strings.ToLower(strings.TrimSpace(viper.GetString("infra.default_provider")))
 	switch p {
-	case "aws", "gcp", "azure", "cloudflare", "digitalocean", "hetzner":
+	case "aws", "gcp", "azure", "cloudflare", "digitalocean", "hetzner", "vercel":
 		return p
 	default:
 		return "aws"
@@ -57,6 +58,7 @@ func applyConfiguredDefaultContext(ctx *ServiceContext) {
 	ctx.Cloudflare = false
 	ctx.DigitalOcean = false
 	ctx.Hetzner = false
+	ctx.Vercel = false
 	ctx.IAM = false
 
 	switch DefaultInfraProvider() {
@@ -70,6 +72,8 @@ func applyConfiguredDefaultContext(ctx *ServiceContext) {
 		ctx.DigitalOcean = true
 	case "hetzner":
 		ctx.Hetzner = true
+	case "vercel":
+		ctx.Vercel = true
 	default:
 		ctx.AWS = true
 		ctx.GitHub = true
@@ -240,6 +244,23 @@ func InferContext(question string) ServiceContext {
 		"hetzner load balancer",
 	}
 
+	vercelKeywords := []string{
+		// Only match when Vercel is explicitly referenced — we do not want to
+		// catch generic "deploy" / "preview" / "edge function" phrasing.
+		"vercel",
+		"vercel.app",
+		"vercel project",
+		"vercel deployment",
+		"vercel domain",
+		"vercel env",
+		"next.js deployment",
+		"nextjs deployment",
+		"preview url",
+		"production deployment on vercel",
+		"edge function on vercel",
+		"edge middleware",
+	}
+
 	iamKeywords := []string{
 		// IAM specific queries
 		"iam role", "iam roles", "iam policy", "iam policies",
@@ -323,6 +344,13 @@ func InferContext(question string) ServiceContext {
 		}
 	}
 
+	for _, keyword := range vercelKeywords {
+		if contains(questionLower, keyword) {
+			ctx.Vercel = true
+			break
+		}
+	}
+
 	// Check for IAM-specific queries (takes precedence over general AWS)
 	for _, keyword := range iamKeywords {
 		if contains(questionLower, keyword) {
@@ -333,7 +361,7 @@ func InferContext(question string) ServiceContext {
 
 	// Default to the configured provider if nothing is detected.
 	// AWS keeps GitHub enabled for backward compatibility.
-	if !ctx.AWS && !ctx.GitHub && !ctx.Terraform && !ctx.K8s && !ctx.GCP && !ctx.Azure && !ctx.Cloudflare && !ctx.DigitalOcean && !ctx.Hetzner && !ctx.IAM {
+	if !ctx.AWS && !ctx.GitHub && !ctx.Terraform && !ctx.K8s && !ctx.GCP && !ctx.Azure && !ctx.Cloudflare && !ctx.DigitalOcean && !ctx.Hetzner && !ctx.Vercel && !ctx.IAM {
 		applyConfiguredDefaultContext(&ctx)
 	}
 
@@ -356,6 +384,7 @@ Available services:
 - azure: Microsoft Azure (VMs, AKS, App Service, Storage, Key Vault, Cosmos DB, VNets, etc.)
 - digitalocean: Digital Ocean (Droplets, DOKS, Managed Databases, Spaces, App Platform, Load Balancers, VPCs, etc.)
 - hetzner: Hetzner Cloud (Servers, Load Balancers, Volumes, Networks, Firewalls, Floating IPs, Primary IPs, etc.)
+- vercel: Vercel projects, deployments, domains, env vars, edge functions, KV/Blob/Postgres/Edge Config, analytics
 - github: GitHub repositories, PRs, issues, actions, workflows
 - terraform: Infrastructure as code, Terraform plans, state, modules
 - general: General questions not specific to any cloud platform
@@ -367,11 +396,12 @@ IMPORTANT RULES:
 4. If the query mentions AWS services (EC2, Lambda, S3, CloudFront, Route53, etc.) but NOT IAM-specific topics, classify as "aws"
 5. Only classify as "digitalocean" if the query EXPLICITLY mentions Digital Ocean, doctl, droplets, DOKS, or Digital Ocean-specific products
 6. Only classify as "hetzner" if the query EXPLICITLY mentions Hetzner, hcloud, or Hetzner-specific products
-7. If uncertain, classify as "%s" (the configured default cloud provider)
+7. Only classify as "vercel" if the query EXPLICITLY mentions Vercel, vercel.app, a Vercel deployment/project, or Vercel-specific products (Edge Config, Vercel KV / Blob / Postgres)
+8. If uncertain, classify as "%s" (the configured default cloud provider)
 
 Respond with ONLY a JSON object:
 {
-	"service": "cloudflare|aws|iam|k8s|gcp|azure|digitalocean|hetzner|github|terraform|general",
+	"service": "cloudflare|aws|iam|k8s|gcp|azure|digitalocean|hetzner|vercel|github|terraform|general",
     "confidence": "high|medium|low",
     "reason": "brief explanation of why this classification"
 }`, question, defaultProvider, defaultProvider)
@@ -470,6 +500,9 @@ func NeedsLLMClassification(ctx ServiceContext) bool {
 	if ctx.Hetzner {
 		count++
 	}
+	if ctx.Vercel {
+		count++
+	}
 	if ctx.IAM {
 		count++
 	}
@@ -479,8 +512,9 @@ func NeedsLLMClassification(ctx ServiceContext) bool {
 	// 2. Cloudflare was inferred (verify it's actually Cloudflare-related)
 	// 3. Digital Ocean was inferred (verify it's actually DO-related)
 	// 4. Hetzner was inferred (verify it's actually Hetzner-related)
-	// 5. IAM was inferred (verify it's actually IAM-related for disambiguation)
-	return count > 1 || ctx.Cloudflare || ctx.DigitalOcean || ctx.Hetzner || ctx.IAM
+	// 5. Vercel was inferred (verify it's actually Vercel-related)
+	// 6. IAM was inferred (verify it's actually IAM-related for disambiguation)
+	return count > 1 || ctx.Cloudflare || ctx.DigitalOcean || ctx.Hetzner || ctx.Vercel || ctx.IAM
 }
 
 // ApplyLLMClassification updates the ServiceContext based on LLM classification result
@@ -494,6 +528,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.AWS = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Vercel = false
 		ctx.IAM = false
 	case "k8s":
 		ctx.K8s = true
@@ -502,6 +537,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Azure = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Vercel = false
 		ctx.IAM = false
 	case "gcp":
 		ctx.GCP = true
@@ -510,6 +546,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Azure = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Vercel = false
 		ctx.IAM = false
 	case "azure":
 		ctx.Azure = true
@@ -519,6 +556,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.AWS = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Vercel = false
 		ctx.IAM = false
 	case "digitalocean":
 		ctx.DigitalOcean = true
@@ -528,6 +566,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.K8s = false
 		ctx.Azure = false
 		ctx.Hetzner = false
+		ctx.Vercel = false
 		ctx.IAM = false
 	case "hetzner":
 		ctx.Hetzner = true
@@ -537,6 +576,17 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.K8s = false
 		ctx.Azure = false
 		ctx.DigitalOcean = false
+		ctx.Vercel = false
+		ctx.IAM = false
+	case "vercel":
+		ctx.Vercel = true
+		ctx.AWS = false
+		ctx.GCP = false
+		ctx.Cloudflare = false
+		ctx.K8s = false
+		ctx.Azure = false
+		ctx.DigitalOcean = false
+		ctx.Hetzner = false
 		ctx.IAM = false
 	case "aws":
 		ctx.AWS = true
@@ -546,6 +596,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Azure = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Vercel = false
 		ctx.IAM = false
 	case "iam":
 		ctx.IAM = true
@@ -556,22 +607,26 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Azure = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Vercel = false
 	case "terraform":
 		ctx.Terraform = true
 		ctx.Cloudflare = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Vercel = false
 	case "github":
 		ctx.GitHub = true
 		ctx.Cloudflare = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Vercel = false
 	default:
 		// "general" - default to the configured infrastructure provider
 		// Only zero cloud provider flags, preserving GitHub/Terraform/K8s context
 		ctx.Cloudflare = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Vercel = false
 		ctx.Azure = false
 		ctx.GCP = false
 		ctx.IAM = false
@@ -586,6 +641,8 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 			ctx.DigitalOcean = true
 		case "hetzner":
 			ctx.Hetzner = true
+		case "vercel":
+			ctx.Vercel = true
 		default:
 			ctx.AWS = true
 			ctx.GitHub = true
@@ -593,9 +650,11 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 	}
 }
 
-// contains checks if s contains substr (case-insensitive)
+// contains checks if s contains substr (case-insensitive). Callers are expected
+// to pass an already-lowercased `s` — keyword-match paths in InferContext
+// lowercase the question once up front — so we only normalize `substr`.
 func contains(s, substr string) bool {
-	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+	return strings.Contains(s, strings.ToLower(substr))
 }
 
 func containsAzureSignal(questionLower string, phraseKeywords []string, tokenKeywords []string) bool {

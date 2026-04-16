@@ -4,10 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
+	"github.com/bgdnvk/clanker/internal/ai"
+	"github.com/bgdnvk/clanker/internal/vercel"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcptransport "github.com/mark3labs/mcp-go/server"
 	"github.com/spf13/cobra"
@@ -26,6 +30,20 @@ type commandArgs struct {
 	BackendURL string   `json:"backendUrl,omitempty"`
 	BackendEnv string   `json:"backendEnv,omitempty"`
 	Debug      *bool    `json:"debug,omitempty"`
+}
+
+type vercelAskArgs struct {
+	Question string `json:"question" jsonschema:"description=Natural language question about Vercel infrastructure,required"`
+	Token    string `json:"token,omitempty" jsonschema:"description=Vercel API token (falls back to config/env)"`
+	TeamID   string `json:"teamId,omitempty" jsonschema:"description=Vercel team ID"`
+	Debug    bool   `json:"debug,omitempty" jsonschema:"description=Enable debug output"`
+}
+
+type vercelListArgs struct {
+	Resource string `json:"resource" jsonschema:"description=Resource type: projects|deployments|domains|env|teams|aliases|kv|blob|postgres|edge-configs,required"`
+	Token    string `json:"token,omitempty" jsonschema:"description=Vercel API token (falls back to config/env)"`
+	TeamID   string `json:"teamId,omitempty" jsonschema:"description=Vercel team ID"`
+	Project  string `json:"project,omitempty" jsonschema:"description=Project ID for scoped resources (deployments and env)"`
 }
 
 var mcpCmd = &cobra.Command{
@@ -98,7 +116,161 @@ func newClankerMCPServer() *mcptransport.MCPServer {
 		}),
 	)
 
+	server.AddTool(
+		mcp.NewTool(
+			"clanker_vercel_ask",
+			mcp.WithDescription("Ask a natural language question about your Vercel infrastructure. Gathers Vercel context (projects, deployments, domains) and uses the configured AI provider to answer."),
+			mcp.WithInputSchema[vercelAskArgs](),
+		),
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args vercelAskArgs) (*mcp.CallToolResult, error) {
+			return handleMCPVercelAsk(ctx, args)
+		}),
+	)
+
+	server.AddTool(
+		mcp.NewTool(
+			"clanker_vercel_list",
+			mcp.WithDescription("List Vercel resources (projects, deployments, domains, env vars, teams, aliases, kv, blob, postgres, edge-configs). Returns raw JSON from the Vercel API."),
+			mcp.WithInputSchema[vercelListArgs](),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args vercelListArgs) (*mcp.CallToolResult, error) {
+			return handleMCPVercelList(ctx, args)
+		}),
+	)
+
 	return server
+}
+
+// handleMCPVercelAsk resolves Vercel credentials, gathers context, and asks
+// the configured AI provider about the user's Vercel infrastructure.
+func handleMCPVercelAsk(ctx context.Context, args vercelAskArgs) (*mcp.CallToolResult, error) {
+	token := args.Token
+	if token == "" {
+		token = vercel.ResolveAPIToken()
+	}
+	if token == "" {
+		return mcp.NewToolResultError("Vercel token not configured. Set vercel.api_token in ~/.clanker.yaml or export VERCEL_TOKEN"), nil
+	}
+
+	teamID := args.TeamID
+	if teamID == "" {
+		teamID = vercel.ResolveTeamID()
+	}
+
+	client, err := vercel.NewClient(token, teamID, args.Debug)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to create Vercel client: %v", err)), nil
+	}
+
+	vercelContext, _ := client.GetRelevantContext(ctx, args.Question)
+
+	prompt := buildVercelPrompt(args.Question, vercelContext, "")
+
+	provider := viper.GetString("ai.default_provider")
+	if provider == "" {
+		provider = "openai"
+	}
+	apiKey := mcpResolveProviderKey(provider)
+
+	aiClient := ai.NewClient(provider, apiKey, args.Debug, provider)
+
+	response, err := aiClient.AskPrompt(ctx, prompt)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("AI query failed: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(response), nil
+}
+
+// handleMCPVercelList resolves Vercel credentials and lists the requested
+// resource type, returning raw JSON from the Vercel API.
+func handleMCPVercelList(ctx context.Context, args vercelListArgs) (*mcp.CallToolResult, error) {
+	token := args.Token
+	if token == "" {
+		token = vercel.ResolveAPIToken()
+	}
+	if token == "" {
+		return mcp.NewToolResultError("Vercel token not configured. Set vercel.api_token in ~/.clanker.yaml or export VERCEL_TOKEN"), nil
+	}
+
+	teamID := args.TeamID
+	if teamID == "" {
+		teamID = vercel.ResolveTeamID()
+	}
+
+	client, err := vercel.NewClient(token, teamID, false)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to create Vercel client: %v", err)), nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	resource := strings.ToLower(strings.TrimSpace(args.Resource))
+	endpoint := ""
+
+	switch resource {
+	case "projects", "project":
+		endpoint = "/v9/projects?limit=100"
+	case "deployments", "deployment":
+		endpoint = "/v6/deployments?limit=20"
+		if args.Project != "" {
+			endpoint += "&projectId=" + url.QueryEscape(args.Project)
+		}
+	case "domains", "domain":
+		endpoint = "/v5/domains?limit=100"
+	case "env", "envs", "env-vars", "environment":
+		if args.Project == "" {
+			return mcp.NewToolResultError("project is required to list env vars"), nil
+		}
+		endpoint = fmt.Sprintf("/v10/projects/%s/env", url.PathEscape(args.Project))
+	case "teams", "team":
+		endpoint = "/v2/teams?limit=50"
+	case "aliases", "alias":
+		endpoint = "/v4/aliases?limit=50"
+		if args.Project != "" {
+			endpoint += "&projectId=" + url.QueryEscape(args.Project)
+		}
+	case "kv":
+		endpoint = "/v1/storage/stores?storeType=kv"
+	case "blob":
+		endpoint = "/v1/storage/stores?storeType=blob"
+	case "postgres", "pg":
+		endpoint = "/v1/storage/stores?storeType=postgres"
+	case "edge-configs", "edge-config", "edge":
+		endpoint = "/v1/edge-config"
+	default:
+		return mcp.NewToolResultError(fmt.Sprintf("unknown resource type: %s (expected: projects, deployments, domains, env, teams, aliases, kv, blob, postgres, edge-configs)", resource)), nil
+	}
+
+	result, err := client.RunAPIWithContext(ctx, "GET", endpoint, "")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Vercel API error: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(result), nil
+}
+
+// mcpResolveProviderKey resolves the API key for the given AI provider using
+// config and environment variables. Mirrors the resolution logic in ask.go.
+func mcpResolveProviderKey(provider string) string {
+	switch provider {
+	case "bedrock", "claude", "gemini", "gemini-api":
+		return ""
+	case "openai":
+		return resolveOpenAIKey("")
+	case "anthropic":
+		return resolveAnthropicKey("")
+	case "cohere":
+		return resolveCohereKey("")
+	case "deepseek":
+		return resolveDeepSeekKey("")
+	case "minimax":
+		return resolveMiniMaxKey("")
+	default:
+		return viper.GetString(fmt.Sprintf("ai.providers.%s.api_key", provider))
+	}
 }
 
 func runClankerCommand(ctx context.Context, args commandArgs) (map[string]any, error) {
