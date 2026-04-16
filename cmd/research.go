@@ -19,6 +19,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/hetzner"
 	"github.com/bgdnvk/clanker/internal/k8s"
 	tfclient "github.com/bgdnvk/clanker/internal/terraform"
+	"github.com/bgdnvk/clanker/internal/vercel"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -556,6 +557,7 @@ func buildDeepResearchProviderPatchSubagents(question string, plan deepResearchQ
 	appendProvider("hetzner", strings.TrimSpace(hetzner.ResolveAPIToken()) != "")
 	appendProvider("k8s", canUseDeepResearchKubernetes())
 	appendProvider("supabase", hasDeepResearchSupabaseConnection())
+	appendProvider("vercel", hasDeepResearchVercelAccess())
 	appendProvider("terraform", strings.TrimSpace(options.TerraformWorkspace) != "" || estate.TerraformOK)
 
 	return subagents
@@ -956,6 +958,8 @@ func canRunDeepResearchProviderDrilldown(provider string, options deepResearchRu
 		return canUseDeepResearchKubernetes()
 	case "supabase":
 		return hasDeepResearchSupabaseConnection()
+	case "vercel":
+		return hasDeepResearchVercelAccess()
 	case "terraform":
 		return strings.TrimSpace(options.TerraformWorkspace) != "" || strings.TrimSpace(viper.GetString("terraform.workspace")) != ""
 	default:
@@ -1003,6 +1007,10 @@ func hasDeepResearchSupabaseConnection() bool {
 		}
 	}
 	return false
+}
+
+func hasDeepResearchVercelAccess() bool {
+	return strings.TrimSpace(vercel.ResolveAPIToken()) != ""
 }
 
 func resolveDeepResearchSupabaseConnectionName() string {
@@ -1332,6 +1340,27 @@ func collectDeepResearchProviderContext(ctx context.Context, provider string, pr
 		return collectDeepResearchKubernetesContext(ctx, options.Debug)
 	case "supabase":
 		return collectDeepResearchSupabaseContext(ctx, prompt)
+	case "vercel":
+		apiToken := strings.TrimSpace(vercel.ResolveAPIToken())
+		if apiToken == "" {
+			return deepResearchProviderContext{}, fmt.Errorf("no API token is configured")
+		}
+		teamID := strings.TrimSpace(vercel.ResolveTeamID())
+		label := "personal account"
+		if teamID != "" {
+			label = "team " + teamID
+		}
+		timeoutCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+		defer cancel()
+		client, err := vercel.NewClient(apiToken, teamID, options.Debug)
+		if err != nil {
+			return deepResearchProviderContext{}, err
+		}
+		info, err := client.GetRelevantContext(timeoutCtx, prompt)
+		if err != nil {
+			return deepResearchProviderContext{}, err
+		}
+		return deepResearchProviderContext{Provider: provider, Summary: fmt.Sprintf("Collected Vercel live context for %s.", label), Details: summarizeDeepResearchLines(info, 4), Blob: info}, nil
 	case "terraform":
 		workspace := strings.TrimSpace(options.TerraformWorkspace)
 		if workspace == "" {
@@ -1433,6 +1462,8 @@ func deepResearchProviderPromptTerms(provider string, plan deepResearchQuestionP
 		terms = append(terms, "server", "load balancer", "volume", "network", "firewall", "floating ip", "primary ip")
 	case "supabase":
 		terms = append(terms, "postgres", "database", "schemas", "tables", "auth", "storage", "realtime", "connections")
+	case "vercel":
+		terms = append(terms, "projects", "deployments", "domains", "preview", "production", "build", "edge", "functions", "analytics", "usage", "vercel.app")
 	case "terraform":
 		terms = append(terms, "terraform", "state", "outputs", "plan", "diff", "resource", "drift")
 	}
@@ -1524,6 +1555,8 @@ func deepResearchProviderDisplayName(provider string) string {
 		return "Hetzner"
 	case "supabase":
 		return "Supabase"
+	case "vercel":
+		return "Vercel"
 	case "terraform":
 		return "Terraform"
 	default:
@@ -2380,6 +2413,9 @@ func deepResearchProvidersMentionedInQuestion(questionLower string) []string {
 	if deepResearchQuestionContains(questionLower, "supabase") {
 		providers = append(providers, "supabase")
 	}
+	if deepResearchQuestionContains(questionLower, "vercel", "vercel.app") {
+		providers = append(providers, "vercel")
+	}
 	if deepResearchQuestionContains(questionLower, "terraform") {
 		providers = append(providers, "terraform")
 	}
@@ -2627,6 +2663,8 @@ func inferDeepResearchProvider(resource deepResearchResource) string {
 		return "hetzner"
 	case strings.Contains(typeLower, "supabase"):
 		return "supabase"
+	case strings.Contains(typeLower, "vercel"):
+		return "vercel"
 	default:
 		return "aws"
 	}
@@ -3157,6 +3195,18 @@ func deepResearchProviderSectionHints(provider string, finding deepResearchFindi
 		}
 	case "supabase":
 		hints = append(hints, "configured database connections", "focused database", "top schemas", "largest tables", "objects")
+	case "vercel":
+		switch {
+		case strings.Contains(lowerType, "deployment"):
+			hints = append(hints, "recent deployments", "preview deployments", "production deployments")
+		case strings.Contains(lowerType, "domain"):
+			hints = append(hints, "domains", "aliases", "dns")
+		default:
+			hints = append(hints, "projects", "deployments", "domains", "usage")
+		}
+		if plan.WantsLogs || strings.EqualFold(finding.Category, "resilience") {
+			hints = append(hints, "recent build failures", "deployment status")
+		}
 	case "terraform":
 		hints = append(hints, "terraform workspace info", "terraform state", "terraform outputs")
 		if plan.WantsTerraform || strings.EqualFold(finding.Category, "misconfiguration") || strings.EqualFold(finding.Category, "hygiene") {
@@ -3306,6 +3356,15 @@ func deepResearchProviderServiceLabel(provider string, finding deepResearchFindi
 		}
 	case "supabase":
 		return "Supabase database"
+	case "vercel":
+		switch {
+		case strings.Contains(lowerType, "deployment"):
+			return "Vercel deployment"
+		case strings.Contains(lowerType, "domain"):
+			return "Vercel domain"
+		default:
+			return "Vercel project"
+		}
 	case "terraform":
 		return "Terraform managed resource"
 	default:
