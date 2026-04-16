@@ -304,11 +304,10 @@ Examples:
 			}
 
 			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "vercel") {
-				vcToken := vercel.ResolveAPIToken()
-				if vcToken == "" {
-					return fmt.Errorf("vercel api_token is required (set vercel.api_token, VERCEL_TOKEN, or --api-token)")
+				vcToken, vcTeamID, vcErr := resolveVercelToken(ctx, debug)
+				if vcErr != nil {
+					return vcErr
 				}
-				vcTeamID := vercel.ResolveTeamID()
 				return maker.ExecuteVercelPlan(ctx, makerPlan, maker.ExecOptions{
 					VercelAPIToken: vcToken,
 					VercelTeamID:   vcTeamID,
@@ -713,23 +712,27 @@ Format as a professional compliance table suitable for government security docum
 			includeTerraform = true
 		}
 
+		// Provider-specific Q&A paths.
+		// NOTE: makerMode returns above, so these only fire for
+		// plain --<provider> queries (not --maker --<provider>).
+
 		// Handle explicit --cloudflare flag
-		if includeCloudflare {
+		if includeCloudflare && !makerMode {
 			return handleCloudflareQuery(context.Background(), question, debug)
 		}
 
 		// Handle explicit --digitalocean flag
-		if includeDigitalOcean {
+		if includeDigitalOcean && !makerMode {
 			return handleDigitalOceanQuery(context.Background(), question, debug)
 		}
 
 		// Handle explicit --hetzner flag
-		if includeHetzner {
+		if includeHetzner && !makerMode {
 			return handleHetznerQuery(context.Background(), question, debug)
 		}
 
 		// Handle explicit --vercel flag
-		if includeVercel {
+		if includeVercel && !makerMode {
 			return handleVercelQuery(context.Background(), question, debug)
 		}
 
@@ -2149,6 +2152,33 @@ func resolveHetznerToken(ctx context.Context, debug bool) (string, error) {
 	return "", fmt.Errorf("hetzner api_token is required (set hetzner.api_token or HCLOUD_TOKEN)")
 }
 
+// resolveVercelToken resolves the Vercel API token from config, env, or the
+// backend credential store (same fallback chain as resolveHetznerToken).
+// The returned teamID may be empty for personal accounts.
+func resolveVercelToken(ctx context.Context, debug bool) (apiToken string, teamID string, err error) {
+	apiToken = vercel.ResolveAPIToken()
+	if apiToken != "" {
+		return apiToken, vercel.ResolveTeamID(), nil
+	}
+
+	backendAPIKey := backend.ResolveAPIKey("")
+	if backendAPIKey != "" {
+		backendClient := backend.NewClient(backendAPIKey, debug)
+		creds, backendErr := backendClient.GetVercelCredentials(ctx)
+		if backendErr == nil && strings.TrimSpace(creds.APIToken) != "" {
+			if debug {
+				fmt.Println("[backend] Using Vercel credentials from backend")
+			}
+			return strings.TrimSpace(creds.APIToken), strings.TrimSpace(creds.TeamID), nil
+		}
+		if debug {
+			fmt.Printf("[backend] No Vercel credentials available (%v), falling back to local\n", backendErr)
+		}
+	}
+
+	return "", "", fmt.Errorf("Vercel token not configured. Set vercel.api_token in ~/.clanker.yaml or export VERCEL_TOKEN")
+}
+
 // handleHetznerQuery delegates a Hetzner Cloud query to the Hetzner client
 func handleHetznerQuery(ctx context.Context, question string, debug bool) error {
 	if debug {
@@ -2223,11 +2253,10 @@ func handleVercelQuery(ctx context.Context, question string, debug bool) error {
 		fmt.Println("Delegating query to Vercel agent...")
 	}
 
-	apiToken := vercel.ResolveAPIToken()
-	if apiToken == "" {
-		return fmt.Errorf("Vercel token not configured. Set vercel.api_token in ~/.clanker.yaml or export VERCEL_TOKEN")
+	apiToken, teamID, err := resolveVercelToken(ctx, debug)
+	if err != nil {
+		return err
 	}
-	teamID := vercel.ResolveTeamID()
 
 	client, err := vercel.NewClient(apiToken, teamID, debug)
 	if err != nil {
@@ -2235,8 +2264,8 @@ func handleVercelQuery(ctx context.Context, question string, debug bool) error {
 	}
 
 	vercelContext, err := client.GetRelevantContext(ctx, question)
-	if err != nil && debug {
-		fmt.Printf("[debug] failed to get Vercel context: %v\n", err)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[vercel] warning: failed to fetch context: %v\n", err)
 	}
 
 	// Resolve AI provider + key using the same pattern as other handlers.
