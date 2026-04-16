@@ -446,7 +446,7 @@ type storageStore struct {
 }
 
 func listStorage(ctx context.Context, client *Client, storeType string) error {
-	endpoint := fmt.Sprintf("/v1/storage/stores?storeType=%s", storeType)
+	endpoint := fmt.Sprintf("/v1/storage/stores?storeType=%s", url.QueryEscape(storeType))
 	out, err := client.RunAPIWithContext(ctx, "GET", endpoint, "")
 	if err != nil {
 		return err

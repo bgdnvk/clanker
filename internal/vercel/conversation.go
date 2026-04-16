@@ -107,7 +107,10 @@ func (h *ConversationHistory) Save() error {
 		return fmt.Errorf("failed to marshal conversation history: %w", err)
 	}
 
-	filename := h.filePath()
+	filename, err := h.filePath()
+	if err != nil {
+		return err
+	}
 
 	// Atomic write: write to temp file first, then rename.
 	tmp := filename + ".tmp"
@@ -128,7 +131,11 @@ func (h *ConversationHistory) Load() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	data, err := os.ReadFile(h.filePath())
+	path, err := h.filePath()
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil // No history yet — that is fine.
@@ -153,9 +160,12 @@ func (h *ConversationHistory) Load() error {
 }
 
 // filePath returns the on-disk path for this history file.
-func (h *ConversationHistory) filePath() string {
-	dir, _ := conversationDir()
-	return filepath.Join(dir, fmt.Sprintf("vercel_%s.json", sanitizeID(h.TeamID)))
+func (h *ConversationHistory) filePath() (string, error) {
+	dir, err := conversationDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, fmt.Sprintf("vercel_%s.json", sanitizeID(h.TeamID))), nil
 }
 
 // conversationDir returns ~/.clanker/conversations.
