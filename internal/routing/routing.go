@@ -650,9 +650,11 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 	}
 }
 
-// contains checks if s contains substr (case-insensitive)
+// contains checks if s contains substr (case-insensitive). Callers are expected
+// to pass an already-lowercased `s` — keyword-match paths in InferContext
+// lowercase the question once up front — so we only normalize `substr`.
 func contains(s, substr string) bool {
-	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+	return strings.Contains(s, strings.ToLower(substr))
 }
 
 func containsAzureSignal(questionLower string, phraseKeywords []string, tokenKeywords []string) bool {

@@ -8,8 +8,8 @@ type Project struct {
 	Name        string `json:"name"`
 	AccountID   string `json:"accountId"`
 	Framework   string `json:"framework,omitempty"`
-	CreatedAt   int64  `json:"createdAt,omitempty"`
-	UpdatedAt   int64  `json:"updatedAt,omitempty"`
+	CreatedAt   int64  `json:"createdAt,omitempty"` // milliseconds since Unix epoch
+	UpdatedAt   int64  `json:"updatedAt,omitempty"` // milliseconds since Unix epoch
 	NodeVersion string `json:"nodeVersion,omitempty"`
 	Link        *struct {
 		Type             string `json:"type"`
@@ -35,8 +35,8 @@ type Deployment struct {
 	Target     string `json:"target,omitempty"`     // "production" | "" (preview)
 	Type       string `json:"type,omitempty"`       // LAMBDAS
 	ProjectID  string `json:"projectId,omitempty"`
-	Created    int64  `json:"created,omitempty"`
-	Ready      int64  `json:"ready,omitempty"`
+	Created    int64  `json:"created,omitempty"` // milliseconds since Unix epoch
+	Ready      int64  `json:"ready,omitempty"`   // milliseconds since Unix epoch
 	Creator    *struct {
 		UID      string `json:"uid"`
 		Username string `json:"username"`
@@ -49,8 +49,8 @@ type Domain struct {
 	Name        string   `json:"name"`
 	ProjectID   string   `json:"projectId,omitempty"`
 	Verified    bool     `json:"verified"`
-	CreatedAt   int64    `json:"createdAt,omitempty"`
-	UpdatedAt   int64    `json:"updatedAt,omitempty"`
+	CreatedAt   int64    `json:"createdAt,omitempty"` // milliseconds since Unix epoch
+	UpdatedAt   int64    `json:"updatedAt,omitempty"` // milliseconds since Unix epoch
 	Nameservers []string `json:"nameservers,omitempty"`
 }
 
@@ -71,6 +71,19 @@ type Team struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	Slug string `json:"slug"`
+}
+
+// Alias represents a Vercel deployment alias (/v4/aliases response).
+type Alias struct {
+	UID          string `json:"uid"`
+	Alias        string `json:"alias"`
+	ProjectID    string `json:"projectId,omitempty"`
+	DeploymentID string `json:"deploymentId,omitempty"`
+	Created      int64  `json:"created,omitempty"`
+	Deployment   *struct {
+		ID  string `json:"id,omitempty"`
+		URL string `json:"url,omitempty"`
+	} `json:"deployment,omitempty"`
 }
 
 // User represents the authenticated Vercel user.

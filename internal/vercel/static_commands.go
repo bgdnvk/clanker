@@ -23,6 +23,7 @@ func CreateVercelCommands() *cobra.Command {
 
 	vercelCmd.PersistentFlags().String("api-token", "", "Vercel API token (overrides VERCEL_TOKEN)")
 	vercelCmd.PersistentFlags().String("team-id", "", "Vercel team ID (overrides VERCEL_TEAM_ID)")
+	vercelCmd.PersistentFlags().Bool("raw", false, "Output raw JSON instead of formatted")
 
 	vercelCmd.AddCommand(createVercelListCmd())
 	vercelCmd.AddCommand(createVercelGetCmd())
@@ -192,7 +193,22 @@ func newClientFromFlags(cmd *cobra.Command) (*Client, error) {
 	}
 
 	debug := viper.GetBool("debug")
-	return NewClient(apiToken, teamID, debug)
+	client, err := NewClient(apiToken, teamID, debug)
+	if err != nil {
+		return nil, err
+	}
+	if raw, _ := cmd.Flags().GetBool("raw"); raw {
+		client.raw = true
+	}
+	return client, nil
+}
+
+// rawOutput reports whether the user asked to print unformatted JSON.
+func rawOutput(c *Client) bool {
+	if c == nil {
+		return false
+	}
+	return c.raw
 }
 
 // --- Listers ---
@@ -347,7 +363,36 @@ func listAliases(ctx context.Context, client *Client, projectID string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(out)
+	if rawOutput(client) {
+		fmt.Println(out)
+		return nil
+	}
+	var resp struct {
+		Aliases []Alias `json:"aliases"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return fmt.Errorf("failed to parse aliases response: %w", err)
+	}
+	if len(resp.Aliases) == 0 {
+		fmt.Println("No aliases found.")
+		return nil
+	}
+	fmt.Printf("Vercel Aliases (%d):\n\n", len(resp.Aliases))
+	for _, a := range resp.Aliases {
+		fmt.Printf("  %s\n", a.Alias)
+		if a.UID != "" {
+			fmt.Printf("    UID: %s\n", a.UID)
+		}
+		if a.ProjectID != "" {
+			fmt.Printf("    Project: %s\n", a.ProjectID)
+		}
+		if a.Deployment != nil && a.Deployment.URL != "" {
+			fmt.Printf("    Deployment: https://%s\n", a.Deployment.URL)
+		} else if a.DeploymentID != "" {
+			fmt.Printf("    Deployment: %s\n", a.DeploymentID)
+		}
+		fmt.Println()
+	}
 	return nil
 }
 
@@ -364,13 +409,49 @@ func listPostgres(ctx context.Context, client *Client) error {
 	return listStorage(ctx, client, "postgres")
 }
 
+// storageStore is the shape returned by Vercel's unified storage list endpoint.
+type storageStore struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Type      string `json:"type,omitempty"`
+	Status    string `json:"status,omitempty"`
+	CreatedAt int64  `json:"createdAt,omitempty"`
+}
+
 func listStorage(ctx context.Context, client *Client, storeType string) error {
 	endpoint := fmt.Sprintf("/v1/storage/stores?storeType=%s", storeType)
 	out, err := client.RunAPIWithContext(ctx, "GET", endpoint, "")
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Vercel %s stores:\n%s\n", storeType, out)
+	if rawOutput(client) {
+		fmt.Println(out)
+		return nil
+	}
+	var resp struct {
+		Stores []storageStore `json:"stores"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return fmt.Errorf("failed to parse %s stores response: %w", storeType, err)
+	}
+	if len(resp.Stores) == 0 {
+		fmt.Printf("No Vercel %s stores found.\n", storeType)
+		return nil
+	}
+	fmt.Printf("Vercel %s stores (%d):\n\n", storeType, len(resp.Stores))
+	for _, s := range resp.Stores {
+		fmt.Printf("  %s\n", s.Name)
+		if s.ID != "" {
+			fmt.Printf("    ID: %s\n", s.ID)
+		}
+		if s.Status != "" {
+			fmt.Printf("    Status: %s\n", s.Status)
+		}
+		if s.Type != "" {
+			fmt.Printf("    Type: %s\n", s.Type)
+		}
+		fmt.Println()
+	}
 	return nil
 }
 
@@ -379,8 +460,40 @@ func listEdgeConfigs(ctx context.Context, client *Client) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("Vercel Edge Configs:")
-	fmt.Println(out)
+	if rawOutput(client) {
+		fmt.Println(out)
+		return nil
+	}
+	// Vercel returns either a raw array or `{"edgeConfigs":[...]}` depending on the account shape.
+	var configs []EdgeConfig
+	if err := json.Unmarshal([]byte(out), &configs); err != nil {
+		var envelope struct {
+			EdgeConfigs []EdgeConfig `json:"edgeConfigs"`
+		}
+		if err2 := json.Unmarshal([]byte(out), &envelope); err2 != nil {
+			return fmt.Errorf("failed to parse edge configs response: %w", err)
+		}
+		configs = envelope.EdgeConfigs
+	}
+	if len(configs) == 0 {
+		fmt.Println("No Vercel Edge Configs found.")
+		return nil
+	}
+	fmt.Printf("Vercel Edge Configs (%d):\n\n", len(configs))
+	for _, cfg := range configs {
+		label := cfg.Slug
+		if label == "" {
+			label = cfg.ID
+		}
+		fmt.Printf("  %s\n", label)
+		if cfg.ID != "" {
+			fmt.Printf("    ID: %s\n", cfg.ID)
+		}
+		if cfg.Slug != "" && cfg.Slug != label {
+			fmt.Printf("    Slug: %s\n", cfg.Slug)
+		}
+		fmt.Println()
+	}
 	return nil
 }
 
@@ -391,7 +504,40 @@ func getProject(ctx context.Context, client *Client, idOrName string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(out)
+	if rawOutput(client) {
+		fmt.Println(out)
+		return nil
+	}
+	var p Project
+	if err := json.Unmarshal([]byte(out), &p); err != nil {
+		return fmt.Errorf("failed to parse project response: %w", err)
+	}
+	fmt.Printf("Vercel Project: %s\n\n", p.Name)
+	if p.ID != "" {
+		fmt.Printf("  ID: %s\n", p.ID)
+	}
+	if p.Framework != "" {
+		fmt.Printf("  Framework: %s\n", p.Framework)
+	}
+	if p.NodeVersion != "" {
+		fmt.Printf("  Node: %s\n", p.NodeVersion)
+	}
+	if p.AccountID != "" {
+		fmt.Printf("  Account: %s\n", p.AccountID)
+	}
+	if p.Link != nil && p.Link.Repo != "" {
+		fmt.Printf("  Repo: %s (%s)\n", p.Link.Repo, p.Link.Type)
+		if p.Link.ProductionBranch != "" {
+			fmt.Printf("  Production branch: %s\n", p.Link.ProductionBranch)
+		}
+	}
+	if len(p.LatestDeployments) > 0 {
+		latest := p.LatestDeployments[0]
+		fmt.Printf("  Latest deployment: %s (%s)\n", latest.UID, latest.State)
+		if latest.URL != "" {
+			fmt.Printf("    URL: https://%s\n", latest.URL)
+		}
+	}
 	return nil
 }
 
@@ -400,7 +546,39 @@ func getDeployment(ctx context.Context, client *Client, id string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(out)
+	if rawOutput(client) {
+		fmt.Println(out)
+		return nil
+	}
+	var d Deployment
+	if err := json.Unmarshal([]byte(out), &d); err != nil {
+		return fmt.Errorf("failed to parse deployment response: %w", err)
+	}
+	state := d.State
+	if state == "" {
+		state = d.ReadyState
+	}
+	target := d.Target
+	if target == "" {
+		target = "preview"
+	}
+	name := d.Name
+	if name == "" {
+		name = d.UID
+	}
+	fmt.Printf("Vercel Deployment: %s\n\n", name)
+	fmt.Printf("  UID: %s\n", d.UID)
+	fmt.Printf("  State: %s\n", state)
+	fmt.Printf("  Target: %s\n", target)
+	if d.URL != "" {
+		fmt.Printf("  URL: https://%s\n", d.URL)
+	}
+	if d.ProjectID != "" {
+		fmt.Printf("  Project: %s\n", d.ProjectID)
+	}
+	if d.Creator != nil && d.Creator.Username != "" {
+		fmt.Printf("  Creator: %s\n", d.Creator.Username)
+	}
 	return nil
 }
 
@@ -409,7 +587,52 @@ func getDeploymentEventsSnapshot(ctx context.Context, client *Client, id string)
 	if err != nil {
 		return err
 	}
-	fmt.Println(out)
+	if rawOutput(client) {
+		fmt.Println(out)
+		return nil
+	}
+	// Events come back either as a bare array or an envelope; handle both.
+	type eventPayload struct {
+		Text string `json:"text,omitempty"`
+		Info struct {
+			Name string `json:"name,omitempty"`
+		} `json:"info,omitempty"`
+	}
+	type event struct {
+		Type    string       `json:"type"`
+		Created int64        `json:"created,omitempty"`
+		Payload eventPayload `json:"payload,omitempty"`
+	}
+	var events []event
+	if err := json.Unmarshal([]byte(out), &events); err != nil {
+		var envelope struct {
+			Events []event `json:"events"`
+		}
+		if err2 := json.Unmarshal([]byte(out), &envelope); err2 != nil {
+			return fmt.Errorf("failed to parse events response: %w", err)
+		}
+		events = envelope.Events
+	}
+	if len(events) == 0 {
+		fmt.Println("No deployment events found.")
+		return nil
+	}
+	fmt.Printf("Deployment events (%d):\n\n", len(events))
+	for _, e := range events {
+		ts := ""
+		if e.Created > 0 {
+			ts = time.UnixMilli(e.Created).UTC().Format(time.RFC3339)
+		}
+		text := strings.TrimSpace(e.Payload.Text)
+		if text == "" {
+			text = e.Payload.Info.Name
+		}
+		if ts != "" {
+			fmt.Printf("  [%s] %-10s %s\n", ts, e.Type, text)
+		} else {
+			fmt.Printf("  %-10s %s\n", e.Type, text)
+		}
+	}
 	return nil
 }
 
