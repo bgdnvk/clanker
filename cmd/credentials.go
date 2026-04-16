@@ -12,6 +12,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/backend"
 	"github.com/bgdnvk/clanker/internal/cloudflare"
 	"github.com/bgdnvk/clanker/internal/hetzner"
+	"github.com/bgdnvk/clanker/internal/vercel"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -26,6 +27,7 @@ your API key via --api-key flag or CLANKER_BACKEND_API_KEY environment variable.
 
 Examples:
   clanker credentials store aws --profile myaws
+  clanker credentials store vercel
   clanker credentials list
   clanker credentials test aws
   clanker credentials delete aws`,
@@ -36,7 +38,7 @@ var credentialsStoreCmd = &cobra.Command{
 	Short: "Store credentials in the backend",
 	Long: `Upload local credentials to the clanker backend.
 
-Supported providers: aws, gcp, hetzner, cloudflare, k8s
+Supported providers: aws, gcp, hetzner, cloudflare, vercel, k8s
 
 AWS:
   Exports credentials from local AWS CLI profile using 'aws configure export-credentials'.
@@ -50,6 +52,11 @@ Hetzner:
 Cloudflare:
   Uses api_token and account_id from config or environment variables.
 
+Vercel:
+  Uses api_token (vercel.api_token / VERCEL_TOKEN) and optional team_id
+  (vercel.team_id / VERCEL_TEAM_ID). Override either with --api-token /
+  --team-id flags.
+
 K8s:
   Uploads kubeconfig file content (base64 encoded).
 
@@ -58,6 +65,8 @@ Examples:
   clanker credentials store gcp --project myproject
   clanker credentials store hetzner
   clanker credentials store cloudflare
+  clanker credentials store vercel
+  clanker credentials store vercel --api-token ${VERCEL_TOKEN} --team-id team_abc
   clanker credentials store k8s --kubeconfig ~/.kube/config`,
 	Args: cobra.ExactArgs(1),
 	RunE: runCredentialsStore,
@@ -82,6 +91,7 @@ Examples:
   clanker credentials test gcp
   clanker credentials test hetzner
   clanker credentials test cloudflare
+  clanker credentials test vercel
   clanker credentials test k8s
   clanker credentials test`,
 	Args: cobra.MaximumNArgs(1),
@@ -96,7 +106,8 @@ var credentialsDeleteCmd = &cobra.Command{
 Examples:
   clanker credentials delete aws
   clanker credentials delete gcp
-  clanker credentials delete hetzner`,
+  clanker credentials delete hetzner
+  clanker credentials delete vercel`,
 	Args: cobra.ExactArgs(1),
 	RunE: runCredentialsDelete,
 }
@@ -114,6 +125,8 @@ func init() {
 	credentialsStoreCmd.Flags().String("service-account", "", "GCP service account JSON file path")
 	credentialsStoreCmd.Flags().String("kubeconfig", "", "Path to kubeconfig file (default: ~/.kube/config)")
 	credentialsStoreCmd.Flags().String("context", "", "Kubernetes context name to use")
+	credentialsStoreCmd.Flags().String("api-token", "", "Vercel API token (overrides vercel.api_token / VERCEL_TOKEN)")
+	credentialsStoreCmd.Flags().String("team-id", "", "Vercel team ID (overrides vercel.team_id / VERCEL_TEAM_ID)")
 }
 
 func requireAPIKey(cmd *cobra.Command) (string, error) {
@@ -149,10 +162,12 @@ func runCredentialsStore(cmd *cobra.Command, args []string) error {
 		return storeHetznerCredentials(ctx, cmd, client)
 	case "cloudflare", "cf":
 		return storeCloudflareCredentials(ctx, cmd, client)
+	case "vercel":
+		return storeVercelCredentials(ctx, cmd, client)
 	case "k8s", "kubernetes":
 		return storeKubernetesCredentials(ctx, cmd, client)
 	default:
-		return fmt.Errorf("unsupported provider: %s (supported: aws, gcp, hetzner, cloudflare, k8s)", provider)
+		return fmt.Errorf("unsupported provider: %s (supported: aws, gcp, hetzner, cloudflare, vercel, k8s)", provider)
 	}
 }
 
@@ -302,6 +317,36 @@ func storeCloudflareCredentials(ctx context.Context, cmd *cobra.Command, client 
 	return nil
 }
 
+func storeVercelCredentials(ctx context.Context, cmd *cobra.Command, client *backend.Client) error {
+	apiToken, _ := cmd.Flags().GetString("api-token")
+	if strings.TrimSpace(apiToken) == "" {
+		apiToken = vercel.ResolveAPIToken()
+	}
+	if strings.TrimSpace(apiToken) == "" {
+		return fmt.Errorf("Vercel API token required: use --api-token flag, set vercel.api_token in config, or export VERCEL_TOKEN")
+	}
+
+	teamID, _ := cmd.Flags().GetString("team-id")
+	if strings.TrimSpace(teamID) == "" {
+		teamID = vercel.ResolveTeamID()
+	}
+
+	creds := &backend.VercelCredentials{
+		APIToken: apiToken,
+		TeamID:   teamID,
+	}
+
+	if err := client.StoreVercelCredentials(ctx, creds); err != nil {
+		return fmt.Errorf("failed to store Vercel credentials: %w", err)
+	}
+
+	fmt.Println("Vercel credentials stored successfully")
+	if teamID != "" {
+		fmt.Printf("Team ID: %s\n", teamID)
+	}
+	return nil
+}
+
 func storeKubernetesCredentials(ctx context.Context, cmd *cobra.Command, client *backend.Client) error {
 	kubeconfigPath, _ := cmd.Flags().GetString("kubeconfig")
 	contextName, _ := cmd.Flags().GetString("context")
@@ -366,6 +411,7 @@ func runCredentialsList(cmd *cobra.Command, args []string) error {
 		fmt.Println("  clanker credentials store gcp --project <project>")
 		fmt.Println("  clanker credentials store hetzner")
 		fmt.Println("  clanker credentials store cloudflare")
+		fmt.Println("  clanker credentials store vercel")
 		fmt.Println("  clanker credentials store k8s")
 		return nil
 	}
@@ -442,6 +488,8 @@ func testCredential(ctx context.Context, client *backend.Client, provider backen
 		return testHetznerCredentials(ctx, client, debug)
 	case backend.ProviderCloudflare:
 		return testCloudflareCredentials(ctx, client, debug)
+	case backend.ProviderVercel:
+		return testVercelCredentials(ctx, client, debug)
 	case backend.ProviderKubernetes:
 		return testKubernetesCredentials(ctx, client, debug)
 	default:
@@ -628,6 +676,76 @@ func testCloudflareCredentials(ctx context.Context, client *backend.Client, debu
 	return nil
 }
 
+func testVercelCredentials(ctx context.Context, client *backend.Client, debug bool) error {
+	creds, err := client.GetVercelCredentials(ctx)
+	if err != nil {
+		fmt.Printf("  FAILED: %v\n", err)
+		return err
+	}
+
+	if creds.APIToken == "" {
+		fmt.Println("  FAILED: no API token stored")
+		return fmt.Errorf("no Vercel API token")
+	}
+
+	// Verify the token by fetching the authenticated user.
+	endpoint := "https://api.vercel.com/v2/user"
+	if creds.TeamID != "" {
+		endpoint += "?teamId=" + creds.TeamID
+	}
+
+	cmd := exec.CommandContext(ctx, "curl", "-s", "-o", "/dev/stdout", "-w", "\n%{http_code}",
+		endpoint,
+		"-H", fmt.Sprintf("Authorization: Bearer %s", creds.APIToken),
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Printf("  FAILED: %v\n", err)
+		return err
+	}
+
+	// Split body from the trailing HTTP status line curl appended via -w.
+	raw := strings.TrimSpace(string(output))
+	lastNL := strings.LastIndex(raw, "\n")
+	var body, status string
+	if lastNL < 0 {
+		status = raw
+	} else {
+		body = raw[:lastNL]
+		status = strings.TrimSpace(raw[lastNL+1:])
+	}
+
+	if status != "200" {
+		if debug {
+			fmt.Printf("  Body: %s\n", body)
+		}
+		fmt.Printf("  FAILED: HTTP %s\n", status)
+		return fmt.Errorf("Vercel credential test failed (HTTP %s)", status)
+	}
+
+	var response struct {
+		User struct {
+			Username string `json:"username"`
+			Email    string `json:"email"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal([]byte(body), &response); err != nil {
+		fmt.Println("  PASSED: token accepted by Vercel")
+		return nil
+	}
+
+	switch {
+	case response.User.Username != "":
+		fmt.Printf("  PASSED: authenticated as %s\n", response.User.Username)
+	case response.User.Email != "":
+		fmt.Printf("  PASSED: authenticated as %s\n", response.User.Email)
+	default:
+		fmt.Println("  PASSED: token accepted by Vercel")
+	}
+	return nil
+}
+
 func testKubernetesCredentials(ctx context.Context, client *backend.Client, debug bool) error {
 	creds, err := client.GetKubernetesCredentials(ctx)
 	if err != nil {
@@ -708,10 +826,12 @@ func runCredentialsDelete(cmd *cobra.Command, args []string) error {
 		credProvider = backend.ProviderHetzner
 	case "cloudflare", "cf":
 		credProvider = backend.ProviderCloudflare
+	case "vercel":
+		credProvider = backend.ProviderVercel
 	case "k8s", "kubernetes":
 		credProvider = backend.ProviderKubernetes
 	default:
-		return fmt.Errorf("unsupported provider: %s (supported: aws, gcp, hetzner, cloudflare, k8s)", provider)
+		return fmt.Errorf("unsupported provider: %s (supported: aws, gcp, hetzner, cloudflare, vercel, k8s)", provider)
 	}
 
 	client := backend.NewClient(apiKey, debug)

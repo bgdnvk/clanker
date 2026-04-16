@@ -423,6 +423,59 @@ func (c *Client) StoreHetznerCredentials(ctx context.Context, creds *HetznerCred
 	return nil
 }
 
+// GetVercelCredentials retrieves Vercel credentials from the backend
+func (c *Client) GetVercelCredentials(ctx context.Context) (*VercelCredentials, error) {
+	respBody, err := c.doRequest(ctx, http.MethodGet, "/api/v1/cli/credentials/vercel", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Provider    string            `json:"provider"`
+			Credentials VercelCredentials `json:"credentials"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(respBody, &response); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !response.Success {
+		return nil, fmt.Errorf("failed to get Vercel credentials")
+	}
+
+	return &response.Data.Credentials, nil
+}
+
+// StoreVercelCredentials stores Vercel credentials in the backend
+func (c *Client) StoreVercelCredentials(ctx context.Context, creds *VercelCredentials) error {
+	body := map[string]interface{}{
+		"provider":    "vercel",
+		"credentials": creds,
+	}
+
+	respBody, err := c.doRequest(ctx, http.MethodPut, "/api/v1/secrets/vercel", body)
+	if err != nil {
+		return err
+	}
+
+	var response APIResponse
+	if err := json.Unmarshal(respBody, &response); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !response.Success {
+		if response.Error != "" {
+			return fmt.Errorf("failed to store credentials: %s", response.Error)
+		}
+		return fmt.Errorf("failed to store credentials")
+	}
+
+	return nil
+}
+
 // ListCredentials lists all credentials stored in the backend
 func (c *Client) ListCredentials(ctx context.Context) ([]CredentialEntry, error) {
 	respBody, err := c.doRequest(ctx, http.MethodGet, "/api/v1/cli/credentials", nil)
