@@ -38,6 +38,9 @@ type Command struct {
 	Args     []string          `json:"args"`
 	Reason   string            `json:"reason,omitempty"`
 	Produces map[string]string `json:"produces,omitempty"`
+	// Stdin is optional data piped to the command's standard input.
+	// Used by commands like `vercel env add` that read values from stdin.
+	Stdin string `json:"stdin,omitempty"`
 }
 
 func ParsePlan(raw string) (*Plan, error) {

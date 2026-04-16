@@ -114,9 +114,10 @@ Inspect a deployment:
   "reason": "Show details about a deployment"
 }
 
-Add environment variable:
+Add environment variable (value piped via stdin by the executor):
 {
   "args": ["vercel", "env", "add", "DATABASE_URL", "production"],
+  "stdin": "postgres://user:pass@host/db",
   "reason": "Add DATABASE_URL env var for production target"
 }
 
