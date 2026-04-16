@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -118,7 +119,7 @@ func (c *Client) withTeam(endpoint string) string {
 	if strings.Contains(endpoint, "?") {
 		sep = "&"
 	}
-	return endpoint + sep + "teamId=" + c.teamID
+	return endpoint + sep + "teamId=" + url.QueryEscape(c.teamID)
 }
 
 // RunAPI executes a Vercel REST call with exponential backoff.
@@ -142,6 +143,8 @@ func (c *Client) RunAPIWithContext(ctx context.Context, method, endpoint, body s
 	var lastBody string
 
 	for attempt := 0; attempt < len(backoffs); attempt++ {
+		lastBody = ""
+
 		args := []string{
 			"-s",
 			"-X", method,
@@ -275,7 +278,7 @@ func (c *Client) RunVercelCLIWithStdin(ctx context.Context, stdinData string, ar
 //
 // Vercel API: POST /v10/projects/{projectID}/promote  body: {"id":"<deploymentID>"}
 func (c *Client) PromoteDeployment(ctx context.Context, projectID, deploymentID string) error {
-	endpoint := fmt.Sprintf("/v10/projects/%s/promote", projectID)
+	endpoint := fmt.Sprintf("/v10/projects/%s/promote", url.PathEscape(projectID))
 	body := fmt.Sprintf(`{"id":%q}`, deploymentID)
 	_, err := c.RunAPIWithContext(ctx, "POST", endpoint, body)
 	if err != nil {
@@ -287,7 +290,7 @@ func (c *Client) PromoteDeployment(ctx context.Context, projectID, deploymentID 
 // CancelDeployment cancels an in-progress deployment using the Vercel REST API.
 // Returns the raw API response so the caller can decide how to present it.
 func (c *Client) CancelDeployment(ctx context.Context, deploymentID string) (string, error) {
-	endpoint := fmt.Sprintf("/v12/deployments/%s/cancel", deploymentID)
+	endpoint := fmt.Sprintf("/v12/deployments/%s/cancel", url.PathEscape(deploymentID))
 	result, err := c.RunAPIWithContext(ctx, "PATCH", endpoint, "")
 	if err != nil {
 		return "", fmt.Errorf("cancel deployment %s: %w", deploymentID, err)
@@ -316,7 +319,7 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 	if c.teamID != "" {
 		sections = append(sections, section{
 			name:     "Usage",
-			endpoint: fmt.Sprintf("/v1/teams/%s/analytics/usage?period=30d", c.teamID),
+			endpoint: fmt.Sprintf("/v1/teams/%s/analytics/usage?period=30d", url.PathEscape(c.teamID)),
 			keys:     []string{"usage", "bandwidth", "cost", "invocation", "function", "edge", "analytics", "speed"},
 		})
 	}

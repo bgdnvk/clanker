@@ -26,13 +26,13 @@ func ExecuteVercelPlan(ctx context.Context, plan *Plan, opts ExecOptions) error 
 	bindings := make(map[string]string)
 
 	for idx, cmdSpec := range plan.Commands {
-		if err := validateVercelCommand(cmdSpec.Args, opts.Destroyer); err != nil {
-			return fmt.Errorf("command %d rejected: %w", idx+1, err)
-		}
-
 		args := make([]string, 0, len(cmdSpec.Args)+4)
 		args = append(args, cmdSpec.Args...)
 		args = applyPlanBindings(args, bindings)
+
+		if err := validateVercelCommand(args, opts.Destroyer); err != nil {
+			return fmt.Errorf("command %d rejected after binding: %w", idx+1, err)
+		}
 
 		stdinData := cmdSpec.Stdin
 		// Auto-detect env add commands that need stdin piping even
@@ -75,7 +75,8 @@ func validateVercelCommand(args []string, allowDestructive bool) error {
 	// Check for shell operators and destructive verbs.
 	for _, a := range args {
 		lower := strings.ToLower(a)
-		if strings.Contains(lower, ";") || strings.Contains(lower, "|") || strings.Contains(lower, "&&") || strings.Contains(lower, "||") {
+		if strings.Contains(lower, ";") || strings.Contains(lower, "|") || strings.Contains(lower, "&&") || strings.Contains(lower, "||") ||
+			strings.ContainsAny(a, "\n\r") {
 			return fmt.Errorf("shell operators are not allowed")
 		}
 

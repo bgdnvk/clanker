@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -224,6 +225,10 @@ func listProjects(ctx context.Context, client *Client) error {
 	if err != nil {
 		return err
 	}
+	if rawOutput(client) {
+		fmt.Println(out)
+		return nil
+	}
 	var resp struct {
 		Projects []Project `json:"projects"`
 	}
@@ -252,11 +257,15 @@ func listProjects(ctx context.Context, client *Client) error {
 func listDeployments(ctx context.Context, client *Client, projectID string) error {
 	endpoint := "/v6/deployments?limit=20"
 	if projectID != "" {
-		endpoint += "&projectId=" + projectID
+		endpoint += "&projectId=" + url.QueryEscape(projectID)
 	}
 	out, err := client.RunAPIWithContext(ctx, "GET", endpoint, "")
 	if err != nil {
 		return err
+	}
+	if rawOutput(client) {
+		fmt.Println(out)
+		return nil
 	}
 	var resp struct {
 		Deployments []Deployment `json:"deployments"`
@@ -295,6 +304,10 @@ func listDomains(ctx context.Context, client *Client) error {
 	if err != nil {
 		return err
 	}
+	if rawOutput(client) {
+		fmt.Println(out)
+		return nil
+	}
 	var resp struct {
 		Domains []Domain `json:"domains"`
 	}
@@ -313,9 +326,13 @@ func listDomains(ctx context.Context, client *Client) error {
 }
 
 func listEnvVars(ctx context.Context, client *Client, projectID string) error {
-	out, err := client.RunAPIWithContext(ctx, "GET", fmt.Sprintf("/v10/projects/%s/env", projectID), "")
+	out, err := client.RunAPIWithContext(ctx, "GET", fmt.Sprintf("/v10/projects/%s/env", url.PathEscape(projectID)), "")
 	if err != nil {
 		return err
+	}
+	if rawOutput(client) {
+		fmt.Println(out)
+		return nil
 	}
 	var resp struct {
 		Envs []EnvVar `json:"envs"`
@@ -343,6 +360,10 @@ func listTeams(ctx context.Context, client *Client) error {
 	if err != nil {
 		return err
 	}
+	if rawOutput(client) {
+		fmt.Println(out)
+		return nil
+	}
 	var resp struct {
 		Teams []Team `json:"teams"`
 	}
@@ -363,7 +384,7 @@ func listTeams(ctx context.Context, client *Client) error {
 func listAliases(ctx context.Context, client *Client, projectID string) error {
 	endpoint := "/v4/aliases?limit=50"
 	if projectID != "" {
-		endpoint += "&projectId=" + projectID
+		endpoint += "&projectId=" + url.QueryEscape(projectID)
 	}
 	out, err := client.RunAPIWithContext(ctx, "GET", endpoint, "")
 	if err != nil {
@@ -506,7 +527,7 @@ func listEdgeConfigs(ctx context.Context, client *Client) error {
 // --- Getters ---
 
 func getProject(ctx context.Context, client *Client, idOrName string) error {
-	out, err := client.RunAPIWithContext(ctx, "GET", "/v9/projects/"+idOrName, "")
+	out, err := client.RunAPIWithContext(ctx, "GET", "/v9/projects/"+url.PathEscape(idOrName), "")
 	if err != nil {
 		return err
 	}
@@ -548,7 +569,7 @@ func getProject(ctx context.Context, client *Client, idOrName string) error {
 }
 
 func getDeployment(ctx context.Context, client *Client, id string) error {
-	out, err := client.RunAPIWithContext(ctx, "GET", "/v13/deployments/"+id, "")
+	out, err := client.RunAPIWithContext(ctx, "GET", "/v13/deployments/"+url.PathEscape(id), "")
 	if err != nil {
 		return err
 	}
@@ -589,7 +610,7 @@ func getDeployment(ctx context.Context, client *Client, id string) error {
 }
 
 func getDeploymentEventsSnapshot(ctx context.Context, client *Client, id string) error {
-	out, err := client.RunAPIWithContext(ctx, "GET", "/v2/deployments/"+id+"/events?limit=200", "")
+	out, err := client.RunAPIWithContext(ctx, "GET", "/v2/deployments/"+url.PathEscape(id)+"/events?limit=200", "")
 	if err != nil {
 		return err
 	}
@@ -646,7 +667,7 @@ func getUsage(ctx context.Context, client *Client, period string) error {
 	if period == "" {
 		period = "30d"
 	}
-	endpoint := fmt.Sprintf("/v1/teams/%s/analytics/usage?period=%s", client.GetTeamID(), period)
+	endpoint := fmt.Sprintf("/v1/teams/%s/analytics/usage?period=%s", url.PathEscape(client.GetTeamID()), url.QueryEscape(period))
 	out, err := client.RunAPIWithContext(ctx, "GET", endpoint, "")
 	if err != nil {
 		return err
