@@ -303,6 +303,21 @@ Examples:
 				})
 			}
 
+			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "vercel") {
+				vcToken := vercel.ResolveAPIToken()
+				if vcToken == "" {
+					return fmt.Errorf("vercel api_token is required (set vercel.api_token, VERCEL_TOKEN, or --api-token)")
+				}
+				vcTeamID := vercel.ResolveTeamID()
+				return maker.ExecuteVercelPlan(ctx, makerPlan, maker.ExecOptions{
+					VercelAPIToken: vcToken,
+					VercelTeamID:   vcTeamID,
+					Writer:         os.Stdout,
+					Destroyer:      destroyer,
+					Debug:          debug,
+				})
+			}
+
 			// Resolve AWS profile/region for execution.
 			targetProfile := resolveAWSProfile(profile)
 
@@ -525,7 +540,7 @@ Examples:
 			case "gcp":
 				prompt = maker.GCPPlanPromptWithMode(question, destroyer)
 			case "vercel":
-				return fmt.Errorf("maker mode not yet supported for Vercel (planned for phase 2)")
+				prompt = maker.VercelPlanPromptWithMode(question, destroyer)
 			default:
 				prompt = maker.PlanPromptWithMode(question, destroyer)
 			}
@@ -588,7 +603,7 @@ Examples:
 
 			// Handle GCP, Azure, Cloudflare, and Digital Ocean plans (output directly, no enrichment)
 			providerLower := strings.ToLower(strings.TrimSpace(plan.Provider))
-			if providerLower == "gcp" || providerLower == "azure" || providerLower == "cloudflare" || providerLower == "digitalocean" || providerLower == "hetzner" {
+			if providerLower == "gcp" || providerLower == "azure" || providerLower == "cloudflare" || providerLower == "digitalocean" || providerLower == "hetzner" || providerLower == "vercel" {
 				if plan.CreatedAt.IsZero() {
 					plan.CreatedAt = time.Now().UTC()
 				}
