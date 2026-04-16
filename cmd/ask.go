@@ -34,6 +34,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/resourcedb"
 	"github.com/bgdnvk/clanker/internal/routing"
 	tfclient "github.com/bgdnvk/clanker/internal/terraform"
+	"github.com/bgdnvk/clanker/internal/vercel"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -41,10 +42,10 @@ import (
 // askCmd represents the ask command
 const defaultGeminiModel = "gemini-2.5-flash"
 
-func applyDiscoveryContextDefaults(includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform bool) (bool, bool, bool, bool, bool, bool, bool) {
+func applyDiscoveryContextDefaults(includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel bool) (bool, bool, bool, bool, bool, bool, bool, bool) {
 	includeTerraform = true
-	if includeAWS || includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeHetzner {
-		return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform
+	if includeAWS || includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeHetzner || includeVercel {
+		return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel
 	}
 
 	switch routing.DefaultInfraProvider() {
@@ -58,11 +59,13 @@ func applyDiscoveryContextDefaults(includeAWS, includeGCP, includeAzure, include
 		includeDigitalOcean = true
 	case "hetzner":
 		includeHetzner = true
+	case "vercel":
+		includeVercel = true
 	default:
 		includeAWS = true
 	}
 
-	return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform
+	return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel
 }
 
 var askCmd = &cobra.Command{
@@ -104,6 +107,7 @@ Examples:
 		includeCloudflare, _ := cmd.Flags().GetBool("cloudflare")
 		includeDigitalOcean, _ := cmd.Flags().GetBool("digitalocean")
 		includeHetzner, _ := cmd.Flags().GetBool("hetzner")
+		includeVercel, _ := cmd.Flags().GetBool("vercel")
 		includeTerraform, _ := cmd.Flags().GetBool("terraform")
 		includeIAM, _ := cmd.Flags().GetBool("iam")
 		dbConnection, _ := cmd.Flags().GetString("db-connection")
@@ -299,6 +303,20 @@ Examples:
 				})
 			}
 
+			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "vercel") {
+				vcToken, vcTeamID, vcErr := resolveVercelToken(ctx, debug)
+				if vcErr != nil {
+					return vcErr
+				}
+				return maker.ExecuteVercelPlan(ctx, makerPlan, maker.ExecOptions{
+					VercelAPIToken: vcToken,
+					VercelTeamID:   vcTeamID,
+					Writer:         os.Stdout,
+					Destroyer:      destroyer,
+					Debug:          debug,
+				})
+			}
+
 			// Resolve AWS profile/region for execution.
 			targetProfile := resolveAWSProfile(profile)
 
@@ -433,6 +451,7 @@ Examples:
 			explicitDigitalOcean := cmd.Flags().Changed("digitalocean") && includeDigitalOcean
 			explicitHetzner := cmd.Flags().Changed("hetzner") && includeHetzner
 			explicitAzure := cmd.Flags().Changed("azure") && includeAzure
+			explicitVercel := cmd.Flags().Changed("vercel") && includeVercel
 			explicitCount := 0
 			if explicitGCP {
 				explicitCount++
@@ -452,8 +471,11 @@ Examples:
 			if explicitAzure {
 				explicitCount++
 			}
+			if explicitVercel {
+				explicitCount++
+			}
 			if explicitCount > 1 {
-				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --azure, --cloudflare, --digitalocean, --hetzner) together with --maker")
+				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --azure, --cloudflare, --digitalocean, --hetzner, --vercel) together with --maker")
 			}
 			switch {
 			case explicitHetzner:
@@ -474,6 +496,9 @@ Examples:
 			case explicitAWS:
 				makerProvider = "aws"
 				makerProviderReason = "explicit"
+			case explicitVercel:
+				makerProvider = "vercel"
+				makerProviderReason = "explicit"
 			default:
 				svcCtx := routing.InferContext(questionForRouting(question))
 				if svcCtx.Cloudflare {
@@ -490,6 +515,9 @@ Examples:
 					makerProviderReason = "inferred"
 				} else if svcCtx.GCP {
 					makerProvider = "gcp"
+					makerProviderReason = "inferred"
+				} else if svcCtx.Vercel {
+					makerProvider = "vercel"
 					makerProviderReason = "inferred"
 				}
 			}
@@ -510,6 +538,8 @@ Examples:
 				prompt = maker.AzurePlanPromptWithMode(question, destroyer)
 			case "gcp":
 				prompt = maker.GCPPlanPromptWithMode(question, destroyer)
+			case "vercel":
+				prompt = maker.VercelPlanPromptWithMode(question, destroyer)
 			default:
 				prompt = maker.PlanPromptWithMode(question, destroyer)
 			}
@@ -572,7 +602,7 @@ Examples:
 
 			// Handle GCP, Azure, Cloudflare, and Digital Ocean plans (output directly, no enrichment)
 			providerLower := strings.ToLower(strings.TrimSpace(plan.Provider))
-			if providerLower == "gcp" || providerLower == "azure" || providerLower == "cloudflare" || providerLower == "digitalocean" || providerLower == "hetzner" {
+			if providerLower == "gcp" || providerLower == "azure" || providerLower == "cloudflare" || providerLower == "digitalocean" || providerLower == "hetzner" || providerLower == "vercel" {
 				if plan.CreatedAt.IsZero() {
 					plan.CreatedAt = time.Now().UTC()
 				}
@@ -662,7 +692,7 @@ Format as a professional compliance table suitable for government security docum
 
 		// Discovery mode enables comprehensive infrastructure analysis
 		if discovery {
-			includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform = applyDiscoveryContextDefaults(
+			includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel = applyDiscoveryContextDefaults(
 				includeAWS,
 				includeGCP,
 				includeAzure,
@@ -670,6 +700,7 @@ Format as a professional compliance table suitable for government security docum
 				includeDigitalOcean,
 				includeHetzner,
 				includeTerraform,
+				includeVercel,
 			)
 			if debug {
 				fmt.Println("Discovery mode enabled: Terraform context activated alongside the selected infrastructure provider(s)")
@@ -681,22 +712,31 @@ Format as a professional compliance table suitable for government security docum
 			includeTerraform = true
 		}
 
+		// Provider-specific Q&A paths.
+		// NOTE: makerMode returns above, so these only fire for
+		// plain --<provider> queries (not --maker --<provider>).
+
 		// Handle explicit --cloudflare flag
-		if includeCloudflare {
+		if includeCloudflare && !makerMode {
 			return handleCloudflareQuery(context.Background(), question, debug)
 		}
 
 		// Handle explicit --digitalocean flag
-		if includeDigitalOcean {
+		if includeDigitalOcean && !makerMode {
 			return handleDigitalOceanQuery(context.Background(), question, debug)
 		}
 
 		// Handle explicit --hetzner flag
-		if includeHetzner {
+		if includeHetzner && !makerMode {
 			return handleHetznerQuery(context.Background(), question, debug)
 		}
 
-		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare && !includeDigitalOcean && !includeHetzner && !includeDB {
+		// Handle explicit --vercel flag
+		if includeVercel && !makerMode {
+			return handleVercelQuery(context.Background(), question, debug)
+		}
+
+		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare && !includeDigitalOcean && !includeHetzner && !includeVercel && !includeDB {
 			routingQuestion := questionForRouting(question)
 
 			// First, do quick keyword check for explicit terms
@@ -765,6 +805,11 @@ Format as a professional compliance table suitable for government security docum
 			// Handle Hetzner queries
 			if svcCtx.Hetzner {
 				return handleHetznerQuery(context.Background(), routingQuestion, debug)
+			}
+
+			// Handle Vercel queries
+			if svcCtx.Vercel {
+				return handleVercelQuery(context.Background(), routingQuestion, debug)
 			}
 
 			// Handle IAM queries by delegating to IAM agent
@@ -1250,6 +1295,7 @@ func init() {
 	askCmd.Flags().Bool("cloudflare", false, "Include Cloudflare infrastructure context")
 	askCmd.Flags().Bool("digitalocean", false, "Include Digital Ocean infrastructure context")
 	askCmd.Flags().Bool("hetzner", false, "Include Hetzner Cloud infrastructure context")
+	askCmd.Flags().Bool("vercel", false, "Include Vercel context")
 	askCmd.Flags().Bool("github", false, "Include GitHub repository context")
 	askCmd.Flags().Bool("cicd", false, "Include CI/CD context (currently GitHub Actions)")
 	askCmd.Flags().Bool("db", false, "Include configured database context")
@@ -2106,6 +2152,33 @@ func resolveHetznerToken(ctx context.Context, debug bool) (string, error) {
 	return "", fmt.Errorf("hetzner api_token is required (set hetzner.api_token or HCLOUD_TOKEN)")
 }
 
+// resolveVercelToken resolves the Vercel API token from config, env, or the
+// backend credential store (same fallback chain as resolveHetznerToken).
+// The returned teamID may be empty for personal accounts.
+func resolveVercelToken(ctx context.Context, debug bool) (apiToken string, teamID string, err error) {
+	apiToken = vercel.ResolveAPIToken()
+	if apiToken != "" {
+		return apiToken, vercel.ResolveTeamID(), nil
+	}
+
+	backendAPIKey := backend.ResolveAPIKey("")
+	if backendAPIKey != "" {
+		backendClient := backend.NewClient(backendAPIKey, debug)
+		creds, backendErr := backendClient.GetVercelCredentials(ctx)
+		if backendErr == nil && strings.TrimSpace(creds.APIToken) != "" {
+			if debug {
+				fmt.Println("[backend] Using Vercel credentials from backend")
+			}
+			return strings.TrimSpace(creds.APIToken), strings.TrimSpace(creds.TeamID), nil
+		}
+		if debug {
+			fmt.Printf("[backend] No Vercel credentials available (%v), falling back to local\n", backendErr)
+		}
+	}
+
+	return "", "", fmt.Errorf("Vercel token not configured. Set vercel.api_token in ~/.clanker.yaml or export VERCEL_TOKEN")
+}
+
 // handleHetznerQuery delegates a Hetzner Cloud query to the Hetzner client
 func handleHetznerQuery(ctx context.Context, question string, debug bool) error {
 	if debug {
@@ -2171,6 +2244,111 @@ Provide a clear, concise answer based on the data above. If the data doesn't con
 
 	fmt.Println(response)
 	return nil
+}
+
+// handleVercelQuery delegates a Vercel query to the Vercel agent with
+// per-team conversation history for multi-turn context.
+func handleVercelQuery(ctx context.Context, question string, debug bool) error {
+	if debug {
+		fmt.Println("Delegating query to Vercel agent...")
+	}
+
+	apiToken, teamID, err := resolveVercelToken(ctx, debug)
+	if err != nil {
+		return err
+	}
+
+	client, err := vercel.NewClient(apiToken, teamID, debug)
+	if err != nil {
+		return fmt.Errorf("failed to create Vercel client: %w", err)
+	}
+
+	// Load conversation history keyed by team (or "personal" for non-team accounts).
+	conversationID := teamID
+	if conversationID == "" {
+		conversationID = "personal"
+	}
+	history := vercel.NewConversationHistory(conversationID)
+	if err := history.Load(); err != nil && debug {
+		fmt.Fprintf(os.Stderr, "[debug] conversation history: %v\n", err)
+	}
+
+	vercelContext, err := client.GetRelevantContext(ctx, question)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[vercel] warning: failed to fetch context: %v\n", err)
+		if strings.TrimSpace(vercelContext) == "" {
+			return fmt.Errorf("failed to fetch Vercel context: %w", err)
+		}
+	}
+
+	// Resolve AI provider + key using the same pattern as other handlers.
+	provider := viper.GetString("ai.default_provider")
+	if provider == "" {
+		provider = "openai"
+	}
+
+	var apiKey string
+	switch provider {
+	case "bedrock", "claude":
+		apiKey = ""
+	case "gemini", "gemini-api":
+		apiKey = ""
+	case "openai":
+		apiKey = resolveOpenAIKey("")
+	case "anthropic":
+		apiKey = resolveAnthropicKey("")
+	case "cohere":
+		apiKey = resolveCohereKey("")
+	case "deepseek":
+		apiKey = resolveDeepSeekKey("")
+	case "minimax":
+		apiKey = resolveMiniMaxKey("")
+	default:
+		apiKey = viper.GetString(fmt.Sprintf("ai.providers.%s.api_key", provider))
+	}
+
+	aiClient := ai.NewClient(provider, apiKey, debug, provider)
+
+	historyContext := history.GetRecentContext(5)
+	prompt := buildVercelPrompt(question, vercelContext, historyContext)
+
+	response, err := aiClient.AskPrompt(ctx, prompt)
+	if err != nil {
+		return fmt.Errorf("Vercel AI query failed: %w", err)
+	}
+
+	fmt.Println(response)
+
+	// Persist the exchange so subsequent invocations see the conversation.
+	history.AddEntry(question, response)
+	if err := history.Save(); err != nil && debug {
+		fmt.Fprintf(os.Stderr, "[debug] save history: %v\n", err)
+	}
+
+	return nil
+}
+
+// buildVercelPrompt assembles the system prompt for a Vercel ask query,
+// injecting infrastructure context and recent conversation history when
+// available.
+func buildVercelPrompt(question, vercelContext, historyContext string) string {
+	var sb strings.Builder
+	sb.WriteString("You are a Vercel infrastructure assistant. ")
+	sb.WriteString("Answer questions about the user's Vercel account based on the provided context.\n\n")
+	if vercelContext != "" {
+		sb.WriteString("Vercel Context:\n")
+		sb.WriteString(vercelContext)
+		sb.WriteString("\n\n")
+	}
+	if historyContext != "" {
+		sb.WriteString("Recent Conversation:\n")
+		sb.WriteString(historyContext)
+		sb.WriteString("\n\n")
+	}
+	sb.WriteString("User Question: ")
+	sb.WriteString(question)
+	sb.WriteString("\n\nProvide a helpful, concise response in markdown format.")
+	return sb.String()
 }
 
 // handleK8sQuery delegates a Kubernetes query to the K8s agent

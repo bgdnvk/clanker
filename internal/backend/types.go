@@ -47,6 +47,13 @@ type HetznerCredentials struct {
 	APIToken string `json:"api_token"`
 }
 
+// VercelCredentials represents Vercel credentials stored in the backend.
+// TeamID is optional — personal accounts have no team scope.
+type VercelCredentials struct {
+	APIToken string `json:"api_token"`
+	TeamID   string `json:"team_id,omitempty"`
+}
+
 // CredentialProvider represents supported credential providers
 type CredentialProvider string
 
@@ -58,6 +65,7 @@ const (
 	ProviderDigitalOcean CredentialProvider = "digitalocean"
 	ProviderHetzner      CredentialProvider = "hetzner"
 	ProviderKubernetes   CredentialProvider = "kubernetes"
+	ProviderVercel       CredentialProvider = "vercel"
 )
 
 // CredentialEntry represents a stored credential in the backend

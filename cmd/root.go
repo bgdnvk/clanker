@@ -10,6 +10,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/digitalocean"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	"github.com/bgdnvk/clanker/internal/hetzner"
+	"github.com/bgdnvk/clanker/internal/vercel"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -110,6 +111,11 @@ func init() {
 	// Register Hetzner static commands
 	hetznerCmd := hetzner.CreateHetznerCommands()
 	rootCmd.AddCommand(hetznerCmd)
+
+	// Register Vercel static commands + ask stub (phase 1)
+	vercelCmd := vercel.CreateVercelCommands()
+	AddVercelAskCommand(vercelCmd)
+	rootCmd.AddCommand(vercelCmd)
 }
 
 // initConfig reads in config file and ENV variables if set.

@@ -231,6 +231,10 @@ type ExecOptions struct {
 	// Hetzner options
 	HetznerAPIToken string
 
+	// Vercel options
+	VercelAPIToken string
+	VercelTeamID   string
+
 	CheckpointKey            string
 	DisableDurableCheckpoint bool
 
