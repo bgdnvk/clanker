@@ -98,9 +98,17 @@ func (c *Client) GetAPIToken() string { return c.apiToken }
 func (c *Client) GetTeamID() string { return c.teamID }
 
 // withTeam appends `teamId=<id>` to the endpoint when the client is team-scoped
-// and the endpoint does not already carry a teamId parameter.
+// and the endpoint does not already carry a teamId parameter. Endpoints that
+// already encode the team in the path (e.g. `/v1/teams/{teamID}/...`) are
+// returned unchanged so we don't double-scope the request.
 func (c *Client) withTeam(endpoint string) string {
-	if c.teamID == "" || strings.Contains(endpoint, "teamId=") {
+	if c.teamID == "" {
+		return endpoint
+	}
+	if strings.Contains(endpoint, "teamId=") {
+		return endpoint
+	}
+	if strings.Contains(endpoint, "/teams/"+c.teamID) {
 		return endpoint
 	}
 	sep := "?"
@@ -123,6 +131,8 @@ func (c *Client) RunAPIWithContext(ctx context.Context, method, endpoint, body s
 
 	endpoint = c.withTeam(endpoint)
 
+	// backoffs has three entries, meaning we make up to 3 total attempts
+	// (the initial try + 2 retries) before giving up.
 	backoffs := []time.Duration{200 * time.Millisecond, 500 * time.Millisecond, 1200 * time.Millisecond}
 	var lastErr error
 	var lastStderr string
@@ -155,13 +165,13 @@ func (c *Client) RunAPIWithContext(ctx context.Context, method, endpoint, body s
 		if err == nil {
 			result := stdout.String()
 			if apiErr := checkAPIError(result); apiErr != nil {
-				// Retry once on 429 / 5xx style responses (detected via the error body).
+				// Retry on 429 / 5xx style responses (detected via the error body).
 				if isRetryableError(apiErr.Error()) && attempt < len(backoffs)-1 {
 					lastBody = result
 					time.Sleep(backoffs[attempt])
 					continue
 				}
-				return result, apiErr
+				return result, fmt.Errorf("%w%s", apiErr, errorHint(apiErr.Error()))
 			}
 			return result, nil
 		}
@@ -337,22 +347,36 @@ func checkAPIError(response string) error {
 	return nil
 }
 
-// isRetryableError determines whether to retry a Vercel API failure.
+// isRetryableError determines whether to retry a Vercel API failure. The input
+// may be either a raw stderr string from curl or an API error body — both the
+// Vercel-documented error codes and common transport failure phrases are
+// matched here.
 func isRetryableError(s string) bool {
 	lower := strings.ToLower(s)
+	// Vercel API error codes surfaced in the error body.
+	retryableCodes := []string{
+		"rate_limited",
+		"too_many_requests",
+		"internal_server_error",
+		"bad_gateway",
+		"service_unavailable",
+		"gateway_timeout",
+	}
+	for _, code := range retryableCodes {
+		if strings.Contains(lower, code) {
+			return true
+		}
+	}
 	if strings.Contains(lower, "rate") && strings.Contains(lower, "limit") {
 		return true
 	}
-	if strings.Contains(lower, "rate_limit") || strings.Contains(lower, "too_many_requests") {
+	if strings.Contains(lower, "rate_limit") {
 		return true
 	}
 	if strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out") {
 		return true
 	}
 	if strings.Contains(lower, "temporarily unavailable") || strings.Contains(lower, "internal error") {
-		return true
-	}
-	if strings.Contains(lower, "bad_gateway") || strings.Contains(lower, "service_unavailable") || strings.Contains(lower, "gateway_timeout") {
 		return true
 	}
 	if strings.Contains(lower, "connection refused") || strings.Contains(lower, "connection reset") {
