@@ -35,6 +35,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/routing"
 	tfclient "github.com/bgdnvk/clanker/internal/terraform"
 	"github.com/bgdnvk/clanker/internal/vercel"
+	"github.com/bgdnvk/clanker/internal/verda"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -42,10 +43,10 @@ import (
 // askCmd represents the ask command
 const defaultGeminiModel = "gemini-2.5-flash"
 
-func applyDiscoveryContextDefaults(includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel bool) (bool, bool, bool, bool, bool, bool, bool, bool) {
+func applyDiscoveryContextDefaults(includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda bool) (bool, bool, bool, bool, bool, bool, bool, bool, bool) {
 	includeTerraform = true
-	if includeAWS || includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeHetzner || includeVercel {
-		return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel
+	if includeAWS || includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeHetzner || includeVercel || includeVerda {
+		return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda
 	}
 
 	switch routing.DefaultInfraProvider() {
@@ -61,11 +62,13 @@ func applyDiscoveryContextDefaults(includeAWS, includeGCP, includeAzure, include
 		includeHetzner = true
 	case "vercel":
 		includeVercel = true
+	case "verda":
+		includeVerda = true
 	default:
 		includeAWS = true
 	}
 
-	return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel
+	return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda
 }
 
 var askCmd = &cobra.Command{
@@ -108,6 +111,7 @@ Examples:
 		includeDigitalOcean, _ := cmd.Flags().GetBool("digitalocean")
 		includeHetzner, _ := cmd.Flags().GetBool("hetzner")
 		includeVercel, _ := cmd.Flags().GetBool("vercel")
+		includeVerda, _ := cmd.Flags().GetBool("verda")
 		includeTerraform, _ := cmd.Flags().GetBool("terraform")
 		includeIAM, _ := cmd.Flags().GetBool("iam")
 		dbConnection, _ := cmd.Flags().GetString("db-connection")
@@ -452,6 +456,7 @@ Examples:
 			explicitHetzner := cmd.Flags().Changed("hetzner") && includeHetzner
 			explicitAzure := cmd.Flags().Changed("azure") && includeAzure
 			explicitVercel := cmd.Flags().Changed("vercel") && includeVercel
+			explicitVerda := cmd.Flags().Changed("verda") && includeVerda
 			explicitCount := 0
 			if explicitGCP {
 				explicitCount++
@@ -474,8 +479,14 @@ Examples:
 			if explicitVercel {
 				explicitCount++
 			}
+			if explicitVerda {
+				explicitCount++
+			}
 			if explicitCount > 1 {
-				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --azure, --cloudflare, --digitalocean, --hetzner, --vercel) together with --maker")
+				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --azure, --cloudflare, --digitalocean, --hetzner, --vercel, --verda) together with --maker")
+			}
+			if explicitVerda {
+				return fmt.Errorf("--maker is not yet supported for Verda — drop the --maker flag and use `clanker ask --verda \"%s\"` for read-only queries", question)
 			}
 			switch {
 			case explicitHetzner:
@@ -692,7 +703,7 @@ Format as a professional compliance table suitable for government security docum
 
 		// Discovery mode enables comprehensive infrastructure analysis
 		if discovery {
-			includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel = applyDiscoveryContextDefaults(
+			includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda = applyDiscoveryContextDefaults(
 				includeAWS,
 				includeGCP,
 				includeAzure,
@@ -701,6 +712,7 @@ Format as a professional compliance table suitable for government security docum
 				includeHetzner,
 				includeTerraform,
 				includeVercel,
+				includeVerda,
 			)
 			if debug {
 				fmt.Println("Discovery mode enabled: Terraform context activated alongside the selected infrastructure provider(s)")
@@ -736,7 +748,12 @@ Format as a professional compliance table suitable for government security docum
 			return handleVercelQuery(context.Background(), question, debug)
 		}
 
-		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare && !includeDigitalOcean && !includeHetzner && !includeVercel && !includeDB {
+		// Handle explicit --verda flag
+		if includeVerda && !makerMode {
+			return handleVerdaQuery(context.Background(), question, debug)
+		}
+
+		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare && !includeDigitalOcean && !includeHetzner && !includeVercel && !includeVerda && !includeDB {
 			routingQuestion := questionForRouting(question)
 
 			// First, do quick keyword check for explicit terms
@@ -810,6 +827,11 @@ Format as a professional compliance table suitable for government security docum
 			// Handle Vercel queries
 			if svcCtx.Vercel {
 				return handleVercelQuery(context.Background(), routingQuestion, debug)
+			}
+
+			// Handle Verda queries
+			if svcCtx.Verda {
+				return handleVerdaQuery(context.Background(), routingQuestion, debug)
 			}
 
 			// Handle IAM queries by delegating to IAM agent
@@ -1296,6 +1318,7 @@ func init() {
 	askCmd.Flags().Bool("digitalocean", false, "Include Digital Ocean infrastructure context")
 	askCmd.Flags().Bool("hetzner", false, "Include Hetzner Cloud infrastructure context")
 	askCmd.Flags().Bool("vercel", false, "Include Vercel context")
+	askCmd.Flags().Bool("verda", false, "Include Verda Cloud (GPU/AI) infrastructure context")
 	askCmd.Flags().Bool("github", false, "Include GitHub repository context")
 	askCmd.Flags().Bool("cicd", false, "Include CI/CD context (currently GitHub Actions)")
 	askCmd.Flags().Bool("db", false, "Include configured database context")
@@ -2348,6 +2371,118 @@ func buildVercelPrompt(question, vercelContext, historyContext string) string {
 	sb.WriteString("User Question: ")
 	sb.WriteString(question)
 	sb.WriteString("\n\nProvide a helpful, concise response in markdown format.")
+	return sb.String()
+}
+
+// resolveVerdaCredentials returns the Verda client ID / client secret / project ID
+// resolving in this order: ~/.clanker.yaml (verda.* keys) → VERDA_* env vars →
+// ~/.verda/credentials (written by `verda auth login`).
+func resolveVerdaCredentials() (clientID, clientSecret, projectID string, err error) {
+	clientID = verda.ResolveClientID()
+	clientSecret = verda.ResolveClientSecret()
+	projectID = verda.ResolveProjectID()
+	if clientID == "" || clientSecret == "" {
+		return "", "", "", fmt.Errorf("Verda credentials not configured. Set verda.client_id / verda.client_secret in ~/.clanker.yaml, export VERDA_CLIENT_ID / VERDA_CLIENT_SECRET, or run `verda auth login`")
+	}
+	return clientID, clientSecret, projectID, nil
+}
+
+// handleVerdaQuery delegates a Verda Cloud query to the Verda agent with
+// per-project conversation history for multi-turn context.
+func handleVerdaQuery(ctx context.Context, question string, debug bool) error {
+	if debug {
+		fmt.Println("Delegating query to Verda agent...")
+	}
+
+	clientID, clientSecret, projectID, err := resolveVerdaCredentials()
+	if err != nil {
+		return err
+	}
+
+	client, err := verda.NewClient(clientID, clientSecret, projectID, debug)
+	if err != nil {
+		return fmt.Errorf("failed to create Verda client: %w", err)
+	}
+
+	scope := projectID
+	if scope == "" {
+		scope = "personal"
+	}
+	history := verda.NewConversationHistory(scope)
+	if err := history.Load(); err != nil && debug {
+		fmt.Fprintf(os.Stderr, "[debug] verda conversation history: %v\n", err)
+	}
+
+	verdaContext, err := client.GetRelevantContext(ctx, question)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[verda] warning: failed to fetch context: %v\n", err)
+		if strings.TrimSpace(verdaContext) == "" {
+			return fmt.Errorf("failed to fetch Verda context: %w", err)
+		}
+	}
+
+	provider := viper.GetString("ai.default_provider")
+	if provider == "" {
+		provider = "openai"
+	}
+	var apiKey string
+	switch provider {
+	case "bedrock", "claude":
+		apiKey = ""
+	case "gemini", "gemini-api":
+		apiKey = ""
+	case "openai":
+		apiKey = resolveOpenAIKey("")
+	case "anthropic":
+		apiKey = resolveAnthropicKey("")
+	case "cohere":
+		apiKey = resolveCohereKey("")
+	case "deepseek":
+		apiKey = resolveDeepSeekKey("")
+	case "minimax":
+		apiKey = resolveMiniMaxKey("")
+	default:
+		apiKey = viper.GetString(fmt.Sprintf("ai.providers.%s.api_key", provider))
+	}
+
+	aiClient := ai.NewClient(provider, apiKey, debug, provider)
+
+	historyContext := history.GetRecentContext(5)
+	prompt := buildVerdaPrompt(question, verdaContext, historyContext)
+
+	response, err := aiClient.AskPrompt(ctx, prompt)
+	if err != nil {
+		return fmt.Errorf("Verda AI query failed: %w", err)
+	}
+
+	fmt.Println(response)
+
+	history.AddEntry(question, response)
+	if err := history.Save(); err != nil && debug {
+		fmt.Fprintf(os.Stderr, "[debug] save verda history: %v\n", err)
+	}
+	return nil
+}
+
+// buildVerdaPrompt assembles the system prompt for a Verda ask query, injecting
+// resource context and recent conversation history when available.
+func buildVerdaPrompt(question, verdaContext, historyContext string) string {
+	var sb strings.Builder
+	sb.WriteString("You are a Verda Cloud infrastructure assistant. ")
+	sb.WriteString("Verda (ex-DataCrunch) is a European GPU/AI cloud that provides GPU instances (H100, A100, H200, B200, L40S, V100, A6000), Instant Clusters (with Slurm or Kubernetes orchestrator), volumes (including shared filesystems), serverless containers and jobs. Answer questions about the user's Verda account based on the provided context.\n\n")
+	if verdaContext != "" {
+		sb.WriteString("Verda Context:\n")
+		sb.WriteString(verdaContext)
+		sb.WriteString("\n\n")
+	}
+	if historyContext != "" {
+		sb.WriteString("Recent Conversation:\n")
+		sb.WriteString(historyContext)
+		sb.WriteString("\n\n")
+	}
+	sb.WriteString("User Question: ")
+	sb.WriteString(question)
+	sb.WriteString("\n\nProvide a helpful, concise response in markdown format. When discussing pricing, remember Verda hourly prices can be converted to monthly using *730.")
 	return sb.String()
 }
 
