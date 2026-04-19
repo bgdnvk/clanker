@@ -513,6 +513,56 @@ func isRetryableNetError(err error) bool {
 		strings.Contains(s, "temporarily unavailable")
 }
 
+// ResolveInstanceID returns the Verda instance UUID for the given input. If
+// `nameOrID` already looks like a UUID it's returned verbatim (lowercased).
+// Otherwise we list instances and match by hostname. Used by CLI commands so
+// users can pass a friendly hostname where an ID is expected.
+func (c *Client) ResolveInstanceID(ctx context.Context, nameOrID string) (string, error) {
+	trimmed := strings.TrimSpace(nameOrID)
+	if trimmed == "" {
+		return "", fmt.Errorf("empty instance identifier")
+	}
+	lowered := strings.ToLower(trimmed)
+	if looksLikeUUIDString(lowered) {
+		return lowered, nil
+	}
+	body, err := c.RunAPIWithContext(ctx, http.MethodGet, "/v1/instances", "")
+	if err != nil {
+		return "", err
+	}
+	var list []Instance
+	if err := json.Unmarshal([]byte(body), &list); err != nil {
+		return "", fmt.Errorf("decode instances: %w", err)
+	}
+	for _, inst := range list {
+		if strings.EqualFold(inst.Hostname, trimmed) || inst.ID == trimmed {
+			return inst.ID, nil
+		}
+	}
+	return "", fmt.Errorf("no verda instance found for %q (tried hostname and ID match)", nameOrID)
+}
+
+// looksLikeUUIDString is the package-private mirror of the k8s cluster provider
+// helper — kept here so CLI paths don't reach across packages just for this.
+func looksLikeUUIDString(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, r := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if !(r >= '0' && r <= '9') && !(r >= 'a' && r <= 'f') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // DecodeActionResults decodes a 207 Multi-Status body from PUT /v1/instances.
 // When the Verda API succeeds uniformly it returns 202 with a plain JSON body;
 // a partial failure comes back as an array of ActionResult entries.
@@ -584,6 +634,8 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 		{name: "Volumes", path: "/v1/volumes", keys: []string{"volume", "disk", "storage", "sfs", "shared filesystem", "nvme", "hdd"}},
 		{name: "SSHKeys", path: "/v1/ssh-keys", keys: []string{"ssh", "key", "access"}},
 		{name: "Scripts", path: "/v1/scripts?pageSize=25", keys: []string{"script", "startup", "cloud-init"}},
+		{name: "ContainerDeployments", path: "/v1/container-deployments", keys: []string{"container", "serverless", "inference", "endpoint", "replica", "scale"}},
+		{name: "JobDeployments", path: "/v1/job-deployments", keys: []string{"job", "batch", "queue", "serverless", "scaled"}},
 		{name: "Balance", path: "/v1/balance", keys: []string{"balance", "credit", "cost", "bill", "spend", "afford"}, always: true},
 		{name: "Locations", path: "/v1/locations", keys: []string{"location", "region", "datacenter", "availability"}},
 	}

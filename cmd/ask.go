@@ -750,7 +750,7 @@ Format as a professional compliance table suitable for government security docum
 
 		// Handle explicit --verda flag
 		if includeVerda && !makerMode {
-			return handleVerdaQuery(context.Background(), question, debug)
+			return handleVerdaQuery(cmd.Context(), question, debug)
 		}
 
 		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare && !includeDigitalOcean && !includeHetzner && !includeVercel && !includeVerda && !includeDB {
@@ -831,7 +831,7 @@ Format as a professional compliance table suitable for government security docum
 
 			// Handle Verda queries
 			if svcCtx.Verda {
-				return handleVerdaQuery(context.Background(), routingQuestion, debug)
+				return handleVerdaQuery(cmd.Context(), routingQuestion, debug)
 			}
 
 			// Handle IAM queries by delegating to IAM agent

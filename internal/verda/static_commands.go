@@ -68,7 +68,14 @@ Supported resources:
   scripts         - Startup scripts
   instance-types  - Available instance types with pricing
   cluster-types   - Available cluster SKUs
+  container-types - Serverless container compute types
+  containers      - Serverless container deployments
+  jobs            - Serverless job deployments
+  secrets         - Serverless secrets
+  file-secrets    - Serverless file secrets
+  registry-creds  - Container registry credentials
   locations       - Available datacenter locations
+  balance         - Current project balance
   images          - Available OS images (instance)
   cluster-images  - Available OS images (cluster)
   availability    - Current instance-type availability across regions`,
@@ -100,8 +107,22 @@ Supported resources:
 				path = "/v1/instance-types"
 			case "cluster-types":
 				path = "/v1/cluster-types"
+			case "container-types":
+				path = "/v1/container-types"
+			case "containers", "container-deployments":
+				path = "/v1/container-deployments"
+			case "jobs", "job-deployments":
+				path = "/v1/job-deployments"
+			case "secrets":
+				path = "/v1/secrets"
+			case "file-secrets":
+				path = "/v1/file-secrets"
+			case "registry-creds", "registry-credentials":
+				path = "/v1/container-registry-credentials"
 			case "locations":
 				path = "/v1/locations"
+			case "balance":
+				path = "/v1/balance"
 			case "images":
 				path = "/v1/images"
 			case "cluster-images":
@@ -177,9 +198,12 @@ func createVerdaGetCmd() *cobra.Command {
 
 func createVerdaActionCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "action <start|stop|shutdown|delete|discontinue|hibernate|boot|force_shutdown> <instance_id>",
+		Use:   "action <start|stop|shutdown|delete|discontinue|hibernate|boot|force_shutdown> <instance>",
 		Short: "Perform a lifecycle action on a Verda instance",
 		Long: `Invoke PUT /v1/instances with the given action.
+
+The <instance> argument accepts either a Verda instance UUID or a hostname —
+hostnames are resolved via GET /v1/instances before the action is issued.
 
 The underlying REST call is always PUT /v1/instances regardless of the action verb.
 Supported actions: boot, start, shutdown, force_shutdown, delete, discontinue,
@@ -187,7 +211,7 @@ hibernate, configure_spot, delete_stuck, deploy, transfer.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			action := strings.ToLower(args[0])
-			id := args[1]
+			nameOrID := args[1]
 
 			valid := map[string]bool{
 				InstanceActionBoot:          true,
@@ -213,10 +237,18 @@ hibernate, configure_spot, delete_stuck, deploy, transfer.`,
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 
-			payload, _ := json.Marshal(PerformInstanceActionRequest{
+			id, err := client.ResolveInstanceID(ctx, nameOrID)
+			if err != nil {
+				return err
+			}
+
+			payload, err := json.Marshal(PerformInstanceActionRequest{
 				Action: action,
 				ID:     id,
 			})
+			if err != nil {
+				return fmt.Errorf("marshal action: %w", err)
+			}
 
 			body, err := client.RunAPIWithContext(ctx, http.MethodPut, "/v1/instances", string(payload))
 			if err != nil {
