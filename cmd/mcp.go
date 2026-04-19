@@ -12,6 +12,7 @@ import (
 
 	"github.com/bgdnvk/clanker/internal/ai"
 	"github.com/bgdnvk/clanker/internal/vercel"
+	"github.com/bgdnvk/clanker/internal/verda"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcptransport "github.com/mark3labs/mcp-go/server"
 	"github.com/spf13/cobra"
@@ -44,6 +45,21 @@ type vercelListArgs struct {
 	Token    string `json:"token,omitempty" jsonschema:"description=Vercel API token (falls back to config/env)"`
 	TeamID   string `json:"teamId,omitempty" jsonschema:"description=Vercel team ID"`
 	Project  string `json:"project,omitempty" jsonschema:"description=Project ID for scoped resources (deployments and env)"`
+}
+
+type verdaAskArgs struct {
+	Question     string `json:"question" jsonschema:"description=Natural language question about Verda Cloud (GPU/AI) infrastructure,required"`
+	ClientID     string `json:"clientId,omitempty" jsonschema:"description=Verda OAuth2 client ID (falls back to config/env/credentials file)"`
+	ClientSecret string `json:"clientSecret,omitempty" jsonschema:"description=Verda OAuth2 client secret (falls back to config/env/credentials file)"`
+	ProjectID    string `json:"projectId,omitempty" jsonschema:"description=Verda project ID for conversation scoping"`
+	Debug        bool   `json:"debug,omitempty" jsonschema:"description=Enable debug output"`
+}
+
+type verdaListArgs struct {
+	Resource     string `json:"resource" jsonschema:"description=Resource type: instances|clusters|volumes|ssh-keys|scripts|instance-types|cluster-types|locations|balance|images|cluster-images|availability,required"`
+	ClientID     string `json:"clientId,omitempty" jsonschema:"description=Verda OAuth2 client ID (falls back to config/env/credentials file)"`
+	ClientSecret string `json:"clientSecret,omitempty" jsonschema:"description=Verda OAuth2 client secret (falls back to config/env/credentials file)"`
+	ProjectID    string `json:"projectId,omitempty" jsonschema:"description=Verda project ID"`
 }
 
 var mcpCmd = &cobra.Command{
@@ -136,6 +152,29 @@ func newClankerMCPServer() *mcptransport.MCPServer {
 		),
 		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args vercelListArgs) (*mcp.CallToolResult, error) {
 			return handleMCPVercelList(ctx, args)
+		}),
+	)
+
+	server.AddTool(
+		mcp.NewTool(
+			"clanker_verda_ask",
+			mcp.WithDescription("Ask a natural language question about your Verda Cloud (GPU/AI) infrastructure. Gathers Verda context (instances, clusters, volumes, balance) and uses the configured AI provider to answer."),
+			mcp.WithInputSchema[verdaAskArgs](),
+		),
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args verdaAskArgs) (*mcp.CallToolResult, error) {
+			return handleMCPVerdaAsk(ctx, args)
+		}),
+	)
+
+	server.AddTool(
+		mcp.NewTool(
+			"clanker_verda_list",
+			mcp.WithDescription("List Verda Cloud resources. Returns raw JSON from the Verda REST API."),
+			mcp.WithInputSchema[verdaListArgs](),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args verdaListArgs) (*mcp.CallToolResult, error) {
+			return handleMCPVerdaList(ctx, args)
 		}),
 	)
 
@@ -249,6 +288,114 @@ func handleMCPVercelList(ctx context.Context, args vercelListArgs) (*mcp.CallToo
 		return mcp.NewToolResultError(fmt.Sprintf("Vercel API error: %v", err)), nil
 	}
 
+	return mcp.NewToolResultText(result), nil
+}
+
+// handleMCPVerdaAsk resolves Verda credentials, gathers context, and asks the
+// configured AI provider about the user's Verda Cloud infrastructure.
+func handleMCPVerdaAsk(ctx context.Context, args verdaAskArgs) (*mcp.CallToolResult, error) {
+	clientID := args.ClientID
+	if clientID == "" {
+		clientID = verda.ResolveClientID()
+	}
+	clientSecret := args.ClientSecret
+	if clientSecret == "" {
+		clientSecret = verda.ResolveClientSecret()
+	}
+	if clientID == "" || clientSecret == "" {
+		return mcp.NewToolResultError("Verda credentials not configured. Set verda.client_id / verda.client_secret in ~/.clanker.yaml, export VERDA_CLIENT_ID / VERDA_CLIENT_SECRET, or run `verda auth login`"), nil
+	}
+	projectID := args.ProjectID
+	if projectID == "" {
+		projectID = verda.ResolveProjectID()
+	}
+
+	client, err := verda.NewClient(clientID, clientSecret, projectID, args.Debug)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to create Verda client: %v", err)), nil
+	}
+
+	verdaContext, _ := client.GetRelevantContext(ctx, args.Question)
+
+	prompt := buildVerdaPrompt(args.Question, verdaContext, "")
+
+	provider := viper.GetString("ai.default_provider")
+	if provider == "" {
+		provider = "openai"
+	}
+	apiKey := mcpResolveProviderKey(provider)
+	aiClient := ai.NewClient(provider, apiKey, args.Debug, provider)
+
+	response, err := aiClient.AskPrompt(ctx, prompt)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("AI query failed: %v", err)), nil
+	}
+	return mcp.NewToolResultText(response), nil
+}
+
+// handleMCPVerdaList resolves Verda credentials and lists the requested resource type.
+func handleMCPVerdaList(ctx context.Context, args verdaListArgs) (*mcp.CallToolResult, error) {
+	clientID := args.ClientID
+	if clientID == "" {
+		clientID = verda.ResolveClientID()
+	}
+	clientSecret := args.ClientSecret
+	if clientSecret == "" {
+		clientSecret = verda.ResolveClientSecret()
+	}
+	if clientID == "" || clientSecret == "" {
+		return mcp.NewToolResultError("Verda credentials not configured. Set verda.client_id / verda.client_secret in ~/.clanker.yaml, export VERDA_CLIENT_ID / VERDA_CLIENT_SECRET, or run `verda auth login`"), nil
+	}
+	projectID := args.ProjectID
+	if projectID == "" {
+		projectID = verda.ResolveProjectID()
+	}
+
+	client, err := verda.NewClient(clientID, clientSecret, projectID, false)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to create Verda client: %v", err)), nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	resource := strings.ToLower(strings.TrimSpace(args.Resource))
+	var path string
+	switch resource {
+	case "instances", "instance", "vm", "vms":
+		path = "/v1/instances"
+	case "clusters", "cluster":
+		path = "/v1/clusters"
+	case "volumes", "volume":
+		path = "/v1/volumes"
+	case "ssh-keys", "ssh", "keys":
+		path = "/v1/ssh-keys"
+	case "scripts", "startup-scripts":
+		path = "/v1/scripts?pageSize=100"
+	case "instance-types", "types":
+		path = "/v1/instance-types"
+	case "cluster-types":
+		path = "/v1/cluster-types"
+	case "container-types":
+		path = "/v1/container-types"
+	case "locations":
+		path = "/v1/locations"
+	case "balance":
+		path = "/v1/balance"
+	case "images":
+		path = "/v1/images"
+	case "cluster-images":
+		path = "/v1/images/cluster"
+	case "availability":
+		path = "/v1/instance-availability"
+	default:
+		return mcp.NewToolResultError(fmt.Sprintf("unknown resource type: %s", resource)), nil
+	}
+
+	result, err := client.RunAPIWithContext(ctx, "GET", path, "")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Verda API error: %v", err)), nil
+	}
 	return mcp.NewToolResultText(result), nil
 }
 
