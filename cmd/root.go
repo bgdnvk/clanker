@@ -11,6 +11,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/gcp"
 	"github.com/bgdnvk/clanker/internal/hetzner"
 	"github.com/bgdnvk/clanker/internal/vercel"
+	"github.com/bgdnvk/clanker/internal/verda"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -116,6 +117,11 @@ func init() {
 	vercelCmd := vercel.CreateVercelCommands()
 	AddVercelAskCommand(vercelCmd)
 	rootCmd.AddCommand(vercelCmd)
+
+	// Register Verda Cloud static commands + ask subcommand
+	verdaCmd := verda.CreateVerdaCommands()
+	AddVerdaAskCommand(verdaCmd)
+	rootCmd.AddCommand(verdaCmd)
 }
 
 // initConfig reads in config file and ENV variables if set.
