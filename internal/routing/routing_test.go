@@ -445,3 +445,59 @@ func TestContains(t *testing.T) {
 		})
 	}
 }
+
+func TestInferContext_VerdaExplicit(t *testing.T) {
+	useDefaultProvider(t, "")
+
+	tests := []string{
+		"list my verda instances",
+		"how much am I spending on verda cloud",
+		"any datacrunch clusters running",
+		"show me the verda gpu usage",
+		"spin up an instant cluster on verda",
+	}
+	for _, q := range tests {
+		t.Run(q, func(t *testing.T) {
+			ctx := InferContext(q)
+			if !ctx.Verda {
+				t.Errorf("expected Verda=true for %q", q)
+			}
+		})
+	}
+}
+
+func TestInferContext_VerdaDefaultProvider(t *testing.T) {
+	useDefaultProvider(t, "verda")
+	// Use a query with no provider/module keywords so the default-provider
+	// fallback at the end of InferContext fires.
+	ctx := InferContext("what is running right now?")
+	if !ctx.Verda {
+		t.Error("generic discovery should activate Verda when it's the default provider")
+	}
+	if ctx.AWS {
+		t.Error("AWS should not be activated when verda is the default")
+	}
+}
+
+func TestInferContext_VerdaNoFalsePositive(t *testing.T) {
+	useDefaultProvider(t, "")
+	// "gpu" alone is not a Verda signal (AWS p4/p5/g5 also have GPUs).
+	ctx := InferContext("list my gpu instances on aws")
+	if ctx.Verda {
+		t.Error("bare 'gpu' + aws should not trigger Verda routing")
+	}
+}
+
+func TestApplyLLMClassification_Verda(t *testing.T) {
+	useDefaultProvider(t, "")
+	ctx := ServiceContext{AWS: true, Cloudflare: true, DigitalOcean: true, Hetzner: true, Vercel: true, IAM: true}
+	ApplyLLMClassification(&ctx, "verda")
+	if !ctx.Verda {
+		t.Error("Verda should be set")
+	}
+	// Per the existing ApplyLLMClassification convention, the Verda case
+	// clears cloud providers + IAM but preserves GitHub/Terraform.
+	if ctx.AWS || ctx.Cloudflare || ctx.DigitalOcean || ctx.Hetzner || ctx.Vercel || ctx.IAM {
+		t.Error("other cloud providers should be cleared when LLM picks verda")
+	}
+}

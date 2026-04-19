@@ -509,6 +509,9 @@ func toClusterInfo(c *verda.Cluster) *ClusterInfo {
 	return info
 }
 
+// looksLikeUUID reports whether s is a canonical lowercase Verda UUID. Callers
+// should lowercase inputs before calling so pasted uppercase IDs still match —
+// resolveClusterID does this.
 func looksLikeUUID(s string) bool {
 	if len(s) != 36 {
 		return false
@@ -520,7 +523,7 @@ func looksLikeUUID(s string) bool {
 				return false
 			}
 		default:
-			if !(r >= '0' && r <= '9') && !(r >= 'a' && r <= 'f') && !(r >= 'A' && r <= 'F') {
+			if !(r >= '0' && r <= '9') && !(r >= 'a' && r <= 'f') {
 				return false
 			}
 		}
