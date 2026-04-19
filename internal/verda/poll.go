@@ -44,14 +44,17 @@ func (c *Client) WaitInstanceRunning(ctx context.Context, id string, opts PollOp
 			return &inst, nil
 		}
 
-		if time.Now().After(deadline) {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
 			return &inst, fmt.Errorf("timeout waiting for instance %s to reach running (last status=%s)", id, inst.Status)
 		}
 
-		select {
-		case <-ctx.Done():
-			return &inst, ctx.Err()
-		case <-time.After(opts.Interval):
+		wait := opts.Interval
+		if wait > remaining {
+			wait = remaining
+		}
+		if err := sleepCtx(ctx, wait); err != nil {
+			return &inst, err
 		}
 	}
 }
@@ -76,14 +79,16 @@ func (c *Client) WaitClusterRunning(ctx context.Context, id string, opts PollOpt
 			return &cl, nil
 		}
 
-		if time.Now().After(deadline) {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
 			return &cl, fmt.Errorf("timeout waiting for cluster %s to reach running (last status=%s)", id, cl.Status)
 		}
-
-		select {
-		case <-ctx.Done():
-			return &cl, ctx.Err()
-		case <-time.After(opts.Interval):
+		wait := opts.Interval
+		if wait > remaining {
+			wait = remaining
+		}
+		if err := sleepCtx(ctx, wait); err != nil {
+			return &cl, err
 		}
 	}
 }
@@ -108,22 +113,28 @@ func (c *Client) WaitVolumeAvailable(ctx context.Context, id string, opts PollOp
 			return &v, nil
 		}
 
-		if time.Now().After(deadline) {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
 			return &v, fmt.Errorf("timeout waiting for volume %s to reach ready (last status=%s)", id, v.Status)
 		}
-
-		select {
-		case <-ctx.Done():
-			return &v, ctx.Err()
-		case <-time.After(opts.Interval):
+		wait := opts.Interval
+		if wait > remaining {
+			wait = remaining
+		}
+		if err := sleepCtx(ctx, wait); err != nil {
+			return &v, err
 		}
 	}
 }
 
+// isTerminalInstanceStatus reports whether the status is one WaitInstanceRunning
+// should return on. `StatusOffline` is intentionally NOT terminal — an offline
+// instance may transition back to running after a boot action, so polling must
+// continue until the caller-imposed deadline.
 func isTerminalInstanceStatus(s string) bool {
 	switch s {
 	case StatusRunning, StatusError, StatusDiscontinued, StatusNotFound,
-		StatusNoCapacity, StatusInstallationFailed, StatusOffline:
+		StatusNoCapacity, StatusInstallationFailed:
 		return true
 	}
 	return false

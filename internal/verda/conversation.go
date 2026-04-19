@@ -84,6 +84,9 @@ func (h *ConversationHistory) GetRecentContext(maxEntries int) string {
 }
 
 // Save persists the conversation to ~/.clanker/conversations/verda_<scope>.json.
+// Write is atomic: marshal → write temp file → rename over the destination.
+// A crash mid-write leaves either the old or new file intact but never a
+// half-written blob that would poison subsequent loads.
 func (h *ConversationHistory) Save() error {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -102,7 +105,25 @@ func (h *ConversationHistory) Save() error {
 	}
 
 	path := filepath.Join(dir, fmt.Sprintf("verda_%s.json", sanitize(h.ScopeID)))
-	return os.WriteFile(path, data, 0o644)
+	tmp, err := os.CreateTemp(dir, "verda_*.json.tmp")
+	if err != nil {
+		return fmt.Errorf("create tmp: %w", err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("write tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("close tmp: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("rename: %w", err)
+	}
+	return nil
 }
 
 // Load restores history from disk. Missing file is not an error.

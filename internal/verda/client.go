@@ -223,39 +223,61 @@ func (c *Client) ClientID() string { return c.clientID }
 // ProjectID exposes the project ID.
 func (c *Client) ProjectID() string { return c.projectID }
 
-// ensureToken obtains or refreshes the OAuth2 bearer token. Safe to call from
-// any request path.
+// ensureToken returns a valid OAuth2 bearer token, fetching or refreshing
+// as needed. The mutex is only held for cache reads and writes — HTTP I/O
+// happens with the lock dropped so concurrent callers can't deadlock if
+// the transport ever taps back into c.mu.
 func (c *Client) ensureToken(ctx context.Context) (string, error) {
+	// Fast path: cached token still valid.
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Keep a small margin before expiry so we don't race the clock.
 	if c.accessToken != "" && time.Until(c.tokenExpiry) > 30*time.Second {
-		return c.accessToken, nil
+		tok := c.accessToken
+		c.mu.Unlock()
+		return tok, nil
 	}
+	refreshTok := c.refreshToken
+	c.mu.Unlock()
 
-	var body map[string]string
-	if c.refreshToken != "" {
-		body = map[string]string{
+	// Slow path: attempt a refresh_token flow first when we have one,
+	// fall back to client_credentials if refresh fails or is absent.
+	if refreshTok != "" {
+		tr, err := c.fetchToken(ctx, map[string]string{
 			"grant_type":    "refresh_token",
-			"refresh_token": c.refreshToken,
+			"refresh_token": refreshTok,
+		})
+		if err == nil {
+			return c.storeToken(tr), nil
 		}
-	} else {
-		body = map[string]string{
-			"grant_type":    "client_credentials",
-			"client_id":     c.clientID,
-			"client_secret": c.clientSecret,
+		// Drop the broken refresh token so subsequent callers don't retry it.
+		c.mu.Lock()
+		if c.refreshToken == refreshTok {
+			c.refreshToken = ""
 		}
+		c.mu.Unlock()
 	}
 
+	tr, err := c.fetchToken(ctx, map[string]string{
+		"grant_type":    "client_credentials",
+		"client_id":     c.clientID,
+		"client_secret": c.clientSecret,
+	})
+	if err != nil {
+		return "", err
+	}
+	return c.storeToken(tr), nil
+}
+
+// fetchToken performs a single POST /v1/oauth2/token with the provided body.
+// Does no locking — callers are responsible for any synchronization.
+func (c *Client) fetchToken(ctx context.Context, body map[string]string) (*TokenResponse, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return "", fmt.Errorf("marshal token request: %w", err)
+		return nil, fmt.Errorf("marshal token request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, effectiveBaseURL()+"/v1/oauth2/token", bytes.NewReader(payload))
 	if err != nil {
-		return "", fmt.Errorf("build token request: %w", err)
+		return nil, fmt.Errorf("build token request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -266,85 +288,34 @@ func (c *Client) ensureToken(ctx context.Context) (string, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		// Refresh can fail if the refresh token has expired; retry once with
-		// client_credentials so the caller doesn't need to reason about it.
-		if c.refreshToken != "" {
-			c.refreshToken = ""
-			c.accessToken = ""
-			c.tokenExpiry = time.Time{}
-			return c.ensureTokenLocked(ctx)
-		}
-		return "", fmt.Errorf("verda token request failed: %w", err)
+		return nil, fmt.Errorf("verda token request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	buf := new(bytes.Buffer)
 	if _, err := buf.ReadFrom(resp.Body); err != nil {
-		return "", fmt.Errorf("read token response: %w", err)
+		return nil, fmt.Errorf("read token response: %w", err)
 	}
 
 	if resp.StatusCode >= 400 {
-		// Retry once with fresh client credentials if we just tried refresh_token.
-		if c.refreshToken != "" {
-			c.refreshToken = ""
-			c.accessToken = ""
-			c.tokenExpiry = time.Time{}
-			return c.ensureTokenLocked(ctx)
-		}
-		return "", decodeAPIErrorBody(buf.Bytes(), resp.StatusCode)
+		return nil, decodeAPIErrorBody(buf.Bytes(), resp.StatusCode)
 	}
 
 	var tr TokenResponse
 	if err := json.Unmarshal(buf.Bytes(), &tr); err != nil {
-		return "", fmt.Errorf("decode token response: %w (body: %s)", err, buf.String())
+		return nil, fmt.Errorf("decode token response: %w (body: %s)", err, buf.String())
 	}
 	if tr.AccessToken == "" {
-		return "", fmt.Errorf("verda token response missing access_token (body: %s)", buf.String())
+		return nil, fmt.Errorf("verda token response missing access_token (body: %s)", buf.String())
 	}
-
-	c.accessToken = tr.AccessToken
-	c.refreshToken = tr.RefreshToken
-	if tr.ExpiresIn > 0 {
-		c.tokenExpiry = time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second)
-	} else {
-		c.tokenExpiry = time.Now().Add(55 * time.Minute)
-	}
-
-	return c.accessToken, nil
+	return &tr, nil
 }
 
-// ensureTokenLocked is called after we've reset the cached token state inside
-// ensureToken; it drops the mutex safely because the caller holds it.
-func (c *Client) ensureTokenLocked(ctx context.Context) (string, error) {
-	// We're already holding c.mu — unlock and reacquire via the public path
-	// would deadlock. Inline the minimum client-credentials flow here.
-	body, err := json.Marshal(map[string]string{
-		"grant_type":    "client_credentials",
-		"client_id":     c.clientID,
-		"client_secret": c.clientSecret,
-	})
-	if err != nil {
-		return "", err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, effectiveBaseURL()+"/v1/oauth2/token", bytes.NewReader(body))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	buf := new(bytes.Buffer)
-	_, _ = buf.ReadFrom(resp.Body)
-	if resp.StatusCode >= 400 {
-		return "", decodeAPIErrorBody(buf.Bytes(), resp.StatusCode)
-	}
-	var tr TokenResponse
-	if err := json.Unmarshal(buf.Bytes(), &tr); err != nil {
-		return "", err
-	}
+// storeToken persists a TokenResponse into the client cache and returns the
+// access token.
+func (c *Client) storeToken(tr *TokenResponse) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.accessToken = tr.AccessToken
 	c.refreshToken = tr.RefreshToken
 	if tr.ExpiresIn > 0 {
@@ -352,7 +323,7 @@ func (c *Client) ensureTokenLocked(ctx context.Context) (string, error) {
 	} else {
 		c.tokenExpiry = time.Now().Add(55 * time.Minute)
 	}
-	return c.accessToken, nil
+	return c.accessToken
 }
 
 // apiResponse carries the decoded parts of a Verda API call we may care about
@@ -392,7 +363,9 @@ func (c *Client) RunAPIWithContext(ctx context.Context, method, path, body strin
 			if !isRetryableNetError(err) || attempt == maxAttempts-1 {
 				return "", err
 			}
-			time.Sleep(backoffs[attempt])
+			if err := sleepCtx(ctx, backoffs[attempt]); err != nil {
+				return "", err
+			}
 			continue
 		}
 
@@ -415,14 +388,18 @@ func (c *Client) RunAPIWithContext(ctx context.Context, method, path, body strin
 				if wait == 0 {
 					wait = backoffs[attempt]
 				}
-				time.Sleep(wait)
+				if err := sleepCtx(ctx, wait); err != nil {
+					return "", err
+				}
 				continue
 			}
 			return string(resp.Body), decodeAPIErrorBody(resp.Body, resp.StatusCode)
 		}
 
 		if resp.StatusCode >= 500 && resp.StatusCode < 600 && attempt < maxAttempts-1 {
-			time.Sleep(backoffs[attempt])
+			if err := sleepCtx(ctx, backoffs[attempt]); err != nil {
+				return "", err
+			}
 			continue
 		}
 
@@ -504,6 +481,24 @@ func decodeAPIErrorBody(body []byte, status int) error {
 		}
 	}
 	return fmt.Errorf("verda API HTTP %d: %s", status, strings.TrimSpace(string(body)))
+}
+
+// sleepCtx blocks for the given duration or returns when ctx is cancelled.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 func isRetryableNetError(err error) bool {
