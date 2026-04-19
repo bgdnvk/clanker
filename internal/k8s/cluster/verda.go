@@ -305,9 +305,12 @@ func (p *VerdaInstantProvider) GetCluster(ctx context.Context, clusterName strin
 // resolveClusterID maps a hostname or raw ID to a cluster ID. Verda's API keys
 // everything by UUID, but users specify clusters by name in clanker commands.
 func (p *VerdaInstantProvider) resolveClusterID(ctx context.Context, nameOrID string) (string, error) {
-	// Treat the input as a UUID if it looks like one.
-	if looksLikeUUID(nameOrID) {
-		return nameOrID, nil
+	// Treat the input as a UUID if it looks like one. Verda UUIDs are
+	// lowercase per the spec, so normalise in case a user pasted an
+	// uppercase variant from a UI.
+	lowered := strings.ToLower(strings.TrimSpace(nameOrID))
+	if looksLikeUUID(lowered) {
+		return lowered, nil
 	}
 	return p.findClusterIDByHostname(ctx, nameOrID)
 }
@@ -385,20 +388,29 @@ func (p *VerdaInstantProvider) fetchRemoteKubeconfig(ctx context.Context, host s
 }
 
 func (p *VerdaInstantProvider) scpRead(ctx context.Context, target string) (string, error) {
-	// Use `scp` piping to stdout via `cat`, avoiding temp files. Practically
-	// we invoke `ssh <host> cat <path>` since `scp - <remote:path>` has
-	// inconsistent support.
+	// We invoke `ssh <host> cat <path>` since `scp - <remote:path>` has
+	// inconsistent support across OpenSSH versions.
 	host, path := splitSCPTarget(target)
 	if host == "" || path == "" {
 		return "", fmt.Errorf("invalid scp target %s", target)
+	}
+	// Belt-and-braces: reject any path containing shell metacharacters in case
+	// the candidate list ever becomes user-supplied. `ssh` concatenates the
+	// remote args into a single string before passing to the login shell, so
+	// anything non-literal here is an injection vector.
+	if strings.ContainsAny(path, ";&|`$><\n\r") {
+		return "", fmt.Errorf("refusing to scp path with shell metacharacters: %q", path)
 	}
 
 	args := []string{
 		"-i", p.sshKeyPath,
 		"-o", "StrictHostKeyChecking=accept-new",
 		"-o", "ConnectTimeout=10",
+		"-o", "BatchMode=yes",
 		host,
-		"cat " + path,
+		"--",
+		"cat",
+		path,
 	}
 	DebugLog(p.debug, "ssh", "%s", strings.Join(args, " "))
 
