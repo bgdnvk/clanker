@@ -539,6 +539,107 @@ clanker ask --apply --plan-file plan.json | cat
 clanker ask --hetzner --maker --destroyer "delete the test server" | cat
 ```
 
+## Verda Cloud
+
+Clanker supports [Verda Cloud](https://verda.com) (ex-DataCrunch), a European GPU/AI cloud. Every operation runs against Verda's REST API directly — the `verda` CLI binary is optional and only needed for `verda auth login` and `verda skills install`.
+
+### Setup
+
+Verda uses OAuth2 Client Credentials. Generate a `client_id` / `client_secret` pair at [console.verda.com/account/api-keys](https://console.verda.com/account/api-keys) (scope `cloud-api-v1`), then pick one of the resolution paths below.
+
+Option 1 — install the Verda CLI and log in:
+
+```bash
+brew install verda-cloud/tap/verda-cli
+verda auth login   # writes ~/.verda/credentials which clanker reads
+```
+
+Option 2 — environment variables:
+
+```bash
+export VERDA_CLIENT_ID="..."
+export VERDA_CLIENT_SECRET="..."
+export VERDA_PROJECT_ID="..."   # optional
+```
+
+Option 3 — `~/.clanker.yaml`:
+
+```yaml
+verda:
+    client_id: ""
+    client_secret: ""
+    default_project_id: ""
+    default_location: "FIN-01"
+    default_ssh_key_id: ""
+    ssh_key_path: "~/.ssh/id_ed25519"
+```
+
+Option 4 — store in the clanker backend so other machines pick it up automatically:
+
+```bash
+clanker credentials store verda --client-id "$VERDA_CLIENT_ID" --client-secret "$VERDA_CLIENT_SECRET"
+clanker credentials test verda    # hits /v1/balance through the stored creds
+```
+
+### Static Commands
+
+```bash
+clanker verda list instances
+clanker verda list clusters
+clanker verda list volumes
+clanker verda list instance-types
+clanker verda list locations
+clanker verda list containers         # serverless container deployments
+clanker verda list jobs               # serverless job deployments
+clanker verda balance
+
+clanker verda get instance <uuid|hostname>
+clanker verda action start <uuid|hostname>
+clanker verda action shutdown <uuid|hostname>
+clanker verda action delete <uuid|hostname>   # destructive, requires confirmation
+```
+
+### AI Queries
+
+```bash
+# Explicit flag
+clanker ask --verda "what GPU instances are running?"
+clanker ask --verda "how much am I spending this month?"
+
+# Keyword routing (no flag needed when the query mentions verda/datacrunch)
+clanker ask "list my verda clusters"
+
+# Default provider — set infra.default_provider: verda in ~/.clanker.yaml
+# to route bare `clanker ask "..."` queries through Verda.
+```
+
+### Maker (Plan + Apply)
+
+Verda plans use a `verda-api` verb so execution goes through the REST client directly (no CLI dependency). Destructive actions — `DELETE`, `action=delete|discontinue|force_shutdown|delete_stuck|hibernate` — require `--destroyer`.
+
+```bash
+# Generate a plan
+clanker ask --verda --maker "spin up one H100 in FIN-01 with my default ssh key" | tee plan.json
+
+# Apply an approved plan
+clanker ask --apply --plan-file plan.json
+
+# Allow destructive operations (delete instances / discontinue clusters)
+clanker ask --verda --maker --destroyer "delete the training instance" | cat
+```
+
+### Kubernetes (Instant Clusters)
+
+Verda doesn't have a managed K8s control plane, but its Instant Clusters ship with Kubernetes preinstalled. Clanker registers a `verda-instant` provider under its K8s agent that provisions a cluster and pulls kubeconfig off the head node. From the desktop app, click the "kubeconfig →" button on a Verda cluster in the resource list to get a ready-to-paste `ssh | sed` one-liner.
+
+### MCP
+
+Verda is exposed over MCP as `clanker_verda_ask` and `clanker_verda_list` so any MCP-compatible agent (Claude Desktop, Cursor, Zed, etc) can reach the same surface:
+
+```bash
+clanker mcp --transport http --listen :39393
+```
+
 ## Troubleshooting
 
 AWS auth:
