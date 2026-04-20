@@ -2378,20 +2378,47 @@ func buildVercelPrompt(question, vercelContext, historyContext string) string {
 // resolving in this order: ~/.clanker.yaml (verda.* keys) → VERDA_* env vars →
 // ~/.verda/credentials (written by `verda auth login`).
 func resolveVerdaCredentials() (clientID, clientSecret, projectID string, err error) {
+	return resolveVerdaCredentialsWithContext(context.Background(), false)
+}
+
+// resolveVerdaCredentialsWithContext mirrors resolveVercelToken's fallback
+// chain: local config / env / ~/.verda/credentials first, then the clanker
+// backend credential store if the local path has nothing. `debug` controls
+// whether the backend fallback logs its decision.
+func resolveVerdaCredentialsWithContext(ctx context.Context, debug bool) (clientID, clientSecret, projectID string, err error) {
 	clientID = verda.ResolveClientID()
 	clientSecret = verda.ResolveClientSecret()
 	projectID = verda.ResolveProjectID()
-	if clientID == "" || clientSecret == "" {
-		// Pick the most-likely-useful suggestion based on whether the verda
-		// CLI is installed. Users without the CLI should never be told to run
-		// `verda auth login` — they'll get a confusing "command not found".
-		suggestion := "Set verda.client_id / verda.client_secret in ~/.clanker.yaml or export VERDA_CLIENT_ID / VERDA_CLIENT_SECRET."
-		if verda.CLIInstalled() {
-			suggestion = "Set verda.client_id / verda.client_secret in ~/.clanker.yaml, export VERDA_CLIENT_ID / VERDA_CLIENT_SECRET, or run `verda auth login` (the CLI writes ~/.verda/credentials which clanker reads automatically)."
-		}
-		return "", "", "", fmt.Errorf("Verda credentials not configured. %s", suggestion)
+	if clientID != "" && clientSecret != "" {
+		return clientID, clientSecret, projectID, nil
 	}
-	return clientID, clientSecret, projectID, nil
+
+	// Local resolution failed — try the clanker backend credential store if
+	// the user has an API key configured. If the backend route isn't
+	// provisioned server-side yet we get a 404 and fall through to the
+	// human-readable error below.
+	if backendAPIKey := backend.ResolveAPIKey(""); backendAPIKey != "" {
+		backendClient := backend.NewClient(backendAPIKey, debug)
+		creds, bErr := backendClient.GetVerdaCredentials(ctx)
+		if bErr == nil && strings.TrimSpace(creds.ClientID) != "" && strings.TrimSpace(creds.ClientSecret) != "" {
+			if debug {
+				fmt.Println("[backend] Using Verda credentials from backend")
+			}
+			return strings.TrimSpace(creds.ClientID), strings.TrimSpace(creds.ClientSecret), strings.TrimSpace(creds.ProjectID), nil
+		}
+		if debug {
+			fmt.Printf("[backend] No Verda credentials available (%v), falling back to local error\n", bErr)
+		}
+	}
+
+	// Pick the most-likely-useful suggestion based on whether the verda
+	// CLI is installed. Users without the CLI should never be told to run
+	// `verda auth login` — they'll get a confusing "command not found".
+	suggestion := "Set verda.client_id / verda.client_secret in ~/.clanker.yaml or export VERDA_CLIENT_ID / VERDA_CLIENT_SECRET."
+	if verda.CLIInstalled() {
+		suggestion = "Set verda.client_id / verda.client_secret in ~/.clanker.yaml, export VERDA_CLIENT_ID / VERDA_CLIENT_SECRET, or run `verda auth login` (the CLI writes ~/.verda/credentials which clanker reads automatically)."
+	}
+	return "", "", "", fmt.Errorf("Verda credentials not configured. %s", suggestion)
 }
 
 // handleVerdaQuery delegates a Verda Cloud query to the Verda agent with
@@ -2401,7 +2428,7 @@ func handleVerdaQuery(ctx context.Context, question string, debug bool) error {
 		fmt.Println("Delegating query to Verda agent...")
 	}
 
-	clientID, clientSecret, projectID, err := resolveVerdaCredentials()
+	clientID, clientSecret, projectID, err := resolveVerdaCredentialsWithContext(ctx, debug)
 	if err != nil {
 		return err
 	}

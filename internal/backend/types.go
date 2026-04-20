@@ -54,6 +54,15 @@ type VercelCredentials struct {
 	TeamID   string `json:"team_id,omitempty"`
 }
 
+// VerdaCredentials represents Verda Cloud (ex-DataCrunch) credentials stored
+// in the backend. Verda uses OAuth2 Client Credentials so we need both IDs.
+// ProjectID is optional.
+type VerdaCredentials struct {
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+	ProjectID    string `json:"project_id,omitempty"`
+}
+
 // CredentialProvider represents supported credential providers
 type CredentialProvider string
 
@@ -66,6 +75,7 @@ const (
 	ProviderHetzner      CredentialProvider = "hetzner"
 	ProviderKubernetes   CredentialProvider = "kubernetes"
 	ProviderVercel       CredentialProvider = "vercel"
+	ProviderVerda        CredentialProvider = "verda"
 )
 
 // CredentialEntry represents a stored credential in the backend
