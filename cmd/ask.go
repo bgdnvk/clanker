@@ -1369,7 +1369,7 @@ func init() {
 	askCmd.Flags().String("minimax-model", "", "MiniMax model to use (overrides config)")
 	askCmd.Flags().String("github-model", "", "GitHub Models model to use (overrides config)")
 	askCmd.Flags().Bool("agent-trace", false, "Show detailed coordinator agent lifecycle logs (overrides config)")
-	askCmd.Flags().Bool("maker", false, "Generate an AWS, GCP, Azure, Cloudflare, Digital Ocean, or Hetzner CLI plan (JSON) for infrastructure changes")
+	askCmd.Flags().Bool("maker", false, "Generate an AWS, GCP, Azure, Cloudflare, Digital Ocean, Hetzner, Vercel, or Verda plan (JSON) for infrastructure changes")
 	askCmd.Flags().Bool("destroyer", false, "Allow destructive operations when using --maker (requires explicit confirmation in UI/workflow)")
 	askCmd.Flags().Bool("apply", false, "Apply an approved maker plan (reads from stdin unless --plan-file is provided)")
 	askCmd.Flags().String("plan-file", "", "Optional path to maker plan JSON file for --apply")
