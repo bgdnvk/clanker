@@ -14,6 +14,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/k8s/storage"
 	"github.com/bgdnvk/clanker/internal/k8s/telemetry"
 	"github.com/bgdnvk/clanker/internal/k8s/workloads"
+	"github.com/bgdnvk/clanker/internal/verda"
 )
 
 // Agent is the main K8s orchestrator that receives delegated queries from the main agent
@@ -60,6 +61,42 @@ func NewAgentWithOptions(opts AgentOptions) *Agent {
 		}))
 	}
 
+	// Register Verda Instant Cluster provider if Verda credentials are configured.
+	// Failing to build a client is non-fatal — it just means the provider won't
+	// be available until the user adds credentials. Log at debug so a user
+	// investigating why "verda-instant" isn't a selectable cluster type has a
+	// breadcrumb to follow.
+	verdaClientID := verda.ResolveClientID()
+	verdaClientSecret := verda.ResolveClientSecret()
+	switch {
+	case verdaClientID == "" && verdaClientSecret == "":
+		if opts.Debug {
+			fmt.Println("[k8s] verda provider skipped: no verda credentials configured")
+		}
+	case verdaClientID == "" || verdaClientSecret == "":
+		if opts.Debug {
+			fmt.Println("[k8s] verda provider skipped: partial credentials (need both client_id and client_secret)")
+		}
+	default:
+		client, err := verda.NewClient(verdaClientID, verdaClientSecret, verda.ResolveProjectID(), opts.Debug)
+		if err != nil {
+			if opts.Debug {
+				fmt.Printf("[k8s] verda provider skipped: %v\n", err)
+			}
+		} else {
+			mgr.RegisterProvider(cluster.NewVerdaInstantProvider(cluster.VerdaInstantProviderOptions{
+				Client:          client,
+				DefaultLocation: verda.ResolveDefaultLocation(),
+				DefaultSSHKeyID: verda.ResolveDefaultSSHKeyID(),
+				SSHKeyPath:      verda.ResolveSSHKeyPath(),
+				Debug:           opts.Debug,
+			}))
+			if opts.Debug {
+				fmt.Println("[k8s] verda-instant provider registered")
+			}
+		}
+	}
+
 	return &Agent{
 		clusterMgr: mgr,
 		debug:      opts.Debug,
@@ -85,6 +122,19 @@ func (a *Agent) RegisterKubeadmProvider(opts KubeadmProviderOptions) {
 		KeyPairName: opts.KeyPairName,
 		SSHKeyPath:  opts.SSHKeyPath,
 		Debug:       a.debug,
+	}))
+}
+
+// RegisterVerdaInstantProvider registers a Verda Cloud Instant Cluster provider
+// with the agent. Idempotent — the underlying Manager replaces existing entries
+// of the same type.
+func (a *Agent) RegisterVerdaInstantProvider(client *verda.Client, defaultLocation, defaultSSHKeyID, sshKeyPath string) {
+	a.clusterMgr.RegisterProvider(cluster.NewVerdaInstantProvider(cluster.VerdaInstantProviderOptions{
+		Client:          client,
+		DefaultLocation: defaultLocation,
+		DefaultSSHKeyID: defaultSSHKeyID,
+		SSHKeyPath:      sshKeyPath,
+		Debug:           a.debug,
 	}))
 }
 

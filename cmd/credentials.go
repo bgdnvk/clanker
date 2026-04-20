@@ -15,6 +15,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/cloudflare"
 	"github.com/bgdnvk/clanker/internal/hetzner"
 	"github.com/bgdnvk/clanker/internal/vercel"
+	"github.com/bgdnvk/clanker/internal/verda"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -40,7 +41,7 @@ var credentialsStoreCmd = &cobra.Command{
 	Short: "Store credentials in the backend",
 	Long: `Upload local credentials to the clanker backend.
 
-Supported providers: aws, gcp, hetzner, cloudflare, vercel, k8s
+Supported providers: aws, gcp, hetzner, cloudflare, vercel, verda, k8s
 
 AWS:
   Exports credentials from local AWS CLI profile using 'aws configure export-credentials'.
@@ -69,6 +70,8 @@ Examples:
   clanker credentials store cloudflare
   clanker credentials store vercel
   clanker credentials store vercel --api-token ${VERCEL_TOKEN} --team-id team_abc
+  clanker credentials store verda
+  clanker credentials store verda --client-id ${VERDA_CLIENT_ID} --client-secret ${VERDA_CLIENT_SECRET}
   clanker credentials store k8s --kubeconfig ~/.kube/config`,
 	Args: cobra.ExactArgs(1),
 	RunE: runCredentialsStore,
@@ -129,6 +132,9 @@ func init() {
 	credentialsStoreCmd.Flags().String("context", "", "Kubernetes context name to use")
 	credentialsStoreCmd.Flags().String("api-token", "", "Vercel API token (overrides vercel.api_token / VERCEL_TOKEN)")
 	credentialsStoreCmd.Flags().String("team-id", "", "Vercel team ID (overrides vercel.team_id / VERCEL_TEAM_ID)")
+	credentialsStoreCmd.Flags().String("client-id", "", "Verda OAuth2 client ID (overrides verda.client_id / VERDA_CLIENT_ID)")
+	credentialsStoreCmd.Flags().String("client-secret", "", "Verda OAuth2 client secret (overrides verda.client_secret / VERDA_CLIENT_SECRET)")
+	credentialsStoreCmd.Flags().String("project-id", "", "Verda project ID (overrides verda.default_project_id / VERDA_PROJECT_ID)")
 }
 
 func requireAPIKey(cmd *cobra.Command) (string, error) {
@@ -166,10 +172,12 @@ func runCredentialsStore(cmd *cobra.Command, args []string) error {
 		return storeCloudflareCredentials(ctx, cmd, client)
 	case "vercel":
 		return storeVercelCredentials(ctx, cmd, client)
+	case "verda":
+		return storeVerdaCredentials(ctx, cmd, client)
 	case "k8s", "kubernetes":
 		return storeKubernetesCredentials(ctx, cmd, client)
 	default:
-		return fmt.Errorf("unsupported provider: %s (supported: aws, gcp, hetzner, cloudflare, vercel, k8s)", provider)
+		return fmt.Errorf("unsupported provider: %s (supported: aws, gcp, hetzner, cloudflare, vercel, verda, k8s)", provider)
 	}
 }
 
@@ -349,6 +357,44 @@ func storeVercelCredentials(ctx context.Context, cmd *cobra.Command, client *bac
 	return nil
 }
 
+// storeVerdaCredentials pushes Verda OAuth2 client_id / client_secret (plus
+// optional project_id) to the clanker backend so other machines can pull
+// them via `clanker ask --verda` without re-authenticating.
+func storeVerdaCredentials(ctx context.Context, cmd *cobra.Command, client *backend.Client) error {
+	clientID, _ := cmd.Flags().GetString("client-id")
+	if strings.TrimSpace(clientID) == "" {
+		clientID = verda.ResolveClientID()
+	}
+	clientSecret, _ := cmd.Flags().GetString("client-secret")
+	if strings.TrimSpace(clientSecret) == "" {
+		clientSecret = verda.ResolveClientSecret()
+	}
+	if strings.TrimSpace(clientID) == "" || strings.TrimSpace(clientSecret) == "" {
+		return fmt.Errorf("Verda client_id and client_secret required: pass --client-id / --client-secret, set verda.client_id / verda.client_secret in config, export VERDA_CLIENT_ID / VERDA_CLIENT_SECRET, or run `verda auth login` (writes ~/.verda/credentials)")
+	}
+
+	projectID, _ := cmd.Flags().GetString("project-id")
+	if strings.TrimSpace(projectID) == "" {
+		projectID = verda.ResolveProjectID()
+	}
+
+	creds := &backend.VerdaCredentials{
+		ClientID:     strings.TrimSpace(clientID),
+		ClientSecret: strings.TrimSpace(clientSecret),
+		ProjectID:    strings.TrimSpace(projectID),
+	}
+
+	if err := client.StoreVerdaCredentials(ctx, creds); err != nil {
+		return fmt.Errorf("failed to store Verda credentials: %w", err)
+	}
+
+	fmt.Println("Verda credentials stored successfully")
+	if projectID != "" {
+		fmt.Printf("Project ID: %s\n", projectID)
+	}
+	return nil
+}
+
 func storeKubernetesCredentials(ctx context.Context, cmd *cobra.Command, client *backend.Client) error {
 	kubeconfigPath, _ := cmd.Flags().GetString("kubeconfig")
 	contextName, _ := cmd.Flags().GetString("context")
@@ -492,6 +538,8 @@ func testCredential(ctx context.Context, client *backend.Client, provider backen
 		return testCloudflareCredentials(ctx, client, debug)
 	case backend.ProviderVercel:
 		return testVercelCredentials(ctx, client, debug)
+	case backend.ProviderVerda:
+		return testVerdaCredentials(ctx, client, debug)
 	case backend.ProviderKubernetes:
 		return testKubernetesCredentials(ctx, client, debug)
 	default:
@@ -678,6 +726,41 @@ func testCloudflareCredentials(ctx context.Context, client *backend.Client, debu
 	return nil
 }
 
+// testVerdaCredentials pulls the stored Verda creds from the clanker backend
+// and exercises them against Verda's balance endpoint, which is the cheapest
+// authenticated call. A success response confirms the oauth2 token flow works
+// end-to-end through the saved credentials.
+func testVerdaCredentials(ctx context.Context, client *backend.Client, debug bool) error {
+	creds, err := client.GetVerdaCredentials(ctx)
+	if err != nil {
+		fmt.Printf("  FAILED: %v\n", err)
+		return err
+	}
+	if creds.ClientID == "" || creds.ClientSecret == "" {
+		fmt.Println("  FAILED: no client_id/client_secret stored")
+		return fmt.Errorf("no Verda credentials")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	vClient, err := verda.NewClient(creds.ClientID, creds.ClientSecret, creds.ProjectID, debug)
+	if err != nil {
+		fmt.Printf("  FAILED: %v\n", err)
+		return err
+	}
+	body, err := vClient.RunAPIWithContext(ctx, "GET", "/v1/balance", "")
+	if err != nil {
+		fmt.Printf("  FAILED: %v\n", err)
+		return err
+	}
+	fmt.Println("  PASSED: authenticated against /v1/balance")
+	if debug {
+		fmt.Printf("  balance: %s\n", strings.TrimSpace(body))
+	}
+	return nil
+}
+
 func testVercelCredentials(ctx context.Context, client *backend.Client, debug bool) error {
 	creds, err := client.GetVercelCredentials(ctx)
 	if err != nil {
@@ -834,10 +917,12 @@ func runCredentialsDelete(cmd *cobra.Command, args []string) error {
 		credProvider = backend.ProviderCloudflare
 	case "vercel":
 		credProvider = backend.ProviderVercel
+	case "verda":
+		credProvider = backend.ProviderVerda
 	case "k8s", "kubernetes":
 		credProvider = backend.ProviderKubernetes
 	default:
-		return fmt.Errorf("unsupported provider: %s (supported: aws, gcp, hetzner, cloudflare, vercel, k8s)", provider)
+		return fmt.Errorf("unsupported provider: %s (supported: aws, gcp, hetzner, cloudflare, vercel, verda, k8s)", provider)
 	}
 
 	client := backend.NewClient(apiKey, debug)

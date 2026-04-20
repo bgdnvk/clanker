@@ -35,13 +35,14 @@ func DebugLog(debug bool, provider, format string, args ...interface{}) {
 type ClusterType string
 
 const (
-	ClusterTypeEKS      ClusterType = "eks"
-	ClusterTypeGKE      ClusterType = "gke"
-	ClusterTypeAKS      ClusterType = "aks"
-	ClusterTypeKubeadm  ClusterType = "kubeadm"
-	ClusterTypeKops     ClusterType = "kops"
-	ClusterTypeK3s      ClusterType = "k3s"
-	ClusterTypeExisting ClusterType = "existing"
+	ClusterTypeEKS          ClusterType = "eks"
+	ClusterTypeGKE          ClusterType = "gke"
+	ClusterTypeAKS          ClusterType = "aks"
+	ClusterTypeKubeadm      ClusterType = "kubeadm"
+	ClusterTypeKops         ClusterType = "kops"
+	ClusterTypeK3s          ClusterType = "k3s"
+	ClusterTypeExisting     ClusterType = "existing"
+	ClusterTypeVerdaInstant ClusterType = "verda-instant"
 )
 
 // Standard timeout constants for cluster operations

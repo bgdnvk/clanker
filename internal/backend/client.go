@@ -449,6 +449,45 @@ func (c *Client) GetVercelCredentials(ctx context.Context) (*VercelCredentials, 
 	return &response.Data.Credentials, nil
 }
 
+// GetVerdaCredentials retrieves Verda Cloud credentials from the backend.
+// The clanker backend may return 404 today (route may not be provisioned
+// server-side yet); the caller treats that as "fall back to local creds" so
+// behaviour degrades gracefully until the server adds the endpoint.
+func (c *Client) GetVerdaCredentials(ctx context.Context) (*VerdaCredentials, error) {
+	respBody, err := c.doRequest(ctx, http.MethodGet, "/api/v1/cli/credentials/verda", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Provider    string           `json:"provider"`
+			Credentials VerdaCredentials `json:"credentials"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(respBody, &response); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !response.Success {
+		return nil, fmt.Errorf("failed to get Verda credentials")
+	}
+
+	return &response.Data.Credentials, nil
+}
+
+// StoreVerdaCredentials stores Verda Cloud credentials in the backend.
+func (c *Client) StoreVerdaCredentials(ctx context.Context, creds *VerdaCredentials) error {
+	body := map[string]interface{}{
+		"provider":    "verda",
+		"credentials": creds,
+	}
+	_, err := c.doRequest(ctx, http.MethodPut, "/api/v1/cli/credentials/verda", body)
+	return err
+}
+
 // StoreVercelCredentials stores Vercel credentials in the backend
 func (c *Client) StoreVercelCredentials(ctx context.Context, creds *VercelCredentials) error {
 	body := map[string]interface{}{
