@@ -10,6 +10,27 @@ import (
 	"time"
 )
 
+// fileLocks serializes Save+Load per ScopeID so two concurrent
+// `clanker verda ask` invocations for the same project don't race on the
+// tmp-file + rename dance and lose one conversation's history. Keyed by the
+// sanitized filename so two scopes that happen to normalise to the same name
+// still share a lock.
+var (
+	fileLocks   = map[string]*sync.Mutex{}
+	fileLocksMu sync.Mutex
+)
+
+func fileLockFor(name string) *sync.Mutex {
+	fileLocksMu.Lock()
+	defer fileLocksMu.Unlock()
+	if m, ok := fileLocks[name]; ok {
+		return m
+	}
+	m := &sync.Mutex{}
+	fileLocks[name] = m
+	return m
+}
+
 // ConversationEntry is a single Q&A exchange.
 type ConversationEntry struct {
 	Timestamp time.Time `json:"timestamp"`
@@ -86,10 +107,21 @@ func (h *ConversationHistory) GetRecentContext(maxEntries int) string {
 // Save persists the conversation to ~/.clanker/conversations/verda_<scope>.json.
 // Write is atomic: marshal → write temp file → rename over the destination.
 // A crash mid-write leaves either the old or new file intact but never a
-// half-written blob that would poison subsequent loads.
+// half-written blob that would poison subsequent loads. A per-scope file lock
+// serializes concurrent Save calls for the same project — without it, two
+// parallel `ask --verda` calls could race on the rename and drop one history.
 func (h *ConversationHistory) Save() error {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
+	data, err := json.MarshalIndent(h, "", "  ")
+	scopeName := sanitize(h.ScopeID)
+	h.mu.RUnlock()
+	if err != nil {
+		return fmt.Errorf("marshal history: %w", err)
+	}
+
+	lock := fileLockFor(scopeName)
+	lock.Lock()
+	defer lock.Unlock()
 
 	dir, err := conversationDir()
 	if err != nil {
@@ -99,12 +131,7 @@ func (h *ConversationHistory) Save() error {
 		return fmt.Errorf("create conversation dir: %w", err)
 	}
 
-	data, err := json.MarshalIndent(h, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal history: %w", err)
-	}
-
-	path := filepath.Join(dir, fmt.Sprintf("verda_%s.json", sanitize(h.ScopeID)))
+	path := filepath.Join(dir, fmt.Sprintf("verda_%s.json", scopeName))
 	tmp, err := os.CreateTemp(dir, "verda_*.json.tmp")
 	if err != nil {
 		return fmt.Errorf("create tmp: %w", err)
@@ -128,6 +155,15 @@ func (h *ConversationHistory) Save() error {
 
 // Load restores history from disk. Missing file is not an error.
 func (h *ConversationHistory) Load() error {
+	// Take the per-scope file lock first so we don't read a file that Save
+	// is currently mid-rename on. Grabbing the struct mutex early would let
+	// a parallel Save hold fileLock + block here, so the order is:
+	// fileLock (cross-process write barrier) → struct mu (in-memory state).
+	scopeName := sanitize(h.ScopeID)
+	lock := fileLockFor(scopeName)
+	lock.Lock()
+	defer lock.Unlock()
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -135,7 +171,7 @@ func (h *ConversationHistory) Load() error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(dir, fmt.Sprintf("verda_%s.json", sanitize(h.ScopeID)))
+	path := filepath.Join(dir, fmt.Sprintf("verda_%s.json", scopeName))
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
