@@ -130,7 +130,7 @@ Supported resources:
 			case "availability":
 				path = "/v1/instance-availability"
 			default:
-				return fmt.Errorf("unknown resource type: %s", resource)
+				return fmt.Errorf("unknown resource type %q. Supported: instances, clusters, volumes, ssh-keys, scripts, instance-types, cluster-types, container-types, containers, jobs, secrets, file-secrets, registry-creds, locations, balance, images, cluster-images, availability", resource)
 			}
 
 			body, err := client.RunAPIWithContext(ctx, http.MethodGet, path, "")
@@ -277,6 +277,19 @@ func createVerdaBalanceCmd() *cobra.Command {
 			body, err := client.RunAPIWithContext(ctx, http.MethodGet, "/v1/balance", "")
 			if err != nil {
 				return err
+			}
+			raw, _ := cmd.Flags().GetBool("raw")
+			if raw {
+				fmt.Println(body)
+				return nil
+			}
+			// When the response parses cleanly print a short human-friendly
+			// summary line (e.g. "Balance: $42.17 USD") so users scanning a
+			// terminal don't have to read JSON. The raw body is still
+			// printed below for scripts grepping numeric fields.
+			var b Balance
+			if err := json.Unmarshal([]byte(body), &b); err == nil && b.Currency != "" {
+				fmt.Printf("Balance: %.2f %s\n", b.Amount, strings.ToUpper(b.Currency))
 			}
 			fmt.Println(prettyJSON(body))
 			return nil

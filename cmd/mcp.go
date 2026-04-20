@@ -56,7 +56,7 @@ type verdaAskArgs struct {
 }
 
 type verdaListArgs struct {
-	Resource     string `json:"resource" jsonschema:"description=Resource type: instances|clusters|volumes|ssh-keys|scripts|instance-types|cluster-types|locations|balance|images|cluster-images|availability,required"`
+	Resource     string `json:"resource" jsonschema:"description=Resource type: instances|clusters|volumes|ssh-keys|scripts|instance-types|cluster-types|container-types|containers|jobs|secrets|file-secrets|registry-creds|locations|balance|images|cluster-images|availability,required"`
 	ClientID     string `json:"clientId,omitempty" jsonschema:"description=Verda OAuth2 client ID (falls back to config/env/credentials file)"`
 	ClientSecret string `json:"clientSecret,omitempty" jsonschema:"description=Verda OAuth2 client secret (falls back to config/env/credentials file)"`
 	ProjectID    string `json:"projectId,omitempty" jsonschema:"description=Verda project ID"`
@@ -378,6 +378,16 @@ func handleMCPVerdaList(ctx context.Context, args verdaListArgs) (*mcp.CallToolR
 		path = "/v1/cluster-types"
 	case "container-types":
 		path = "/v1/container-types"
+	case "containers", "container-deployments":
+		path = "/v1/container-deployments"
+	case "jobs", "job-deployments":
+		path = "/v1/job-deployments"
+	case "secrets":
+		path = "/v1/secrets"
+	case "file-secrets":
+		path = "/v1/file-secrets"
+	case "registry-creds", "registry-credentials":
+		path = "/v1/container-registry-credentials"
 	case "locations":
 		path = "/v1/locations"
 	case "balance":
@@ -389,7 +399,7 @@ func handleMCPVerdaList(ctx context.Context, args verdaListArgs) (*mcp.CallToolR
 	case "availability":
 		path = "/v1/instance-availability"
 	default:
-		return mcp.NewToolResultError(fmt.Sprintf("unknown resource type: %s", resource)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("unknown resource type %q. Supported: instances, clusters, volumes, ssh-keys, scripts, instance-types, cluster-types, container-types, containers, jobs, secrets, file-secrets, registry-creds, locations, balance, images, cluster-images, availability", resource)), nil
 	}
 
 	result, err := client.RunAPIWithContext(ctx, "GET", path, "")
