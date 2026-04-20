@@ -488,6 +488,21 @@ func TestInferContext_VerdaNoFalsePositive(t *testing.T) {
 	}
 }
 
+func TestApplyLLMClassification_OtherProvidersClearVerda(t *testing.T) {
+	useDefaultProvider(t, "")
+	// Each sibling provider case should clear Verda so a keyword-inferred Verda
+	// doesn't leak into an LLM-picked different provider.
+	for _, svc := range []string{"cloudflare", "k8s", "gcp", "azure", "digitalocean", "hetzner", "vercel", "aws", "iam"} {
+		t.Run(svc, func(t *testing.T) {
+			ctx := ServiceContext{Verda: true}
+			ApplyLLMClassification(&ctx, svc)
+			if ctx.Verda {
+				t.Errorf("Verda should be cleared when LLM picks %s", svc)
+			}
+		})
+	}
+}
+
 func TestApplyLLMClassification_Verda(t *testing.T) {
 	useDefaultProvider(t, "")
 	ctx := ServiceContext{AWS: true, Cloudflare: true, DigitalOcean: true, Hetzner: true, Vercel: true, IAM: true}

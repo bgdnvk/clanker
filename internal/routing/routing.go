@@ -561,6 +561,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Verda = false
 		ctx.IAM = false
 	case "k8s":
 		ctx.K8s = true
@@ -570,6 +571,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Verda = false
 		ctx.IAM = false
 	case "gcp":
 		ctx.GCP = true
@@ -579,6 +581,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Verda = false
 		ctx.IAM = false
 	case "azure":
 		ctx.Azure = true
@@ -589,6 +592,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Verda = false
 		ctx.IAM = false
 	case "digitalocean":
 		ctx.DigitalOcean = true
@@ -599,6 +603,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Azure = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Verda = false
 		ctx.IAM = false
 	case "hetzner":
 		ctx.Hetzner = true
@@ -609,6 +614,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Azure = false
 		ctx.DigitalOcean = false
 		ctx.Vercel = false
+		ctx.Verda = false
 		ctx.IAM = false
 	case "vercel":
 		ctx.Vercel = true
@@ -653,6 +659,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Verda = false
 	case "terraform":
 		ctx.Terraform = true
 		ctx.Cloudflare = false
