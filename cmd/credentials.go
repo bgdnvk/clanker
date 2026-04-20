@@ -538,6 +538,8 @@ func testCredential(ctx context.Context, client *backend.Client, provider backen
 		return testCloudflareCredentials(ctx, client, debug)
 	case backend.ProviderVercel:
 		return testVercelCredentials(ctx, client, debug)
+	case backend.ProviderVerda:
+		return testVerdaCredentials(ctx, client, debug)
 	case backend.ProviderKubernetes:
 		return testKubernetesCredentials(ctx, client, debug)
 	default:
@@ -724,6 +726,41 @@ func testCloudflareCredentials(ctx context.Context, client *backend.Client, debu
 	return nil
 }
 
+// testVerdaCredentials pulls the stored Verda creds from the clanker backend
+// and exercises them against Verda's balance endpoint, which is the cheapest
+// authenticated call. A success response confirms the oauth2 token flow works
+// end-to-end through the saved credentials.
+func testVerdaCredentials(ctx context.Context, client *backend.Client, debug bool) error {
+	creds, err := client.GetVerdaCredentials(ctx)
+	if err != nil {
+		fmt.Printf("  FAILED: %v\n", err)
+		return err
+	}
+	if creds.ClientID == "" || creds.ClientSecret == "" {
+		fmt.Println("  FAILED: no client_id/client_secret stored")
+		return fmt.Errorf("no Verda credentials")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	vClient, err := verda.NewClient(creds.ClientID, creds.ClientSecret, creds.ProjectID, debug)
+	if err != nil {
+		fmt.Printf("  FAILED: %v\n", err)
+		return err
+	}
+	body, err := vClient.RunAPIWithContext(ctx, "GET", "/v1/balance", "")
+	if err != nil {
+		fmt.Printf("  FAILED: %v\n", err)
+		return err
+	}
+	fmt.Println("  PASSED: authenticated against /v1/balance")
+	if debug {
+		fmt.Printf("  balance: %s\n", strings.TrimSpace(body))
+	}
+	return nil
+}
+
 func testVercelCredentials(ctx context.Context, client *backend.Client, debug bool) error {
 	creds, err := client.GetVercelCredentials(ctx)
 	if err != nil {
@@ -880,10 +917,12 @@ func runCredentialsDelete(cmd *cobra.Command, args []string) error {
 		credProvider = backend.ProviderCloudflare
 	case "vercel":
 		credProvider = backend.ProviderVercel
+	case "verda":
+		credProvider = backend.ProviderVerda
 	case "k8s", "kubernetes":
 		credProvider = backend.ProviderKubernetes
 	default:
-		return fmt.Errorf("unsupported provider: %s (supported: aws, gcp, hetzner, cloudflare, vercel, k8s)", provider)
+		return fmt.Errorf("unsupported provider: %s (supported: aws, gcp, hetzner, cloudflare, vercel, verda, k8s)", provider)
 	}
 
 	client := backend.NewClient(apiKey, debug)
