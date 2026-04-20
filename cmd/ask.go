@@ -321,6 +321,21 @@ Examples:
 				})
 			}
 
+			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "verda") {
+				verdaClientID, verdaClientSecret, verdaProjectID, vErr := resolveVerdaCredentialsWithContext(ctx, debug)
+				if vErr != nil {
+					return vErr
+				}
+				return maker.ExecuteVerdaPlan(ctx, makerPlan, maker.ExecOptions{
+					VerdaClientID:     verdaClientID,
+					VerdaClientSecret: verdaClientSecret,
+					VerdaProjectID:    verdaProjectID,
+					Writer:            os.Stdout,
+					Destroyer:         destroyer,
+					Debug:             debug,
+				})
+			}
+
 			// Resolve AWS profile/region for execution.
 			targetProfile := resolveAWSProfile(profile)
 
@@ -485,9 +500,6 @@ Examples:
 			if explicitCount > 1 {
 				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --azure, --cloudflare, --digitalocean, --hetzner, --vercel, --verda) together with --maker")
 			}
-			if explicitVerda {
-				return fmt.Errorf("--maker is not yet supported for Verda — drop the --maker flag and use `clanker ask --verda \"%s\"` for read-only queries", question)
-			}
 			switch {
 			case explicitHetzner:
 				makerProvider = "hetzner"
@@ -510,6 +522,9 @@ Examples:
 			case explicitVercel:
 				makerProvider = "vercel"
 				makerProviderReason = "explicit"
+			case explicitVerda:
+				makerProvider = "verda"
+				makerProviderReason = "explicit"
 			default:
 				svcCtx := routing.InferContext(questionForRouting(question))
 				if svcCtx.Cloudflare {
@@ -529,6 +544,9 @@ Examples:
 					makerProviderReason = "inferred"
 				} else if svcCtx.Vercel {
 					makerProvider = "vercel"
+					makerProviderReason = "inferred"
+				} else if svcCtx.Verda {
+					makerProvider = "verda"
 					makerProviderReason = "inferred"
 				}
 			}
@@ -551,6 +569,8 @@ Examples:
 				prompt = maker.GCPPlanPromptWithMode(question, destroyer)
 			case "vercel":
 				prompt = maker.VercelPlanPromptWithMode(question, destroyer)
+			case "verda":
+				prompt = maker.VerdaPlanPromptWithMode(question, destroyer)
 			default:
 				prompt = maker.PlanPromptWithMode(question, destroyer)
 			}
@@ -611,9 +631,9 @@ Examples:
 
 			plan.Provider = makerProvider
 
-			// Handle GCP, Azure, Cloudflare, and Digital Ocean plans (output directly, no enrichment)
+			// Handle GCP, Azure, Cloudflare, Digital Ocean, Hetzner, Vercel, and Verda plans (output directly, no enrichment)
 			providerLower := strings.ToLower(strings.TrimSpace(plan.Provider))
-			if providerLower == "gcp" || providerLower == "azure" || providerLower == "cloudflare" || providerLower == "digitalocean" || providerLower == "hetzner" || providerLower == "vercel" {
+			if providerLower == "gcp" || providerLower == "azure" || providerLower == "cloudflare" || providerLower == "digitalocean" || providerLower == "hetzner" || providerLower == "vercel" || providerLower == "verda" {
 				if plan.CreatedAt.IsZero() {
 					plan.CreatedAt = time.Now().UTC()
 				}
