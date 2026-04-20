@@ -235,6 +235,11 @@ type ExecOptions struct {
 	VercelAPIToken string
 	VercelTeamID   string
 
+	// Verda Cloud options (OAuth2 client credentials — both required)
+	VerdaClientID     string
+	VerdaClientSecret string
+	VerdaProjectID    string
+
 	CheckpointKey            string
 	DisableDurableCheckpoint bool
 

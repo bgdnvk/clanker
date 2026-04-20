@@ -49,6 +49,16 @@ const BaseURL = "https://api.verda.com"
 // When empty, the production BaseURL is used.
 var baseURLForTest = ""
 
+// SetBaseURLForTest exposes the test-only base URL override to external test
+// packages (e.g. internal/maker/exec_verda_test.go that need to run the full
+// executor against an httptest server). Returns the previous value so tests
+// can restore on cleanup. Never call from production code.
+func SetBaseURLForTest(url string) string {
+	prev := baseURLForTest
+	baseURLForTest = url
+	return prev
+}
+
 func effectiveBaseURL() string {
 	if baseURLForTest != "" {
 		return baseURLForTest
