@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -21,6 +22,25 @@ import (
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
+
+// ErrCLINotInstalled is returned by RunVerdaCLI* when the `verda` binary is
+// missing from PATH. Typed so callers can surface a clear, one-shot error
+// instead of the generic exec failure and can branch with errors.Is.
+var ErrCLINotInstalled = errors.New("verda CLI not installed")
+
+// IsCLINotInstalled reports whether err indicates the verda binary is missing.
+// Shorthand for `errors.Is(err, ErrCLINotInstalled)` so call sites don't need
+// to import errors explicitly.
+func IsCLINotInstalled(err error) bool { return errors.Is(err, ErrCLINotInstalled) }
+
+// CLIInstalled reports whether the `verda` binary is reachable on PATH.
+// Fast (just a lookpath) so callers can branch UX eagerly — e.g., to hide
+// a "login with verda CLI" hint when the binary isn't present but the
+// REST credentials are configured and usable.
+func CLIInstalled() bool {
+	_, err := exec.LookPath("verda")
+	return err == nil
+}
 
 // BaseURL is the Verda API base; the `/v1` prefix is part of every path we call.
 const BaseURL = "https://api.verda.com"
@@ -590,7 +610,7 @@ func (c *Client) RunVerdaCLI(args ...string) (string, error) {
 // needing a logged-in profile.
 func (c *Client) RunVerdaCLIWithContext(ctx context.Context, args ...string) (string, error) {
 	if _, err := exec.LookPath("verda"); err != nil {
-		return "", fmt.Errorf("verda CLI not found in PATH (install from https://docs.verda.com/cli/)")
+		return "", fmt.Errorf("%w — install it from https://docs.verda.com/cli/ (brew install verda-cloud/tap/verda-cli), or configure client_id / client_secret directly in ~/.clanker.yaml and use the REST paths instead", ErrCLINotInstalled)
 	}
 
 	fullArgs := append([]string{"--agent"}, args...)

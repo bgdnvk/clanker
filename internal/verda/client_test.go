@@ -306,3 +306,35 @@ func TestSleepCtxZero(t *testing.T) {
 		t.Errorf("zero duration should return nil, got %v", err)
 	}
 }
+
+func TestRunVerdaCLIReturnsErrCLINotInstalled(t *testing.T) {
+	// Stash PATH so exec.LookPath can't find any binary for the duration of
+	// this test, guaranteeing the RunVerdaCLI path takes the error branch
+	// regardless of what the CI machine has installed.
+	t.Setenv("PATH", "")
+
+	c := &Client{clientID: "id", clientSecret: "sec"}
+	_, err := c.RunVerdaCLI("vm", "list")
+	if err == nil {
+		t.Fatal("expected error when verda binary is absent")
+	}
+	if !IsCLINotInstalled(err) {
+		t.Errorf("expected ErrCLINotInstalled, got %T: %v", err, err)
+	}
+	// The message should mention both the docs URL and the REST fallback so
+	// users can choose their path without reading the sentinel's wrapping.
+	msg := err.Error()
+	if !strings.Contains(msg, "docs.verda.com") {
+		t.Errorf("error message missing docs link: %q", msg)
+	}
+	if !strings.Contains(msg, "client_id") {
+		t.Errorf("error message missing REST fallback hint: %q", msg)
+	}
+}
+
+func TestCLIInstalledOnEmptyPath(t *testing.T) {
+	t.Setenv("PATH", "")
+	if CLIInstalled() {
+		t.Error("CLIInstalled should be false when PATH is empty")
+	}
+}

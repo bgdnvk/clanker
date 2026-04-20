@@ -2382,7 +2382,14 @@ func resolveVerdaCredentials() (clientID, clientSecret, projectID string, err er
 	clientSecret = verda.ResolveClientSecret()
 	projectID = verda.ResolveProjectID()
 	if clientID == "" || clientSecret == "" {
-		return "", "", "", fmt.Errorf("Verda credentials not configured. Set verda.client_id / verda.client_secret in ~/.clanker.yaml, export VERDA_CLIENT_ID / VERDA_CLIENT_SECRET, or run `verda auth login`")
+		// Pick the most-likely-useful suggestion based on whether the verda
+		// CLI is installed. Users without the CLI should never be told to run
+		// `verda auth login` — they'll get a confusing "command not found".
+		suggestion := "Set verda.client_id / verda.client_secret in ~/.clanker.yaml or export VERDA_CLIENT_ID / VERDA_CLIENT_SECRET."
+		if verda.CLIInstalled() {
+			suggestion = "Set verda.client_id / verda.client_secret in ~/.clanker.yaml, export VERDA_CLIENT_ID / VERDA_CLIENT_SECRET, or run `verda auth login` (the CLI writes ~/.verda/credentials which clanker reads automatically)."
+		}
+		return "", "", "", fmt.Errorf("Verda credentials not configured. %s", suggestion)
 	}
 	return clientID, clientSecret, projectID, nil
 }

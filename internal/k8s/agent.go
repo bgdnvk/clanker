@@ -63,17 +63,36 @@ func NewAgentWithOptions(opts AgentOptions) *Agent {
 
 	// Register Verda Instant Cluster provider if Verda credentials are configured.
 	// Failing to build a client is non-fatal — it just means the provider won't
-	// be available until the user adds credentials.
-	if verdaClientID := verda.ResolveClientID(); verdaClientID != "" {
-		if verdaClientSecret := verda.ResolveClientSecret(); verdaClientSecret != "" {
-			if client, err := verda.NewClient(verdaClientID, verdaClientSecret, verda.ResolveProjectID(), opts.Debug); err == nil {
-				mgr.RegisterProvider(cluster.NewVerdaInstantProvider(cluster.VerdaInstantProviderOptions{
-					Client:          client,
-					DefaultLocation: verda.ResolveDefaultLocation(),
-					DefaultSSHKeyID: verda.ResolveDefaultSSHKeyID(),
-					SSHKeyPath:      verda.ResolveSSHKeyPath(),
-					Debug:           opts.Debug,
-				}))
+	// be available until the user adds credentials. Log at debug so a user
+	// investigating why "verda-instant" isn't a selectable cluster type has a
+	// breadcrumb to follow.
+	verdaClientID := verda.ResolveClientID()
+	verdaClientSecret := verda.ResolveClientSecret()
+	switch {
+	case verdaClientID == "" && verdaClientSecret == "":
+		if opts.Debug {
+			fmt.Println("[k8s] verda provider skipped: no verda credentials configured")
+		}
+	case verdaClientID == "" || verdaClientSecret == "":
+		if opts.Debug {
+			fmt.Println("[k8s] verda provider skipped: partial credentials (need both client_id and client_secret)")
+		}
+	default:
+		client, err := verda.NewClient(verdaClientID, verdaClientSecret, verda.ResolveProjectID(), opts.Debug)
+		if err != nil {
+			if opts.Debug {
+				fmt.Printf("[k8s] verda provider skipped: %v\n", err)
+			}
+		} else {
+			mgr.RegisterProvider(cluster.NewVerdaInstantProvider(cluster.VerdaInstantProviderOptions{
+				Client:          client,
+				DefaultLocation: verda.ResolveDefaultLocation(),
+				DefaultSSHKeyID: verda.ResolveDefaultSSHKeyID(),
+				SSHKeyPath:      verda.ResolveSSHKeyPath(),
+				Debug:           opts.Debug,
+			}))
+			if opts.Debug {
+				fmt.Println("[k8s] verda-instant provider registered")
 			}
 		}
 	}
