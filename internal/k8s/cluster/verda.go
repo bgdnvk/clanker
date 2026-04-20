@@ -87,13 +87,20 @@ func (p *VerdaInstantProvider) Create(ctx context.Context, opts CreateOptions) (
 		return nil, &ErrInvalidConfiguration{Message: "verda-instant requires an ssh_key_id — set verda.default_ssh_key_id or pass KeyPairName"}
 	}
 
-	image, err := p.pickKubernetesClusterImage(ctx)
+	image, k8sLabelled, err := p.pickKubernetesClusterImage(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolve cluster image: %w", err)
 	}
+	if !k8sLabelled {
+		// Surface loudly — downstream GetKubeconfig will fail without k8s
+		// installed, so callers need a chance to abort or supply a startup
+		// script before we burn GPU hours.
+		DebugLog(true, "verda", "WARNING: no kubernetes-labelled cluster image found; falling back to image %q. Configure verda.default_startup_script_id to install k8s manually, or GetKubeconfig will fail.", image)
+	}
 
-	// Verda requires a shared_volume on every cluster create. Use a default SFS
-	// sized for working-set storage; caller can resize after provisioning.
+	// Verda requires a shared_volume on every cluster create. 100 GB is enough
+	// for working-set storage; users who need more can resize via
+	// `clanker verda action` or use `PUT /v1/volumes` with {action:"resize"}.
 	shared := verda.SharedVolumeDto{
 		Name: opts.Name + "-sfs",
 		Size: 100,
@@ -333,33 +340,38 @@ func (p *VerdaInstantProvider) findClusterIDByHostname(ctx context.Context, host
 }
 
 // pickKubernetesClusterImage selects a cluster OS image labelled as Kubernetes.
-func (p *VerdaInstantProvider) pickKubernetesClusterImage(ctx context.Context) (string, error) {
+// Returns (imageID, foundK8sLabel, error). `foundK8sLabel` is true when the
+// match was explicit (name/category/details hints at Kubernetes); false when
+// we fell back to the default image. Callers should surface a loud warning in
+// the fallback case because the cluster may provision without k8s baked in,
+// which makes GetKubeconfig fail opaquely later.
+func (p *VerdaInstantProvider) pickKubernetesClusterImage(ctx context.Context) (string, bool, error) {
 	body, err := p.client.RunAPIWithContext(ctx, http.MethodGet, "/v1/images/cluster", "")
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	var images []verda.Image
 	if err := json.Unmarshal([]byte(body), &images); err != nil {
-		return "", fmt.Errorf("decode cluster images: %w", err)
+		return "", false, fmt.Errorf("decode cluster images: %w", err)
 	}
 	// Prefer an image whose name/category hints at Kubernetes.
 	for _, img := range images {
 		joined := strings.ToLower(img.Name + " " + img.Category + " " + img.ImageType + " " + strings.Join(img.Details, " "))
 		if strings.Contains(joined, "kubernetes") || strings.Contains(joined, "k8s") {
-			return pickImageID(img), nil
+			return pickImageID(img), true, nil
 		}
 	}
 	// Fall back to the default image — cluster will come up without k8s baked
 	// in; caller is expected to configure a startup script.
 	for _, img := range images {
 		if img.IsDefault {
-			return pickImageID(img), nil
+			return pickImageID(img), false, nil
 		}
 	}
 	if len(images) > 0 {
-		return pickImageID(images[0]), nil
+		return pickImageID(images[0]), false, nil
 	}
-	return "", fmt.Errorf("no cluster images available from Verda")
+	return "", false, fmt.Errorf("no cluster images available from Verda")
 }
 
 func pickImageID(img verda.Image) string {
