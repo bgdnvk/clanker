@@ -10,6 +10,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/digitalocean"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	"github.com/bgdnvk/clanker/internal/hetzner"
+	"github.com/bgdnvk/clanker/internal/railway"
 	"github.com/bgdnvk/clanker/internal/vercel"
 	"github.com/bgdnvk/clanker/internal/verda"
 	"github.com/spf13/cobra"
@@ -117,6 +118,11 @@ func init() {
 	vercelCmd := vercel.CreateVercelCommands()
 	AddVercelAskCommand(vercelCmd)
 	rootCmd.AddCommand(vercelCmd)
+
+	// Register Railway static commands + ask stub (phase 1)
+	railwayCmd := railway.CreateRailwayCommands()
+	AddRailwayAskCommand(railwayCmd)
+	rootCmd.AddCommand(railwayCmd)
 
 	// Register Verda Cloud static commands + ask subcommand
 	verdaCmd := verda.CreateVerdaCommands()

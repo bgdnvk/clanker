@@ -31,6 +31,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/k8s"
 	"github.com/bgdnvk/clanker/internal/k8s/plan"
 	"github.com/bgdnvk/clanker/internal/maker"
+	"github.com/bgdnvk/clanker/internal/railway"
 	"github.com/bgdnvk/clanker/internal/resourcedb"
 	"github.com/bgdnvk/clanker/internal/routing"
 	tfclient "github.com/bgdnvk/clanker/internal/terraform"
@@ -111,6 +112,7 @@ Examples:
 		includeDigitalOcean, _ := cmd.Flags().GetBool("digitalocean")
 		includeHetzner, _ := cmd.Flags().GetBool("hetzner")
 		includeVercel, _ := cmd.Flags().GetBool("vercel")
+		includeRailway, _ := cmd.Flags().GetBool("railway")
 		includeVerda, _ := cmd.Flags().GetBool("verda")
 		includeTerraform, _ := cmd.Flags().GetBool("terraform")
 		includeIAM, _ := cmd.Flags().GetBool("iam")
@@ -768,12 +770,17 @@ Format as a professional compliance table suitable for government security docum
 			return handleVercelQuery(context.Background(), question, debug)
 		}
 
+		// Handle explicit --railway flag
+		if includeRailway && !makerMode {
+			return handleRailwayQuery(context.Background(), question, debug)
+		}
+
 		// Handle explicit --verda flag
 		if includeVerda && !makerMode {
 			return handleVerdaQuery(cmd.Context(), question, debug)
 		}
 
-		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare && !includeDigitalOcean && !includeHetzner && !includeVercel && !includeVerda && !includeDB {
+		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare && !includeDigitalOcean && !includeHetzner && !includeVercel && !includeRailway && !includeVerda && !includeDB {
 			routingQuestion := questionForRouting(question)
 
 			// First, do quick keyword check for explicit terms
@@ -847,6 +854,11 @@ Format as a professional compliance table suitable for government security docum
 			// Handle Vercel queries
 			if svcCtx.Vercel {
 				return handleVercelQuery(context.Background(), routingQuestion, debug)
+			}
+
+			// Handle Railway queries
+			if svcCtx.Railway {
+				return handleRailwayQuery(context.Background(), routingQuestion, debug)
 			}
 
 			// Handle Verda queries
@@ -2381,6 +2393,120 @@ func buildVercelPrompt(question, vercelContext, historyContext string) string {
 	if vercelContext != "" {
 		sb.WriteString("Vercel Context:\n")
 		sb.WriteString(vercelContext)
+		sb.WriteString("\n\n")
+	}
+	if historyContext != "" {
+		sb.WriteString("Recent Conversation:\n")
+		sb.WriteString(historyContext)
+		sb.WriteString("\n\n")
+	}
+	sb.WriteString("User Question: ")
+	sb.WriteString(question)
+	sb.WriteString("\n\nProvide a helpful, concise response in markdown format.")
+	return sb.String()
+}
+
+// resolveRailwayToken resolves the Railway account token and optional workspace
+// ID from config or environment. Workspace ID may be empty for single-workspace
+// accounts; the GraphQL API infers scope from the token in that case.
+func resolveRailwayToken(ctx context.Context, debug bool) (apiToken string, workspaceID string, err error) {
+	apiToken = railway.ResolveAPIToken()
+	if apiToken != "" {
+		return apiToken, railway.ResolveWorkspaceID(), nil
+	}
+
+	return "", "", fmt.Errorf("Railway token not configured. Set railway.api_token in ~/.clanker.yaml or export RAILWAY_API_TOKEN")
+}
+
+// handleRailwayQuery delegates a Railway query to the Railway agent with
+// per-workspace conversation history for multi-turn context.
+func handleRailwayQuery(ctx context.Context, question string, debug bool) error {
+	if debug {
+		fmt.Println("Delegating query to Railway agent...")
+	}
+
+	apiToken, workspaceID, err := resolveRailwayToken(ctx, debug)
+	if err != nil {
+		return err
+	}
+
+	client, err := railway.NewClient(apiToken, workspaceID, debug)
+	if err != nil {
+		return fmt.Errorf("failed to create Railway client: %w", err)
+	}
+
+	conversationID := workspaceID
+	if conversationID == "" {
+		conversationID = "personal"
+	}
+	history := railway.NewConversationHistory(conversationID)
+	if err := history.Load(); err != nil && debug {
+		fmt.Fprintf(os.Stderr, "[debug] conversation history: %v\n", err)
+	}
+
+	railwayContext, err := client.GetRelevantContext(ctx, question)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[railway] warning: failed to fetch context: %v\n", err)
+		if strings.TrimSpace(railwayContext) == "" {
+			return fmt.Errorf("failed to fetch Railway context: %w", err)
+		}
+	}
+
+	provider := viper.GetString("ai.default_provider")
+	if provider == "" {
+		provider = "openai"
+	}
+
+	var apiKey string
+	switch provider {
+	case "bedrock", "claude":
+		apiKey = ""
+	case "gemini", "gemini-api":
+		apiKey = ""
+	case "openai":
+		apiKey = resolveOpenAIKey("")
+	case "anthropic":
+		apiKey = resolveAnthropicKey("")
+	case "cohere":
+		apiKey = resolveCohereKey("")
+	case "deepseek":
+		apiKey = resolveDeepSeekKey("")
+	case "minimax":
+		apiKey = resolveMiniMaxKey("")
+	default:
+		apiKey = viper.GetString(fmt.Sprintf("ai.providers.%s.api_key", provider))
+	}
+
+	aiClient := ai.NewClient(provider, apiKey, debug, provider)
+
+	historyContext := history.GetRecentContext(5)
+	prompt := buildRailwayPrompt(question, railwayContext, historyContext)
+
+	response, err := aiClient.AskPrompt(ctx, prompt)
+	if err != nil {
+		return fmt.Errorf("Railway AI query failed: %w", err)
+	}
+
+	fmt.Println(response)
+
+	history.AddEntry(question, response)
+	if err := history.Save(); err != nil && debug {
+		fmt.Fprintf(os.Stderr, "[debug] save history: %v\n", err)
+	}
+
+	return nil
+}
+
+// buildRailwayPrompt assembles the system prompt for a Railway ask query,
+// injecting infrastructure context and recent conversation history when
+// available.
+func buildRailwayPrompt(question, railwayContext, historyContext string) string {
+	var sb strings.Builder
+	sb.WriteString("You are a Railway infrastructure assistant. ")
+	sb.WriteString("Answer questions about the user's Railway workspace (projects, services, environments, deployments, domains, variables, volumes) based on the provided context.\n\n")
+	if railwayContext != "" {
+		sb.WriteString("Railway Context:\n")
+		sb.WriteString(railwayContext)
 		sb.WriteString("\n\n")
 	}
 	if historyContext != "" {
