@@ -40,17 +40,20 @@ type deepResearchEstateSnapshot struct {
 }
 
 type deepResearchResource struct {
-	ID               string                           `json:"id"`
-	Type             string                           `json:"type"`
-	Name             string                           `json:"name"`
-	Region           string                           `json:"region"`
-	State            string                           `json:"state"`
-	CreatedAt        string                           `json:"createdAt,omitempty"`
-	Tags             map[string]string                `json:"tags,omitempty"`
-	Attributes       map[string]interface{}           `json:"attributes,omitempty"`
-	MonthlyPrice     float64                          `json:"monthlyPrice,omitempty"`
-	Connections      []string                         `json:"connections,omitempty"`
-	TypedConnections []deepResearchResourceConnection `json:"typedConnections,omitempty"`
+	ID                 string                           `json:"id"`
+	Type               string                           `json:"type"`
+	Name               string                           `json:"name"`
+	Region             string                           `json:"region"`
+	State              string                           `json:"state"`
+	CreatedAt          string                           `json:"createdAt,omitempty"`
+	Tags               map[string]string                `json:"tags,omitempty"`
+	Attributes         map[string]interface{}           `json:"attributes,omitempty"`
+	MonthlyPrice       float64                          `json:"monthlyPrice,omitempty"`
+	IAMRole            string                           `json:"iamRole,omitempty"`
+	IAMPolicies        []string                         `json:"iamPolicies,omitempty"`
+	CanInvokeResources []string                         `json:"canInvokeResources,omitempty"`
+	Connections        []string                         `json:"connections,omitempty"`
+	TypedConnections   []deepResearchResourceConnection `json:"typedConnections,omitempty"`
 }
 
 type deepResearchResourceConnection struct {
