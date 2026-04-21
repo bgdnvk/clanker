@@ -14,6 +14,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/backend"
 	"github.com/bgdnvk/clanker/internal/cloudflare"
 	"github.com/bgdnvk/clanker/internal/hetzner"
+	"github.com/bgdnvk/clanker/internal/railway"
 	"github.com/bgdnvk/clanker/internal/vercel"
 	"github.com/bgdnvk/clanker/internal/verda"
 	"github.com/spf13/cobra"
@@ -130,8 +131,9 @@ func init() {
 	credentialsStoreCmd.Flags().String("service-account", "", "GCP service account JSON file path")
 	credentialsStoreCmd.Flags().String("kubeconfig", "", "Path to kubeconfig file (default: ~/.kube/config)")
 	credentialsStoreCmd.Flags().String("context", "", "Kubernetes context name to use")
-	credentialsStoreCmd.Flags().String("api-token", "", "Vercel API token (overrides vercel.api_token / VERCEL_TOKEN)")
+	credentialsStoreCmd.Flags().String("api-token", "", "Vercel/Railway API token (overrides <provider>.api_token / VERCEL_TOKEN / RAILWAY_API_TOKEN)")
 	credentialsStoreCmd.Flags().String("team-id", "", "Vercel team ID (overrides vercel.team_id / VERCEL_TEAM_ID)")
+	credentialsStoreCmd.Flags().String("workspace-id", "", "Railway workspace ID (overrides railway.workspace_id / RAILWAY_WORKSPACE_ID)")
 	credentialsStoreCmd.Flags().String("client-id", "", "Verda OAuth2 client ID (overrides verda.client_id / VERDA_CLIENT_ID)")
 	credentialsStoreCmd.Flags().String("client-secret", "", "Verda OAuth2 client secret (overrides verda.client_secret / VERDA_CLIENT_SECRET)")
 	credentialsStoreCmd.Flags().String("project-id", "", "Verda project ID (overrides verda.default_project_id / VERDA_PROJECT_ID)")
@@ -172,12 +174,14 @@ func runCredentialsStore(cmd *cobra.Command, args []string) error {
 		return storeCloudflareCredentials(ctx, cmd, client)
 	case "vercel":
 		return storeVercelCredentials(ctx, cmd, client)
+	case "railway":
+		return storeRailwayCredentials(ctx, cmd, client)
 	case "verda":
 		return storeVerdaCredentials(ctx, cmd, client)
 	case "k8s", "kubernetes":
 		return storeKubernetesCredentials(ctx, cmd, client)
 	default:
-		return fmt.Errorf("unsupported provider: %s (supported: aws, gcp, hetzner, cloudflare, vercel, verda, k8s)", provider)
+		return fmt.Errorf("unsupported provider: %s (supported: aws, gcp, hetzner, cloudflare, vercel, railway, verda, k8s)", provider)
 	}
 }
 
@@ -353,6 +357,36 @@ func storeVercelCredentials(ctx context.Context, cmd *cobra.Command, client *bac
 	fmt.Println("Vercel credentials stored successfully")
 	if teamID != "" {
 		fmt.Printf("Team ID: %s\n", teamID)
+	}
+	return nil
+}
+
+func storeRailwayCredentials(ctx context.Context, cmd *cobra.Command, client *backend.Client) error {
+	apiToken, _ := cmd.Flags().GetString("api-token")
+	if strings.TrimSpace(apiToken) == "" {
+		apiToken = railway.ResolveAPIToken()
+	}
+	if strings.TrimSpace(apiToken) == "" {
+		return fmt.Errorf("Railway API token required: use --api-token flag, set railway.api_token in config, or export RAILWAY_API_TOKEN")
+	}
+
+	workspaceID, _ := cmd.Flags().GetString("workspace-id")
+	if strings.TrimSpace(workspaceID) == "" {
+		workspaceID = railway.ResolveWorkspaceID()
+	}
+
+	creds := &backend.RailwayCredentials{
+		APIToken:    apiToken,
+		WorkspaceID: workspaceID,
+	}
+
+	if err := client.StoreRailwayCredentials(ctx, creds); err != nil {
+		return fmt.Errorf("failed to store Railway credentials: %w", err)
+	}
+
+	fmt.Println("Railway credentials stored successfully")
+	if workspaceID != "" {
+		fmt.Printf("Workspace ID: %s\n", workspaceID)
 	}
 	return nil
 }
@@ -538,6 +572,8 @@ func testCredential(ctx context.Context, client *backend.Client, provider backen
 		return testCloudflareCredentials(ctx, client, debug)
 	case backend.ProviderVercel:
 		return testVercelCredentials(ctx, client, debug)
+	case backend.ProviderRailway:
+		return testRailwayCredentials(ctx, client, debug)
 	case backend.ProviderVerda:
 		return testVerdaCredentials(ctx, client, debug)
 	case backend.ProviderKubernetes:
@@ -831,6 +867,90 @@ func testVercelCredentials(ctx context.Context, client *backend.Client, debug bo
 		fmt.Printf("  PASSED: authenticated as %s\n", response.User.Email)
 	default:
 		fmt.Println("  PASSED: token accepted by Vercel")
+	}
+	return nil
+}
+
+func testRailwayCredentials(ctx context.Context, client *backend.Client, debug bool) error {
+	creds, err := client.GetRailwayCredentials(ctx)
+	if err != nil {
+		fmt.Printf("  FAILED: %v\n", err)
+		return err
+	}
+
+	if creds.APIToken == "" {
+		fmt.Println("  FAILED: no API token stored")
+		return fmt.Errorf("no Railway API token")
+	}
+
+	// Bounded context so a hanging curl does not block forever.
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	// Verify the token by posting a minimal GraphQL query for the current user.
+	body := `{"query":"query { me { id name email } }"}`
+	cmd := exec.CommandContext(ctx, "curl", "-s", "-o", "/dev/stdout", "-w", "\n%{http_code}",
+		"-X", "POST",
+		"https://backboard.railway.com/graphql/v2",
+		"-H", fmt.Sprintf("Authorization: Bearer %s", creds.APIToken),
+		"-H", "Content-Type: application/json",
+		"-d", body,
+	)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Printf("  FAILED: %v\n", err)
+		return err
+	}
+
+	raw := strings.TrimSpace(string(output))
+	lastNL := strings.LastIndex(raw, "\n")
+	var respBody, status string
+	if lastNL < 0 {
+		status = raw
+	} else {
+		respBody = raw[:lastNL]
+		status = strings.TrimSpace(raw[lastNL+1:])
+	}
+
+	if status != "200" {
+		if debug {
+			fmt.Printf("  Body: %s\n", respBody)
+		}
+		fmt.Printf("  FAILED: HTTP %s\n", status)
+		return fmt.Errorf("Railway credential test failed (HTTP %s)", status)
+	}
+
+	// Railway returns errors inside a 200 response envelope — check them.
+	var response struct {
+		Data struct {
+			Me struct {
+				ID    string `json:"id"`
+				Name  string `json:"name"`
+				Email string `json:"email"`
+			} `json:"me"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal([]byte(respBody), &response); err != nil {
+		fmt.Println("  PASSED: token accepted by Railway")
+		return nil
+	}
+
+	if len(response.Errors) > 0 {
+		fmt.Printf("  FAILED: %s\n", response.Errors[0].Message)
+		return fmt.Errorf("Railway rejected token: %s", response.Errors[0].Message)
+	}
+
+	switch {
+	case response.Data.Me.Name != "":
+		fmt.Printf("  PASSED: authenticated as %s\n", response.Data.Me.Name)
+	case response.Data.Me.Email != "":
+		fmt.Printf("  PASSED: authenticated as %s\n", response.Data.Me.Email)
+	default:
+		fmt.Println("  PASSED: token accepted by Railway")
 	}
 	return nil
 }
