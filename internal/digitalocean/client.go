@@ -18,6 +18,44 @@ type Client struct {
 	debug    bool
 }
 
+// CLIInstalled reports whether doctl is available on PATH.
+func CLIInstalled() bool {
+	_, err := exec.LookPath("doctl")
+	return err == nil
+}
+
+// CLIAuthenticated reports whether the current shell already has a working
+// doctl auth context. This lets read-only inventory code reuse ambient CLI
+// auth instead of requiring the token to be copied into config or env again.
+func CLIAuthenticated(ctx context.Context) bool {
+	if !CLIInstalled() {
+		return false
+	}
+	probeCtx := ctx
+	if probeCtx == nil {
+		var cancel context.CancelFunc
+		probeCtx, cancel = context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(probeCtx, "doctl", "account", "get", "--output", "json")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return false
+	}
+	return strings.TrimSpace(stdout.String()) != ""
+}
+
+// CanUseLiveContext reports whether DigitalOcean live queries can run either
+// with an explicit API token or an authenticated doctl context.
+func CanUseLiveContext(ctx context.Context) bool {
+	if strings.TrimSpace(ResolveAPIToken()) != "" {
+		return true
+	}
+	return CLIAuthenticated(ctx)
+}
+
 // ResolveAPIToken returns the Digital Ocean API token from config or environment
 func ResolveAPIToken() string {
 	if token := strings.TrimSpace(viper.GetString("digitalocean.api_token")); token != "" {
@@ -34,7 +72,7 @@ func ResolveAPIToken() string {
 
 // NewClient creates a new Digital Ocean client
 func NewClient(apiToken string, debug bool) (*Client, error) {
-	if strings.TrimSpace(apiToken) == "" {
+	if strings.TrimSpace(apiToken) == "" && !CLIInstalled() {
 		return nil, fmt.Errorf("digitalocean api_token is required")
 	}
 
@@ -76,8 +114,10 @@ func (c *Client) RunDoctl(ctx context.Context, args ...string) (string, error) {
 		return "", fmt.Errorf("doctl not found in PATH (required for Digital Ocean operations, install from: https://docs.digitalocean.com/reference/doctl/how-to/install/)")
 	}
 
-	// Inject access token
-	fullArgs := append([]string{"--access-token", c.apiToken}, args...)
+	fullArgs := normalizeDoctlOutputArgs(args)
+	if strings.TrimSpace(c.apiToken) != "" {
+		fullArgs = append([]string{"--access-token", c.apiToken}, fullArgs...)
+	}
 
 	backoffs := []time.Duration{200 * time.Millisecond, 500 * time.Millisecond, 1200 * time.Millisecond}
 	var lastErr error
@@ -118,6 +158,16 @@ func (c *Client) RunDoctl(ctx context.Context, args ...string) (string, error) {
 	}
 
 	return "", fmt.Errorf("doctl command failed: %w, stderr: %s%s", lastErr, lastStderr, doErrorHint(lastStderr))
+}
+
+func normalizeDoctlOutputArgs(args []string) []string {
+	normalized := append([]string{}, args...)
+	for i := 0; i < len(normalized)-1; i++ {
+		if normalized[i] == "--format" && strings.EqualFold(strings.TrimSpace(normalized[i+1]), "json") {
+			normalized[i] = "--output"
+		}
+	}
+	return normalized
 }
 
 // GetRelevantContext gathers Digital Ocean context for LLM queries

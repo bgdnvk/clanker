@@ -106,7 +106,7 @@ func collectSecurityGitHubContext(ctx context.Context) (deepResearchProviderCont
 		out.WriteString("\n")
 	}
 
-	workflowInfo, err := client.GetRelevantContext(timeoutCtx, "workflow run status failed jobs steps artifacts logs pull requests")
+	workflowInfo, err := client.GetRelevantContext(timeoutCtx, "repository security branch protection workflow permissions trigger review self-hosted runners workflow run status failed jobs steps artifacts logs pull requests pull_request_target repository_dispatch workflow_dispatch schedule")
 	if err != nil {
 		warnings = append(warnings, fmt.Sprintf("workflows: %v", err))
 	} else if strings.TrimSpace(workflowInfo) != "" {
@@ -266,6 +266,15 @@ func runSecurityLiveProviderScout(ctx context.Context, provider string, scanCtx 
 	prompt := buildSecurityProviderContextPrompt(provider, scanCtx.Question)
 	contextResult, err := collectSecurityProviderContext(ctx, provider, prompt, scanCtx.Options)
 	if err != nil {
+		if securityProviderContextMissingAccess(provider, err) {
+			summary := fmt.Sprintf("%s live security scout skipped: %v", securityProviderLabel(provider), err)
+			return nil, nil, securitySubagentRun{
+				Name:    name,
+				Status:  "skipped",
+				Summary: summary,
+				Details: securityProviderContextAccessHints(provider),
+			}, nil
+		}
 		summary := fmt.Sprintf("%s live security scout failed: %v", securityProviderLabel(provider), err)
 		return nil, nil, securitySubagentRun{Name: name, Status: "warning", Summary: summary}, []string{summary}
 	}
@@ -293,6 +302,44 @@ func runSecurityLiveProviderScout(ctx context.Context, provider string, scanCtx 
 		Summary: summary,
 		Details: uniqueNonEmptyStrings(details),
 	}, nil
+}
+
+func securityProviderContextMissingAccess(provider string, err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "cloudflare", "hetzner", "vercel":
+		return strings.Contains(msg, "no api token is configured")
+	case "digitalocean":
+		return strings.Contains(msg, "no api token") || strings.Contains(msg, "authenticated doctl context")
+	case "supabase":
+		return strings.Contains(msg, "no supabase database connection is configured")
+	case "verda":
+		return strings.Contains(msg, "verda credentials are not configured")
+	default:
+		return false
+	}
+}
+
+func securityProviderContextAccessHints(provider string) []string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "cloudflare":
+		return []string{"Configure `cloudflare.api_token` or export `CLOUDFLARE_API_TOKEN` to enable Cloudflare live security coverage."}
+	case "digitalocean":
+		return []string{"Configure `digitalocean.api_token`, export `DO_API_TOKEN` / `DIGITALOCEAN_ACCESS_TOKEN`, or log in with `doctl auth init` to enable DigitalOcean live security coverage."}
+	case "hetzner":
+		return []string{"Configure `hetzner.api_token` or export `HCLOUD_TOKEN` to enable Hetzner live security coverage."}
+	case "supabase":
+		return []string{"Configure a `databases.connections` entry with `vendor: supabase`, or provide `CLANKER_RUNTIME_DB_CONNECTION_JSON`, to enable Supabase live security coverage."}
+	case "vercel":
+		return []string{"Configure `vercel.api_token` or export `VERCEL_TOKEN` to enable Vercel live security coverage."}
+	case "verda":
+		return []string{"Configure `verda.client_id` / `verda.client_secret`, export `VERDA_CLIENT_ID` / `VERDA_CLIENT_SECRET`, or run `verda auth login` to enable Verda live security coverage."}
+	default:
+		return nil
+	}
 }
 
 func buildSecurityProviderContextPrompt(provider string, question string) string {
@@ -324,7 +371,7 @@ func buildSecurityProviderContextPrompt(provider string, question string) string
 	case "verda":
 		return base + " verda instances clusters volumes ssh keys scripts container deployments job deployments public endpoints auth none firewall ingress egress" + suffix
 	case "github":
-		return base + " github repository repo actions workflows workflow runs jobs steps artifacts logs self-hosted runners pull requests" + suffix
+		return base + " github repository repo actions workflows workflow runs jobs steps artifacts logs self-hosted runners pull requests branch protection workflow permissions pull_request_target repository_dispatch workflow_dispatch schedule" + suffix
 	case "terraform":
 		return base + " terraform state summary plan changes diff outputs resources ingress firewall security groups public access bucket encryption iam role" + suffix
 	default:
@@ -441,6 +488,100 @@ func buildSecurityProviderLineFindings(provider string, entry securityProviderCo
 				Evidence:     evidence,
 				Questions:    buildSecurityQuestions("misconfiguration", resourceName, "", false),
 			})
+		}
+		if strings.Contains(sectionLower, "branch protection") && (strings.Contains(lineLower, "protected=false") || strings.Contains(lineLower, "not protected")) {
+			findings = append(findings, securityFinding{
+				ID:           buildDeepResearchFindingID("security-github-branch-protection", provider+"|"+entry.Line),
+				Severity:     "high",
+				Category:     "ci-cd",
+				Title:        fmt.Sprintf("%s lacks default branch protection", label),
+				Summary:      "The default branch appears to be unprotected. That weakens review, status-check, and merge controls for the same repository that drives CI and release automation.",
+				ResourceName: resourceName,
+				ResourceType: resourceType,
+				Provider:     provider,
+				Evidence:     evidence,
+				Questions:    buildSecurityQuestions("misconfiguration", resourceName, "", false),
+			})
+		}
+		if strings.Contains(sectionLower, "actions permissions") && strings.Contains(lineLower, "allowed_actions=all") {
+			findings = append(findings, securityFinding{
+				ID:           buildDeepResearchFindingID("security-github-actions-permissions", provider+"|"+entry.Line),
+				Severity:     "medium",
+				Category:     "ci-cd",
+				Title:        fmt.Sprintf("%s allows all GitHub Actions sources", label),
+				Summary:      "Repository Actions settings allow all actions. Review whether this repository should restrict to GitHub-owned, verified, or explicitly selected actions only.",
+				ResourceName: resourceName,
+				ResourceType: resourceType,
+				Provider:     provider,
+				Evidence:     evidence,
+				Questions:    buildSecurityQuestions("misconfiguration", resourceName, "", false),
+			})
+		}
+		if strings.Contains(sectionLower, "actions permissions") && (strings.Contains(lineLower, "default_workflow_permissions=write") || strings.Contains(lineLower, "can_approve_pull_request_reviews=true")) {
+			findings = append(findings, securityFinding{
+				ID:           buildDeepResearchFindingID("security-github-workflow-permissions", provider+"|"+entry.Line),
+				Severity:     "high",
+				Category:     "ci-cd",
+				Title:        fmt.Sprintf("%s grants broad default workflow privileges", label),
+				Summary:      "GitHub Actions defaults indicate write-capable workflow tokens or workflow-based PR approval. Review token scope and whether write access should be opt-in per workflow.",
+				ResourceName: resourceName,
+				ResourceType: resourceType,
+				Provider:     provider,
+				Evidence:     evidence,
+				Questions:    buildSecurityQuestions("misconfiguration", resourceName, "", false),
+			})
+		}
+		if strings.Contains(sectionLower, "workflow trigger review") {
+			if strings.Contains(lineLower, "uses_pull_request_target=true") {
+				severity := "high"
+				if securityGitHubLineHasWritePermissions(lineLower) {
+					severity = "critical"
+				}
+				findings = append(findings, securityFinding{
+					ID:           buildDeepResearchFindingID("security-github-pull-request-target", provider+"|"+entry.Line),
+					Severity:     severity,
+					Category:     "ci-cd",
+					Title:        fmt.Sprintf("%s uses pull_request_target", label),
+					Summary:      "This workflow is triggered by pull_request_target. Review whether untrusted PR content can influence a workflow that runs with privileged repository context or write-capable tokens.",
+					ResourceName: resourceName,
+					ResourceType: resourceType,
+					Provider:     provider,
+					Evidence:     evidence,
+					Questions:    buildSecurityQuestions("misconfiguration", resourceName, "", false),
+				})
+			}
+			if strings.Contains(lineLower, "uses_repository_dispatch=true") {
+				severity := "medium"
+				if securityGitHubLineHasWritePermissions(lineLower) {
+					severity = "high"
+				}
+				findings = append(findings, securityFinding{
+					ID:           buildDeepResearchFindingID("security-github-repository-dispatch", provider+"|"+entry.Line),
+					Severity:     severity,
+					Category:     "ci-cd",
+					Title:        fmt.Sprintf("%s exposes a repository_dispatch trigger", label),
+					Summary:      "This workflow can be triggered through repository_dispatch. Validate who can emit that event and whether the triggered workflow needs the current token scope.",
+					ResourceName: resourceName,
+					ResourceType: resourceType,
+					Provider:     provider,
+					Evidence:     evidence,
+					Questions:    buildSecurityQuestions("misconfiguration", resourceName, "", false),
+				})
+			}
+			if (strings.Contains(lineLower, "uses_workflow_dispatch=true") || strings.Contains(lineLower, "uses_schedule=true")) && securityGitHubLineHasWritePermissions(lineLower) {
+				findings = append(findings, securityFinding{
+					ID:           buildDeepResearchFindingID("security-github-privileged-trigger", provider+"|"+entry.Line),
+					Severity:     "medium",
+					Category:     "ci-cd",
+					Title:        fmt.Sprintf("%s has a privileged manually or time-triggered workflow", label),
+					Summary:      "This workflow uses workflow_dispatch or schedule together with write-capable permissions. Review operator access, approval flow, and whether write scope is actually required.",
+					ResourceName: resourceName,
+					ResourceType: resourceType,
+					Provider:     provider,
+					Evidence:     evidence,
+					Questions:    buildSecurityQuestions("misconfiguration", resourceName, "", false),
+				})
+			}
 		}
 	}
 
@@ -1108,6 +1249,15 @@ func securityProviderContextSubject(line string) string {
 
 func securityGitHubContextSubject(line string) string {
 	trimmed := strings.TrimSpace(strings.TrimPrefix(line, "-"))
+	if strings.HasPrefix(trimmed, "Workflow: ") {
+		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "Workflow: "))
+	}
+	if strings.HasPrefix(trimmed, "Default branch ") {
+		return "default branch"
+	}
+	if strings.HasPrefix(trimmed, "Actions enabled=") || strings.HasPrefix(trimmed, "default_workflow_permissions=") {
+		return "actions settings"
+	}
 	if idx := strings.Index(trimmed, " ("); idx > 0 {
 		return strings.TrimSpace(trimmed[:idx])
 	}
@@ -1120,6 +1270,14 @@ func securityGitHubContextSubject(line string) string {
 func securityProviderSectionResourceType(provider string, section string) string {
 	lower := strings.ToLower(strings.TrimSpace(section))
 	switch {
+	case strings.Contains(lower, "branch protection"):
+		return provider + "-branch-protection"
+	case strings.Contains(lower, "actions permissions"):
+		return provider + "-actions-permissions"
+	case strings.Contains(lower, "workflow trigger"):
+		return provider + "-workflow-definition"
+	case strings.Contains(lower, "repository security"):
+		return provider + "-repository-settings"
 	case strings.Contains(lower, "repository"):
 		return provider + "-repository"
 	case strings.Contains(lower, "runner"):
@@ -1152,6 +1310,27 @@ func securityProviderSectionResourceType(provider string, section string) string
 		}
 		return provider + "-" + strings.ReplaceAll(strings.ReplaceAll(lower, " ", "-"), "/", "-")
 	}
+}
+
+func securityGitHubLineHasWritePermissions(lineLower string) bool {
+	if strings.Contains(lineLower, "permissions=write-all") {
+		return true
+	}
+	if !strings.Contains(lineLower, "permissions=") {
+		return false
+	}
+	permissionsIndex := strings.Index(lineLower, "permissions=")
+	permissions := lineLower[permissionsIndex+len("permissions="):]
+	for _, part := range strings.Split(permissions, ",") {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		if strings.Contains(trimmed, "=write") || strings.HasSuffix(trimmed, "write") {
+			return true
+		}
+	}
+	return false
 }
 
 func securityLineHasWorldOpenCIDR(text string) bool {
