@@ -42,7 +42,7 @@ var credentialsStoreCmd = &cobra.Command{
 	Short: "Store credentials in the backend",
 	Long: `Upload local credentials to the clanker backend.
 
-Supported providers: aws, gcp, hetzner, cloudflare, vercel, verda, k8s
+Supported providers: aws, gcp, hetzner, cloudflare, vercel, railway, verda, k8s
 
 AWS:
   Exports credentials from local AWS CLI profile using 'aws configure export-credentials'.
@@ -61,6 +61,11 @@ Vercel:
   (vercel.team_id / VERCEL_TEAM_ID). Override either with --api-token /
   --team-id flags.
 
+Railway:
+  Uses account token (railway.api_token / RAILWAY_API_TOKEN) and optional
+  workspace_id (railway.workspace_id / RAILWAY_WORKSPACE_ID). Override
+  either with --api-token / --workspace-id flags.
+
 K8s:
   Uploads kubeconfig file content (base64 encoded).
 
@@ -71,6 +76,8 @@ Examples:
   clanker credentials store cloudflare
   clanker credentials store vercel
   clanker credentials store vercel --api-token ${VERCEL_TOKEN} --team-id team_abc
+  clanker credentials store railway
+  clanker credentials store railway --api-token ${RAILWAY_API_TOKEN} --workspace-id ws_abc
   clanker credentials store verda
   clanker credentials store verda --client-id ${VERDA_CLIENT_ID} --client-secret ${VERDA_CLIENT_SECRET}
   clanker credentials store k8s --kubeconfig ~/.kube/config`,
@@ -98,6 +105,7 @@ Examples:
   clanker credentials test hetzner
   clanker credentials test cloudflare
   clanker credentials test vercel
+  clanker credentials test railway
   clanker credentials test k8s
   clanker credentials test`,
 	Args: cobra.MaximumNArgs(1),
@@ -113,7 +121,8 @@ Examples:
   clanker credentials delete aws
   clanker credentials delete gcp
   clanker credentials delete hetzner
-  clanker credentials delete vercel`,
+  clanker credentials delete vercel
+  clanker credentials delete railway`,
 	Args: cobra.ExactArgs(1),
 	RunE: runCredentialsDelete,
 }
