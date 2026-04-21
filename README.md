@@ -218,6 +218,32 @@ clanker ask --aws --maker --apply --plan-file plan.json | cat
 clanker ask --aws --maker --destroyer "delete the clanka-postgres rds instance" | cat
 ```
 
+### Security
+
+Minimal security scan commands:
+
+```bash
+# Best-effort scan using whatever local provider access is already configured
+clanker security | cat
+
+# Focus the scan on a specific service or attack surface
+clanker security "review public APIs, IAM blast radius, and auth gaps around clanker-auth" | cat
+
+# Pin provider-side helpers to a specific account, project, or workspace
+clanker security --profile prod --gcp-project my-gcp-project --workspace prod | cat
+
+# Re-check auth-gated routes with runtime auth attached to the probe set
+export CLANKER_RUNTIME_SECURITY_BEARER_TOKEN="your-token"
+clanker security "verify which routes unlock with auth" | cat
+```
+
+Notes:
+
+- Without `CLANKER_RUNTIME_DEEP_RESEARCH_ESTATE_JSON`, the scan still runs in best-effort mode using live provider context only.
+- DigitalOcean live coverage works with either `digitalocean.api_token` / `DO_API_TOKEN` / `DIGITALOCEAN_ACCESS_TOKEN` or an authenticated `doctl` session.
+- Supabase live coverage needs a configured `databases.connections` entry with `vendor: supabase`, or a runtime `CLANKER_RUNTIME_DB_CONNECTION_JSON` connection.
+- Verda live coverage needs `verda.client_id` / `verda.client_secret`, `VERDA_CLIENT_ID` / `VERDA_CLIENT_SECRET`, or `verda auth login`.
+
 ### Maker apply behavior
 
 When you run with `--maker --apply`, the runner tries to be safe and repeatable:
