@@ -25,6 +25,7 @@ type ServiceContext struct {
 	DigitalOcean bool
 	Hetzner      bool
 	Vercel       bool
+	Railway      bool
 	Verda        bool
 	IAM          bool
 	Code         bool
@@ -42,7 +43,7 @@ type Classification struct {
 func DefaultInfraProvider() string {
 	p := strings.ToLower(strings.TrimSpace(viper.GetString("infra.default_provider")))
 	switch p {
-	case "aws", "gcp", "azure", "cloudflare", "digitalocean", "hetzner", "vercel", "verda":
+	case "aws", "gcp", "azure", "cloudflare", "digitalocean", "hetzner", "vercel", "railway", "verda":
 		return p
 	default:
 		return "aws"
@@ -60,6 +61,7 @@ func applyConfiguredDefaultContext(ctx *ServiceContext) {
 	ctx.DigitalOcean = false
 	ctx.Hetzner = false
 	ctx.Vercel = false
+	ctx.Railway = false
 	ctx.Verda = false
 	ctx.IAM = false
 
@@ -76,6 +78,8 @@ func applyConfiguredDefaultContext(ctx *ServiceContext) {
 		ctx.Hetzner = true
 	case "vercel":
 		ctx.Vercel = true
+	case "railway":
+		ctx.Railway = true
 	case "verda":
 		ctx.Verda = true
 	default:
@@ -265,6 +269,24 @@ func InferContext(question string) ServiceContext {
 		"edge middleware",
 	}
 
+	railwayKeywords := []string{
+		// Only match when Railway is explicitly referenced. Generic deploy/
+		// service/env phrasing is intentionally excluded so we do not
+		// mistakenly route AWS/GCP questions through the Railway agent.
+		"railway",
+		"railway.app",
+		"railway project",
+		"railway service",
+		"railway deployment",
+		"railway domain",
+		"railway volume",
+		"railway environment",
+		"railway plugin",
+		"nixpacks",
+		"railway.json",
+		"railway.toml",
+	}
+
 	verdaKeywords := []string{
 		// Match explicit Verda mentions + DataCrunch (the old brand) + Verda-
 		// specific resource nouns. GPU model codes alone (h100, a100, etc.) are
@@ -366,6 +388,13 @@ func InferContext(question string) ServiceContext {
 	for _, keyword := range vercelKeywords {
 		if contains(questionLower, keyword) {
 			ctx.Vercel = true
+			break
+		}
+	}
+
+	for _, keyword := range railwayKeywords {
+		if contains(questionLower, keyword) {
+			ctx.Railway = true
 			break
 		}
 	}
@@ -531,6 +560,9 @@ func NeedsLLMClassification(ctx ServiceContext) bool {
 	if ctx.Vercel {
 		count++
 	}
+	if ctx.Railway {
+		count++
+	}
 	if ctx.Verda {
 		count++
 	}
@@ -546,7 +578,7 @@ func NeedsLLMClassification(ctx ServiceContext) bool {
 	// 5. Vercel was inferred (verify it's actually Vercel-related)
 	// 6. Verda was inferred (verify it's actually Verda-related)
 	// 7. IAM was inferred (verify it's actually IAM-related for disambiguation)
-	return count > 1 || ctx.Cloudflare || ctx.DigitalOcean || ctx.Hetzner || ctx.Vercel || ctx.Verda || ctx.IAM
+	return count > 1 || ctx.Cloudflare || ctx.DigitalOcean || ctx.Hetzner || ctx.Vercel || ctx.Railway || ctx.Verda || ctx.IAM
 }
 
 // ApplyLLMClassification updates the ServiceContext based on LLM classification result
@@ -561,6 +593,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Railway = false
 		ctx.Verda = false
 		ctx.IAM = false
 	case "k8s":
@@ -571,6 +604,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Railway = false
 		ctx.Verda = false
 		ctx.IAM = false
 	case "gcp":
@@ -581,6 +615,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Railway = false
 		ctx.Verda = false
 		ctx.IAM = false
 	case "azure":
@@ -592,6 +627,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Railway = false
 		ctx.Verda = false
 		ctx.IAM = false
 	case "digitalocean":
@@ -603,6 +639,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Azure = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Railway = false
 		ctx.Verda = false
 		ctx.IAM = false
 	case "hetzner":
@@ -614,6 +651,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Azure = false
 		ctx.DigitalOcean = false
 		ctx.Vercel = false
+		ctx.Railway = false
 		ctx.Verda = false
 		ctx.IAM = false
 	case "vercel":
@@ -637,6 +675,19 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Railway = false
+		ctx.IAM = false
+	case "railway":
+		ctx.Railway = true
+		ctx.AWS = false
+		ctx.GCP = false
+		ctx.Cloudflare = false
+		ctx.K8s = false
+		ctx.Azure = false
+		ctx.DigitalOcean = false
+		ctx.Hetzner = false
+		ctx.Vercel = false
+		ctx.Verda = false
 		ctx.IAM = false
 	case "aws":
 		ctx.AWS = true
@@ -647,6 +698,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Railway = false
 		ctx.Verda = false
 		ctx.IAM = false
 	case "iam":
@@ -659,6 +711,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Railway = false
 		ctx.Verda = false
 	case "terraform":
 		ctx.Terraform = true
@@ -666,6 +719,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Railway = false
 		ctx.Verda = false
 	case "github":
 		ctx.GitHub = true
@@ -673,6 +727,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Railway = false
 		ctx.Verda = false
 	default:
 		// "general" - default to the configured infrastructure provider
@@ -681,6 +736,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Railway = false
 		ctx.Verda = false
 		ctx.Azure = false
 		ctx.GCP = false
@@ -698,6 +754,8 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 			ctx.Hetzner = true
 		case "vercel":
 			ctx.Vercel = true
+		case "railway":
+			ctx.Railway = true
 		case "verda":
 			ctx.Verda = true
 		default:
