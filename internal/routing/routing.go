@@ -453,12 +453,13 @@ IMPORTANT RULES:
 5. Only classify as "digitalocean" if the query EXPLICITLY mentions Digital Ocean, doctl, droplets, DOKS, or Digital Ocean-specific products
 6. Only classify as "hetzner" if the query EXPLICITLY mentions Hetzner, hcloud, or Hetzner-specific products
 7. Only classify as "vercel" if the query EXPLICITLY mentions Vercel, vercel.app, a Vercel deployment/project, or Vercel-specific products (Edge Config, Vercel KV / Blob / Postgres)
-8. Only classify as "verda" if the query EXPLICITLY mentions Verda, DataCrunch, Verda clusters/instances, or an Instant Cluster (Verda's managed cluster product)
-9. If uncertain, classify as "%s" (the configured default cloud provider)
+8. Only classify as "railway" if the query EXPLICITLY mentions Railway, railway.app, a Railway project/service/deployment/volume/environment, Nixpacks, or a railway.json/railway.toml file
+9. Only classify as "verda" if the query EXPLICITLY mentions Verda, DataCrunch, Verda clusters/instances, or an Instant Cluster (Verda's managed cluster product)
+10. If uncertain, classify as "%s" (the configured default cloud provider)
 
 Respond with ONLY a JSON object:
 {
-	"service": "cloudflare|aws|iam|k8s|gcp|azure|digitalocean|hetzner|vercel|verda|github|terraform|general",
+	"service": "cloudflare|aws|iam|k8s|gcp|azure|digitalocean|hetzner|vercel|railway|verda|github|terraform|general",
     "confidence": "high|medium|low",
     "reason": "brief explanation of why this classification"
 }`, question, defaultProvider, defaultProvider)

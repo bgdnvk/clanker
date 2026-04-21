@@ -323,6 +323,20 @@ Examples:
 				})
 			}
 
+			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "railway") {
+				rwToken, rwWorkspaceID, rwErr := resolveRailwayToken(ctx, debug)
+				if rwErr != nil {
+					return rwErr
+				}
+				return maker.ExecuteRailwayPlan(ctx, makerPlan, maker.ExecOptions{
+					RailwayAPIToken:    rwToken,
+					RailwayWorkspaceID: rwWorkspaceID,
+					Writer:             os.Stdout,
+					Destroyer:          destroyer,
+					Debug:              debug,
+				})
+			}
+
 			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "verda") {
 				verdaClientID, verdaClientSecret, verdaProjectID, vErr := resolveVerdaCredentialsWithContext(ctx, debug)
 				if vErr != nil {
@@ -473,6 +487,7 @@ Examples:
 			explicitHetzner := cmd.Flags().Changed("hetzner") && includeHetzner
 			explicitAzure := cmd.Flags().Changed("azure") && includeAzure
 			explicitVercel := cmd.Flags().Changed("vercel") && includeVercel
+			explicitRailway := cmd.Flags().Changed("railway") && includeRailway
 			explicitVerda := cmd.Flags().Changed("verda") && includeVerda
 			explicitCount := 0
 			if explicitGCP {
@@ -496,11 +511,14 @@ Examples:
 			if explicitVercel {
 				explicitCount++
 			}
+			if explicitRailway {
+				explicitCount++
+			}
 			if explicitVerda {
 				explicitCount++
 			}
 			if explicitCount > 1 {
-				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --azure, --cloudflare, --digitalocean, --hetzner, --vercel, --verda) together with --maker")
+				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --azure, --cloudflare, --digitalocean, --hetzner, --vercel, --railway, --verda) together with --maker")
 			}
 			switch {
 			case explicitHetzner:
@@ -524,6 +542,9 @@ Examples:
 			case explicitVercel:
 				makerProvider = "vercel"
 				makerProviderReason = "explicit"
+			case explicitRailway:
+				makerProvider = "railway"
+				makerProviderReason = "explicit"
 			case explicitVerda:
 				makerProvider = "verda"
 				makerProviderReason = "explicit"
@@ -546,6 +567,9 @@ Examples:
 					makerProviderReason = "inferred"
 				} else if svcCtx.Vercel {
 					makerProvider = "vercel"
+					makerProviderReason = "inferred"
+				} else if svcCtx.Railway {
+					makerProvider = "railway"
 					makerProviderReason = "inferred"
 				} else if svcCtx.Verda {
 					makerProvider = "verda"
@@ -571,6 +595,8 @@ Examples:
 				prompt = maker.GCPPlanPromptWithMode(question, destroyer)
 			case "vercel":
 				prompt = maker.VercelPlanPromptWithMode(question, destroyer)
+			case "railway":
+				prompt = maker.RailwayPlanPromptWithMode(question, destroyer)
 			case "verda":
 				prompt = maker.VerdaPlanPromptWithMode(question, destroyer)
 			default:
@@ -1382,7 +1408,7 @@ func init() {
 	askCmd.Flags().String("minimax-model", "", "MiniMax model to use (overrides config)")
 	askCmd.Flags().String("github-model", "", "GitHub Models model to use (overrides config)")
 	askCmd.Flags().Bool("agent-trace", false, "Show detailed coordinator agent lifecycle logs (overrides config)")
-	askCmd.Flags().Bool("maker", false, "Generate an AWS, GCP, Azure, Cloudflare, Digital Ocean, Hetzner, Vercel, or Verda plan (JSON) for infrastructure changes")
+	askCmd.Flags().Bool("maker", false, "Generate an AWS, GCP, Azure, Cloudflare, Digital Ocean, Hetzner, Vercel, Railway, or Verda plan (JSON) for infrastructure changes")
 	askCmd.Flags().Bool("destroyer", false, "Allow destructive operations when using --maker (requires explicit confirmation in UI/workflow)")
 	askCmd.Flags().Bool("apply", false, "Apply an approved maker plan (reads from stdin unless --plan-file is provided)")
 	askCmd.Flags().String("plan-file", "", "Optional path to maker plan JSON file for --apply")
