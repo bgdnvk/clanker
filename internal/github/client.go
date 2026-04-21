@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/google/go-github/v56/github"
 	"golang.org/x/oauth2"
+	"gopkg.in/yaml.v3"
 )
 
 type Repository struct {
@@ -91,6 +93,17 @@ type workflowAnnotationSummary struct {
 	AnnotationLevel string
 	Message         string
 	Title           string
+}
+
+type workflowSecuritySummary struct {
+	Name                   string
+	Path                   string
+	Events                 []string
+	Permissions            string
+	UsesPullRequestTarget  bool
+	UsesRepositoryDispatch bool
+	UsesWorkflowDispatch   bool
+	UsesSchedule           bool
 }
 
 type Client struct {
@@ -621,6 +634,10 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 	includeDetailedRunContext := containsAnyGitHubPhrase(questionLower,
 		"job", "jobs", "step", "steps", "failed", "failure", "failing", "annotation", "annotations", "artifact", "artifacts", "log", "logs", "debug",
 	)
+	includeSecurityContext := containsAnyGitHubPhrase(questionLower,
+		"security", "harden", "hardening", "branch protection", "protected branch", "workflow permission", "workflow permissions",
+		"pull_request_target", "repository_dispatch", "workflow_dispatch", "schedule", "trigger", "triggers",
+	)
 
 	if strings.Contains(questionLower, "repo") || strings.Contains(questionLower, "repository") {
 		repos, err := c.ListRepositories(ctx, 25)
@@ -637,6 +654,48 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 			contextText.WriteString("GitHub Runners:\n")
 			contextText.WriteString(FormatRunners(runners))
 			contextText.WriteString("\n")
+		}
+	}
+
+	if includeSecurityContext {
+		repoSecurity, err := c.getRepositorySecurityInfo(ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed to get repository security info: %w", err)
+		}
+		if strings.TrimSpace(repoSecurity) != "" {
+			contextText.WriteString("GitHub Repository Security:\n")
+			contextText.WriteString(repoSecurity)
+			contextText.WriteString("\n\n")
+		}
+
+		branchProtection, err := c.getBranchProtectionInfo(ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed to get branch protection info: %w", err)
+		}
+		if strings.TrimSpace(branchProtection) != "" {
+			contextText.WriteString("GitHub Branch Protection:\n")
+			contextText.WriteString(branchProtection)
+			contextText.WriteString("\n\n")
+		}
+
+		actionsPermissions, err := c.getActionsPermissionsInfo(ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed to get actions permissions info: %w", err)
+		}
+		if strings.TrimSpace(actionsPermissions) != "" {
+			contextText.WriteString("GitHub Actions Permissions:\n")
+			contextText.WriteString(actionsPermissions)
+			contextText.WriteString("\n\n")
+		}
+
+		workflowSecurity, err := c.getWorkflowSecurityInfo(ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed to get workflow security info: %w", err)
+		}
+		if strings.TrimSpace(workflowSecurity) != "" {
+			contextText.WriteString("GitHub Workflow Trigger Review:\n")
+			contextText.WriteString(workflowSecurity)
+			contextText.WriteString("\n\n")
 		}
 	}
 
@@ -681,6 +740,322 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 	}
 
 	return contextText.String(), nil
+}
+
+func (c *Client) getRepositorySecurityInfo(ctx context.Context) (string, error) {
+	output, err := runGitHubCLIWithRetry(ctx, "api", fmt.Sprintf("repos/%s/%s", c.owner, c.repo))
+	if err != nil {
+		return "", err
+	}
+
+	var raw struct {
+		FullName      string `json:"full_name"`
+		DefaultBranch string `json:"default_branch"`
+		Private       bool   `json:"private"`
+		Fork          bool   `json:"fork"`
+		AllowForking  bool   `json:"allow_forking"`
+		Archived      bool   `json:"archived"`
+		Disabled      bool   `json:"disabled"`
+		Visibility    string `json:"visibility"`
+	}
+	if err := json.Unmarshal([]byte(output), &raw); err != nil {
+		return "", fmt.Errorf("failed to parse repository security info: %w", err)
+	}
+	if strings.TrimSpace(raw.Visibility) == "" {
+		if raw.Private {
+			raw.Visibility = "private"
+		} else {
+			raw.Visibility = "public"
+		}
+	}
+
+	return fmt.Sprintf("- %s, visibility=%s, default_branch=%s, allow_forking=%t, archived=%t, disabled=%t, fork=%t", strings.TrimSpace(raw.FullName), strings.TrimSpace(raw.Visibility), strings.TrimSpace(raw.DefaultBranch), raw.AllowForking, raw.Archived, raw.Disabled, raw.Fork), nil
+}
+
+func (c *Client) getBranchProtectionInfo(ctx context.Context) (string, error) {
+	defaultBranch, err := c.defaultBranchName(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	output, err := runGitHubCLIWithRetry(ctx, "api", fmt.Sprintf("repos/%s/%s/branches/%s/protection", c.owner, c.repo, defaultBranch))
+	if err != nil {
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "404") || strings.Contains(lower, "branch not protected") || strings.Contains(lower, "not found") {
+			return fmt.Sprintf("- Default branch %s protected=false", defaultBranch), nil
+		}
+		return "", err
+	}
+
+	var raw struct {
+		RequiredPullRequestReviews struct {
+			RequiredApprovingReviewCount int  `json:"required_approving_review_count"`
+			RequireCodeOwnerReviews      bool `json:"require_code_owner_reviews"`
+		} `json:"required_pull_request_reviews"`
+		RequiredStatusChecks struct {
+			Strict   bool     `json:"strict"`
+			Contexts []string `json:"contexts"`
+		} `json:"required_status_checks"`
+		EnforceAdmins struct {
+			Enabled bool `json:"enabled"`
+		} `json:"enforce_admins"`
+		AllowForcePushes struct {
+			Enabled bool `json:"enabled"`
+		} `json:"allow_force_pushes"`
+		AllowDeletions struct {
+			Enabled bool `json:"enabled"`
+		} `json:"allow_deletions"`
+		RequiredLinearHistory struct {
+			Enabled bool `json:"enabled"`
+		} `json:"required_linear_history"`
+		RequiredConversationResolution struct {
+			Enabled bool `json:"enabled"`
+		} `json:"required_conversation_resolution"`
+	}
+	if err := json.Unmarshal([]byte(output), &raw); err != nil {
+		return "", fmt.Errorf("failed to parse branch protection info: %w", err)
+	}
+
+	statusChecks := "none"
+	if len(raw.RequiredStatusChecks.Contexts) > 0 {
+		statusChecks = strings.Join(raw.RequiredStatusChecks.Contexts, ",")
+	}
+
+	return fmt.Sprintf("- Default branch %s protected=true, required_reviews=%d, require_code_owner_reviews=%t, strict_status_checks=%t, status_checks=%s, enforce_admins=%t, allows_force_pushes=%t, allows_deletions=%t, requires_linear_history=%t, requires_conversation_resolution=%t", defaultBranch, raw.RequiredPullRequestReviews.RequiredApprovingReviewCount, raw.RequiredPullRequestReviews.RequireCodeOwnerReviews, raw.RequiredStatusChecks.Strict, statusChecks, raw.EnforceAdmins.Enabled, raw.AllowForcePushes.Enabled, raw.AllowDeletions.Enabled, raw.RequiredLinearHistory.Enabled, raw.RequiredConversationResolution.Enabled), nil
+}
+
+func (c *Client) getActionsPermissionsInfo(ctx context.Context) (string, error) {
+	permissionsOutput, err := runGitHubCLIWithRetry(ctx, "api", fmt.Sprintf("repos/%s/%s/actions/permissions", c.owner, c.repo))
+	if err != nil {
+		return "", err
+	}
+
+	workflowOutput, err := runGitHubCLIWithRetry(ctx, "api", fmt.Sprintf("repos/%s/%s/actions/permissions/workflow", c.owner, c.repo))
+	if err != nil {
+		return "", err
+	}
+
+	var permissions struct {
+		Enabled        bool   `json:"enabled"`
+		AllowedActions string `json:"allowed_actions"`
+	}
+	if err := json.Unmarshal([]byte(permissionsOutput), &permissions); err != nil {
+		return "", fmt.Errorf("failed to parse actions permissions: %w", err)
+	}
+
+	var workflowPermissions struct {
+		DefaultWorkflowPermissions   string `json:"default_workflow_permissions"`
+		CanApprovePullRequestReviews bool   `json:"can_approve_pull_request_reviews"`
+	}
+	if err := json.Unmarshal([]byte(workflowOutput), &workflowPermissions); err != nil {
+		return "", fmt.Errorf("failed to parse workflow permissions: %w", err)
+	}
+
+	return strings.Join([]string{
+		fmt.Sprintf("- Actions enabled=%t, allowed_actions=%s", permissions.Enabled, strings.TrimSpace(permissions.AllowedActions)),
+		fmt.Sprintf("- default_workflow_permissions=%s, can_approve_pull_request_reviews=%t", strings.TrimSpace(workflowPermissions.DefaultWorkflowPermissions), workflowPermissions.CanApprovePullRequestReviews),
+	}, "\n"), nil
+}
+
+func (c *Client) getWorkflowSecurityInfo(ctx context.Context) (string, error) {
+	summaries, err := c.listWorkflowSecuritySummaries(ctx)
+	if err != nil {
+		return "", err
+	}
+	if len(summaries) == 0 {
+		return "No workflow files found.\n", nil
+	}
+
+	var info strings.Builder
+	for _, summary := range summaries {
+		permissions := strings.TrimSpace(summary.Permissions)
+		if permissions == "" {
+			permissions = "repo-default"
+		}
+		events := strings.Join(summary.Events, ",")
+		if events == "" {
+			events = "unknown"
+		}
+		info.WriteString(fmt.Sprintf("- Workflow: %s, path=%s, events=%s, permissions=%s, uses_pull_request_target=%t, uses_repository_dispatch=%t, uses_workflow_dispatch=%t, uses_schedule=%t\n", summary.Name, summary.Path, events, permissions, summary.UsesPullRequestTarget, summary.UsesRepositoryDispatch, summary.UsesWorkflowDispatch, summary.UsesSchedule))
+	}
+
+	return strings.TrimSpace(info.String()), nil
+}
+
+func (c *Client) defaultBranchName(ctx context.Context) (string, error) {
+	output, err := runGitHubCLIWithRetry(ctx, "api", fmt.Sprintf("repos/%s/%s", c.owner, c.repo))
+	if err != nil {
+		return "", err
+	}
+	var raw struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	if err := json.Unmarshal([]byte(output), &raw); err != nil {
+		return "", fmt.Errorf("failed to parse default branch: %w", err)
+	}
+	if strings.TrimSpace(raw.DefaultBranch) == "" {
+		return "", fmt.Errorf("default branch is empty")
+	}
+	return strings.TrimSpace(raw.DefaultBranch), nil
+}
+
+func (c *Client) listWorkflowSecuritySummaries(ctx context.Context) ([]workflowSecuritySummary, error) {
+	output, err := runGitHubCLIWithRetry(ctx, "api", fmt.Sprintf("repos/%s/%s/contents/.github/workflows", c.owner, c.repo))
+	if err != nil {
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "404") || strings.Contains(lower, "not found") {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var files []struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal([]byte(output), &files); err != nil {
+		return nil, fmt.Errorf("failed to parse workflow file listing: %w", err)
+	}
+
+	summaries := make([]workflowSecuritySummary, 0, len(files))
+	for _, file := range files {
+		if strings.TrimSpace(file.Type) != "file" {
+			continue
+		}
+		lowerName := strings.ToLower(strings.TrimSpace(file.Name))
+		if !strings.HasSuffix(lowerName, ".yml") && !strings.HasSuffix(lowerName, ".yaml") {
+			continue
+		}
+		contentOutput, err := runGitHubCLIWithRetry(ctx, "api", fmt.Sprintf("repos/%s/%s/contents/%s", c.owner, c.repo, strings.TrimSpace(file.Path)))
+		if err != nil {
+			return nil, err
+		}
+		var content struct {
+			Name     string `json:"name"`
+			Path     string `json:"path"`
+			Content  string `json:"content"`
+			Encoding string `json:"encoding"`
+		}
+		if err := json.Unmarshal([]byte(contentOutput), &content); err != nil {
+			return nil, fmt.Errorf("failed to parse workflow file content: %w", err)
+		}
+		decoded, err := decodeGitHubContent(content.Content, content.Encoding)
+		if err != nil {
+			return nil, err
+		}
+		summaries = append(summaries, summarizeGitHubWorkflowSecurity(content.Name, content.Path, decoded))
+	}
+
+	sort.Slice(summaries, func(i, j int) bool {
+		return summaries[i].Path < summaries[j].Path
+	})
+	return summaries, nil
+}
+
+func decodeGitHubContent(content string, encoding string) (string, error) {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return "", nil
+	}
+	if strings.EqualFold(strings.TrimSpace(encoding), "base64") {
+		decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(trimmed, "\n", ""))
+		if err != nil {
+			return "", fmt.Errorf("failed to decode GitHub content: %w", err)
+		}
+		return string(decoded), nil
+	}
+	return trimmed, nil
+}
+
+func summarizeGitHubWorkflowSecurity(name string, path string, content string) workflowSecuritySummary {
+	workflow := workflowSecuritySummary{Name: strings.TrimSpace(name), Path: strings.TrimSpace(path)}
+	var doc map[string]interface{}
+	if err := yaml.Unmarshal([]byte(content), &doc); err != nil {
+		return workflow
+	}
+
+	triggerValue := doc["on"]
+	workflow.Events = extractGitHubWorkflowEvents(triggerValue)
+	workflow.UsesPullRequestTarget = containsString(workflow.Events, "pull_request_target")
+	workflow.UsesRepositoryDispatch = containsString(workflow.Events, "repository_dispatch")
+	workflow.UsesWorkflowDispatch = containsString(workflow.Events, "workflow_dispatch")
+	workflow.UsesSchedule = containsString(workflow.Events, "schedule")
+	workflow.Permissions = extractGitHubWorkflowPermissions(doc["permissions"])
+	return workflow
+}
+
+func extractGitHubWorkflowEvents(value interface{}) []string {
+	switch typed := value.(type) {
+	case string:
+		return []string{strings.TrimSpace(typed)}
+	case []interface{}:
+		events := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if event, ok := item.(string); ok && strings.TrimSpace(event) != "" {
+				events = append(events, strings.TrimSpace(event))
+			}
+		}
+		sort.Strings(events)
+		return uniqueStrings(events)
+	case map[string]interface{}:
+		events := make([]string, 0, len(typed))
+		for key := range typed {
+			events = append(events, strings.TrimSpace(key))
+		}
+		sort.Strings(events)
+		return uniqueStrings(events)
+	default:
+		return nil
+	}
+}
+
+func extractGitHubWorkflowPermissions(value interface{}) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case map[string]interface{}:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, key := range keys {
+			parts = append(parts, fmt.Sprintf("%s=%v", key, typed[key]))
+		}
+		return strings.Join(parts, ",")
+	default:
+		return ""
+	}
+}
+
+func containsString(values []string, target string) bool {
+	target = strings.ToLower(strings.TrimSpace(target))
+	for _, value := range values {
+		if strings.ToLower(strings.TrimSpace(value)) == target {
+			return true
+		}
+	}
+	return false
+}
+
+func uniqueStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToLower(trimmed)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, trimmed)
+	}
+	return result
 }
 
 func (c *Client) getWorkflowInfo(ctx context.Context) (string, error) {

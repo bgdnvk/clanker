@@ -40,17 +40,20 @@ type deepResearchEstateSnapshot struct {
 }
 
 type deepResearchResource struct {
-	ID               string                           `json:"id"`
-	Type             string                           `json:"type"`
-	Name             string                           `json:"name"`
-	Region           string                           `json:"region"`
-	State            string                           `json:"state"`
-	CreatedAt        string                           `json:"createdAt,omitempty"`
-	Tags             map[string]string                `json:"tags,omitempty"`
-	Attributes       map[string]interface{}           `json:"attributes,omitempty"`
-	MonthlyPrice     float64                          `json:"monthlyPrice,omitempty"`
-	Connections      []string                         `json:"connections,omitempty"`
-	TypedConnections []deepResearchResourceConnection `json:"typedConnections,omitempty"`
+	ID                 string                           `json:"id"`
+	Type               string                           `json:"type"`
+	Name               string                           `json:"name"`
+	Region             string                           `json:"region"`
+	State              string                           `json:"state"`
+	CreatedAt          string                           `json:"createdAt,omitempty"`
+	Tags               map[string]string                `json:"tags,omitempty"`
+	Attributes         map[string]interface{}           `json:"attributes,omitempty"`
+	MonthlyPrice       float64                          `json:"monthlyPrice,omitempty"`
+	IAMRole            string                           `json:"iamRole,omitempty"`
+	IAMPolicies        []string                         `json:"iamPolicies,omitempty"`
+	CanInvokeResources []string                         `json:"canInvokeResources,omitempty"`
+	Connections        []string                         `json:"connections,omitempty"`
+	TypedConnections   []deepResearchResourceConnection `json:"typedConnections,omitempty"`
 }
 
 type deepResearchResourceConnection struct {
@@ -801,10 +804,10 @@ func runCloudflareDeepResearchScout(ctx context.Context, options deepResearchRun
 }
 
 func runDigitalOceanDeepResearchScout(ctx context.Context, options deepResearchRunOptions) deepResearchSubagentRun {
-	apiToken := strings.TrimSpace(digitalocean.ResolveAPIToken())
-	if apiToken == "" {
-		return deepResearchSubagentRun{Name: "digitalocean-scout", Status: "warning", Summary: "DigitalOcean scout skipped: no API token is configured."}
+	if !digitalocean.CanUseLiveContext(ctx) {
+		return deepResearchSubagentRun{Name: "digitalocean-scout", Status: "warning", Summary: "DigitalOcean scout skipped: no API token or authenticated doctl context is configured."}
 	}
+	apiToken := strings.TrimSpace(digitalocean.ResolveAPIToken())
 	timeoutCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 	client, err := digitalocean.NewClient(apiToken, options.Debug)
@@ -951,7 +954,7 @@ func canRunDeepResearchProviderDrilldown(provider string, options deepResearchRu
 	case "cloudflare":
 		return strings.TrimSpace(cloudflare.ResolveAPIToken()) != ""
 	case "digitalocean":
-		return strings.TrimSpace(digitalocean.ResolveAPIToken()) != ""
+		return digitalocean.CanUseLiveContext(context.Background())
 	case "hetzner":
 		return strings.TrimSpace(hetzner.ResolveAPIToken()) != ""
 	case "k8s":
@@ -1306,8 +1309,8 @@ func collectDeepResearchProviderContext(ctx context.Context, provider string, pr
 		return deepResearchProviderContext{Provider: provider, Summary: "Collected Cloudflare live context.", Details: summarizeDeepResearchLines(info, 4), Blob: info}, nil
 	case "digitalocean":
 		apiToken := strings.TrimSpace(digitalocean.ResolveAPIToken())
-		if apiToken == "" {
-			return deepResearchProviderContext{}, fmt.Errorf("no API token is configured")
+		if !digitalocean.CanUseLiveContext(ctx) {
+			return deepResearchProviderContext{}, fmt.Errorf("no API token or authenticated doctl context is configured")
 		}
 		timeoutCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
 		defer cancel()
@@ -2655,14 +2658,20 @@ func inferDeepResearchProvider(resource deepResearchResource) string {
 		return "azure"
 	case strings.Contains(typeLower, "gcp") || strings.Contains(typeLower, "google"):
 		return "gcp"
+	case strings.Contains(typeLower, "kubernetes") || strings.Contains(typeLower, "k8s"):
+		return "k8s"
 	case strings.Contains(typeLower, "cloudflare") || strings.HasPrefix(typeLower, "cf_"):
 		return "cloudflare"
 	case strings.Contains(typeLower, "digitalocean") || strings.HasPrefix(typeLower, "do_"):
 		return "digitalocean"
+	case strings.Contains(typeLower, "github"):
+		return "github"
 	case strings.Contains(typeLower, "hetzner") || strings.HasPrefix(typeLower, "hz_"):
 		return "hetzner"
 	case strings.Contains(typeLower, "supabase"):
 		return "supabase"
+	case strings.Contains(typeLower, "verda"):
+		return "verda"
 	case strings.Contains(typeLower, "vercel"):
 		return "vercel"
 	default:

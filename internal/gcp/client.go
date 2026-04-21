@@ -21,6 +21,9 @@ func ResolveProjectID() string {
 	if projectID := strings.TrimSpace(viper.GetString("infra.gcp.project_id")); projectID != "" {
 		return projectID
 	}
+	if env := strings.TrimSpace(os.Getenv("GCP_PROJECT_ID")); env != "" {
+		return env
+	}
 	if env := strings.TrimSpace(os.Getenv("GCP_PROJECT")); env != "" {
 		return env
 	}
@@ -30,7 +33,29 @@ func ResolveProjectID() string {
 	if env := strings.TrimSpace(os.Getenv("GCLOUD_PROJECT")); env != "" {
 		return env
 	}
+	if projectID := resolveConfiguredGcloudProjectID(); projectID != "" {
+		return projectID
+	}
 	return ""
+}
+
+func resolveConfiguredGcloudProjectID() string {
+	bin, err := FindGcloudBinary()
+	if err != nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "config", "get-value", "project")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	projectID := strings.TrimSpace(string(output))
+	if projectID == "" || projectID == "(unset)" {
+		return ""
+	}
+	return projectID
 }
 
 func NewClient(projectID string, debug bool) (*Client, error) {
