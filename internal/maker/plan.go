@@ -162,6 +162,8 @@ func inferProviderFromCommands(cmds []Command) string {
 		switch first {
 		case "vercel":
 			return "vercel"
+		case "railway":
+			return "railway"
 		case "wrangler":
 			return "cloudflare"
 		case "hcloud":
