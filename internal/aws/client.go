@@ -224,6 +224,7 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 
 	// Analyze question to determine what AWS services to query
 	questionLower := strings.ToLower(question)
+	hasSecurityQuery := awsQuestionHasSecurityIntent(questionLower)
 
 	if strings.Contains(questionLower, "ec2") || strings.Contains(questionLower, "instance") {
 		ec2Info, err := c.getEC2Info(ctx)
@@ -333,7 +334,51 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 		context.WriteString("\n\n")
 	}
 
+	if hasSecurityQuery {
+		for _, section := range []struct {
+			name string
+			op   string
+		}{
+			{name: "Security Groups", op: "list_security_groups"},
+			{name: "Load Balancers", op: "describe_load_balancers"},
+			{name: "Route Tables", op: "list_route_tables"},
+			{name: "AWS WAFv2", op: "check_wafv2_service"},
+			{name: "AWS CloudTrail", op: "check_cloudtrail_service"},
+			{name: "AWS Config", op: "check_config_service"},
+			{name: "AWS GuardDuty", op: "check_guardduty_service"},
+			{name: "AWS Security Hub", op: "check_securityhub_service"},
+			{name: "AWS Network Firewall", op: "check_networkfirewall_service"},
+			{name: "AWS KMS Keys", op: "list_kms_keys"},
+		} {
+			result, err := c.executeOperation(ctx, section.op, nil)
+			if err != nil {
+				context.WriteString(fmt.Sprintf("%s:\nNote: %v\n\n", section.name, err))
+				continue
+			}
+			if strings.TrimSpace(result) == "" {
+				continue
+			}
+			context.WriteString(section.name)
+			context.WriteString(":\n")
+			context.WriteString(result)
+			context.WriteString("\n\n")
+		}
+	}
+
 	return context.String(), nil
+}
+
+func awsQuestionHasSecurityIntent(questionLower string) bool {
+	markers := []string{
+		"security", "firewall", "security group", "route table", "route exposure", "load balancer", "public bucket",
+		"audit", "detective", "cloudtrail", "guardduty", "security hub", "waf", "kms", "encryption", "snapshot",
+	}
+	for _, marker := range markers {
+		if strings.Contains(questionLower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) getIAMRolesInfo(ctx context.Context) (string, error) {
@@ -1064,6 +1109,11 @@ func (c *Client) GetAIProfiles() map[string]AIProfile {
 
 // executeOperation executes an AWS operation using the default infrastructure profile
 func (c *Client) executeOperation(ctx context.Context, toolName string, input map[string]interface{}) (string, error) {
+	profile := c.aiProfile()
+	return c.executeAWSOperation(ctx, toolName, input, profile)
+}
+
+func (c *Client) aiProfile() *AIProfile {
 	// Get infrastructure profile from config
 	defaultEnv := viper.GetString("infra.default_environment")
 	if defaultEnv == "" {
@@ -1077,13 +1127,18 @@ func (c *Client) executeOperation(ctx context.Context, toolName string, input ma
 	if awsRegion == "" {
 		awsRegion = "us-gov-west-1"
 	}
+	if strings.TrimSpace(c.profile) != "" {
+		awsProfile = strings.TrimSpace(c.profile)
+	}
+	if strings.TrimSpace(c.cfg.Region) != "" {
+		awsRegion = strings.TrimSpace(c.cfg.Region)
+	}
 
-	profile := &AIProfile{
+	return &AIProfile{
 		Provider:   "aws-cli",
 		AWSProfile: awsProfile,
 		Region:     awsRegion,
 	}
-	return c.executeAWSOperation(ctx, toolName, input, profile)
 }
 
 // ExecuteOperation exposes the default single-operation execution helper.
@@ -1093,25 +1148,7 @@ func (c *Client) ExecuteOperation(ctx context.Context, toolName string, input ma
 
 // executeOperations executes multiple AWS operations using the default infrastructure profile
 func (c *Client) executeOperations(ctx context.Context, operations []LLMOperation) (string, error) {
-	defaultEnv := viper.GetString("infra.default_environment")
-	if defaultEnv == "" {
-		defaultEnv = "dev"
-	}
-	awsProfile := viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
-	if awsProfile == "" {
-		awsProfile = "govcloud-dev"
-	}
-	awsRegion := viper.GetString(fmt.Sprintf("infra.aws.environments.%s.region", defaultEnv))
-	if awsRegion == "" {
-		awsRegion = "us-gov-west-1"
-	}
-
-	profile := &AIProfile{
-		Provider:   "aws-cli",
-		AWSProfile: awsProfile,
-		Region:     awsRegion,
-	}
-	return c.executeOperationsWithProfile(ctx, operations, profile)
+	return c.executeOperationsWithProfile(ctx, operations, c.aiProfile())
 }
 
 // ExecuteOperations exposes the default batch execution helper.
@@ -1121,25 +1158,7 @@ func (c *Client) ExecuteOperations(ctx context.Context, operations []LLMOperatio
 
 // execCLI executes AWS CLI commands using the default infrastructure profile
 func (c *Client) execCLI(ctx context.Context, args []string) (string, error) {
-	defaultEnv := viper.GetString("infra.default_environment")
-	if defaultEnv == "" {
-		defaultEnv = "dev"
-	}
-	awsProfile := viper.GetString(fmt.Sprintf("infra.aws.environments.%s.profile", defaultEnv))
-	if awsProfile == "" {
-		awsProfile = "govcloud-dev"
-	}
-	awsRegion := viper.GetString(fmt.Sprintf("infra.aws.environments.%s.region", defaultEnv))
-	if awsRegion == "" {
-		awsRegion = "us-gov-west-1"
-	}
-
-	profile := &AIProfile{
-		Provider:   "aws-cli",
-		AWSProfile: awsProfile,
-		Region:     awsRegion,
-	}
-	return c.execAWSCLI(ctx, args, profile)
+	return c.execAWSCLI(ctx, args, c.aiProfile())
 }
 
 // ExecCLI exposes the CLI helper to other packages.

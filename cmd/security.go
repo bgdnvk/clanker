@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -64,6 +65,8 @@ type securityFinding struct {
 	Category     string   `json:"category"`
 	Title        string   `json:"title"`
 	Summary      string   `json:"summary"`
+	Confidence   string   `json:"confidence,omitempty"`
+	BlastRadius  string   `json:"blastRadius,omitempty"`
 	ResourceID   string   `json:"resourceId,omitempty"`
 	ResourceName string   `json:"resourceName,omitempty"`
 	ResourceType string   `json:"resourceType,omitempty"`
@@ -137,12 +140,17 @@ type securitySurfaceCandidate struct {
 type securityProbeObservation struct {
 	Endpoint         string
 	ResourceID       string
+	Scheme           string
+	Port             string
 	StatusCode       int
 	Reachable        bool
 	RequiresAuth     bool
 	Authenticated    bool
 	AllowsCORS       bool
 	Server           string
+	Banner           string
+	TLSEnabled       bool
+	TLSVersion       string
 	ContentType      string
 	Location         string
 	Method           string
@@ -156,6 +164,7 @@ type securityScanContext struct {
 	Candidates  []securitySurfaceCandidate
 	Probes      []securityProbeObservation
 	AuthPack    securityRuntimeAuthPack
+	Options     deepResearchRunOptions
 	ProbeLimit  int
 	ProbeTarget int
 }
@@ -175,6 +184,11 @@ vectors that an operator can validate manually.`,
 			question = strings.TrimSpace(args[0])
 		}
 
+		profile, _ := cmd.Flags().GetString("profile")
+		gcpProject, _ := cmd.Flags().GetString("gcp-project")
+		azureSubscriptionID, _ := cmd.Flags().GetString("azure-subscription")
+		workspace, _ := cmd.Flags().GetString("workspace")
+
 		estate, warnings := loadDeepResearchEstateSnapshot()
 		authPack, authWarnings := loadSecurityRuntimeAuthPack()
 		warnings = append(warnings, authWarnings...)
@@ -182,9 +196,15 @@ vectors that an operator can validate manually.`,
 		fmt.Printf("[security] starting security scan query=%q resources=%d\n", question, len(estate.Resources))
 
 		ctx := securityScanContext{
-			Question:   question,
-			Estate:     estate,
-			AuthPack:   authPack,
+			Question: question,
+			Estate:   estate,
+			AuthPack: authPack,
+			Options: deepResearchRunOptions{
+				Profile:             strings.TrimSpace(profile),
+				GCPProject:          strings.TrimSpace(gcpProject),
+				AzureSubscriptionID: strings.TrimSpace(azureSubscriptionID),
+				TerraformWorkspace:  strings.TrimSpace(workspace),
+			},
 			ProbeLimit: maxSecurityProbeEndpoints,
 		}
 
@@ -273,6 +293,22 @@ func runSecurityScan(ctx context.Context, scanCtx securityScanContext) (security
 	warnings = append(warnings, providerWarnings...)
 	fmt.Printf("[security][provider-enrichment] %s\n", providerRun.Summary)
 
+	providerScoutSubagents := buildSecurityLiveProviderSubagents(scanCtx)
+	providerScoutCandidates, providerScoutFindings, providerScoutRuns, providerScoutWarnings := executeSecurityProviderSubagentBatch(ctx, providerScoutSubagents)
+	if len(providerScoutSubagents) == 0 {
+		runs = append(runs, securitySubagentRun{
+			Name:    "live-provider-scouts",
+			Status:  "warning",
+			Summary: "No live provider security scouts were available for the current estate and credentials.",
+		})
+	} else {
+		scanCtx.Candidates = mergeSecuritySurfaceCandidates(scanCtx.Candidates, providerScoutCandidates)
+		scanCtx.ProbeTarget = minInt(len(scanCtx.Candidates), scanCtx.ProbeLimit)
+		runs = append(runs, providerScoutRuns...)
+		warnings = append(warnings, providerScoutWarnings...)
+		fmt.Printf("[security][live-provider-scouts] collected %d live provider findings and %d endpoint candidates\n", len(providerScoutFindings), len(providerScoutCandidates))
+	}
+
 	fmt.Printf("[security][reachability-scout] starting\n")
 	probes, reachRun, reachWarnings := runSecurityReachabilityScout(ctx, scanCtx)
 	scanCtx.Probes = probes
@@ -282,7 +318,7 @@ func runSecurityScan(ctx context.Context, scanCtx securityScanContext) (security
 
 	var (
 		findingsMu       sync.Mutex
-		allFindings      = append([]securityFinding{}, providerFindings...)
+		allFindings      = append(append([]securityFinding{}, providerFindings...), providerScoutFindings...)
 		analysisRuns     []securitySubagentRun
 		analysisWarnings []string
 	)
@@ -290,6 +326,17 @@ func runSecurityScan(ctx context.Context, scanCtx securityScanContext) (security
 		name string
 		run  func() ([]securityFinding, securitySubagentRun, []string)
 	}{
+		{
+			name: "network-policy-analyst",
+			run: func() ([]securityFinding, securitySubagentRun, []string) {
+				findings := buildSecurityNetworkPolicyFindings(scanCtx.Estate.Resources)
+				summary := fmt.Sprintf("Flagged %d network policy and open-ingress findings.", len(findings))
+				if len(findings) == 0 {
+					summary = "No world-open ingress or obvious network-policy drift was inferred from the estate snapshot."
+				}
+				return findings, securitySubagentRun{Name: "network-policy-analyst", Status: "ok", Summary: summary}, nil
+			},
+		},
 		{
 			name: "misconfig-analyst",
 			run: func() ([]securityFinding, securitySubagentRun, []string) {
@@ -313,6 +360,17 @@ func runSecurityScan(ctx context.Context, scanCtx securityScanContext) (security
 			},
 		},
 		{
+			name: "iam-policy-analyst",
+			run: func() ([]securityFinding, securitySubagentRun, []string) {
+				findings := buildSecurityIAMPolicyFindings(scanCtx.Estate.Resources)
+				summary := fmt.Sprintf("Flagged %d privileged IAM policy findings.", len(findings))
+				if len(findings) == 0 {
+					summary = "No high-risk IAM policy names or obvious role-chaining paths were inferred from the estate snapshot."
+				}
+				return findings, securitySubagentRun{Name: "iam-policy-analyst", Status: "ok", Summary: summary}, nil
+			},
+		},
+		{
 			name: "identity-analyst",
 			run: func() ([]securityFinding, securitySubagentRun, []string) {
 				findings := buildSecurityIdentityFindings(scanCtx.Estate.Resources)
@@ -321,6 +379,28 @@ func runSecurityScan(ctx context.Context, scanCtx securityScanContext) (security
 					summary = "No clear public-to-identity pivot path was inferred from the estate snapshot."
 				}
 				return findings, securitySubagentRun{Name: "identity-analyst", Status: "ok", Summary: summary}, nil
+			},
+		},
+		{
+			name: "storage-hygiene-analyst",
+			run: func() ([]securityFinding, securitySubagentRun, []string) {
+				findings := buildSecurityStorageExposureFindings(scanCtx.Estate.Resources)
+				summary := fmt.Sprintf("Flagged %d storage exposure or encryption findings.", len(findings))
+				if len(findings) == 0 {
+					summary = "No obvious public bucket or disabled encryption signals were inferred from the estate snapshot."
+				}
+				return findings, securitySubagentRun{Name: "storage-hygiene-analyst", Status: "ok", Summary: summary}, nil
+			},
+		},
+		{
+			name: "detective-control-analyst",
+			run: func() ([]securityFinding, securitySubagentRun, []string) {
+				findings := buildSecurityDetectiveControlFindings(scanCtx.Estate.Resources)
+				summary := fmt.Sprintf("Flagged %d logging, alerting, WAF, or detector coverage findings.", len(findings))
+				if len(findings) == 0 {
+					summary = "No obvious disabled logging, alerting, WAF, or detector signals were inferred from the estate snapshot."
+				}
+				return findings, securitySubagentRun{Name: "detective-control-analyst", Status: "ok", Summary: summary}, nil
 			},
 		},
 		{
@@ -891,6 +971,9 @@ func buildSecuritySurfaceCandidates(resources []deepResearchResource) ([]securit
 
 	for _, resource := range resources {
 		port := deepResearchFirstNonEmptyAttr(resource.Attributes, "port", "publicPort", "listenerPort")
+		if strings.TrimSpace(port) == "" {
+			port = inferSecurityDefaultPort(resource)
+		}
 		collectedValues := make([]string, 0, 8)
 		for _, key := range keys {
 			collectedValues = append(collectedValues, flattenSecurityAttrStrings(resource.Attributes[key])...)
@@ -947,6 +1030,27 @@ func buildSecuritySurfaceCandidates(resources []deepResearchResource) ([]securit
 	return candidates, warnings
 }
 
+func inferSecurityDefaultPort(resource deepResearchResource) string {
+	lowerType := strings.ToLower(strings.TrimSpace(resource.Type))
+	lowerName := strings.ToLower(strings.TrimSpace(resource.Name))
+	engine := strings.ToLower(strings.TrimSpace(deepResearchFirstNonEmptyAttr(resource.Attributes, "engine", "databaseEngine", "dbEngine")))
+	signals := strings.Join([]string{lowerType, lowerName, engine}, " ")
+	switch {
+	case strings.Contains(signals, "postgres"):
+		return "5432"
+	case strings.Contains(signals, "mysql") || strings.Contains(signals, "mariadb"):
+		return "3306"
+	case strings.Contains(signals, "redis"):
+		return "6379"
+	case strings.Contains(signals, "mongodb") || strings.Contains(signals, "mongo"):
+		return "27017"
+	case strings.Contains(signals, "elasticsearch") || strings.Contains(signals, "opensearch"):
+		return "9200"
+	default:
+		return ""
+	}
+}
+
 func flattenSecurityAttrStrings(value interface{}) []string {
 	result := []string{}
 	switch typed := value.(type) {
@@ -985,28 +1089,50 @@ func normalizeSecurityEndpoints(raw string, port string) []string {
 	if strings.HasPrefix(trimmed, "//") {
 		return []string{"https:" + trimmed, "http:" + trimmed}
 	}
-	if strings.HasPrefix(strings.ToLower(trimmed), "tcp://") || strings.HasPrefix(strings.ToLower(trimmed), "udp://") {
-		return nil
+	lowerTrimmed := strings.ToLower(trimmed)
+	if strings.HasPrefix(lowerTrimmed, "tcp://") || strings.HasPrefix(lowerTrimmed, "tls://") {
+		parsed, err := url.Parse(trimmed)
+		if err != nil || strings.TrimSpace(parsed.Host) == "" {
+			return nil
+		}
+		return []string{strings.ToLower(parsed.Scheme) + "://" + strings.TrimSpace(parsed.Host)}
 	}
-	if explicitPort := securityExtractEndpointPort(trimmed); explicitPort != "" && !securityPortLikelyHTTP(explicitPort) {
-		return nil
-	}
-	if strings.TrimSpace(port) != "" && securityExtractEndpointPort(trimmed) == "" && !securityPortLikelyHTTP(port) {
+	if strings.HasPrefix(lowerTrimmed, "udp://") {
 		return nil
 	}
 
-	host := trimmed
-	if port != "" && !strings.Contains(host, ":") && net.ParseIP(strings.TrimSpace(host)) != nil {
-		host = net.JoinHostPort(host, port)
-	} else if port != "" && !strings.Contains(host, ":") && strings.Contains(host, ".") {
-		host = net.JoinHostPort(host, port)
+	host, effectivePort := securityNormalizeEndpointHostPort(trimmed, port)
+	if host == "" {
+		return nil
 	}
 
 	if !strings.Contains(host, ".") && net.ParseIP(strings.Trim(host, "[]")) == nil {
 		return nil
 	}
+	if effectivePort != "" && !securityPortLikelyHTTP(effectivePort) {
+		return []string{"tcp://" + host}
+	}
 
 	return []string{"https://" + host, "http://" + host}
+}
+
+func securityNormalizeEndpointHostPort(raw string, fallbackPort string) (string, string) {
+	parsed, err := url.Parse("//" + strings.TrimSpace(raw))
+	if err != nil {
+		return "", ""
+	}
+	host := strings.TrimSpace(parsed.Hostname())
+	if host == "" {
+		return "", ""
+	}
+	effectivePort := strings.TrimSpace(parsed.Port())
+	if effectivePort == "" {
+		effectivePort = strings.TrimSpace(fallbackPort)
+	}
+	if effectivePort == "" {
+		return host, ""
+	}
+	return net.JoinHostPort(host, effectivePort), effectivePort
 }
 
 func securityPortLikelyHTTP(port string) bool {
@@ -1024,6 +1150,14 @@ func securityExtractEndpointPort(raw string) string {
 		return ""
 	}
 	return strings.TrimSpace(parsed.Port())
+}
+
+func securityEndpointScheme(endpoint string) string {
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(parsed.Scheme))
 }
 
 func classifySecurityProbeError(err error) (string, bool) {
@@ -1114,7 +1248,7 @@ func summarizeSecurityCandidates(candidates []securitySurfaceCandidate, limit in
 func runSecurityReachabilityScout(ctx context.Context, scanCtx securityScanContext) ([]securityProbeObservation, securitySubagentRun, []string) {
 	candidates := scanCtx.Candidates
 	if len(candidates) == 0 {
-		return nil, securitySubagentRun{Name: "reachability-scout", Status: "warning", Summary: "No candidate HTTP surfaces were available to probe."}, nil
+		return nil, securitySubagentRun{Name: "reachability-scout", Status: "warning", Summary: "No candidate network surfaces were available to probe."}, nil
 	}
 	if len(candidates) > scanCtx.ProbeLimit {
 		candidates = candidates[:scanCtx.ProbeLimit]
@@ -1139,6 +1273,8 @@ func runSecurityReachabilityScout(ctx context.Context, scanCtx securityScanConte
 
 	reachableCount := 0
 	authCount := 0
+	httpCount := 0
+	socketCount := 0
 	for _, obs := range observations {
 		if obs.Reachable {
 			reachableCount++
@@ -1146,10 +1282,16 @@ func runSecurityReachabilityScout(ctx context.Context, scanCtx securityScanConte
 		if obs.RequiresAuth || obs.Authenticated {
 			authCount++
 		}
+		if obs.StatusCode > 0 {
+			httpCount++
+		} else if obs.Reachable {
+			socketCount++
+		}
 	}
 	details := []string{
 		fmt.Sprintf("Attempted %d of %d candidate endpoints.", attempted, len(scanCtx.Candidates)),
-		fmt.Sprintf("HTTP responses collected: %d", len(observations)),
+		fmt.Sprintf("HTTP responses collected: %d", httpCount),
+		fmt.Sprintf("TCP/TLS socket handshakes collected: %d", socketCount),
 		fmt.Sprintf("Reachable endpoints: %d", reachableCount),
 		fmt.Sprintf("Auth-gated or auth-unlocked surfaces: %d", authCount),
 	}
@@ -1168,6 +1310,10 @@ func runSecurityReachabilityScout(ctx context.Context, scanCtx securityScanConte
 }
 
 func probeSecurityEndpoint(parent context.Context, candidate securitySurfaceCandidate, authPack securityRuntimeAuthPack) (securityProbeObservation, error) {
+	if scheme := securityEndpointScheme(candidate.Endpoint); scheme == "tcp" || scheme == "tls" {
+		return probeSecuritySocket(parent, candidate)
+	}
+
 	ctx, cancel := context.WithTimeout(parent, securityProbeTimeout)
 	defer cancel()
 
@@ -1180,6 +1326,8 @@ func probeSecurityEndpoint(parent context.Context, candidate securitySurfaceCand
 	observation := securityProbeObservation{
 		Endpoint:   candidate.Endpoint,
 		ResourceID: candidate.ResourceID,
+		Scheme:     securityEndpointScheme(candidate.Endpoint),
+		Port:       securityExtractEndpointPort(strings.TrimPrefix(strings.TrimPrefix(candidate.Endpoint, "https://"), "http://")),
 		Method:     "HEAD",
 	}
 
@@ -1225,6 +1373,113 @@ func probeSecurityEndpoint(parent context.Context, candidate securitySurfaceCand
 	return observation, nil
 }
 
+func probeSecuritySocket(parent context.Context, candidate securitySurfaceCandidate) (securityProbeObservation, error) {
+	ctx, cancel := context.WithTimeout(parent, securityProbeTimeout)
+	defer cancel()
+
+	parsed, err := url.Parse(strings.TrimSpace(candidate.Endpoint))
+	if err != nil {
+		return securityProbeObservation{Endpoint: candidate.Endpoint, ResourceID: candidate.ResourceID}, err
+	}
+
+	observation := securityProbeObservation{
+		Endpoint:   candidate.Endpoint,
+		ResourceID: candidate.ResourceID,
+		Scheme:     strings.ToLower(strings.TrimSpace(parsed.Scheme)),
+		Port:       strings.TrimSpace(parsed.Port()),
+		Method:     "TCP connect",
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return observation, fmt.Errorf("missing socket host")
+	}
+
+	dialer := &net.Dialer{Timeout: securityProbeTimeout}
+	conn, err := dialer.DialContext(ctx, "tcp", parsed.Host)
+	if err != nil {
+		return observation, err
+	}
+	observation.Reachable = true
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetLinger(0)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(350 * time.Millisecond))
+	banner := make([]byte, 256)
+	if n, readErr := conn.Read(banner); n > 0 {
+		observation.Banner = securitySanitizeProbeBanner(banner[:n])
+	} else if readErr == nil {
+		observation.Banner = ""
+	}
+	_ = conn.Close()
+
+	if securityShouldAttemptTLS(observation.Scheme, observation.Port) {
+		if tlsVersion, tlsErr := securityProbeTLSVersion(ctx, dialer, parsed.Hostname(), parsed.Host); tlsErr == nil {
+			observation.TLSEnabled = true
+			observation.TLSVersion = tlsVersion
+		}
+	}
+
+	observation.Notes = buildSecurityProbeNotes(observation)
+	return observation, nil
+}
+
+func securityShouldAttemptTLS(scheme string, port string) bool {
+	if strings.EqualFold(strings.TrimSpace(scheme), "tls") {
+		return true
+	}
+	switch strings.TrimSpace(port) {
+	case "443", "465", "636", "853", "993", "995", "8443", "9443", "5671":
+		return true
+	default:
+		return false
+	}
+}
+
+func securityProbeTLSVersion(ctx context.Context, dialer *net.Dialer, hostname string, address string) (string, error) {
+	config := &tls.Config{InsecureSkipVerify: true}
+	if net.ParseIP(strings.TrimSpace(hostname)) == nil {
+		config.ServerName = strings.TrimSpace(hostname)
+	}
+	conn, err := tls.DialWithDialer(dialer, "tcp", address, config)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	return securityTLSVersionLabel(conn.ConnectionState().Version), nil
+}
+
+func securityTLSVersionLabel(version uint16) string {
+	switch version {
+	case tls.VersionTLS10:
+		return "TLS1.0"
+	case tls.VersionTLS11:
+		return "TLS1.1"
+	case tls.VersionTLS12:
+		return "TLS1.2"
+	case tls.VersionTLS13:
+		return "TLS1.3"
+	default:
+		return fmt.Sprintf("0x%x", version)
+	}
+}
+
+func securitySanitizeProbeBanner(data []byte) string {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return ""
+	}
+	runes := make([]rune, 0, len(trimmed))
+	for _, r := range trimmed {
+		if r == '\n' || r == '\r' || r == '\t' || (r >= 32 && r < 127) {
+			runes = append(runes, r)
+		}
+	}
+	sanitized := strings.TrimSpace(string(runes))
+	if len(sanitized) > 160 {
+		sanitized = sanitized[:160]
+	}
+	return sanitized
+}
+
 func doSecurityHTTPProbe(ctx context.Context, client *http.Client, endpoint string, method string, headers map[string]string) (int, http.Header, string, error) {
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, nil)
 	if err != nil {
@@ -1266,11 +1521,24 @@ func buildSecurityAuthHeaders(pack securityRuntimeAuthPack) map[string]string {
 
 func buildSecurityProbeNotes(observation securityProbeObservation) []string {
 	notes := []string{}
+	if observation.Reachable && observation.StatusCode == 0 {
+		portLabel := strings.TrimSpace(observation.Port)
+		if portLabel == "" {
+			portLabel = "unknown"
+		}
+		notes = append(notes, fmt.Sprintf("TCP connect succeeded on port %s.", portLabel))
+	}
 	if observation.StatusCode > 0 {
 		notes = append(notes, fmt.Sprintf("HTTP %d via %s", observation.StatusCode, observation.Method))
 	}
 	if observation.Server != "" {
 		notes = append(notes, fmt.Sprintf("Server banner: %s", observation.Server))
+	}
+	if observation.Banner != "" {
+		notes = append(notes, fmt.Sprintf("Service banner: %s", observation.Banner))
+	}
+	if observation.TLSEnabled {
+		notes = append(notes, fmt.Sprintf("Direct TLS handshake succeeded (%s).", coalesceSecurityName(observation.TLSVersion, "TLS detected")))
 	}
 	if observation.ContentType != "" {
 		notes = append(notes, fmt.Sprintf("Content-Type: %s", observation.ContentType))
@@ -1332,6 +1600,25 @@ func buildSecurityReachabilityFindings(candidates []securitySurfaceCandidate, pr
 		evidence := append([]string{}, probe.Notes...)
 		for _, interestingPath := range probe.InterestingPaths {
 			evidence = append(evidence, fmt.Sprintf("Interesting path reachable: %s", interestingPath))
+		}
+		if probe.StatusCode == 0 {
+			findings = append(findings, securityFinding{
+				ID:           buildDeepResearchFindingID("security-socket-surface", candidate.ResourceID+"|"+probe.Endpoint),
+				Severity:     securitySeverityForSurface(candidate.ResourceType, candidate.LikelyPublic),
+				Category:     "reachable-surface",
+				Title:        fmt.Sprintf("%s exposes a reachable TCP service", resourceLabel),
+				Summary:      fmt.Sprintf("The socket %s accepted a TCP connection. Treat it as a live externally reachable service until intended clients, auth requirements, and network guards are verified.", probe.Endpoint),
+				ResourceID:   candidate.ResourceID,
+				ResourceName: candidate.ResourceName,
+				ResourceType: candidate.ResourceType,
+				Provider:     candidate.Provider,
+				Region:       candidate.Region,
+				Endpoint:     probe.Endpoint,
+				Reachable:    true,
+				Evidence:     evidence,
+				Questions:    buildSecurityQuestions("reachable-surface", candidate.ResourceName, probe.Endpoint, false),
+			})
+			continue
 		}
 		severity := "medium"
 		category := "reachable-surface"
@@ -1583,6 +1870,12 @@ func buildSecurityAttackChainVectors(findings []securityFinding, probeByEndpoint
 		if strings.TrimSpace(probe.Server) != "" {
 			evidence = append(evidence, fmt.Sprintf("Observed server banner: %s", strings.TrimSpace(probe.Server)))
 		}
+		if strings.TrimSpace(probe.Banner) != "" {
+			evidence = append(evidence, fmt.Sprintf("Observed service banner: %s", strings.TrimSpace(probe.Banner)))
+		}
+		if probe.TLSEnabled {
+			evidence = append(evidence, fmt.Sprintf("Direct TLS handshake succeeded: %s", coalesceSecurityName(probe.TLSVersion, "TLS detected")))
+		}
 
 		vectors = append(vectors, securityAttackVector{
 			ID:             buildDeepResearchFindingID("vector-public-runtime-pivot", resourceID),
@@ -1646,6 +1939,49 @@ func buildSecurityAttackVector(finding securityFinding, probe securityProbeObser
 	blastRadius := inferSecurityBlastRadius(finding)
 	switch finding.Category {
 	case "public-surface", "reachable-surface", "authenticated-surface":
+		if scheme := coalesceSecurityName(strings.TrimSpace(probe.Scheme), securityEndpointScheme(finding.Endpoint)); scheme == "tcp" || scheme == "tls" {
+			return securityAttackVector{
+				ID:             buildDeepResearchFindingID("vector-socket-recon", finding.ID),
+				Severity:       finding.Severity,
+				Title:          fmt.Sprintf("Live socket exposure path for %s", resourceLabel),
+				Summary:        "Treat this as a controlled network-exposure plan: confirm the open port, fingerprint the protocol with read-only handshakes only, and decide whether the service should ever be reachable from the internet.",
+				KillChainStage: "initial-access",
+				Exploitability: ternaryString(finding.RequiresAuth, "medium", "high"),
+				Confidence:     ternaryString(probe.Reachable, "high", "medium"),
+				LikelyImpact:   "Protocol fingerprinting, exposed control-plane or data-plane access, and confirmation of internet-reachable admin or data services.",
+				BlastRadius:    blastRadius,
+				ResourceIDs:    resourceIDs,
+				EntryPoints:    entryPoints,
+				Prerequisites: uniqueNonEmptyStrings([]string{
+					"Network reachability to the target host and port",
+					ternaryString(probe.TLSEnabled, "A read-only TLS handshake to validate certificate and protocol posture", "A single safe TCP connection with no auth or state-changing commands"),
+				}),
+				Steps: []string{
+					fmt.Sprintf("Confirm that %s accepts a TCP connection from the expected test vantage point.", finding.Endpoint),
+					"Fingerprint the exposed protocol with the least invasive read-only handshake possible and stop before any state-changing command.",
+					"Record banner data, TLS metadata, and port ownership to determine whether the service is admin-only, data-plane, or public product traffic.",
+					"Validate whether the port should be private-only, VPN-gated, or fronted by a dedicated edge instead of being directly internet reachable.",
+				},
+				ImmediateActions: []string{
+					"Restrict the port to approved CIDRs, private networks, or bastion paths immediately if public reachability is not intentional.",
+					"Disable direct exposure for data stores, caches, or control-plane services and move access behind private networking.",
+					"Require TLS, client auth, or protocol-native authentication where the service must remain reachable.",
+				},
+				ValidationChecks: []string{
+					"Confirm which source networks can complete the TCP or TLS handshake.",
+					"Verify that only the intended protocol responds and that banner leakage is minimized.",
+					"Re-test after remediation to confirm the port is no longer publicly reachable or is strongly gated.",
+				},
+				DetectionSignals: []string{
+					"Repeated TCP handshakes or TLS hellos from unfamiliar source IPs.",
+					"Connection bursts to admin, database, cache, or orchestration ports.",
+					"Protocol negotiation or login attempts outside expected operator maintenance windows.",
+				},
+				RequiresAuth: finding.RequiresAuth,
+				AuthKinds:    authKinds,
+				Evidence:     evidence,
+			}, true
+		}
 		steps := []string{
 			fmt.Sprintf("Fingerprint %s with safe GET, HEAD, and OPTIONS requests.", finding.Endpoint),
 			"Enumerate health, version, OpenAPI, Swagger, docs, and well-known auth paths without mutating state.",
@@ -2195,6 +2531,13 @@ func buildSecurityQuestions(category string, resourceName string, endpoint strin
 	resourceLabel := coalesceSecurityName(resourceName, endpoint, "this target")
 	switch category {
 	case "public-surface", "reachable-surface", "authenticated-surface":
+		if scheme := securityEndpointScheme(endpoint); scheme == "tcp" || scheme == "tls" {
+			return []string{
+				fmt.Sprintf("Which clients, CIDRs, or networks should ever be allowed to reach %s on this port?", resourceLabel),
+				"Is this socket supposed to be internet reachable, or should it only exist on private networking or through a bastion path?",
+				"What is the safest read-only handshake or banner check that proves the auth boundary without changing service state?",
+			}
+		}
 		questions := []string{
 			fmt.Sprintf("Which routes on %s should be public versus operator-only?", resourceLabel),
 			"Does the current surface expose version, schema, or documentation endpoints that should be gated?",

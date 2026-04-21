@@ -2658,14 +2658,20 @@ func inferDeepResearchProvider(resource deepResearchResource) string {
 		return "azure"
 	case strings.Contains(typeLower, "gcp") || strings.Contains(typeLower, "google"):
 		return "gcp"
+	case strings.Contains(typeLower, "kubernetes") || strings.Contains(typeLower, "k8s"):
+		return "k8s"
 	case strings.Contains(typeLower, "cloudflare") || strings.HasPrefix(typeLower, "cf_"):
 		return "cloudflare"
 	case strings.Contains(typeLower, "digitalocean") || strings.HasPrefix(typeLower, "do_"):
 		return "digitalocean"
+	case strings.Contains(typeLower, "github"):
+		return "github"
 	case strings.Contains(typeLower, "hetzner") || strings.HasPrefix(typeLower, "hz_"):
 		return "hetzner"
 	case strings.Contains(typeLower, "supabase"):
 		return "supabase"
+	case strings.Contains(typeLower, "verda"):
+		return "verda"
 	case strings.Contains(typeLower, "vercel"):
 		return "vercel"
 	default:
