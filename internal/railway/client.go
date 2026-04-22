@@ -182,7 +182,11 @@ func (c *Client) RunGQL(ctx context.Context, query string, vars map[string]any, 
 			if !isRetryableError(lastStderr) {
 				break
 			}
-			time.Sleep(backoffs[attempt])
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoffs[attempt]):
+			}
 			continue
 		}
 
@@ -202,7 +206,11 @@ func (c *Client) RunGQL(ctx context.Context, query string, vars map[string]any, 
 				if c.debug {
 					fmt.Printf("[railway] http %d (retry in %s)\n", status, wait)
 				}
-				time.Sleep(wait)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(wait):
+				}
 				continue
 			}
 			return fmt.Errorf("railway graphql http %d: %s%s", status, truncateForError(body), errorHint(body))
@@ -224,7 +232,11 @@ func (c *Client) RunGQL(ctx context.Context, query string, vars map[string]any, 
 			}
 			combined := strings.Join(msgs, "; ")
 			if retryable && attempt < len(backoffs)-1 {
-				time.Sleep(backoffs[attempt])
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(backoffs[attempt]):
+				}
 				continue
 			}
 			return fmt.Errorf("railway graphql errors: %s%s", combined, errorHint(combined))
