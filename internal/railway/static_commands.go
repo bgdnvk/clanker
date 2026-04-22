@@ -650,9 +650,10 @@ func createRailwayVariableCmd() *cobra.Command {
 
 func createRailwayVariableSetCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "set <KEY=VALUE>",
-		Short: "Set an environment variable (KEY=VALUE)",
-		Args:  cobra.ExactArgs(1),
+		Use:     "set <KEY=VALUE>",
+		Aliases: []string{"add"},
+		Short:   "Set an environment variable (KEY=VALUE)",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			projectID, _ := cmd.Flags().GetString("project")
 			environmentID, _ := cmd.Flags().GetString("environment")
