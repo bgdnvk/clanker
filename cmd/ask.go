@@ -2442,6 +2442,21 @@ func resolveRailwayToken(ctx context.Context, debug bool) (apiToken string, work
 		return apiToken, railway.ResolveWorkspaceID(), nil
 	}
 
+	backendAPIKey := backend.ResolveAPIKey("")
+	if backendAPIKey != "" {
+		backendClient := backend.NewClient(backendAPIKey, debug)
+		creds, bErr := backendClient.GetRailwayCredentials(ctx)
+		if bErr == nil && strings.TrimSpace(creds.APIToken) != "" {
+			if debug {
+				fmt.Println("[backend] Using Railway credentials from backend")
+			}
+			return strings.TrimSpace(creds.APIToken), strings.TrimSpace(creds.WorkspaceID), nil
+		}
+		if debug {
+			fmt.Printf("[backend] No Railway credentials available (%v), falling back to local\n", bErr)
+		}
+	}
+
 	return "", "", fmt.Errorf("Railway token not configured. Set railway.api_token in ~/.clanker.yaml or export RAILWAY_API_TOKEN")
 }
 
