@@ -85,33 +85,38 @@ func (h *ConversationHistory) GetRecentContext(maxEntries int) string {
 }
 
 // Save persists the conversation history to disk using atomic write
-// (temp file + rename).
+// (temp file + rename). The mutex is only held while snapshotting and
+// marshalling state — disk I/O happens with the lock released so concurrent
+// callers aren't blocked on filesystem latency.
 func (h *ConversationHistory) Save() error {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	if len(h.Entries) > MaxHistoryEntries {
+		h.Entries = h.Entries[len(h.Entries)-MaxHistoryEntries:]
+	}
+	snapshot := struct {
+		Entries     []ConversationEntry `json:"entries"`
+		WorkspaceID string              `json:"workspace_id"`
+	}{
+		Entries:     append([]ConversationEntry(nil), h.Entries...),
+		WorkspaceID: h.WorkspaceID,
+	}
+	workspaceID := h.WorkspaceID
+	h.mu.Unlock()
+
+	data, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal conversation history: %w", err)
+	}
 
 	dir, err := conversationDir()
 	if err != nil {
 		return err
 	}
-
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create conversation directory: %w", err)
 	}
 
-	if len(h.Entries) > MaxHistoryEntries {
-		h.Entries = h.Entries[len(h.Entries)-MaxHistoryEntries:]
-	}
-
-	data, err := json.MarshalIndent(h, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal conversation history: %w", err)
-	}
-
-	filename, err := h.filePath()
-	if err != nil {
-		return err
-	}
+	filename := filepath.Join(dir, fmt.Sprintf("railway_%s.json", sanitizeID(workspaceID)))
 
 	// Atomic write: temp + rename.
 	tmp := filename + ".tmp"
@@ -176,8 +181,13 @@ func conversationDir() (string, error) {
 	return filepath.Join(home, ".clanker", "conversations"), nil
 }
 
-// sanitizeID replaces characters that are invalid in filenames.
+// sanitizeID replaces characters that are invalid in filenames. An empty
+// input yields the default "personal" bucket so callers never produce a
+// filename like "railway_.json".
 func sanitizeID(s string) string {
+	if s == "" {
+		return "personal"
+	}
 	replacer := strings.NewReplacer(
 		"/", "_",
 		"\\", "_",
