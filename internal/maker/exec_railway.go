@@ -68,7 +68,8 @@ func validateRailwayCommand(args []string, allowDestructive bool) error {
 	for _, a := range args {
 		lower := strings.ToLower(a)
 		if strings.Contains(lower, ";") || strings.Contains(lower, "|") || strings.Contains(lower, "&&") || strings.Contains(lower, "||") ||
-			strings.ContainsAny(a, "\n\r") {
+			strings.ContainsAny(a, "\n\r") ||
+			strings.Contains(a, "`") || strings.Contains(a, "$(") {
 			return fmt.Errorf("shell operators are not allowed")
 		}
 
