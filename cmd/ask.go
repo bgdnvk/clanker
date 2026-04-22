@@ -44,10 +44,10 @@ import (
 // askCmd represents the ask command
 const defaultGeminiModel = "gemini-2.5-flash"
 
-func applyDiscoveryContextDefaults(includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda bool) (bool, bool, bool, bool, bool, bool, bool, bool, bool) {
+func applyDiscoveryContextDefaults(includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda, includeRailway bool) (bool, bool, bool, bool, bool, bool, bool, bool, bool, bool) {
 	includeTerraform = true
-	if includeAWS || includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeHetzner || includeVercel || includeVerda {
-		return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda
+	if includeAWS || includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeHetzner || includeVercel || includeVerda || includeRailway {
+		return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda, includeRailway
 	}
 
 	switch routing.DefaultInfraProvider() {
@@ -65,11 +65,13 @@ func applyDiscoveryContextDefaults(includeAWS, includeGCP, includeAzure, include
 		includeVercel = true
 	case "verda":
 		includeVerda = true
+	case "railway":
+		includeRailway = true
 	default:
 		includeAWS = true
 	}
 
-	return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda
+	return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda, includeRailway
 }
 
 var askCmd = &cobra.Command{
@@ -751,7 +753,7 @@ Format as a professional compliance table suitable for government security docum
 
 		// Discovery mode enables comprehensive infrastructure analysis
 		if discovery {
-			includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda = applyDiscoveryContextDefaults(
+			includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda, includeRailway = applyDiscoveryContextDefaults(
 				includeAWS,
 				includeGCP,
 				includeAzure,
@@ -761,6 +763,7 @@ Format as a professional compliance table suitable for government security docum
 				includeTerraform,
 				includeVercel,
 				includeVerda,
+				includeRailway,
 			)
 			if debug {
 				fmt.Println("Discovery mode enabled: Terraform context activated alongside the selected infrastructure provider(s)")
