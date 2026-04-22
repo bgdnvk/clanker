@@ -622,8 +622,11 @@ func (c *Client) GetUsage(ctx context.Context, workspaceID string) (*UsageSummar
 	}
 	var summary UsageSummary
 	if len(out.Usage) > 0 {
-		// best-effort decode; the Railway schema is a JSON scalar here.
-		_ = json.Unmarshal(out.Usage, &summary)
+		// Railway returns a JSON scalar here; surface decode failures so
+		// callers can distinguish "no data" from "bad payload".
+		if err := json.Unmarshal(out.Usage, &summary); err != nil {
+			return nil, fmt.Errorf("decode usage payload: %w", err)
+		}
 	}
 	return &summary, nil
 }
