@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"golang.org/x/sync/errgroup"
 )
 
 // graphqlEndpoint is the Railway public GraphQL (Backboard) URL.
@@ -660,8 +661,26 @@ func (c *Client) ListDeploymentLogs(ctx context.Context, deploymentID string, bu
 // GetRelevantContext gathers Railway context for LLM queries. The output is
 // a best-effort dump of the resources most likely relevant to the user's
 // question. Sections are keyword-gated to keep the context compact.
+//
+// Fan-out across projects is capped with errgroup so we don't hammer the
+// Railway API with N parallel round-trips on large workspaces.
 func (c *Client) GetRelevantContext(ctx context.Context, question string) (string, error) {
 	questionLower := strings.ToLower(strings.TrimSpace(question))
+
+	// Projects are cheap and many sections need them; fetch once and share.
+	var (
+		cachedProjects    []Project
+		cachedProjectsErr error
+		cachedProjectsOK  bool
+	)
+	getProjects := func() ([]Project, error) {
+		if cachedProjectsOK || cachedProjectsErr != nil {
+			return cachedProjects, cachedProjectsErr
+		}
+		cachedProjects, cachedProjectsErr = c.ListProjects(ctx)
+		cachedProjectsOK = cachedProjectsErr == nil
+		return cachedProjects, cachedProjectsErr
+	}
 
 	type section struct {
 		name string
@@ -674,7 +693,7 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 			name: "Projects",
 			keys: []string{"project", "railway", "deploy", "service", "app", "nixpacks", "environment"},
 			run: func() (string, error) {
-				projects, err := c.ListProjects(ctx)
+				projects, err := getProjects()
 				if err != nil {
 					return "", err
 				}
@@ -685,25 +704,36 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 			name: "Services",
 			keys: []string{"service", "container", "worker", "web", "api", "backend"},
 			run: func() (string, error) {
-				projects, err := c.ListProjects(ctx)
+				projects, err := getProjects()
 				if err != nil {
 					return "", err
 				}
-				var sb strings.Builder
-				for _, p := range projects {
-					services, err := c.ListServices(ctx, p.ID)
-					if err != nil {
-						return "", err
-					}
-					if len(services) == 0 {
-						continue
-					}
-					sb.WriteString(fmt.Sprintf("Project %s (%s):\n", p.Name, p.ID))
-					for _, s := range services {
-						sb.WriteString(fmt.Sprintf("  - %s (%s)\n", s.Name, s.ID))
-					}
+				results := make([]string, len(projects))
+				g, gctx := errgroup.WithContext(ctx)
+				g.SetLimit(3)
+				for i, p := range projects {
+					i, p := i, p
+					g.Go(func() error {
+						services, err := c.ListServices(gctx, p.ID)
+						if err != nil {
+							return err
+						}
+						if len(services) == 0 {
+							return nil
+						}
+						var sb strings.Builder
+						sb.WriteString(fmt.Sprintf("Project %s (%s):\n", p.Name, p.ID))
+						for _, s := range services {
+							sb.WriteString(fmt.Sprintf("  - %s (%s)\n", s.Name, s.ID))
+						}
+						results[i] = sb.String()
+						return nil
+					})
 				}
-				return sb.String(), nil
+				if err := g.Wait(); err != nil {
+					return "", err
+				}
+				return strings.Join(filterEmpty(results), ""), nil
 			},
 		},
 		{
@@ -721,66 +751,91 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 			name: "Domains",
 			keys: []string{"domain", "dns", "custom domain", "up.railway.app"},
 			run: func() (string, error) {
-				projects, err := c.ListProjects(ctx)
+				projects, err := getProjects()
 				if err != nil {
 					return "", err
 				}
-				var sb strings.Builder
-				for _, p := range projects {
-					domains, err := c.ListDomains(ctx, p.ID)
-					if err != nil {
-						continue
-					}
-					if len(domains) == 0 {
-						continue
-					}
-					sb.WriteString(fmt.Sprintf("Project %s:\n", p.Name))
-					for _, d := range domains {
-						kind := "service"
-						if d.IsCustom {
-							kind = "custom"
+				results := make([]string, len(projects))
+				g, gctx := errgroup.WithContext(ctx)
+				g.SetLimit(3)
+				for i, p := range projects {
+					i, p := i, p
+					g.Go(func() error {
+						domains, err := c.ListDomains(gctx, p.ID)
+						if err != nil {
+							// non-fatal; skip projects we can't enumerate
+							return nil
 						}
-						sb.WriteString(fmt.Sprintf("  - %s [%s]\n", d.Domain, kind))
-					}
+						if len(domains) == 0 {
+							return nil
+						}
+						var sb strings.Builder
+						sb.WriteString(fmt.Sprintf("Project %s:\n", p.Name))
+						for _, d := range domains {
+							kind := "service"
+							if d.IsCustom {
+								kind = "custom"
+							}
+							sb.WriteString(fmt.Sprintf("  - %s [%s]\n", d.Domain, kind))
+						}
+						results[i] = sb.String()
+						return nil
+					})
 				}
-				return sb.String(), nil
+				if err := g.Wait(); err != nil {
+					return "", err
+				}
+				return strings.Join(filterEmpty(results), ""), nil
 			},
 		},
 		{
 			name: "Variables",
 			keys: []string{"variable", "env", "environment variable", "secret", "config"},
 			run: func() (string, error) {
-				// Variables require project+environment+service scope so we
-				// only enumerate keys when we can discover a single project.
-				projects, err := c.ListProjects(ctx)
+				// Variables require project+environment+service scope, so we
+				// still need GetProject here (ListProjects doesn't return
+				// environments). Cap parallelism to avoid N round-trips.
+				projects, err := getProjects()
 				if err != nil || len(projects) == 0 {
 					return "", err
 				}
-				var sb strings.Builder
-				for _, p := range projects {
-					proj, err := c.GetProject(ctx, p.ID)
-					if err != nil {
-						continue
-					}
-					if len(proj.Environments) == 0 {
-						continue
-					}
-					envID := proj.Environments[0].ID
-					for _, svc := range proj.Services {
-						keys, err := c.ListVariables(ctx, p.ID, envID, svc.ID)
+				results := make([]string, len(projects))
+				g, gctx := errgroup.WithContext(ctx)
+				g.SetLimit(3)
+				for i, p := range projects {
+					i, p := i, p
+					g.Go(func() error {
+						proj, err := c.GetProject(gctx, p.ID)
 						if err != nil {
-							continue
+							return nil
 						}
-						if len(keys) == 0 {
-							continue
+						if len(proj.Environments) == 0 {
+							return nil
 						}
-						sb.WriteString(fmt.Sprintf("Project %s / env %s / service %s:\n", p.Name, proj.Environments[0].Name, svc.Name))
-						for k := range keys {
-							sb.WriteString(fmt.Sprintf("  - %s\n", k))
+						envID := proj.Environments[0].ID
+						envName := proj.Environments[0].Name
+						var sb strings.Builder
+						for _, svc := range proj.Services {
+							keys, err := c.ListVariables(gctx, p.ID, envID, svc.ID)
+							if err != nil {
+								continue
+							}
+							if len(keys) == 0 {
+								continue
+							}
+							sb.WriteString(fmt.Sprintf("Project %s / env %s / service %s:\n", p.Name, envName, svc.Name))
+							for k := range keys {
+								sb.WriteString(fmt.Sprintf("  - %s\n", k))
+							}
 						}
-					}
+						results[i] = sb.String()
+						return nil
+					})
 				}
-				return sb.String(), nil
+				if err := g.Wait(); err != nil {
+					return "", err
+				}
+				return strings.Join(filterEmpty(results), ""), nil
 			},
 		},
 		{
@@ -941,6 +996,18 @@ func isRetryableError(s string) bool {
 		return true
 	}
 	return false
+}
+
+// filterEmpty drops empty strings so callers can Join over partial fan-out
+// results without stray blank lines.
+func filterEmpty(ss []string) []string {
+	out := ss[:0]
+	for _, s := range ss {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // errorHint returns an actionable hint for common Railway error messages.
