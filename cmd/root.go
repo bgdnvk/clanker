@@ -114,14 +114,15 @@ func init() {
 	hetznerCmd := hetzner.CreateHetznerCommands()
 	rootCmd.AddCommand(hetznerCmd)
 
-	// Register Vercel static commands + ask stub (phase 1)
+	// Register Vercel static commands. Natural-language queries go through
+	// `clanker ask --vercel "..."` — the canonical path that resolves
+	// credentials, fetches context, and drives the configured AI provider.
 	vercelCmd := vercel.CreateVercelCommands()
-	AddVercelAskCommand(vercelCmd)
 	rootCmd.AddCommand(vercelCmd)
 
-	// Register Railway static commands + ask stub (phase 1)
+	// Register Railway static commands. Natural-language queries go through
+	// `clanker ask --railway "..."`.
 	railwayCmd := railway.CreateRailwayCommands()
-	AddRailwayAskCommand(railwayCmd)
 	rootCmd.AddCommand(railwayCmd)
 
 	// Register Verda Cloud static commands + ask subcommand
