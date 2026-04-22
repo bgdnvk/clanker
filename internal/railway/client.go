@@ -145,6 +145,9 @@ func (c *Client) RunGQL(ctx context.Context, query string, vars map[string]any, 
 		return fmt.Errorf("failed to marshal graphql request: %w", err)
 	}
 
+	// backoffs has three entries, meaning we make up to 3 total attempts
+	// (the initial try + 2 retries) before giving up — matches the Vercel
+	// client's retry budget.
 	backoffs := []time.Duration{200 * time.Millisecond, 500 * time.Millisecond, 1200 * time.Millisecond}
 	var lastErr error
 	var lastStderr string
