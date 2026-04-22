@@ -659,9 +659,9 @@ Examples:
 
 			plan.Provider = makerProvider
 
-			// Handle GCP, Azure, Cloudflare, Digital Ocean, Hetzner, Vercel, and Verda plans (output directly, no enrichment)
+			// Handle GCP, Azure, Cloudflare, Digital Ocean, Hetzner, Vercel, Verda, and Railway plans (output directly, no enrichment)
 			providerLower := strings.ToLower(strings.TrimSpace(plan.Provider))
-			if providerLower == "gcp" || providerLower == "azure" || providerLower == "cloudflare" || providerLower == "digitalocean" || providerLower == "hetzner" || providerLower == "vercel" || providerLower == "verda" {
+			if providerLower == "gcp" || providerLower == "azure" || providerLower == "cloudflare" || providerLower == "digitalocean" || providerLower == "hetzner" || providerLower == "vercel" || providerLower == "verda" || providerLower == "railway" {
 				if plan.CreatedAt.IsZero() {
 					plan.CreatedAt = time.Now().UTC()
 				}
