@@ -31,6 +31,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/k8s"
 	"github.com/bgdnvk/clanker/internal/k8s/plan"
 	"github.com/bgdnvk/clanker/internal/maker"
+	"github.com/bgdnvk/clanker/internal/railway"
 	"github.com/bgdnvk/clanker/internal/resourcedb"
 	"github.com/bgdnvk/clanker/internal/routing"
 	tfclient "github.com/bgdnvk/clanker/internal/terraform"
@@ -43,10 +44,10 @@ import (
 // askCmd represents the ask command
 const defaultGeminiModel = "gemini-2.5-flash"
 
-func applyDiscoveryContextDefaults(includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda bool) (bool, bool, bool, bool, bool, bool, bool, bool, bool) {
+func applyDiscoveryContextDefaults(includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda, includeRailway bool) (bool, bool, bool, bool, bool, bool, bool, bool, bool, bool) {
 	includeTerraform = true
-	if includeAWS || includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeHetzner || includeVercel || includeVerda {
-		return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda
+	if includeAWS || includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeHetzner || includeVercel || includeVerda || includeRailway {
+		return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda, includeRailway
 	}
 
 	switch routing.DefaultInfraProvider() {
@@ -64,11 +65,13 @@ func applyDiscoveryContextDefaults(includeAWS, includeGCP, includeAzure, include
 		includeVercel = true
 	case "verda":
 		includeVerda = true
+	case "railway":
+		includeRailway = true
 	default:
 		includeAWS = true
 	}
 
-	return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda
+	return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda, includeRailway
 }
 
 var askCmd = &cobra.Command{
@@ -111,6 +114,7 @@ Examples:
 		includeDigitalOcean, _ := cmd.Flags().GetBool("digitalocean")
 		includeHetzner, _ := cmd.Flags().GetBool("hetzner")
 		includeVercel, _ := cmd.Flags().GetBool("vercel")
+		includeRailway, _ := cmd.Flags().GetBool("railway")
 		includeVerda, _ := cmd.Flags().GetBool("verda")
 		includeTerraform, _ := cmd.Flags().GetBool("terraform")
 		includeIAM, _ := cmd.Flags().GetBool("iam")
@@ -321,6 +325,20 @@ Examples:
 				})
 			}
 
+			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "railway") {
+				rwToken, rwWorkspaceID, rwErr := resolveRailwayToken(ctx, debug)
+				if rwErr != nil {
+					return rwErr
+				}
+				return maker.ExecuteRailwayPlan(ctx, makerPlan, maker.ExecOptions{
+					RailwayAPIToken:    rwToken,
+					RailwayWorkspaceID: rwWorkspaceID,
+					Writer:             os.Stdout,
+					Destroyer:          destroyer,
+					Debug:              debug,
+				})
+			}
+
 			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "verda") {
 				verdaClientID, verdaClientSecret, verdaProjectID, vErr := resolveVerdaCredentialsWithContext(ctx, debug)
 				if vErr != nil {
@@ -471,6 +489,7 @@ Examples:
 			explicitHetzner := cmd.Flags().Changed("hetzner") && includeHetzner
 			explicitAzure := cmd.Flags().Changed("azure") && includeAzure
 			explicitVercel := cmd.Flags().Changed("vercel") && includeVercel
+			explicitRailway := cmd.Flags().Changed("railway") && includeRailway
 			explicitVerda := cmd.Flags().Changed("verda") && includeVerda
 			explicitCount := 0
 			if explicitGCP {
@@ -494,11 +513,14 @@ Examples:
 			if explicitVercel {
 				explicitCount++
 			}
+			if explicitRailway {
+				explicitCount++
+			}
 			if explicitVerda {
 				explicitCount++
 			}
 			if explicitCount > 1 {
-				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --azure, --cloudflare, --digitalocean, --hetzner, --vercel, --verda) together with --maker")
+				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --azure, --cloudflare, --digitalocean, --hetzner, --vercel, --railway, --verda) together with --maker")
 			}
 			switch {
 			case explicitHetzner:
@@ -522,6 +544,9 @@ Examples:
 			case explicitVercel:
 				makerProvider = "vercel"
 				makerProviderReason = "explicit"
+			case explicitRailway:
+				makerProvider = "railway"
+				makerProviderReason = "explicit"
 			case explicitVerda:
 				makerProvider = "verda"
 				makerProviderReason = "explicit"
@@ -544,6 +569,9 @@ Examples:
 					makerProviderReason = "inferred"
 				} else if svcCtx.Vercel {
 					makerProvider = "vercel"
+					makerProviderReason = "inferred"
+				} else if svcCtx.Railway {
+					makerProvider = "railway"
 					makerProviderReason = "inferred"
 				} else if svcCtx.Verda {
 					makerProvider = "verda"
@@ -569,6 +597,8 @@ Examples:
 				prompt = maker.GCPPlanPromptWithMode(question, destroyer)
 			case "vercel":
 				prompt = maker.VercelPlanPromptWithMode(question, destroyer)
+			case "railway":
+				prompt = maker.RailwayPlanPromptWithMode(question, destroyer)
 			case "verda":
 				prompt = maker.VerdaPlanPromptWithMode(question, destroyer)
 			default:
@@ -631,9 +661,9 @@ Examples:
 
 			plan.Provider = makerProvider
 
-			// Handle GCP, Azure, Cloudflare, Digital Ocean, Hetzner, Vercel, and Verda plans (output directly, no enrichment)
+			// Handle GCP, Azure, Cloudflare, Digital Ocean, Hetzner, Vercel, Verda, and Railway plans (output directly, no enrichment)
 			providerLower := strings.ToLower(strings.TrimSpace(plan.Provider))
-			if providerLower == "gcp" || providerLower == "azure" || providerLower == "cloudflare" || providerLower == "digitalocean" || providerLower == "hetzner" || providerLower == "vercel" || providerLower == "verda" {
+			if providerLower == "gcp" || providerLower == "azure" || providerLower == "cloudflare" || providerLower == "digitalocean" || providerLower == "hetzner" || providerLower == "vercel" || providerLower == "verda" || providerLower == "railway" {
 				if plan.CreatedAt.IsZero() {
 					plan.CreatedAt = time.Now().UTC()
 				}
@@ -723,7 +753,7 @@ Format as a professional compliance table suitable for government security docum
 
 		// Discovery mode enables comprehensive infrastructure analysis
 		if discovery {
-			includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda = applyDiscoveryContextDefaults(
+			includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda, includeRailway = applyDiscoveryContextDefaults(
 				includeAWS,
 				includeGCP,
 				includeAzure,
@@ -733,6 +763,7 @@ Format as a professional compliance table suitable for government security docum
 				includeTerraform,
 				includeVercel,
 				includeVerda,
+				includeRailway,
 			)
 			if debug {
 				fmt.Println("Discovery mode enabled: Terraform context activated alongside the selected infrastructure provider(s)")
@@ -768,12 +799,17 @@ Format as a professional compliance table suitable for government security docum
 			return handleVercelQuery(context.Background(), question, debug)
 		}
 
+		// Handle explicit --railway flag
+		if includeRailway && !makerMode {
+			return handleRailwayQuery(context.Background(), question, debug)
+		}
+
 		// Handle explicit --verda flag
 		if includeVerda && !makerMode {
 			return handleVerdaQuery(cmd.Context(), question, debug)
 		}
 
-		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare && !includeDigitalOcean && !includeHetzner && !includeVercel && !includeVerda && !includeDB {
+		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare && !includeDigitalOcean && !includeHetzner && !includeVercel && !includeRailway && !includeVerda && !includeDB {
 			routingQuestion := questionForRouting(question)
 
 			// First, do quick keyword check for explicit terms
@@ -847,6 +883,11 @@ Format as a professional compliance table suitable for government security docum
 			// Handle Vercel queries
 			if svcCtx.Vercel {
 				return handleVercelQuery(context.Background(), routingQuestion, debug)
+			}
+
+			// Handle Railway queries
+			if svcCtx.Railway {
+				return handleRailwayQuery(context.Background(), routingQuestion, debug)
 			}
 
 			// Handle Verda queries
@@ -1338,6 +1379,7 @@ func init() {
 	askCmd.Flags().Bool("digitalocean", false, "Include Digital Ocean infrastructure context")
 	askCmd.Flags().Bool("hetzner", false, "Include Hetzner Cloud infrastructure context")
 	askCmd.Flags().Bool("vercel", false, "Include Vercel context")
+	askCmd.Flags().Bool("railway", false, "Include Railway context")
 	askCmd.Flags().Bool("verda", false, "Include Verda Cloud (GPU/AI) infrastructure context")
 	askCmd.Flags().Bool("github", false, "Include GitHub repository context")
 	askCmd.Flags().Bool("cicd", false, "Include CI/CD context (currently GitHub Actions)")
@@ -1369,7 +1411,7 @@ func init() {
 	askCmd.Flags().String("minimax-model", "", "MiniMax model to use (overrides config)")
 	askCmd.Flags().String("github-model", "", "GitHub Models model to use (overrides config)")
 	askCmd.Flags().Bool("agent-trace", false, "Show detailed coordinator agent lifecycle logs (overrides config)")
-	askCmd.Flags().Bool("maker", false, "Generate an AWS, GCP, Azure, Cloudflare, Digital Ocean, Hetzner, Vercel, or Verda plan (JSON) for infrastructure changes")
+	askCmd.Flags().Bool("maker", false, "Generate an AWS, GCP, Azure, Cloudflare, Digital Ocean, Hetzner, Vercel, Railway, or Verda plan (JSON) for infrastructure changes")
 	askCmd.Flags().Bool("destroyer", false, "Allow destructive operations when using --maker (requires explicit confirmation in UI/workflow)")
 	askCmd.Flags().Bool("apply", false, "Apply an approved maker plan (reads from stdin unless --plan-file is provided)")
 	askCmd.Flags().String("plan-file", "", "Optional path to maker plan JSON file for --apply")
@@ -2381,6 +2423,135 @@ func buildVercelPrompt(question, vercelContext, historyContext string) string {
 	if vercelContext != "" {
 		sb.WriteString("Vercel Context:\n")
 		sb.WriteString(vercelContext)
+		sb.WriteString("\n\n")
+	}
+	if historyContext != "" {
+		sb.WriteString("Recent Conversation:\n")
+		sb.WriteString(historyContext)
+		sb.WriteString("\n\n")
+	}
+	sb.WriteString("User Question: ")
+	sb.WriteString(question)
+	sb.WriteString("\n\nProvide a helpful, concise response in markdown format.")
+	return sb.String()
+}
+
+// resolveRailwayToken resolves the Railway account token and optional workspace
+// ID from config or environment. Workspace ID may be empty for single-workspace
+// accounts; the GraphQL API infers scope from the token in that case.
+func resolveRailwayToken(ctx context.Context, debug bool) (apiToken string, workspaceID string, err error) {
+	apiToken = railway.ResolveAPIToken()
+	if apiToken != "" {
+		return apiToken, railway.ResolveWorkspaceID(), nil
+	}
+
+	backendAPIKey := backend.ResolveAPIKey("")
+	if backendAPIKey != "" {
+		backendClient := backend.NewClient(backendAPIKey, debug)
+		creds, bErr := backendClient.GetRailwayCredentials(ctx)
+		if bErr == nil && strings.TrimSpace(creds.APIToken) != "" {
+			if debug {
+				fmt.Println("[backend] Using Railway credentials from backend")
+			}
+			return strings.TrimSpace(creds.APIToken), strings.TrimSpace(creds.WorkspaceID), nil
+		}
+		if debug {
+			fmt.Printf("[backend] No Railway credentials available (%v), falling back to local\n", bErr)
+		}
+	}
+
+	return "", "", fmt.Errorf("Railway token not configured. Set railway.api_token in ~/.clanker.yaml or export RAILWAY_API_TOKEN")
+}
+
+// handleRailwayQuery delegates a Railway query to the Railway agent with
+// per-workspace conversation history for multi-turn context.
+func handleRailwayQuery(ctx context.Context, question string, debug bool) error {
+	if debug {
+		fmt.Println("Delegating query to Railway agent...")
+	}
+
+	apiToken, workspaceID, err := resolveRailwayToken(ctx, debug)
+	if err != nil {
+		return err
+	}
+
+	client, err := railway.NewClient(apiToken, workspaceID, debug)
+	if err != nil {
+		return fmt.Errorf("failed to create Railway client: %w", err)
+	}
+
+	conversationID := workspaceID
+	if conversationID == "" {
+		conversationID = "personal"
+	}
+	history := railway.NewConversationHistory(conversationID)
+	if err := history.Load(); err != nil && debug {
+		fmt.Fprintf(os.Stderr, "[debug] conversation history: %v\n", err)
+	}
+
+	railwayContext, err := client.GetRelevantContext(ctx, question)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[railway] warning: failed to fetch context: %v\n", err)
+		if strings.TrimSpace(railwayContext) == "" {
+			return fmt.Errorf("failed to fetch Railway context: %w", err)
+		}
+	}
+
+	provider := viper.GetString("ai.default_provider")
+	if provider == "" {
+		provider = "openai"
+	}
+
+	var apiKey string
+	switch provider {
+	case "bedrock", "claude":
+		apiKey = ""
+	case "gemini", "gemini-api":
+		apiKey = ""
+	case "openai":
+		apiKey = resolveOpenAIKey("")
+	case "anthropic":
+		apiKey = resolveAnthropicKey("")
+	case "cohere":
+		apiKey = resolveCohereKey("")
+	case "deepseek":
+		apiKey = resolveDeepSeekKey("")
+	case "minimax":
+		apiKey = resolveMiniMaxKey("")
+	default:
+		apiKey = viper.GetString(fmt.Sprintf("ai.providers.%s.api_key", provider))
+	}
+
+	aiClient := ai.NewClient(provider, apiKey, debug, provider)
+
+	historyContext := history.GetRecentContext(5)
+	prompt := buildRailwayPrompt(question, railwayContext, historyContext)
+
+	response, err := aiClient.AskPrompt(ctx, prompt)
+	if err != nil {
+		return fmt.Errorf("Railway AI query failed: %w", err)
+	}
+
+	fmt.Println(response)
+
+	history.AddEntry(question, response)
+	if err := history.Save(); err != nil && debug {
+		fmt.Fprintf(os.Stderr, "[debug] save history: %v\n", err)
+	}
+
+	return nil
+}
+
+// buildRailwayPrompt assembles the system prompt for a Railway ask query,
+// injecting infrastructure context and recent conversation history when
+// available.
+func buildRailwayPrompt(question, railwayContext, historyContext string) string {
+	var sb strings.Builder
+	sb.WriteString("You are a Railway infrastructure assistant. ")
+	sb.WriteString("Answer questions about the user's Railway workspace (projects, services, environments, deployments, domains, variables, volumes) based on the provided context.\n\n")
+	if railwayContext != "" {
+		sb.WriteString("Railway Context:\n")
+		sb.WriteString(railwayContext)
 		sb.WriteString("\n\n")
 	}
 	if historyContext != "" {

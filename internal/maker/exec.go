@@ -235,6 +235,10 @@ type ExecOptions struct {
 	VercelAPIToken string
 	VercelTeamID   string
 
+	// Railway options
+	RailwayAPIToken    string
+	RailwayWorkspaceID string
+
 	// Verda Cloud options (OAuth2 client credentials — both required)
 	VerdaClientID     string
 	VerdaClientSecret string
