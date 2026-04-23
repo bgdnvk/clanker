@@ -1,27 +1,23 @@
 # Clanker CLI
 
-Alpha version.  
-Main agent powering [Clanker Cloud](https://clankercloud.ai)
-
-Beta coming soon [clankercloud.ai](https://clankercloud.ai)
+Beta version.  
+Main agent powering [Clanker Cloud](https://clankercloud.ai), currently in beta. 
 
 Docs available at [docs.clankercloud.ai](https://docs.clankercloud.ai/)
 
-Interactive docs: [Clanker Cloud: How It Works](https://codexsims.com/explainers/clanker-cloud-how-it-works/)  
-Courtesy of [@cto_junior](https://x.com/cto_junior)
-
-Interactive getting started: [Clanker Getting Started](https://codexsims.com/explainers/clanker-getting-started/)  
-Courtesy of [@cto_junior](https://x.com/cto_junior)
 
 Ask questions about your infra (and optionally GitHub/etc). Clanker can inspect existing environments and also generate or apply infrastructure and deploy plans through its maker and deploy flows.
 
-Repo: [bgdnvk/clanker](https://github.com/bgdnvk/clanker)
+Repo: [bgdnvk/clanker](https://github.com/bgdnvk/clanker)  
+
+Interactive docs: [Clanker Cloud: How It Works](https://codexsims.com/explainers/clanker-cloud-how-it-works/)  
+Courtesy of [@cto_junior](https://x.com/cto_junior)
 
 Homebrew tap: [clankercloud/homebrew-tap](https://github.com/clankercloud/homebrew-tap)
 
 ## Install
 
-### Homebrew (outdated beware)
+### Homebrew (can be outdated, the best is to build from master)
 
 ```bash
 brew tap clankercloud/tap
