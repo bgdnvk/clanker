@@ -16,6 +16,7 @@ INSTALL_PATH ?= $(INSTALL_BIN)/$(BINARY_NAME)
 #   make release-create TAG=v0.0.2
 TAG ?= v0.0.0
 DIST_DIR ?= ./dist
+RELEASE_LDFLAGS := -X github.com/bgdnvk/clanker/cmd.Version=$(TAG)
 
 .PHONY: build build-all clean test test-short run install uninstall dev deps fmt vet lint docs quick ci help \
 	release-clean release-build-macos release-tar-macos release-sha release release-create release-upload \
@@ -174,10 +175,10 @@ release-build-macos: release-clean
 	@echo "Building macOS binaries for $(TAG)..."
 	@mkdir -p $(DIST_DIR)
 	@echo "- darwin/arm64"
-	@GOOS=darwin GOARCH=arm64 go build -o $(DIST_DIR)/$(BINARY_NAME) $(MAIN_PATH)
+	@GOOS=darwin GOARCH=arm64 go build -ldflags "$(RELEASE_LDFLAGS)" -o $(DIST_DIR)/$(BINARY_NAME) $(MAIN_PATH)
 	@mv $(DIST_DIR)/$(BINARY_NAME) $(DIST_DIR)/$(BINARY_NAME)-darwin-arm64
 	@echo "- darwin/amd64"
-	@GOOS=darwin GOARCH=amd64 go build -o $(DIST_DIR)/$(BINARY_NAME) $(MAIN_PATH)
+	@GOOS=darwin GOARCH=amd64 go build -ldflags "$(RELEASE_LDFLAGS)" -o $(DIST_DIR)/$(BINARY_NAME) $(MAIN_PATH)
 	@mv $(DIST_DIR)/$(BINARY_NAME) $(DIST_DIR)/$(BINARY_NAME)-darwin-amd64
 
 release-tar-macos: release-build-macos
