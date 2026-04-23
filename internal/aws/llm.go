@@ -153,6 +153,54 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		ruleCount, _ := c.execAWSCLI(ctx, ruleArgs, profile)
 		return fmt.Sprintf("✅ EventBridge service is available. Rule count: %s", strings.TrimSpace(ruleCount)), nil
 
+	case "check_scheduler_service":
+		args := []string{"scheduler", "list-schedules", "--max-results", "1", "--output", "table"}
+		_, err := c.execAWSCLI(ctx, args, profile)
+		if err != nil {
+			return "❌ EventBridge Scheduler service not available or no access", nil
+		}
+		return "✅ EventBridge Scheduler service is available", nil
+
+	case "check_pipes_service":
+		args := []string{"pipes", "list-pipes", "--max-results", "1", "--output", "table"}
+		_, err := c.execAWSCLI(ctx, args, profile)
+		if err != nil {
+			return "❌ EventBridge Pipes service not available or no access", nil
+		}
+		return "✅ EventBridge Pipes service is available", nil
+
+	case "check_verifiedpermissions_service":
+		args := []string{"verifiedpermissions", "list-policy-stores", "--max-results", "1", "--output", "table"}
+		_, err := c.execAWSCLI(ctx, args, profile)
+		if err != nil {
+			return "❌ Verified Permissions service not available or no access", nil
+		}
+		return "✅ Verified Permissions service is available", nil
+
+	case "check_securitylake_service":
+		args := []string{"securitylake", "list-data-lakes", "--output", "table"}
+		_, err := c.execAWSCLI(ctx, args, profile)
+		if err != nil {
+			return "❌ Security Lake service not available or no access", nil
+		}
+		return "✅ Security Lake service is available", nil
+
+	case "check_datazone_service":
+		args := []string{"datazone", "list-domains", "--max-results", "1", "--output", "table"}
+		_, err := c.execAWSCLI(ctx, args, profile)
+		if err != nil {
+			return "❌ Amazon DataZone service not available or no access", nil
+		}
+		return "✅ Amazon DataZone service is available", nil
+
+	case "check_qbusiness_service":
+		args := []string{"qbusiness", "list-applications", "--max-results", "1", "--output", "table"}
+		_, err := c.execAWSCLI(ctx, args, profile)
+		if err != nil {
+			return "❌ Amazon Q Business service not available or no access", nil
+		}
+		return "✅ Amazon Q Business service is available", nil
+
 	case "check_lambda_service":
 		args := []string{"lambda", "list-functions", "--max-items", "1", "--output", "table"}
 		_, err := c.execAWSCLI(ctx, args, profile)
@@ -2055,7 +2103,7 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		args := []string{"ec2", "describe-security-groups", "--output", "table", "--query", "SecurityGroups[*].{GroupId:GroupId,GroupName:GroupName,VpcId:VpcId,Description:Description}"}
 		return c.execAWSCLI(ctx, args, profile)
 
-	case "describe_load_balancers":
+	case "describe_load_balancers", "list_load_balancers":
 		// Try both ALB and NLB
 		albArgs := []string{"elbv2", "describe-load-balancers", "--output", "table"}
 		albResult, _ := c.execAWSCLI(ctx, albArgs, profile)
@@ -2142,7 +2190,7 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		args := []string{"cloudwatch", "describe-alarms", "--output", "table", "--query", "MetricAlarms[*].{Name:AlarmName,State:StateValue,Reason:StateReason}"}
 		return c.execAWSCLI(ctx, args, profile)
 
-	case "list_log_groups":
+	case "list_log_groups", "list_cloudwatch_log_groups":
 		args := []string{"logs", "describe-log-groups", "--output", "table", "--query", "logGroups[*].{Name:logGroupName,Size:storedBytes,Retention:retentionInDays}"}
 		return c.execAWSCLI(ctx, args, profile)
 
@@ -2173,11 +2221,11 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		args := []string{"cloudfront", "list-distributions", "--output", "table", "--query", "DistributionList.Items[*].{Id:Id,DomainName:DomainName,Status:Status}"}
 		return c.execAWSCLI(ctx, args, profile)
 
-	case "list_route53_zones":
+	case "list_route53_zones", "list_route53_hosted_zones":
 		args := []string{"route53", "list-hosted-zones", "--output", "table", "--query", "HostedZones[*].{Id:Id,Name:Name,Type:Config.PrivateZone}"}
 		return c.execAWSCLI(ctx, args, profile)
 
-	case "list_secrets":
+	case "list_secrets", "list_secrets_manager_secrets":
 		args := []string{"secretsmanager", "list-secrets", "--output", "table", "--query", "SecretList[*].{Name:Name,LastChanged:LastChangedDate}"}
 		return c.execAWSCLI(ctx, args, profile)
 
@@ -2340,7 +2388,7 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		details, _ := c.execAWSCLI(ctx, detailArgs, profile)
 		return fmt.Sprintf("CodeBuild Projects:\n%s\n\nProject Details:\n%s", projects, details), nil
 
-	case "list_codepipelines":
+	case "list_codepipelines", "list_codepipeline_pipelines":
 		args := []string{"codepipeline", "list-pipelines", "--output", "table"}
 		return c.execAWSCLI(ctx, args, profile)
 
@@ -2388,6 +2436,10 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 
 	case "list_sagemaker_models":
 		args := []string{"sagemaker", "list-models", "--output", "table"}
+		return c.execAWSCLI(ctx, args, profile)
+
+	case "list_sagemaker_training_jobs":
+		args := []string{"sagemaker", "list-training-jobs", "--output", "table", "--query", "TrainingJobSummaries[*].{Name:TrainingJobName,Status:TrainingJobStatus,Created:CreationTime}"}
 		return c.execAWSCLI(ctx, args, profile)
 
 	case "list_sagemaker_notebook_instances":
@@ -2539,6 +2591,8 @@ func (c *Client) discoverAllActiveServices(ctx context.Context, profile *AIProfi
 		"check_sqs_service",
 		"check_sns_service",
 		"check_eventbridge_service",
+		"check_scheduler_service",
+		"check_pipes_service",
 		"check_ecr_service",
 		"check_elasticsearch_service",
 		"check_opensearch_service",
@@ -2596,8 +2650,11 @@ func (c *Client) discoverAllActiveServices(ctx context.Context, profile *AIProfi
 		"check_msk_service",
 		"check_transitgateway_service",
 		"check_securityhub_service",
+		"check_securitylake_service",
+		"check_verifiedpermissions_service",
 		"check_servicecatalog_service",
 		"check_lakeformation_service",
+		"check_datazone_service",
 		"check_mq_service",
 		"check_fsx_service",
 		"check_directconnect_service",
@@ -2669,6 +2726,7 @@ func (c *Client) discoverAllActiveServices(ctx context.Context, profile *AIProfi
 		"check_ivs_service",
 		"check_appflow_service",
 		"check_cleanrooms_service",
+		"check_qbusiness_service",
 		"check_cloudsearch_service",
 		"check_dataexchange_service",
 		"check_finspace_service",
