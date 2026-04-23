@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bgdnvk/clanker/internal/ai"
+	"github.com/bgdnvk/clanker/internal/railway"
 	"github.com/bgdnvk/clanker/internal/vercel"
 	"github.com/bgdnvk/clanker/internal/verda"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -45,6 +46,22 @@ type vercelListArgs struct {
 	Token    string `json:"token,omitempty" jsonschema:"description=Vercel API token (falls back to config/env)"`
 	TeamID   string `json:"teamId,omitempty" jsonschema:"description=Vercel team ID"`
 	Project  string `json:"project,omitempty" jsonschema:"description=Project ID for scoped resources (deployments and env)"`
+}
+
+type railwayAskArgs struct {
+	Question    string `json:"question" jsonschema:"description=Natural language question about Railway infrastructure,required"`
+	Token       string `json:"token,omitempty" jsonschema:"description=Railway API token (falls back to config/env)"`
+	WorkspaceID string `json:"workspaceId,omitempty" jsonschema:"description=Railway workspace ID"`
+	Debug       bool   `json:"debug,omitempty" jsonschema:"description=Enable debug output"`
+}
+
+type railwayListArgs struct {
+	Resource    string `json:"resource" jsonschema:"description=Resource type: projects|services|deployments|domains|variables|volumes|workspaces,required"`
+	Token       string `json:"token,omitempty" jsonschema:"description=Railway API token (falls back to config/env)"`
+	WorkspaceID string `json:"workspaceId,omitempty" jsonschema:"description=Railway workspace ID"`
+	Project     string `json:"project,omitempty" jsonschema:"description=Project ID for scoped resources (services, deployments, domains, variables, volumes)"`
+	Environment string `json:"environment,omitempty" jsonschema:"description=Environment ID for scoping deployments/variables"`
+	Service     string `json:"service,omitempty" jsonschema:"description=Service ID for scoping deployments/variables"`
 }
 
 type verdaAskArgs struct {
@@ -152,6 +169,29 @@ func newClankerMCPServer() *mcptransport.MCPServer {
 		),
 		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args vercelListArgs) (*mcp.CallToolResult, error) {
 			return handleMCPVercelList(ctx, args)
+		}),
+	)
+
+	server.AddTool(
+		mcp.NewTool(
+			"clanker_railway_ask",
+			mcp.WithDescription("Ask a natural language question about your Railway infrastructure. Gathers Railway context (projects, services, environments, deployments, domains) and uses the configured AI provider to answer."),
+			mcp.WithInputSchema[railwayAskArgs](),
+		),
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args railwayAskArgs) (*mcp.CallToolResult, error) {
+			return handleMCPRailwayAsk(ctx, args)
+		}),
+	)
+
+	server.AddTool(
+		mcp.NewTool(
+			"clanker_railway_list",
+			mcp.WithDescription("List Railway resources (projects, services, deployments, domains, variables, volumes, workspaces). Returns JSON with the requested resource list."),
+			mcp.WithInputSchema[railwayListArgs](),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args railwayListArgs) (*mcp.CallToolResult, error) {
+			return handleMCPRailwayList(ctx, args)
 		}),
 	)
 
@@ -289,6 +329,141 @@ func handleMCPVercelList(ctx context.Context, args vercelListArgs) (*mcp.CallToo
 	}
 
 	return mcp.NewToolResultText(result), nil
+}
+
+// handleMCPRailwayAsk resolves Railway credentials, gathers context, and asks
+// the configured AI provider about the user's Railway infrastructure.
+func handleMCPRailwayAsk(ctx context.Context, args railwayAskArgs) (*mcp.CallToolResult, error) {
+	token := args.Token
+	if token == "" {
+		token = railway.ResolveAPIToken()
+	}
+	if token == "" {
+		return mcp.NewToolResultError("Railway token not configured. Set railway.api_token in ~/.clanker.yaml or export RAILWAY_API_TOKEN"), nil
+	}
+
+	workspaceID := args.WorkspaceID
+	if workspaceID == "" {
+		workspaceID = railway.ResolveWorkspaceID()
+	}
+
+	client, err := railway.NewClient(token, workspaceID, args.Debug)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to create Railway client: %v", err)), nil
+	}
+
+	railwayContext, _ := client.GetRelevantContext(ctx, args.Question)
+
+	prompt := buildRailwayPrompt(args.Question, railwayContext, "")
+
+	provider := viper.GetString("ai.default_provider")
+	if provider == "" {
+		provider = "openai"
+	}
+	apiKey := mcpResolveProviderKey(provider)
+
+	aiClient := ai.NewClient(provider, apiKey, args.Debug, provider)
+
+	response, err := aiClient.AskPrompt(ctx, prompt)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("AI query failed: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(response), nil
+}
+
+// handleMCPRailwayList resolves Railway credentials and lists the requested
+// resource type using the Railway GraphQL client.
+func handleMCPRailwayList(ctx context.Context, args railwayListArgs) (*mcp.CallToolResult, error) {
+	token := args.Token
+	if token == "" {
+		token = railway.ResolveAPIToken()
+	}
+	if token == "" {
+		return mcp.NewToolResultError("Railway token not configured. Set railway.api_token in ~/.clanker.yaml or export RAILWAY_API_TOKEN"), nil
+	}
+
+	workspaceID := args.WorkspaceID
+	if workspaceID == "" {
+		workspaceID = railway.ResolveWorkspaceID()
+	}
+
+	client, err := railway.NewClient(token, workspaceID, false)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to create Railway client: %v", err)), nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	resource := strings.ToLower(strings.TrimSpace(args.Resource))
+
+	switch resource {
+	case "projects", "project":
+		projects, err := client.ListProjects(ctx)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Railway API error: %v", err)), nil
+		}
+		return mcp.NewToolResultJSON(projects)
+	case "services", "service":
+		if args.Project == "" {
+			return mcp.NewToolResultError("project is required to list services"), nil
+		}
+		services, err := client.ListServices(ctx, args.Project)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Railway API error: %v", err)), nil
+		}
+		return mcp.NewToolResultJSON(services)
+	case "deployments", "deployment":
+		if args.Project == "" {
+			return mcp.NewToolResultError("project is required to list deployments"), nil
+		}
+		deployments, err := client.ListDeployments(ctx, args.Project, args.Environment, args.Service, 20)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Railway API error: %v", err)), nil
+		}
+		return mcp.NewToolResultJSON(deployments)
+	case "domains", "domain":
+		if args.Project == "" {
+			return mcp.NewToolResultError("project is required to list domains"), nil
+		}
+		domains, err := client.ListDomains(ctx, args.Project)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Railway API error: %v", err)), nil
+		}
+		return mcp.NewToolResultJSON(domains)
+	case "variables", "variable", "vars", "env":
+		if args.Project == "" || args.Environment == "" || args.Service == "" {
+			return mcp.NewToolResultError("project, environment, and service are required to list variables"), nil
+		}
+		variables, err := client.ListVariables(ctx, args.Project, args.Environment, args.Service)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Railway API error: %v", err)), nil
+		}
+		// Scrub values — never return secrets through MCP.
+		scrubbed := make(map[string]string, len(variables))
+		for k := range variables {
+			scrubbed[k] = ""
+		}
+		return mcp.NewToolResultJSON(scrubbed)
+	case "volumes", "volume":
+		if args.Project == "" {
+			return mcp.NewToolResultError("project is required to list volumes"), nil
+		}
+		volumes, err := client.ListVolumes(ctx, args.Project)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Railway API error: %v", err)), nil
+		}
+		return mcp.NewToolResultJSON(volumes)
+	case "workspaces", "workspace":
+		workspaces, err := client.ListWorkspaces(ctx)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Railway API error: %v", err)), nil
+		}
+		return mcp.NewToolResultJSON(workspaces)
+	default:
+		return mcp.NewToolResultError(fmt.Sprintf("unknown resource type: %s (expected: projects, services, deployments, domains, variables, volumes, workspaces)", resource)), nil
+	}
 }
 
 // handleMCPVerdaAsk resolves Verda credentials, gathers context, and asks the

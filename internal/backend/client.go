@@ -515,6 +515,61 @@ func (c *Client) StoreVercelCredentials(ctx context.Context, creds *VercelCreden
 	return nil
 }
 
+// GetRailwayCredentials retrieves Railway credentials from the backend. The
+// clanker backend may return 404 today; callers treat that as "fall back to
+// local creds" so behaviour degrades gracefully.
+func (c *Client) GetRailwayCredentials(ctx context.Context) (*RailwayCredentials, error) {
+	respBody, err := c.doRequest(ctx, http.MethodGet, "/api/v1/cli/credentials/railway", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Provider    string             `json:"provider"`
+			Credentials RailwayCredentials `json:"credentials"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(respBody, &response); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !response.Success {
+		return nil, fmt.Errorf("failed to get Railway credentials")
+	}
+
+	return &response.Data.Credentials, nil
+}
+
+// StoreRailwayCredentials stores Railway credentials in the backend
+func (c *Client) StoreRailwayCredentials(ctx context.Context, creds *RailwayCredentials) error {
+	body := map[string]interface{}{
+		"provider":    "railway",
+		"credentials": creds,
+	}
+
+	respBody, err := c.doRequest(ctx, http.MethodPut, "/api/v1/secrets/railway", body)
+	if err != nil {
+		return err
+	}
+
+	var response APIResponse
+	if err := json.Unmarshal(respBody, &response); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !response.Success {
+		if response.Error != "" {
+			return fmt.Errorf("failed to store credentials: %s", response.Error)
+		}
+		return fmt.Errorf("failed to store credentials")
+	}
+
+	return nil
+}
+
 // ListCredentials lists all credentials stored in the backend
 func (c *Client) ListCredentials(ctx context.Context) ([]CredentialEntry, error) {
 	respBody, err := c.doRequest(ctx, http.MethodGet, "/api/v1/cli/credentials", nil)

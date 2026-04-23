@@ -760,6 +760,7 @@ func readKeyFiles(dir string) map[string]string {
 		"render.yaml",
 		"Procfile",
 		"vercel.json",
+		"railway.json", "railway.toml",
 		"netlify.toml",
 		"wrangler.toml", "wrangler.jsonc", "wrangler.json",
 		".env.example", ".env.sample", ".env.template",

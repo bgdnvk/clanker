@@ -10,6 +10,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/digitalocean"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	"github.com/bgdnvk/clanker/internal/hetzner"
+	"github.com/bgdnvk/clanker/internal/railway"
 	"github.com/bgdnvk/clanker/internal/vercel"
 	"github.com/bgdnvk/clanker/internal/verda"
 	"github.com/spf13/cobra"
@@ -113,10 +114,16 @@ func init() {
 	hetznerCmd := hetzner.CreateHetznerCommands()
 	rootCmd.AddCommand(hetznerCmd)
 
-	// Register Vercel static commands + ask stub (phase 1)
+	// Register Vercel static commands. Natural-language queries go through
+	// `clanker ask --vercel "..."` — the canonical path that resolves
+	// credentials, fetches context, and drives the configured AI provider.
 	vercelCmd := vercel.CreateVercelCommands()
-	AddVercelAskCommand(vercelCmd)
 	rootCmd.AddCommand(vercelCmd)
+
+	// Register Railway static commands. Natural-language queries go through
+	// `clanker ask --railway "..."`.
+	railwayCmd := railway.CreateRailwayCommands()
+	rootCmd.AddCommand(railwayCmd)
 
 	// Register Verda Cloud static commands + ask subcommand
 	verdaCmd := verda.CreateVerdaCommands()

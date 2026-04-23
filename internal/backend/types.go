@@ -54,6 +54,14 @@ type VercelCredentials struct {
 	TeamID   string `json:"team_id,omitempty"`
 }
 
+// RailwayCredentials represents Railway credentials stored in the backend.
+// WorkspaceID is optional — single-workspace accounts can omit it and the
+// GraphQL API infers scope from the account token.
+type RailwayCredentials struct {
+	APIToken    string `json:"api_token"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
 // VerdaCredentials represents Verda Cloud (ex-DataCrunch) credentials stored
 // in the backend. Verda uses OAuth2 Client Credentials so we need both IDs.
 // ProjectID is optional.
@@ -75,6 +83,7 @@ const (
 	ProviderHetzner      CredentialProvider = "hetzner"
 	ProviderKubernetes   CredentialProvider = "kubernetes"
 	ProviderVercel       CredentialProvider = "vercel"
+	ProviderRailway      CredentialProvider = "railway"
 	ProviderVerda        CredentialProvider = "verda"
 )
 
