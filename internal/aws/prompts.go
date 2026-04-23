@@ -30,6 +30,12 @@ SERVICE EXISTENCE CHECKS (Quick checks to see if services exist and their basic 
 - check_ec2_service: Check if EC2 service is available and count instances
 - check_ecs_service: Check if ECS service is available and count clusters
 - check_ecr_service: Check if ECR service is available and count repositories
+- check_scheduler_service: Check if EventBridge Scheduler is available
+- check_pipes_service: Check if EventBridge Pipes is available
+- check_verifiedpermissions_service: Check if Amazon Verified Permissions is available
+- check_securitylake_service: Check if Amazon Security Lake is available
+- check_datazone_service: Check if Amazon DataZone is available
+- check_qbusiness_service: Check if Amazon Q Business is available
 
 COMPUTE:
 - list_ec2_instances: List EC2 instances with state, type, and details
