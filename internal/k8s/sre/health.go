@@ -23,8 +23,19 @@ func NewHealthChecker(client K8sClient, debug bool) *HealthChecker {
 	}
 }
 
-// CheckCluster performs a cluster-wide health check
+// CheckCluster performs a cluster-wide health check, returning aggregate
+// counts only. Use CheckClusterDetailed when callers need the underlying
+// per-resource issue list (e.g., for CLI output).
 func (h *HealthChecker) CheckCluster(ctx context.Context) (*ClusterHealthSummary, error) {
+	summary, _, err := h.CheckClusterDetailed(ctx)
+	return summary, err
+}
+
+// CheckClusterDetailed runs the same checks as CheckCluster but also returns
+// the full list of detected issues from nodes + workloads. Issues are useful
+// for CLI/UI surfaces that show per-resource problems with severity and
+// suggestions, not just aggregate counts.
+func (h *HealthChecker) CheckClusterDetailed(ctx context.Context) (*ClusterHealthSummary, []Issue, error) {
 	summary := &ClusterHealthSummary{
 		Score: 100,
 	}
@@ -32,14 +43,14 @@ func (h *HealthChecker) CheckCluster(ctx context.Context) (*ClusterHealthSummary
 	// Check nodes
 	nodeHealth, nodeIssues, err := h.checkNodes(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to check nodes: %w", err)
+		return nil, nil, fmt.Errorf("failed to check nodes: %w", err)
 	}
 	summary.NodeHealth = nodeHealth
 
 	// Check workloads
 	workloadHealth, workloadIssues, podCounts, err := h.checkWorkloads(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to check workloads: %w", err)
+		return nil, nil, fmt.Errorf("failed to check workloads: %w", err)
 	}
 	summary.WorkloadHealth = workloadHealth
 	summary.TotalPods = podCounts.total
@@ -86,7 +97,7 @@ func (h *HealthChecker) CheckCluster(ctx context.Context) (*ClusterHealthSummary
 		summary.OverallHealth = "healthy"
 	}
 
-	return summary, nil
+	return summary, allIssues, nil
 }
 
 // CheckNamespace performs a health check on a specific namespace

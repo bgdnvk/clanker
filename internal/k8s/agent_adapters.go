@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/bgdnvk/clanker/internal/k8s/networking"
+	"github.com/bgdnvk/clanker/internal/k8s/sre"
 	"github.com/bgdnvk/clanker/internal/k8s/workloads"
 )
 
@@ -128,6 +129,13 @@ func (a *helmClientAdapter) Run(ctx context.Context, args ...string) (string, er
 
 func (a *helmClientAdapter) RunWithNamespace(ctx context.Context, namespace string, args ...string) (string, error) {
 	return a.client.RunHelmWithNamespace(ctx, namespace, args...)
+}
+
+// NewSREAdapter returns an sre.K8sClient backed by the given kubectl Client.
+// Exposed so callers outside this package can build SRE checkers without
+// reimplementing the adapter (mirrors NewNetworkingAdapter).
+func NewSREAdapter(client *Client) sre.K8sClient {
+	return &sreClientAdapter{client: client}
 }
 
 // sreClientAdapter wraps Client to implement sre.K8sClient interface
