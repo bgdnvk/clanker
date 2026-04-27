@@ -78,9 +78,28 @@ func TestAuditPolicies_AllNamespaces(t *testing.T) {
 	}
 }
 
+// perNamespaceMock returns a different list response per namespace, so we can
+// distinguish a namespace that exists with a default-deny policy from a
+// namespace whose lookup returned no policies.
+type perNamespaceMock struct {
+	mockClient
+	responses map[string]string // namespace -> raw JSON list response
+}
+
+func (m *perNamespaceMock) RunWithNamespace(ctx context.Context, namespace string, args ...string) (string, error) {
+	if v, ok := m.responses[namespace]; ok {
+		return v, nil
+	}
+	// Default: no items.
+	return `{"items": []}`, nil
+}
+
 func TestAuditPolicies_FilteredNamespaces(t *testing.T) {
-	client := &mockClient{
-		runWithNSResponse: `{"items": [{"metadata": {"name": "default-deny", "namespace": "only"}, "spec": {"podSelector": {}, "policyTypes": ["Ingress"]}}]}`,
+	client := &perNamespaceMock{
+		responses: map[string]string{
+			"only": `{"items": [{"metadata": {"name": "default-deny", "namespace": "only"}, "spec": {"podSelector": {}, "policyTypes": ["Ingress"]}}]}`,
+			// "missing" is intentionally absent so the mock returns an empty list.
+		},
 	}
 	mgr := NewNetworkPolicyManager(client, false)
 
@@ -90,6 +109,20 @@ func TestAuditPolicies_FilteredNamespaces(t *testing.T) {
 	}
 	if len(report.Namespaces) != 2 {
 		t.Fatalf("expected 2 namespaces in report, got %d", len(report.Namespaces))
+	}
+
+	byNs := map[string]NamespacePolicyAudit{}
+	for _, e := range report.Namespaces {
+		byNs[e.Namespace] = e
+	}
+
+	only := byNs["only"]
+	if only.PolicyCount != 1 || !only.DefaultDenyIn {
+		t.Errorf("only ns: PolicyCount=%d DefaultDenyIn=%v, want 1+true", only.PolicyCount, only.DefaultDenyIn)
+	}
+	missing := byNs["missing"]
+	if missing.PolicyCount != 0 || missing.DefaultDenyIn || missing.DefaultDenyOut {
+		t.Errorf("missing ns should have zero policies and no default-deny, got %+v", missing)
 	}
 }
 
