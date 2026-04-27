@@ -180,6 +180,21 @@ type NetworkPolicyPort struct {
 	EndPort  int    `json:"endPort,omitempty"`
 }
 
+// NamespacePolicyAudit summarizes the network-policy posture of a single
+// namespace.
+type NamespacePolicyAudit struct {
+	Namespace      string   `json:"namespace"`
+	PolicyCount    int      `json:"policyCount"`
+	DefaultDenyIn  bool     `json:"defaultDenyIngress"`
+	DefaultDenyOut bool     `json:"defaultDenyEgress"`
+	PolicyNames    []string `json:"policyNames,omitempty"`
+}
+
+// PolicyAuditReport is the report returned by NetworkPolicyManager.AuditPolicies.
+type PolicyAuditReport struct {
+	Namespaces []NamespacePolicyAudit `json:"namespaces"`
+}
+
 // NetworkPolicyPeer specifies peer for network policy
 type NetworkPolicyPeer struct {
 	PodSelector       map[string]string `json:"podSelector,omitempty"`
