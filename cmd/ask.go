@@ -195,10 +195,14 @@ Examples:
 			return handleDatabaseQuery(context.Background(), question, debug, dbConnection)
 		} else if agentName == "cicd" {
 			return handleCICDQuery(context.Background(), question, debug)
+		} else if agentName == "software-blocks" {
+			return handleSoftwareBlocksQuery(context.Background(), question, debug)
+		} else if agentName == "data_flow" {
+			return handleDataFlowQuery(context.Background(), question, debug)
 		} else if isGitHubCodingAgent(agentName) {
 			selectedGitHubCodingAgent = agentName
 		} else if agentName != "" {
-			return fmt.Errorf("unknown agent: %s (available: hermes, claude-code, database, cicd, copilot, codex, claude)", agentName)
+			return fmt.Errorf("unknown agent: %s (available: hermes, claude-code, database, cicd, software-blocks, data_flow, copilot, codex, claude)", agentName)
 		}
 
 		// Handle apply mode (independent of maker mode)
@@ -1416,7 +1420,7 @@ func init() {
 	askCmd.Flags().Bool("apply", false, "Apply an approved maker plan (reads from stdin unless --plan-file is provided)")
 	askCmd.Flags().String("plan-file", "", "Optional path to maker plan JSON file for --apply")
 	askCmd.Flags().Bool("route-only", false, "Return routing decision as JSON without executing (for backend integration)")
-	askCmd.Flags().String("agent", "", "Use a specific agent to handle the query (e.g., hermes, claude-code, database, cicd, copilot, codex, claude)")
+	askCmd.Flags().String("agent", "", "Use a specific agent to handle the query (e.g., hermes, claude-code, database, cicd, software-blocks, data_flow, copilot, codex, claude)")
 	askCmd.Flags().String("github-coding-agent-model", "", "Override the Copilot CLI model used for GitHub coding-agent delegation")
 }
 
