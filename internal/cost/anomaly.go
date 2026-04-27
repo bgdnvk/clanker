@@ -58,6 +58,9 @@ func DetectDailyAnomaly(service, provider string, trend []DailyCost, thresholdPc
 // DetectAnomaliesByProvider partitions trend by provider and runs
 // DetectDailyAnomaly per partition. Used as the aggregator-level fallback
 // so providers that don't implement AnomalyProvider still get coverage.
+//
+// Output order is not guaranteed — the aggregator's GetAnomalies re-sorts
+// by absolute percent change, so adding a sort here would be wasted work.
 func DetectAnomaliesByProvider(trend []DailyCost, thresholdPct float64) []CostAnomaly {
 	groups := make(map[string][]DailyCost)
 	for _, dc := range trend {
@@ -74,7 +77,6 @@ func DetectAnomaliesByProvider(trend []DailyCost, thresholdPct float64) []CostAn
 			out = append(out, *a)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].PercentChange > out[j].PercentChange })
 	return out
 }
 

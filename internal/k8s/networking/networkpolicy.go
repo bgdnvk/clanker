@@ -264,23 +264,28 @@ func (m *NetworkPolicyManager) AuditPolicies(ctx context.Context, namespaces []s
 		return nil, err
 	}
 
-	if len(namespaces) == 0 {
+	// When the caller didn't pass an explicit list, derive the audit set
+	// from whichever namespaces actually had policies. Track separately so
+	// it's clear we're reporting on discovered namespaces, not mutating the
+	// original input slice.
+	auditNamespaces := namespaces
+	if len(auditNamespaces) == 0 {
 		seen := make(map[string]struct{}, len(policies))
 		for _, p := range policies {
 			if _, ok := seen[p.Namespace]; !ok {
 				seen[p.Namespace] = struct{}{}
-				namespaces = append(namespaces, p.Namespace)
+				auditNamespaces = append(auditNamespaces, p.Namespace)
 			}
 		}
 	}
 
-	byNs := make(map[string][]NetworkPolicyInfo, len(namespaces))
+	byNs := make(map[string][]NetworkPolicyInfo, len(auditNamespaces))
 	for _, p := range policies {
 		byNs[p.Namespace] = append(byNs[p.Namespace], p)
 	}
 
-	report := &PolicyAuditReport{Namespaces: make([]NamespacePolicyAudit, 0, len(namespaces))}
-	for _, ns := range namespaces {
+	report := &PolicyAuditReport{Namespaces: make([]NamespacePolicyAudit, 0, len(auditNamespaces))}
+	for _, ns := range auditNamespaces {
 		entries := byNs[ns]
 		audit := NamespacePolicyAudit{
 			Namespace:   ns,

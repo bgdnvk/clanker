@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 
+	"github.com/bgdnvk/clanker/internal/k8s/networking"
 	"github.com/bgdnvk/clanker/internal/k8s/workloads"
 )
 
@@ -52,7 +53,7 @@ func (a *clientAdapter) Logs(ctx context.Context, podName, namespace string, opt
 // NewNetworkingAdapter returns a networking.K8sClient backed by the given
 // kubectl Client. Exposed so callers outside this package (cmd/) can build
 // networking managers without reimplementing the adapter.
-func NewNetworkingAdapter(client *Client) *networkingClientAdapter {
+func NewNetworkingAdapter(client *Client) networking.K8sClient {
 	return &networkingClientAdapter{client: client}
 }
 

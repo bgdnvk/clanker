@@ -352,11 +352,13 @@ func (a *Aggregator) AuditTags(ctx context.Context, requiredKeys []string, start
 		Entries: make([]TagAuditEntry, 0, len(requiredKeys)),
 	}
 
+	configuredProviders := 0
 	tagProviders := 0
 	for _, p := range a.providers {
 		if !p.IsConfigured() {
 			continue
 		}
+		configuredProviders++
 		if _, ok := p.(TagProvider); ok {
 			tagProviders++
 		}
@@ -376,7 +378,7 @@ func (a *Aggregator) AuditTags(ctx context.Context, requiredKeys []string, start
 		}
 
 		entry := TagAuditEntry{TagKey: key, ProvidersSeen: tagProviders}
-		entry.UnsupportedNum = len(a.providers) - tagProviders
+		entry.UnsupportedNum = configuredProviders - tagProviders
 		for _, t := range resp.Tags {
 			entry.TotalCost += t.Cost
 			if isUntaggedValue(t.TagValue) {

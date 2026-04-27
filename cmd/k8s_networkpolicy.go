@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -81,17 +82,17 @@ func runNetworkPolicyAudit(cmd *cobra.Command, args []string) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(report)
 	default:
-		printNetworkPolicyAuditTable(report)
+		printNetworkPolicyAuditTable(os.Stdout, report)
 		return nil
 	}
 }
 
-func printNetworkPolicyAuditTable(report *networking.PolicyAuditReport) {
+func printNetworkPolicyAuditTable(out io.Writer, report *networking.PolicyAuditReport) {
 	if report == nil || len(report.Namespaces) == 0 {
-		fmt.Println("No namespaces audited.")
+		fmt.Fprintln(out, "No namespaces audited.")
 		return
 	}
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "NAMESPACE\tPOLICIES\tDEFAULT-DENY INGRESS\tDEFAULT-DENY EGRESS")
 	fmt.Fprintln(w, "---------\t--------\t--------------------\t-------------------")
 	for _, ns := range report.Namespaces {
@@ -106,7 +107,7 @@ func printNetworkPolicyAuditTable(report *networking.PolicyAuditReport) {
 		}
 	}
 	if len(uncovered) > 0 {
-		fmt.Fprintf(os.Stdout, "\n⚠  %d namespace(s) lack default-deny in at least one direction: %s\n", len(uncovered), strings.Join(uncovered, ", "))
+		fmt.Fprintf(out, "\n⚠  %d namespace(s) lack default-deny in at least one direction: %s\n", len(uncovered), strings.Join(uncovered, ", "))
 	}
 }
 
