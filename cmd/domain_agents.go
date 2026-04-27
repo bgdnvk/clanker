@@ -54,6 +54,28 @@ func handleCICDQuery(ctx context.Context, question string, debug bool) error {
 	return runDomainAgentQuery(ctx, "cicd", question, sections, warnings, debug)
 }
 
+func handleSoftwareBlocksQuery(ctx context.Context, question string, debug bool) error {
+	aiClient := newConfiguredAIClient(debug)
+	response, err := aiClient.AskPrompt(ctx, buildSoftwareBlocksAgentPrompt(question))
+	if err != nil {
+		return fmt.Errorf("failed to get software-blocks agent response: %w", err)
+	}
+
+	fmt.Println(response)
+	return nil
+}
+
+func handleDataFlowQuery(ctx context.Context, question string, debug bool) error {
+	aiClient := newConfiguredAIClient(debug)
+	response, err := aiClient.AskPrompt(ctx, buildDataFlowAgentPrompt(question))
+	if err != nil {
+		return fmt.Errorf("failed to get data_flow agent response: %w", err)
+	}
+
+	fmt.Println(response)
+	return nil
+}
+
 func configuredDatabaseAgentMode() string {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(runtimeDatabaseModeEnv))) {
 	case "inventory":
@@ -1116,6 +1138,116 @@ Rules:
 	b.WriteString("User Question: ")
 	b.WriteString(strings.TrimSpace(question))
 	b.WriteString("\n\nAnswer as a concise operator report. Start with what you found, then note gaps or next checks only if needed.")
+	return b.String()
+}
+
+func buildSoftwareBlocksAgentPrompt(question string) string {
+	b := &strings.Builder{}
+	b.WriteString(`You are Clanker's software-blocks agent.
+
+Your job is to classify a connected infrastructure system into software architecture blocks, not just cloud provider resource types.
+
+Return JSON only. Do not wrap the output in markdown. Do not include prose before or after the JSON.
+
+Required JSON schema:
+{
+	"systemType": "short human-readable type for this system",
+	"summary": "one sentence summary of what the system appears to be",
+	"blocks": [
+		{
+			"id": "stable-slug",
+			"name": "Block name from the taxonomy when possible",
+			"category": "core|data|infrastructure|reliability|security|workflow|ai",
+			"description": "short purpose in this system",
+			"resourceIds": ["exact resource ids from input"],
+			"confidence": 0.0,
+			"evidence": ["short observed reason"]
+		}
+	],
+	"resources": [
+		{
+			"resourceId": "exact resource id from input",
+			"blockId": "stable-slug matching a block id",
+			"block": "Block name",
+			"category": "core|data|infrastructure|reliability|security|workflow|ai",
+			"confidence": 0.0,
+			"reason": "short observed reason"
+		}
+	]
+}
+
+Block taxonomy:
+- Core application: UI / Frontend, API, Backend service, Database, Object storage, Cache, Queue, Worker, Scheduler / Cron, Auth, Search, Realtime channel, Notifications, Payments / Billing, Admin / Backoffice, Feature flags, Config / Secrets
+- Data and integration: Schema / Models, Migrations, Validation, ETL / Pipelines, Webhooks, Connectors, Embeddings / Vector store, File processing, Analytics events
+- Infrastructure: Compute, Container, Load balancer, CDN, DNS, Network / VPC, Firewall / WAF, Service discovery, Ingress / Gateway, Autoscaling, Infrastructure as Code, Environment
+- Reliability: Logs, Metrics, Traces, Alerts, Health checks, Retries, Rate limits, Circuit breakers, Backups, Disaster recovery, Audit logs
+- Security: Identity, Authorization, Roles / Permissions, API keys, Secrets management, Encryption, Policy engine, Compliance controls, Security scanning, Tenant isolation
+- Developer workflow: Repo, CI/CD pipeline, Tests, Preview environments, Build system, Package registry, Rollback, Documentation, Runbooks
+- AI-native: Prompt / Instruction, Tool call, Memory, RAG knowledge base, Agent, Eval, Guardrail, Human approval gate, Simulation / Dry run
+
+Rules:
+- Use exact resource ids from the input.
+- Every input resource should appear exactly once in resources.
+- Prefer specific software block names from the taxonomy.
+- Classify by observed role and connectivity, not by label alone.
+- If a resource is only infrastructure support, classify it under Infrastructure or Security rather than inventing an app role.
+- If evidence is ambiguous, choose the safest block and lower confidence.
+- Do not invent resources, ids, providers, connections, or states.
+
+Input:
+`)
+	b.WriteString(strings.TrimSpace(question))
+	b.WriteString("\n")
+	return b.String()
+}
+
+func buildDataFlowAgentPrompt(question string) string {
+	b := &strings.Builder{}
+	b.WriteString(`You are Clanker's data_flow agent.
+
+Your job is to map directional runtime data flow from the public Internet into and through connected infrastructure resources.
+
+Return JSON only. Do not wrap the output in markdown. Do not include prose before or after the JSON.
+
+Required JSON schema:
+{
+	"summary": "one sentence summary of the likely data flow",
+	"flows": [
+		{
+			"id": "stable-flow-slug",
+			"sourceResourceId": "exact source resource id from input, or internet for public client/browser traffic",
+			"targetResourceId": "exact target resource id from input",
+			"label": "Data flow",
+			"data": "short payload or traffic description shown on the arrow",
+			"protocol": "HTTP|HTTPS|SQL|TCP|Events|Queue|Object|Unknown",
+			"confidence": 0.0,
+			"evidence": ["short observed reason"]
+		}
+	],
+	"resourceLabels": [
+		{
+			"resourceId": "exact resource id from input",
+			"label": "short role in the flow"
+		}
+	]
+}
+
+Rules:
+- Use exact resource ids from the input.
+- Only create flows between resources that exist in the input, except sourceResourceId may be "internet" for public Internet/client traffic.
+- If a system has a public API gateway, load balancer, CDN, DNS, ingress, public endpoint, browser/client entrypoint, or serverless HTTP function, include a first flow from sourceResourceId "internet" into that entry resource.
+- Prefer observed links, typed connections, names, endpoints, and software-block classifications as evidence.
+- A flow must represent data movement or request traffic, not just ownership, placement, or security attachment.
+- Set label to "Data flow" for every returned flow.
+- Put the concrete arrow text in the data field, for example "browser HTTPS request", "API JSON payload", "SQL query", or "object upload".
+- Use protocol "Unknown" when the protocol cannot be inferred safely.
+- If direction is ambiguous, choose the most likely runtime direction and lower confidence.
+- Do not invent resources, ids, providers, connections, credentials, or states.
+
+Input:
+`)
+	b.WriteString(strings.TrimSpace(question))
+	b.WriteString("\n")
 	return b.String()
 }
 
