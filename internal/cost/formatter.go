@@ -311,6 +311,40 @@ func (f *Formatter) FormatTags(tags *TagsResponse) (string, error) {
 	return sb.String(), nil
 }
 
+// FormatTagAudit renders a tag-compliance audit report.
+func (f *Formatter) FormatTagAudit(report *TagAuditReport) (string, error) {
+	if f.format == "json" {
+		return f.toJSON(report)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(f.header("Tag Compliance Audit"))
+
+	if report == nil || len(report.Entries) == 0 {
+		sb.WriteString("No tag data available\n")
+		return sb.String(), nil
+	}
+
+	w := tabwriter.NewWriter(&sb, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "TAG KEY\tTOTAL COST\tUNTAGGED COST\tUNTAGGED %\tDISTINCT VALUES")
+	fmt.Fprintln(w, "-------\t----------\t-------------\t----------\t---------------")
+	for _, e := range report.Entries {
+		marker := ""
+		if e.UntaggedPct >= 50 {
+			marker = " ⚠"
+		}
+		fmt.Fprintf(w, "%s%s\t$%.2f\t$%.2f\t%.1f%%\t%d\n",
+			e.TagKey, marker, e.TotalCost, e.UntaggedCost, e.UntaggedPct, e.TaggedValues)
+	}
+	w.Flush()
+
+	if report.Entries[0].UnsupportedNum > 0 {
+		fmt.Fprintf(&sb, "\nNote: %d configured provider(s) do not support tag-based cost queries; their spend is excluded.\n",
+			report.Entries[0].UnsupportedNum)
+	}
+	return sb.String(), nil
+}
+
 // Helper methods
 
 func (f *Formatter) header(text string) string {

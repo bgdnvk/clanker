@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -335,6 +336,82 @@ func absFloat(f float64) float64 {
 		return -f
 	}
 	return f
+}
+
+// AuditTags runs a tag-compliance audit for the supplied required tag keys.
+// For each key it groups costs by tag value across providers and reports the
+// portion of spend that fell into the untagged bucket (Cost Explorer returns
+// these as the empty tag value).
+func (a *Aggregator) AuditTags(ctx context.Context, requiredKeys []string, start, end time.Time) (*TagAuditReport, error) {
+	if len(requiredKeys) == 0 {
+		return &TagAuditReport{Period: CostPeriod{StartDate: start, EndDate: end}}, nil
+	}
+
+	report := &TagAuditReport{
+		Period:  CostPeriod{StartDate: start, EndDate: end},
+		Entries: make([]TagAuditEntry, 0, len(requiredKeys)),
+	}
+
+	tagProviders := 0
+	for _, p := range a.providers {
+		if !p.IsConfigured() {
+			continue
+		}
+		if _, ok := p.(TagProvider); ok {
+			tagProviders++
+		}
+	}
+
+	for _, key := range requiredKeys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		resp, err := a.GetTags(ctx, key, start, end)
+		if err != nil {
+			if a.debug {
+				log.Printf("[cost] tag audit: %s: %v", key, err)
+			}
+			continue
+		}
+
+		entry := TagAuditEntry{TagKey: key, ProvidersSeen: tagProviders}
+		entry.UnsupportedNum = len(a.providers) - tagProviders
+		for _, t := range resp.Tags {
+			entry.TotalCost += t.Cost
+			if isUntaggedValue(t.TagValue) {
+				entry.UntaggedCost += t.Cost
+				entry.UntaggedSeen = true
+			} else {
+				entry.TaggedValues++
+			}
+		}
+		if entry.TotalCost > 0 {
+			entry.UntaggedPct = (entry.UntaggedCost / entry.TotalCost) * 100
+		}
+		report.Entries = append(report.Entries, entry)
+	}
+
+	return report, nil
+}
+
+// isUntaggedValue identifies the untagged bucket returned by AWS Cost Explorer
+// when grouping by a tag the resource doesn't carry.
+func isUntaggedValue(v string) bool {
+	trimmed := strings.TrimSpace(v)
+	if trimmed == "" {
+		return true
+	}
+	// AWS prefixes the group key as "tagKey$value"; an unset value comes
+	// through as "tagKey$" (i.e. trailing dollar with empty suffix).
+	if strings.HasSuffix(trimmed, "$") {
+		return true
+	}
+	switch strings.ToLower(trimmed) {
+	case "no value", "(notagkey)", "untagged":
+		return true
+	}
+	return false
 }
 
 // GetTags returns costs grouped by tag across all providers

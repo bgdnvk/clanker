@@ -62,6 +62,23 @@ func TestDetectDailyAnomaly_IgnoresNearZeroBaseline(t *testing.T) {
 	}
 }
 
+func TestIsUntaggedValue(t *testing.T) {
+	cases := map[string]bool{
+		"":                true,
+		"  ":              true,
+		"Environment$":    true,
+		"NO VALUE":        true,
+		"untagged":        true,
+		"prod":            false,
+		"Environment$dev": false,
+	}
+	for in, want := range cases {
+		if got := isUntaggedValue(in); got != want {
+			t.Errorf("isUntaggedValue(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
 func TestDetectAnomaliesByProvider_PartitionsByProvider(t *testing.T) {
 	base := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC)
 	mk := func(provider string, values ...float64) []DailyCost {
