@@ -1,9 +1,13 @@
 package resourcedb
 
 import (
+	"bytes"
+	"database/sql"
+	"log"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestResourceExtraction(t *testing.T) {
@@ -188,6 +192,50 @@ func TestIsCreationOperation(t *testing.T) {
 		if IsCreationOperation(tt.service, tt.op) != tt.expected {
 			t.Errorf("IsCreationOperation(%s, %s) = %v, expected %v", tt.service, tt.op, !tt.expected, tt.expected)
 		}
+	}
+}
+
+func TestHydrateResource_LogsMalformedJSON(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+
+	r := &Resource{ID: 42}
+	hydrateResource(r,
+		sql.NullString{String: "{not json", Valid: true},
+		sql.NullString{String: `{"k":"v"}`, Valid: true},
+		"2024-06-01T12:00:00Z",
+	)
+
+	if got := buf.String(); !bytes.Contains([]byte(got), []byte("malformed metadata JSON")) {
+		t.Errorf("expected malformed-metadata log, got %q", got)
+	}
+	if r.Metadata == nil {
+		t.Error("metadata map should be initialized even on parse failure")
+	}
+	if r.Tags["k"] != "v" {
+		t.Errorf("tags should still hydrate from valid JSON; got %#v", r.Tags)
+	}
+	if r.CreatedAt.IsZero() {
+		t.Error("CreatedAt should parse from valid RFC3339")
+	}
+}
+
+func TestHydrateResource_LogsBadTimestamp(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+
+	r := &Resource{ID: 7}
+	hydrateResource(r, sql.NullString{}, sql.NullString{}, "definitely-not-a-time")
+
+	if !r.CreatedAt.Equal(time.Time{}) {
+		t.Errorf("CreatedAt should remain zero on parse failure; got %v", r.CreatedAt)
+	}
+	if got := buf.String(); !bytes.Contains([]byte(got), []byte("unparseable created_at")) {
+		t.Errorf("expected unparseable-timestamp log, got %q", got)
 	}
 }
 
