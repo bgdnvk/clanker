@@ -246,44 +246,95 @@ func (a *Aggregator) GetForecast(ctx context.Context) (*CostForecast, error) {
 	return nil, nil
 }
 
-// GetAnomalies returns cost anomalies from all providers
+// GetAnomalies returns cost anomalies from all providers. Providers that
+// implement AnomalyProvider supply their own (typically richer, per-service)
+// findings. For providers that don't, we run a generic z-style daily-deviation
+// detector against their daily trend so coverage isn't AWS-only.
 func (a *Aggregator) GetAnomalies(ctx context.Context) (*CostAnomaliesResponse, error) {
 	var (
-		wg        sync.WaitGroup
-		mu        sync.Mutex
-		anomalies []CostAnomaly
+		wg               sync.WaitGroup
+		mu               sync.Mutex
+		anomalies        []CostAnomaly
+		fallbackTrend    []DailyCost
+		anomalyProviders = make(map[string]bool)
 	)
+
+	now := time.Now()
+	start, end := since7Days(now)
 
 	for _, p := range a.providers {
 		if !p.IsConfigured() {
 			continue
 		}
 		if ap, ok := p.(AnomalyProvider); ok {
+			anomalyProviders[p.GetName()] = true
 			ap := ap
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				a, err := ap.GetAnomalies(ctx)
+				found, err := ap.GetAnomalies(ctx)
 				if err != nil {
+					if a.debug {
+						log.Printf("[cost] anomaly fetch from %s: %v", ap.GetName(), err)
+					}
 					return
 				}
 				mu.Lock()
-				anomalies = append(anomalies, a...)
+				anomalies = append(anomalies, found...)
 				mu.Unlock()
 			}()
 		}
 	}
 
+	for _, p := range a.providers {
+		if !p.IsConfigured() {
+			continue
+		}
+		if anomalyProviders[p.GetName()] {
+			continue
+		}
+		p := p
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			trend, err := p.GetDailyTrend(ctx, start, end)
+			if err != nil {
+				if a.debug {
+					log.Printf("[cost] daily trend for fallback anomaly detection on %s: %v", p.GetName(), err)
+				}
+				return
+			}
+			for i := range trend {
+				if trend[i].Provider == "" {
+					trend[i].Provider = p.GetName()
+				}
+			}
+			mu.Lock()
+			fallbackTrend = append(fallbackTrend, trend...)
+			mu.Unlock()
+		}()
+	}
+
 	wg.Wait()
 
-	// Sort by percent change descending
+	anomalies = append(anomalies, DetectAnomaliesByProvider(fallbackTrend, anomalyDeviationPct)...)
+
+	// Sort by absolute percent change descending — both spikes and drops
+	// should bubble up, not just positive deltas.
 	sort.Slice(anomalies, func(i, j int) bool {
-		return anomalies[i].PercentChange > anomalies[j].PercentChange
+		return absFloat(anomalies[i].PercentChange) > absFloat(anomalies[j].PercentChange)
 	})
 
 	return &CostAnomaliesResponse{
 		Anomalies: anomalies,
 	}, nil
+}
+
+func absFloat(f float64) float64 {
+	if f < 0 {
+		return -f
+	}
+	return f
 }
 
 // GetTags returns costs grouped by tag across all providers
