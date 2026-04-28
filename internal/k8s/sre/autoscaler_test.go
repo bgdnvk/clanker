@@ -97,49 +97,60 @@ func TestDetectAutoscaler_Both_PrefersKarpenter(t *testing.T) {
 	}
 }
 
-const sampleEventsJSON = `{
+// sampleEventsJSON renders a fixture whose timestamps are relative to
+// time.Now() so the test stays correct as wall-clock advances. The previous
+// hardcoded 2026 fixture would silently start failing in 2027 once the
+// "current" events fell outside a 365-day lookback.
+func sampleEventsJSON() string {
+	now := time.Now().UTC()
+	recent := now.Add(-30 * time.Minute).Format(time.RFC3339)
+	scaleUp := now.Add(-28 * time.Minute).Format(time.RFC3339)
+	scaleDown := now.Add(-15 * time.Minute).Format(time.RFC3339)
+	ancient := now.AddDate(-2, 0, 0).Format(time.RFC3339)
+	return `{
   "items": [
     {
       "type": "Warning", "reason": "FailedScheduling", "message": "0/3 nodes are available",
-      "count": 5, "firstTimestamp": "2026-04-27T10:00:00Z", "lastTimestamp": "2026-04-27T10:30:00Z",
+      "count": 5, "firstTimestamp": "` + recent + `", "lastTimestamp": "` + recent + `",
       "involvedObject": {"kind": "Pod", "name": "api-7d9", "namespace": "prod"}
     },
     {
       "type": "Normal", "reason": "TriggeredScaleUp", "message": "scaled up to 4 nodes",
-      "count": 1, "lastTimestamp": "2026-04-27T10:32:00Z",
+      "count": 1, "lastTimestamp": "` + scaleUp + `",
       "involvedObject": {"kind": "Node", "name": "ip-10-0-1-23"}
     },
     {
       "type": "Warning", "reason": "NotTriggerScaleUp", "message": "no pool can fit pod",
-      "count": 3, "lastTimestamp": "2026-04-27T10:25:00Z",
+      "count": 3, "lastTimestamp": "` + recent + `",
       "involvedObject": {"kind": "Pod", "name": "api-7d9", "namespace": "prod"}
     },
     {
       "type": "Normal", "reason": "ScaleDownEmpty", "message": "removed empty node",
-      "count": 1, "lastTimestamp": "2026-04-27T11:00:00Z",
+      "count": 1, "lastTimestamp": "` + scaleDown + `",
       "involvedObject": {"kind": "Node", "name": "ip-10-0-1-99"}
     },
     {
       "type": "Warning", "reason": "FailedScheduling", "message": "insufficient cpu",
-      "count": 2, "lastTimestamp": "2026-04-27T10:40:00Z",
+      "count": 2, "lastTimestamp": "` + recent + `",
       "involvedObject": {"kind": "Pod", "name": "worker-abc", "namespace": "default"}
     },
     {
       "type": "Warning", "reason": "FailedScheduling", "message": "ancient",
-      "count": 100, "lastTimestamp": "2025-01-01T00:00:00Z",
+      "count": 100, "lastTimestamp": "` + ancient + `",
       "involvedObject": {"kind": "Pod", "name": "ancient", "namespace": "default"}
     }
   ]
 }`
+}
 
 func TestAnalyzeScalingWaste_AggregatesAndWindows(t *testing.T) {
 	a := NewAutoscalerAnalyzer(&autoscalerMock{
 		caDeployJSON: `{"items": []}`,
-		eventsOutput: sampleEventsJSON,
+		eventsOutput: sampleEventsJSON(),
 	}, false)
 
-	// Use a wide lookback so the 2026 events are kept but the 2025-01-01
-	// "ancient" event is filtered out (it's > a year old vs. now in 2026).
+	// Use a 365d lookback so the recent (now-relative) events are kept
+	// but the explicitly "ancient" event (2 years old) is filtered out.
 	report, err := a.AnalyzeScalingWaste(context.Background(), 365*24*time.Hour)
 	if err != nil {
 		t.Fatalf("AnalyzeScalingWaste: %v", err)
@@ -175,7 +186,7 @@ func TestAnalyzeScalingWaste_AggregatesAndWindows(t *testing.T) {
 func TestAnalyzeScalingWaste_ShortLookbackFiltersOldEvents(t *testing.T) {
 	a := NewAutoscalerAnalyzer(&autoscalerMock{
 		caDeployJSON: `{"items": []}`,
-		eventsOutput: sampleEventsJSON,
+		eventsOutput: sampleEventsJSON(),
 	}, false)
 
 	// 1ns lookback excludes everything except events with no timestamp.

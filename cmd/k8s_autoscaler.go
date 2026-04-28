@@ -138,6 +138,13 @@ func printAutoscalerReport(out io.Writer, report *sre.ScalingWasteReport) {
 		tw.Flush()
 	}
 
+	if len(report.HotPodReasons) > 0 {
+		fmt.Fprintln(out, "\nHot pod reasons (why pods couldn't fit):")
+		for _, r := range report.HotPodReasons {
+			fmt.Fprintf(out, "  %s × %d   %s\n", r.Reason, r.Count, truncate(r.SampleMessage, 80))
+		}
+	}
+
 	if len(report.HotNodeReasons) > 0 {
 		fmt.Fprintln(out, "\nHot node reasons:")
 		for _, r := range report.HotNodeReasons {
