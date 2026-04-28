@@ -16,12 +16,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-var (
-	hpaValidateOutput     string
-	hpaValidateKubeconfig string
-	hpaValidateContext    string
-	hpaValidateSeverity   string
-)
+var hpaValidateSeverity string
 
 var k8sAutoscalerValidateCmd = &cobra.Command{
 	Use:   "validate",
@@ -46,9 +41,8 @@ Examples:
 
 func init() {
 	k8sAutoscalerCmd.AddCommand(k8sAutoscalerValidateCmd)
-	k8sAutoscalerValidateCmd.Flags().StringVarP(&hpaValidateOutput, "output", "o", "table", "Output format (table, json)")
-	k8sAutoscalerValidateCmd.Flags().StringVar(&hpaValidateKubeconfig, "kubeconfig", "", "Path to kubeconfig (default: ~/.kube/config)")
-	k8sAutoscalerValidateCmd.Flags().StringVar(&hpaValidateContext, "context", "", "kubectl context to use")
+	// --output / --kubeconfig / --context come from k8sAutoscalerCmd's
+	// PersistentFlags. Only --severity is local to validate.
 	k8sAutoscalerValidateCmd.Flags().StringVar(&hpaValidateSeverity, "severity", "", "Minimum severity to surface (info, warning, critical) — default shows all")
 }
 
@@ -56,7 +50,7 @@ func runHPAValidate(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	debug := viper.GetBool("debug")
 
-	client := k8s.NewClient(hpaValidateKubeconfig, hpaValidateContext, debug)
+	client := k8s.NewClient(autoscalerKubeconfig, autoscalerContext, debug)
 	validator := sre.NewHPAValidator(k8s.NewSREAdapter(client), debug)
 
 	report, err := validator.Validate(ctx)
@@ -66,7 +60,7 @@ func runHPAValidate(cmd *cobra.Command, args []string) error {
 
 	report.Findings = filterHPAFindingsBySeverity(report.Findings, hpaValidateSeverity)
 
-	switch strings.ToLower(hpaValidateOutput) {
+	switch strings.ToLower(autoscalerOutput) {
 	case "json":
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")

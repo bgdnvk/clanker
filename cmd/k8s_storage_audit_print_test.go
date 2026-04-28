@@ -34,7 +34,7 @@ func TestPrintStorageAuditReport_RendersFindings(t *testing.T) {
 	var buf bytes.Buffer
 	printStorageAuditReport(&buf, &storage.AuditReport{
 		PVsScanned: 1, PVCsScanned: 2, PodsScanned: 4,
-		OrphanedPVCs: 1, PendingPVCs: 1, OrphanedPVs: 1,
+		OrphanedPVCs: 1, PendingPVCs: 1, UnusedPVs: 1,
 		Findings: []storage.AuditFinding{
 			{Kind: "pv", Name: "pv-released", Issue: "PV Released and not reclaimed", Capacity: "20Gi"},
 			{Kind: "pvc", Namespace: "prod", Name: "orphan", Issue: "PVC not referenced by any pod", Capacity: "10Gi"},

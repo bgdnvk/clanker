@@ -87,8 +87,12 @@ func printStorageAuditReport(out io.Writer, report *storage.AuditReport) {
 	}
 
 	fmt.Fprintf(out, "Scanned %d PV(s), %d PVC(s), %d pod(s)\n", report.PVsScanned, report.PVCsScanned, report.PodsScanned)
-	fmt.Fprintf(out, "Waste signals: %d orphaned PVC(s), %d Pending PVC(s), %d unbound PV(s)\n\n",
-		report.OrphanedPVCs, report.PendingPVCs, report.OrphanedPVs)
+	fmt.Fprintf(out, "Waste signals: %d orphaned PVC(s), %d Pending PVC(s), %d unused PV(s)\n",
+		report.OrphanedPVCs, report.PendingPVCs, report.UnusedPVs)
+	if report.Notes != "" {
+		fmt.Fprintf(out, "Notes: %s\n", report.Notes)
+	}
+	fmt.Fprintln(out)
 
 	if len(report.Findings) == 0 {
 		fmt.Fprintln(out, "No storage issues detected. ✓")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -40,7 +41,10 @@ type AuditFinding struct {
 	Capacity  string `json:"capacity,omitempty"`
 }
 
-// AuditReport rolls up the audit results.
+// AuditReport rolls up the audit results. UnusedPVs counts every PV that
+// landed in a non-Bound phase the auditor flags (Released, Available, or
+// Failed) — useful as a single rollup but operators should still read
+// Findings for the per-PV reason.
 type AuditReport struct {
 	GeneratedAt  time.Time      `json:"generatedAt"`
 	PVsScanned   int            `json:"pvsScanned"`
@@ -48,7 +52,8 @@ type AuditReport struct {
 	PodsScanned  int            `json:"podsScanned"`
 	OrphanedPVCs int            `json:"orphanedPvcs"`
 	PendingPVCs  int            `json:"pendingPvcs"`
-	OrphanedPVs  int            `json:"orphanedPvs"`
+	UnusedPVs    int            `json:"unusedPvs"`
+	Notes        string         `json:"notes,omitempty"`
 	Findings     []AuditFinding `json:"findings,omitempty"`
 }
 
@@ -74,9 +79,11 @@ func (a *Auditor) Audit(ctx context.Context) (*AuditReport, error) {
 	usedPVCs, podsScanned, err := a.collectPVCsInUseByPods(ctx)
 	if err != nil {
 		// Pod listing failure shouldn't block the entire audit; we just
-		// can't detect orphaned PVCs without it.
+		// can't detect orphaned PVCs without it. Surface in Notes so the
+		// operator knows the orphan signal was suppressed.
+		report.Notes = fmt.Sprintf("pod scan failed, orphaned-PVC detection disabled: %v", err)
 		if a.debug {
-			fmt.Println("[storage-audit] pod scan failed, orphaned-PVC detection disabled:", err)
+			fmt.Fprintln(os.Stderr, "[storage-audit] pod scan failed, orphaned-PVC detection disabled:", err)
 		}
 	}
 	report.PodsScanned = podsScanned
@@ -95,7 +102,7 @@ func (a *Auditor) Audit(ctx context.Context) (*AuditReport, error) {
 		case f.Kind == "pvc" && strings.Contains(f.Issue, "Pending"):
 			report.PendingPVCs++
 		case f.Kind == "pv":
-			report.OrphanedPVs++
+			report.UnusedPVs++
 		}
 	}
 

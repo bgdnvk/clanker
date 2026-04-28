@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -37,6 +38,7 @@ type HPAValidationReport struct {
 	HPAsScanned          int          `json:"hpasScanned"`
 	ScaledObjectsScanned int          `json:"scaledObjectsScanned"`
 	KEDAInstalled        bool         `json:"kedaInstalled"`
+	Notes                string       `json:"notes,omitempty"`
 	Findings             []HPAFinding `json:"findings,omitempty"`
 }
 
@@ -55,16 +57,24 @@ func (v *HPAValidator) Validate(ctx context.Context) (*HPAValidationReport, erro
 	}
 
 	keda, err := v.kedaInstalled(ctx)
-	if err == nil && keda {
+	if err != nil {
+		appendNote(&report.Notes, fmt.Sprintf("keda detection failed: %v", err))
+		if v.debug {
+			fmt.Fprintln(os.Stderr, "[hpa-validator] keda detection failed:", err)
+		}
+	} else if keda {
 		report.KEDAInstalled = true
 		sos, err := v.listScaledObjects(ctx)
-		if err == nil {
+		if err != nil {
+			appendNote(&report.Notes, fmt.Sprintf("keda detected but scaledobjects fetch failed: %v", err))
+			if v.debug {
+				fmt.Fprintln(os.Stderr, "[hpa-validator] keda detected but scaledobjects fetch failed:", err)
+			}
+		} else {
 			report.ScaledObjectsScanned = len(sos)
 			for _, s := range sos {
 				report.Findings = append(report.Findings, v.validateScaledObject(s)...)
 			}
-		} else if v.debug {
-			fmt.Println("[hpa-validator] keda detected but scaledobjects fetch failed:", err)
 		}
 	}
 
@@ -311,4 +321,18 @@ func (v *HPAValidator) validateScaledObject(s scaledObjectSpec) []HPAFinding {
 	}
 
 	return out
+}
+
+// appendNote concatenates a non-empty diagnostic note onto an accumulator
+// using "; " as the separator. Used so the report carries operator-visible
+// detection failures alongside its findings instead of dropping them.
+func appendNote(dst *string, note string) {
+	if note == "" {
+		return
+	}
+	if *dst == "" {
+		*dst = note
+		return
+	}
+	*dst += "; " + note
 }

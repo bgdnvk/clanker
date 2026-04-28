@@ -247,12 +247,6 @@ func TestValidate_KEDAInstalledScansScaledObjects(t *testing.T) {
 }
 
 func TestValidate_KEDAAggressivePollingIsInfo(t *testing.T) {
-	pi := 1
-	min := 1
-	max := 5
-	_ = pi
-	_ = min
-	_ = max
 	v := NewHPAValidator(&hpaValidatorMock{
 		hpaList:            `{"items": []}`,
 		apiResourcesOutput: "scaledobjects.keda.sh\n",

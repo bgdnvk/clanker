@@ -149,8 +149,8 @@ func TestAnalyzeScalingWaste_AggregatesAndWindows(t *testing.T) {
 		eventsOutput: sampleEventsJSON(),
 	}, false)
 
-	// Use a wide lookback so the 2026 events are kept but the 2025-01-01
-	// "ancient" event is filtered out (it's > a year old vs. now in 2026).
+	// Use a 365d lookback so the recent (now-relative) events are kept
+	// but the explicitly "ancient" event (2 years old) is filtered out.
 	report, err := a.AnalyzeScalingWaste(context.Background(), 365*24*time.Hour)
 	if err != nil {
 		t.Fatalf("AnalyzeScalingWaste: %v", err)

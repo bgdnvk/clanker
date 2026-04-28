@@ -179,8 +179,8 @@ func TestAudit_FlagsAllPVStates(t *testing.T) {
 		t.Errorf("Bound PV should not be flagged, got %+v", report.Findings)
 	}
 
-	if report.OrphanedPVs != 3 {
-		t.Errorf("OrphanedPVs = %d, want 3", report.OrphanedPVs)
+	if report.UnusedPVs != 3 {
+		t.Errorf("UnusedPVs = %d, want 3", report.UnusedPVs)
 	}
 }
 
