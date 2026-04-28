@@ -185,7 +185,24 @@ func (a *AutoscalerAnalyzer) AnalyzeScalingWaste(ctx context.Context, lookback t
 		lookback = time.Hour
 	}
 
-	inv, _ := a.DetectAutoscaler(ctx)
+	inv, detectErr := a.DetectAutoscaler(ctx)
+	if inv == nil {
+		// Belt-and-braces: DetectAutoscaler currently always returns a
+		// non-nil pointer, but a future signature change shouldn't crash
+		// the analyzer with a nil deref on the next line.
+		inv = &AutoscalerInventory{Type: AutoscalerNone}
+	}
+	if detectErr != nil {
+		// DetectAutoscaler may carry meaningful diagnostic notes (karpenter
+		// probe failure, kube-system unreachable). Surface them on the
+		// report so users see why detection went sideways instead of the
+		// inventory silently flipping to "no autoscaler".
+		if inv.Notes == "" {
+			inv.Notes = fmt.Sprintf("autoscaler detection failed: %v", detectErr)
+		} else {
+			inv.Notes += fmt.Sprintf("; autoscaler detection failed: %v", detectErr)
+		}
+	}
 
 	report := &ScalingWasteReport{
 		Inventory:      *inv,

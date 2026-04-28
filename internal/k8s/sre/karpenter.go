@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -113,7 +114,9 @@ func (d *KarpenterDetector) ListNodePools(ctx context.Context) ([]NodePoolSummar
 		summary, err := parseNodePool(item)
 		if err != nil {
 			if d.debug {
-				fmt.Printf("[karpenter] skipping unparseable NodePool: %v\n", err)
+				// stderr so we don't corrupt stdout when the caller is consuming
+				// `-o json` output.
+				fmt.Fprintf(os.Stderr, "[karpenter] skipping unparseable NodePool: %v\n", err)
 			}
 			continue
 		}
@@ -145,7 +148,7 @@ func (d *KarpenterDetector) ListNodeClaims(ctx context.Context) ([]NodeClaimSumm
 		summary, err := parseNodeClaim(item)
 		if err != nil {
 			if d.debug {
-				fmt.Printf("[karpenter] skipping unparseable NodeClaim: %v\n", err)
+				fmt.Fprintf(os.Stderr, "[karpenter] skipping unparseable NodeClaim: %v\n", err)
 			}
 			continue
 		}
