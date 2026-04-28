@@ -251,6 +251,89 @@ func (m *NetworkPolicyManager) AllowFromNamespacePlan(targetNamespace, sourceNam
 	}
 }
 
+// AuditPolicies inspects network policies across the supplied namespaces and
+// reports which ones have default-deny coverage for ingress and egress. A
+// namespace is considered default-deny in a direction when at least one
+// policy targets all pods (empty podSelector) with that direction listed in
+// policyTypes and no rules in that direction (empty ingress/egress slice).
+//
+// If namespaces is nil or empty, all namespaces are audited.
+func (m *NetworkPolicyManager) AuditPolicies(ctx context.Context, namespaces []string) (*PolicyAuditReport, error) {
+	policies, err := m.collectPoliciesForAudit(ctx, namespaces)
+	if err != nil {
+		return nil, err
+	}
+
+	// When the caller didn't pass an explicit list, derive the audit set
+	// from whichever namespaces actually had policies. Track separately so
+	// it's clear we're reporting on discovered namespaces, not mutating the
+	// original input slice.
+	auditNamespaces := namespaces
+	if len(auditNamespaces) == 0 {
+		seen := make(map[string]struct{}, len(policies))
+		for _, p := range policies {
+			if _, ok := seen[p.Namespace]; !ok {
+				seen[p.Namespace] = struct{}{}
+				auditNamespaces = append(auditNamespaces, p.Namespace)
+			}
+		}
+	}
+
+	byNs := make(map[string][]NetworkPolicyInfo, len(auditNamespaces))
+	for _, p := range policies {
+		byNs[p.Namespace] = append(byNs[p.Namespace], p)
+	}
+
+	report := &PolicyAuditReport{Namespaces: make([]NamespacePolicyAudit, 0, len(auditNamespaces))}
+	for _, ns := range auditNamespaces {
+		entries := byNs[ns]
+		audit := NamespacePolicyAudit{
+			Namespace:   ns,
+			PolicyCount: len(entries),
+		}
+		for _, p := range entries {
+			audit.PolicyNames = append(audit.PolicyNames, p.Name)
+			if isDefaultDenyForType(p, "Ingress") && len(p.Ingress) == 0 {
+				audit.DefaultDenyIn = true
+			}
+			if isDefaultDenyForType(p, "Egress") && len(p.Egress) == 0 {
+				audit.DefaultDenyOut = true
+			}
+		}
+		report.Namespaces = append(report.Namespaces, audit)
+	}
+	return report, nil
+}
+
+func (m *NetworkPolicyManager) collectPoliciesForAudit(ctx context.Context, namespaces []string) ([]NetworkPolicyInfo, error) {
+	if len(namespaces) == 0 {
+		return m.ListNetworkPolicies(ctx, "", QueryOptions{AllNamespaces: true})
+	}
+	var combined []NetworkPolicyInfo
+	for _, ns := range namespaces {
+		policies, err := m.ListNetworkPolicies(ctx, ns, QueryOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("namespace %s: %w", ns, err)
+		}
+		combined = append(combined, policies...)
+	}
+	return combined, nil
+}
+
+// isDefaultDenyForType reports whether the policy targets all pods in its
+// namespace and lists the given policy type.
+func isDefaultDenyForType(p NetworkPolicyInfo, policyType string) bool {
+	if len(p.PodSelector) != 0 {
+		return false
+	}
+	for _, t := range p.PolicyTypes {
+		if t == policyType {
+			return true
+		}
+	}
+	return false
+}
+
 // generateNetworkPolicyManifest generates a YAML manifest for a network policy
 func (m *NetworkPolicyManager) generateNetworkPolicyManifest(opts CreateNetworkPolicyOptions) string {
 	manifest := fmt.Sprintf(`apiVersion: networking.k8s.io/v1

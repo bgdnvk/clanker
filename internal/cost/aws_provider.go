@@ -239,45 +239,96 @@ func (p *AWSProvider) GetForecast(ctx context.Context) (*CostForecast, error) {
 	}, nil
 }
 
-// GetAnomalies returns detected cost anomalies
+// GetAnomalies returns detected cost anomalies, both at the account level
+// and broken down per service, comparing the most recent day's spend against
+// the 7-day rolling baseline.
 func (p *AWSProvider) GetAnomalies(ctx context.Context) ([]CostAnomaly, error) {
-	// Get last 7 days of daily costs to detect anomalies
 	now := time.Now()
 	end := now
 	start := now.AddDate(0, 0, -7)
 
-	dailyCosts, err := p.GetDailyTrend(ctx, start, end)
+	totalAnomaly, err := p.detectTotalAnomaly(ctx, start, end)
 	if err != nil {
 		return nil, err
 	}
 
-	// Calculate average and detect anomalies (>30% deviation)
-	if len(dailyCosts) < 2 {
-		return nil, nil
+	serviceAnomalies, err := p.detectServiceAnomalies(ctx, start, end)
+	if err != nil {
+		// Service-level detection is best-effort. Surface the total-level
+		// finding even if the per-service query fails (e.g. account lacks
+		// permission for daily SERVICE grouping).
+		if p.debug {
+			log.Printf("[aws-cost] service anomaly detection failed: %v", err)
+		}
+		if totalAnomaly == nil {
+			return nil, nil
+		}
+		return []CostAnomaly{*totalAnomaly}, nil
 	}
 
-	var total float64
-	for _, dc := range dailyCosts[:len(dailyCosts)-1] {
-		total += dc.Cost
+	out := serviceAnomalies
+	if totalAnomaly != nil {
+		out = append([]CostAnomaly{*totalAnomaly}, out...)
 	}
-	avg := total / float64(len(dailyCosts)-1)
+	return out, nil
+}
 
-	var anomalies []CostAnomaly
-	today := dailyCosts[len(dailyCosts)-1]
-	if avg > 0 {
-		change := ((today.Cost - avg) / avg) * 100
-		if change > 30 || change < -30 {
-			anomalies = append(anomalies, CostAnomaly{
-				Service:       "Total AWS",
-				Provider:      "aws",
-				ExpectedCost:  avg,
-				ActualCost:    today.Cost,
-				PercentChange: change,
-				Description:   fmt.Sprintf("Daily cost deviation of %.1f%% from 7-day average", change),
-			})
+func (p *AWSProvider) detectTotalAnomaly(ctx context.Context, start, end time.Time) (*CostAnomaly, error) {
+	dailyCosts, err := p.GetDailyTrend(ctx, start, end)
+	if err != nil {
+		return nil, err
+	}
+	anomaly := DetectDailyAnomaly("Total AWS", "aws", dailyCosts, anomalyDeviationPct)
+	return anomaly, nil
+}
+
+func (p *AWSProvider) detectServiceAnomalies(ctx context.Context, start, end time.Time) ([]CostAnomaly, error) {
+	input := &costexplorer.GetCostAndUsageInput{
+		TimePeriod: &types.DateInterval{
+			Start: aws.String(start.Format("2006-01-02")),
+			End:   aws.String(end.Format("2006-01-02")),
+		},
+		Granularity: types.GranularityDaily,
+		Metrics:     []string{"UnblendedCost"},
+		GroupBy: []types.GroupDefinition{{
+			Type: types.GroupDefinitionTypeDimension,
+			Key:  aws.String("SERVICE"),
+		}},
+	}
+
+	result, err := p.client.GetCostAndUsage(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get AWS daily costs by service: %w", err)
+	}
+
+	byService := make(map[string][]DailyCost)
+	for _, period := range result.ResultsByTime {
+		if period.TimePeriod == nil || period.TimePeriod.Start == nil {
+			continue
+		}
+		date, err := time.Parse("2006-01-02", *period.TimePeriod.Start)
+		if err != nil {
+			continue
+		}
+		for _, group := range period.Groups {
+			if len(group.Keys) == 0 {
+				continue
+			}
+			service := group.Keys[0]
+			amount := 0.0
+			if c, ok := group.Metrics["UnblendedCost"]; ok && c.Amount != nil {
+				amount, _ = strconv.ParseFloat(*c.Amount, 64)
+			}
+			byService[service] = append(byService[service], DailyCost{Date: date, Cost: amount, Provider: "aws"})
 		}
 	}
 
+	var anomalies []CostAnomaly
+	for service, trend := range byService {
+		if a := DetectDailyAnomaly(service, "aws", trend, anomalyDeviationPct); a != nil {
+			anomalies = append(anomalies, *a)
+		}
+	}
 	return anomalies, nil
 }
 

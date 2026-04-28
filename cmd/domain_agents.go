@@ -312,7 +312,7 @@ func collectDatabaseAgentContext(ctx context.Context, question string, dbConnect
 	}
 
 	if (queryAllProviders || shouldQueryDomainProvider(question, "hetzner")) && hasHetznerDomainAccess() {
-		warnings = append(warnings, "Hetzner database inventory is not implemented in the current CLI integrations")
+		warnings = appendUnsupportedFeature(warnings, "Hetzner", "database inventory")
 	}
 
 	return sections, warnings
@@ -1044,7 +1044,7 @@ func collectCICDAgentContext(ctx context.Context, question string, debug bool) (
 		}
 	}
 	if shouldQueryDomainProvider(question, "hetzner") && hasHetznerDomainAccess() {
-		warnings = append(warnings, "Hetzner build or deployment inventory is not implemented in the current CLI integrations")
+		warnings = appendUnsupportedFeature(warnings, "Hetzner", "build or deployment inventory")
 	}
 
 	return sections, warnings
@@ -1295,6 +1295,13 @@ func appendDomainWarning(warnings []string, title string, err error) []string {
 		return warnings
 	}
 	return append(warnings, fmt.Sprintf("%s: %v", title, err))
+}
+
+// appendUnsupportedFeature records that a provider lacks coverage for a
+// specific area. Distinct from appendDomainWarning so the agent prompt can
+// frame these as documented limitations rather than transient errors.
+func appendUnsupportedFeature(warnings []string, provider, area string) []string {
+	return append(warnings, fmt.Sprintf("%s %s: not yet supported by Clanker (tracked feature gap)", provider, area))
 }
 
 func truncateDomainSection(content string) string {

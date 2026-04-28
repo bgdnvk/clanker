@@ -13,15 +13,17 @@ import (
 )
 
 var (
-	costProvider  string
-	costStartDate string
-	costEndDate   string
-	costFormat    string
-	costOutput    string
-	costTop       int
-	costTagKey    string
-	costGroupBy   string
-	costProfile   string
+	costProvider     string
+	costStartDate    string
+	costEndDate      string
+	costFormat       string
+	costOutput       string
+	costTop          int
+	costTagKey       string
+	costGroupBy      string
+	costProfile      string
+	costTagsAudit    bool
+	costRequiredTags string
 )
 
 func init() {
@@ -52,6 +54,8 @@ func init() {
 
 	// Tags specific flags
 	costTagsCmd.Flags().StringVar(&costTagKey, "key", "", "Filter by tag key")
+	costTagsCmd.Flags().BoolVar(&costTagsAudit, "audit", false, "Audit tag compliance: report untagged spend per required key")
+	costTagsCmd.Flags().StringVar(&costRequiredTags, "required-tags", "Environment,Owner,Project", "Comma-separated tag keys to audit (used with --audit)")
 }
 
 // costCmd represents the cost command
@@ -305,10 +309,16 @@ var costTagsCmd = &cobra.Command{
 	Short: "Show cost grouped by tags",
 	Long: `Display costs grouped by user-defined tags.
 
+With --audit, runs a tag-compliance audit: for each required tag key it
+reports how much spend ended up in the untagged bucket (resources without
+that tag) versus the tagged buckets, so you can spot governance gaps.
+
 Examples:
   clanker cost tags
   clanker cost tags --key Environment
-  clanker cost tags --key Team --format json`,
+  clanker cost tags --key Team --format json
+  clanker cost tags --audit
+  clanker cost tags --audit --required-tags env,owner,cost-center`,
 	Run: func(cmd *cobra.Command, args []string) {
 		ctx := context.Background()
 		debug := viper.GetBool("debug")
@@ -317,6 +327,22 @@ Examples:
 		formatter := cost.NewFormatter(costFormat, true)
 
 		start, end := resolveDateRangeAsTime()
+
+		if costTagsAudit {
+			keys := strings.Split(costRequiredTags, ",")
+			report, err := aggregator.AuditTags(ctx, keys, start, end)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error auditing tags: %v\n", err)
+				os.Exit(1)
+			}
+			output, err := formatter.FormatTagAudit(report)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error formatting output: %v\n", err)
+				os.Exit(1)
+			}
+			formatter.Print(output)
+			return
+		}
 
 		tagKey := costTagKey
 		if tagKey == "" {

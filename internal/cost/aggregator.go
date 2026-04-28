@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -246,44 +247,173 @@ func (a *Aggregator) GetForecast(ctx context.Context) (*CostForecast, error) {
 	return nil, nil
 }
 
-// GetAnomalies returns cost anomalies from all providers
+// GetAnomalies returns cost anomalies from all providers. Providers that
+// implement AnomalyProvider supply their own (typically richer, per-service)
+// findings. For providers that don't, we run a generic z-style daily-deviation
+// detector against their daily trend so coverage isn't AWS-only.
 func (a *Aggregator) GetAnomalies(ctx context.Context) (*CostAnomaliesResponse, error) {
 	var (
-		wg        sync.WaitGroup
-		mu        sync.Mutex
-		anomalies []CostAnomaly
+		wg               sync.WaitGroup
+		mu               sync.Mutex
+		anomalies        []CostAnomaly
+		fallbackTrend    []DailyCost
+		anomalyProviders = make(map[string]bool)
 	)
+
+	now := time.Now()
+	start, end := since7Days(now)
 
 	for _, p := range a.providers {
 		if !p.IsConfigured() {
 			continue
 		}
 		if ap, ok := p.(AnomalyProvider); ok {
+			anomalyProviders[p.GetName()] = true
 			ap := ap
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				a, err := ap.GetAnomalies(ctx)
+				found, err := ap.GetAnomalies(ctx)
 				if err != nil {
+					if a.debug {
+						log.Printf("[cost] anomaly fetch from %s: %v", ap.GetName(), err)
+					}
 					return
 				}
 				mu.Lock()
-				anomalies = append(anomalies, a...)
+				anomalies = append(anomalies, found...)
 				mu.Unlock()
 			}()
 		}
 	}
 
+	for _, p := range a.providers {
+		if !p.IsConfigured() {
+			continue
+		}
+		if anomalyProviders[p.GetName()] {
+			continue
+		}
+		p := p
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			trend, err := p.GetDailyTrend(ctx, start, end)
+			if err != nil {
+				if a.debug {
+					log.Printf("[cost] daily trend for fallback anomaly detection on %s: %v", p.GetName(), err)
+				}
+				return
+			}
+			for i := range trend {
+				if trend[i].Provider == "" {
+					trend[i].Provider = p.GetName()
+				}
+			}
+			mu.Lock()
+			fallbackTrend = append(fallbackTrend, trend...)
+			mu.Unlock()
+		}()
+	}
+
 	wg.Wait()
 
-	// Sort by percent change descending
+	anomalies = append(anomalies, DetectAnomaliesByProvider(fallbackTrend, anomalyDeviationPct)...)
+
+	// Sort by absolute percent change descending — both spikes and drops
+	// should bubble up, not just positive deltas.
 	sort.Slice(anomalies, func(i, j int) bool {
-		return anomalies[i].PercentChange > anomalies[j].PercentChange
+		return absFloat(anomalies[i].PercentChange) > absFloat(anomalies[j].PercentChange)
 	})
 
 	return &CostAnomaliesResponse{
 		Anomalies: anomalies,
 	}, nil
+}
+
+func absFloat(f float64) float64 {
+	if f < 0 {
+		return -f
+	}
+	return f
+}
+
+// AuditTags runs a tag-compliance audit for the supplied required tag keys.
+// For each key it groups costs by tag value across providers and reports the
+// portion of spend that fell into the untagged bucket (Cost Explorer returns
+// these as the empty tag value).
+func (a *Aggregator) AuditTags(ctx context.Context, requiredKeys []string, start, end time.Time) (*TagAuditReport, error) {
+	if len(requiredKeys) == 0 {
+		return &TagAuditReport{Period: CostPeriod{StartDate: start, EndDate: end}}, nil
+	}
+
+	report := &TagAuditReport{
+		Period:  CostPeriod{StartDate: start, EndDate: end},
+		Entries: make([]TagAuditEntry, 0, len(requiredKeys)),
+	}
+
+	configuredProviders := 0
+	tagProviders := 0
+	for _, p := range a.providers {
+		if !p.IsConfigured() {
+			continue
+		}
+		configuredProviders++
+		if _, ok := p.(TagProvider); ok {
+			tagProviders++
+		}
+	}
+
+	for _, key := range requiredKeys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		resp, err := a.GetTags(ctx, key, start, end)
+		if err != nil {
+			if a.debug {
+				log.Printf("[cost] tag audit: %s: %v", key, err)
+			}
+			continue
+		}
+
+		entry := TagAuditEntry{TagKey: key, ProvidersSeen: tagProviders}
+		entry.UnsupportedNum = configuredProviders - tagProviders
+		for _, t := range resp.Tags {
+			entry.TotalCost += t.Cost
+			if isUntaggedValue(t.TagValue) {
+				entry.UntaggedCost += t.Cost
+				entry.UntaggedSeen = true
+			} else {
+				entry.TaggedValues++
+			}
+		}
+		if entry.TotalCost > 0 {
+			entry.UntaggedPct = (entry.UntaggedCost / entry.TotalCost) * 100
+		}
+		report.Entries = append(report.Entries, entry)
+	}
+
+	return report, nil
+}
+
+// isUntaggedValue identifies the untagged bucket returned by AWS Cost Explorer
+// when grouping by a tag the resource doesn't carry.
+func isUntaggedValue(v string) bool {
+	trimmed := strings.TrimSpace(v)
+	if trimmed == "" {
+		return true
+	}
+	// AWS prefixes the group key as "tagKey$value"; an unset value comes
+	// through as "tagKey$" (i.e. trailing dollar with empty suffix).
+	if strings.HasSuffix(trimmed, "$") {
+		return true
+	}
+	switch strings.ToLower(trimmed) {
+	case "no value", "(notagkey)", "untagged":
+		return true
+	}
+	return false
 }
 
 // GetTags returns costs grouped by tag across all providers

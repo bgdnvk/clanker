@@ -127,3 +127,21 @@ type TagsResponse struct {
 	TagKey string     `json:"tagKey"`
 	Period CostPeriod `json:"period"`
 }
+
+// TagAuditEntry summarizes tagging compliance for a single required tag key.
+type TagAuditEntry struct {
+	TagKey         string  `json:"tagKey"`
+	TotalCost      float64 `json:"totalCost"`
+	UntaggedCost   float64 `json:"untaggedCost"`
+	UntaggedPct    float64 `json:"untaggedPct"`
+	TaggedValues   int     `json:"taggedValues"`
+	UntaggedSeen   bool    `json:"untaggedSeen"`
+	ProvidersSeen  int     `json:"providersSeen"`
+	UnsupportedNum int     `json:"unsupportedProviders"`
+}
+
+// TagAuditReport is the response of a tag-compliance audit.
+type TagAuditReport struct {
+	Entries []TagAuditEntry `json:"entries"`
+	Period  CostPeriod      `json:"period"`
+}

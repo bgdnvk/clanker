@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -188,9 +189,14 @@ func (s *Store) ListRuns(limit int) ([]RunSummary, error) {
 		var r RunSummary
 		var createdAt string
 		if err := rows.Scan(&r.RunID, &r.Provider, &r.Region, &r.Profile, &r.ResourceCount, &createdAt); err != nil {
+			log.Printf("[resourcedb] skipping run row: scan failed: %v", err)
 			continue
 		}
-		r.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+			r.CreatedAt = t
+		} else {
+			log.Printf("[resourcedb] run %s: unparseable created_at %q: %v", r.RunID, createdAt, err)
+		}
 		runs = append(runs, r)
 	}
 
@@ -213,6 +219,7 @@ func scanResources(rows *sql.Rows) ([]*Resource, error) {
 	for rows.Next() {
 		r, err := scanResourceRow(rows)
 		if err != nil {
+			log.Printf("[resourcedb] skipping resource row: %v", err)
 			continue
 		}
 		resources = append(resources, r)
@@ -240,21 +247,7 @@ func scanResource(row *sql.Row) (*Resource, error) {
 		r.ParentRunID = parentRunID.String
 	}
 
-	if metadataJSON.Valid {
-		_ = json.Unmarshal([]byte(metadataJSON.String), &r.Metadata)
-	}
-	if r.Metadata == nil {
-		r.Metadata = make(map[string]string)
-	}
-
-	if tagsJSON.Valid {
-		_ = json.Unmarshal([]byte(tagsJSON.String), &r.Tags)
-	}
-	if r.Tags == nil {
-		r.Tags = make(map[string]string)
-	}
-
-	r.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	hydrateResource(r, metadataJSON, tagsJSON, createdAt)
 
 	return r, nil
 }
@@ -279,23 +272,37 @@ func scanResourceRow(rows *sql.Rows) (*Resource, error) {
 		r.ParentRunID = parentRunID.String
 	}
 
+	hydrateResource(r, metadataJSON, tagsJSON, createdAt)
+
+	return r, nil
+}
+
+// hydrateResource populates JSON-encoded and time-encoded fields on a resource,
+// logging (rather than discarding) parse errors so corrupt rows are visible.
+func hydrateResource(r *Resource, metadataJSON, tagsJSON sql.NullString, createdAt string) {
 	if metadataJSON.Valid {
-		_ = json.Unmarshal([]byte(metadataJSON.String), &r.Metadata)
+		if err := json.Unmarshal([]byte(metadataJSON.String), &r.Metadata); err != nil {
+			log.Printf("[resourcedb] resource %d: malformed metadata JSON: %v", r.ID, err)
+		}
 	}
 	if r.Metadata == nil {
 		r.Metadata = make(map[string]string)
 	}
 
 	if tagsJSON.Valid {
-		_ = json.Unmarshal([]byte(tagsJSON.String), &r.Tags)
+		if err := json.Unmarshal([]byte(tagsJSON.String), &r.Tags); err != nil {
+			log.Printf("[resourcedb] resource %d: malformed tags JSON: %v", r.ID, err)
+		}
 	}
 	if r.Tags == nil {
 		r.Tags = make(map[string]string)
 	}
 
-	r.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-
-	return r, nil
+	if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+		r.CreatedAt = t
+	} else {
+		log.Printf("[resourcedb] resource %d: unparseable created_at %q: %v", r.ID, createdAt, err)
+	}
 }
 
 // Vacuum compacts the database
