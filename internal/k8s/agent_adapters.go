@@ -5,6 +5,7 @@ import (
 
 	"github.com/bgdnvk/clanker/internal/k8s/networking"
 	"github.com/bgdnvk/clanker/internal/k8s/sre"
+	"github.com/bgdnvk/clanker/internal/k8s/storage"
 	"github.com/bgdnvk/clanker/internal/k8s/workloads"
 )
 
@@ -86,6 +87,13 @@ func (a *networkingClientAdapter) Delete(ctx context.Context, resourceType, name
 func (a *networkingClientAdapter) Apply(ctx context.Context, manifest string) (string, error) {
 	// Pass empty namespace - kubectl will use the namespace from the manifest
 	return a.client.Apply(ctx, manifest, "")
+}
+
+// NewStorageAdapter returns a storage.K8sClient backed by the given kubectl
+// Client. Exposed so callers outside this package (cmd/) can build storage
+// auditors without poking at the unexported adapter type.
+func NewStorageAdapter(client *Client) storage.K8sClient {
+	return &storageClientAdapter{client: client}
 }
 
 // storageClientAdapter wraps Client to implement storage.K8sClient interface
