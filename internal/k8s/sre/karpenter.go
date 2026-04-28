@@ -267,22 +267,23 @@ func providerInstanceID(providerID string) string {
 }
 
 // isMissingResource reports whether the kubectl error means the requested
-// resource type is unknown (Karpenter not installed). We check stderr-like
-// substrings rather than relying on exit codes because kubectl returns
-// generic errors for both "not found" and "unknown resource".
+// CRD / resource KIND is unknown (Karpenter not installed). We deliberately
+// do NOT match "no resources found" — that string also appears for an empty
+// but installed CRD, which would mis-classify a working Karpenter cluster
+// with zero NodePools as "not installed".
 func isMissingResource(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "the server doesn't have a resource type") ||
-		strings.Contains(msg, "no resources found") ||
 		strings.Contains(msg, "doesn't have a resource") ||
 		strings.Contains(msg, "no matches for kind")
 }
 
 // humanAge is a minimal duration→string formatter for the "AGE" column.
-// kubectl-style: 5m, 3h, 2d, 14d.
+// kubectl-style: 5m, 3h, 2d, 14d. Exactly 24h is rendered as "1d" rather
+// than "24h" to match `kubectl get` conventions.
 func humanAge(d time.Duration) string {
 	if d < 0 {
 		d = 0
@@ -295,6 +296,10 @@ func humanAge(d time.Duration) string {
 	case d < 24*time.Hour:
 		return fmt.Sprintf("%dh", int(d.Hours()))
 	default:
-		return fmt.Sprintf("%dd", int(d.Hours()/24))
+		days := int(d.Hours()) / 24
+		if days < 1 {
+			days = 1
+		}
+		return fmt.Sprintf("%dd", days)
 	}
 }

@@ -21,6 +21,7 @@ var (
 	autoscalerKubeconfig string
 	autoscalerContext    string
 	autoscalerLookback   string
+	autoscalerMaxEvents  int
 )
 
 var k8sAutoscalerCmd = &cobra.Command{
@@ -55,6 +56,7 @@ func init() {
 	k8sAutoscalerCmd.PersistentFlags().StringVar(&autoscalerKubeconfig, "kubeconfig", "", "Path to kubeconfig (default: ~/.kube/config)")
 	k8sAutoscalerCmd.PersistentFlags().StringVar(&autoscalerContext, "context", "", "kubectl context to use")
 	k8sAutoscalerAnalyzeCmd.Flags().StringVar(&autoscalerLookback, "lookback", "1h", "Lookback window for event analysis (e.g. 30m, 6h, 24h)")
+	k8sAutoscalerAnalyzeCmd.Flags().IntVar(&autoscalerMaxEvents, "max-events", 5000, "Maximum events to classify (most-recent kept). 0 disables the cap.")
 }
 
 func runAutoscalerAnalyze(cmd *cobra.Command, args []string) error {
@@ -68,6 +70,7 @@ func runAutoscalerAnalyze(cmd *cobra.Command, args []string) error {
 
 	client := k8s.NewClient(autoscalerKubeconfig, autoscalerContext, debug)
 	analyzer := sre.NewAutoscalerAnalyzer(k8s.NewSREAdapter(client), debug)
+	analyzer.MaxEvents = autoscalerMaxEvents
 
 	report, err := analyzer.AnalyzeScalingWaste(ctx, lookback)
 	if err != nil {
@@ -96,7 +99,14 @@ func printAutoscalerReport(out io.Writer, report *sre.ScalingWasteReport) {
 	if report.Inventory.Notes != "" {
 		fmt.Fprintf(out, "  note: %s\n", report.Inventory.Notes)
 	}
-	fmt.Fprintf(out, "Lookback: %s   Generated: %s\n\n", report.LookbackWindow, report.GeneratedAt.Format(time.RFC3339))
+	fmt.Fprintf(out, "Lookback: %s   Generated: %s\n", report.LookbackWindow, report.GeneratedAt.Format(time.RFC3339))
+	if report.EventsTruncated {
+		fmt.Fprintf(out, "⚠  Event stream truncated to %d most-recent entries (some history dropped). Raise --max-events for full coverage.\n",
+			report.EventsProcessed)
+	} else {
+		fmt.Fprintf(out, "Events processed: %d\n", report.EventsProcessed)
+	}
+	fmt.Fprintln(out)
 
 	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "SIGNAL\tCOUNT")

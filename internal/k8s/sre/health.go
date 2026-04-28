@@ -74,8 +74,12 @@ func (h *HealthChecker) CheckClusterDetailed(ctx context.Context) (*ClusterHealt
 		summary.NetworkHealth = ComponentHealth{Status: "unknown", Score: 50}
 	}
 
-	// Count issues by severity
-	allIssues := append(nodeIssues, workloadIssues...)
+	// Count issues by severity. Build the combined slice with explicit
+	// allocation so callers that mutate the returned []Issue can't clobber
+	// nodeIssues' backing array (they would otherwise share storage).
+	allIssues := make([]Issue, 0, len(nodeIssues)+len(workloadIssues))
+	allIssues = append(allIssues, nodeIssues...)
+	allIssues = append(allIssues, workloadIssues...)
 	for _, issue := range allIssues {
 		switch issue.Severity {
 		case SeverityCritical:

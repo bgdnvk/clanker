@@ -26,7 +26,18 @@ type AutoscalerAnalyzer struct {
 	karpenter   *KarpenterDetector
 	diagnostics *DiagnosticsManager
 	debug       bool
+
+	// MaxEvents bounds how many events the client-side classifier will
+	// process. kubectl get events -A on a busy cluster can return tens of
+	// thousands of objects; this cap keeps the analyzer's memory and CPU
+	// usage predictable. Events are sorted by LastTimestamp ascending, so
+	// when we trim we keep the most recent ones. 0 disables the cap.
+	MaxEvents int
 }
+
+// defaultMaxEvents is the cap applied when MaxEvents is unset. 5000 covers
+// a busy cluster's last few hours without runaway memory.
+const defaultMaxEvents = 5000
 
 // NewAutoscalerAnalyzer wires up an analyzer using an existing k8s client.
 func NewAutoscalerAnalyzer(client K8sClient, debug bool) *AutoscalerAnalyzer {
@@ -35,6 +46,7 @@ func NewAutoscalerAnalyzer(client K8sClient, debug bool) *AutoscalerAnalyzer {
 		karpenter:   NewKarpenterDetector(client, debug),
 		diagnostics: NewDiagnosticsManager(client, debug),
 		debug:       debug,
+		MaxEvents:   defaultMaxEvents,
 	}
 }
 
@@ -52,12 +64,14 @@ type ScalingWasteReport struct {
 	Inventory          AutoscalerInventory `json:"inventory"`
 	LookbackWindow     string              `json:"lookbackWindow"`
 	GeneratedAt        time.Time           `json:"generatedAt"`
-	FailedScheduling   int                 `json:"failedScheduling"`   // pods that couldn't fit
-	NotTriggerScaleUp  int                 `json:"notTriggerScaleUp"`  // CA decided NOT to scale up
-	TriggeredScaleUp   int                 `json:"triggeredScaleUp"`   // CA decided to scale up
-	ScaleDownEmpty     int                 `json:"scaleDownEmpty"`     // CA scaled down empty nodes
-	ScaleDownUnneeded  int                 `json:"scaleDownUnneeded"`  // CA scaled down underutilised nodes
-	NodeNotReadyEvents int                 `json:"nodeNotReadyEvents"` // node went NotReady mid-flight
+	EventsProcessed    int                 `json:"eventsProcessed"`
+	EventsTruncated    bool                `json:"eventsTruncated,omitempty"` // true when the cap kicked in
+	FailedScheduling   int                 `json:"failedScheduling"`          // pods that couldn't fit
+	NotTriggerScaleUp  int                 `json:"notTriggerScaleUp"`         // CA decided NOT to scale up
+	TriggeredScaleUp   int                 `json:"triggeredScaleUp"`          // CA decided to scale up
+	ScaleDownEmpty     int                 `json:"scaleDownEmpty"`            // CA scaled down empty nodes
+	ScaleDownUnneeded  int                 `json:"scaleDownUnneeded"`         // CA scaled down underutilised nodes
+	NodeNotReadyEvents int                 `json:"nodeNotReadyEvents"`        // node went NotReady mid-flight
 	HotPodReasons      []ReasonCount       `json:"hotPodReasons,omitempty"`
 	HotNodeReasons     []ReasonCount       `json:"hotNodeReasons,omitempty"`
 	TopFailingPods     []PodFailure        `json:"topFailingPods,omitempty"`
@@ -80,6 +94,11 @@ type PodFailure struct {
 	NotScaleUpCount  int    `json:"notTriggerScaleUp"`
 	LastReason       string `json:"lastReason,omitempty"`
 	LastMessage      string `json:"lastMessage,omitempty"`
+
+	// lastTimestamp is the timestamp of the event that supplied LastReason
+	// / LastMessage, used internally during aggregation to keep the most
+	// recent reason rather than overwriting newer with older.
+	lastTimestamp time.Time
 }
 
 // DetectAutoscaler returns which autoscaler (if any) is running. It checks
@@ -96,7 +115,16 @@ func (a *AutoscalerAnalyzer) DetectAutoscaler(ctx context.Context) (*AutoscalerI
 
 	if a.karpenter != nil {
 		presence, err := a.karpenter.Detect(ctx)
-		if err == nil && presence != nil {
+		switch {
+		case err != nil:
+			// Surface the error so users notice transient failures instead
+			// of silently being told "no Karpenter" on a flaky kube-apiserver.
+			if inv.Notes == "" {
+				inv.Notes = fmt.Sprintf("karpenter detection failed: %v", err)
+			} else {
+				inv.Notes += fmt.Sprintf("; karpenter detection failed: %v", err)
+			}
+		case presence != nil:
 			inv.KarpenterPresent = presence.Installed
 		}
 	}
@@ -170,6 +198,18 @@ func (a *AutoscalerAnalyzer) AnalyzeScalingWaste(ctx context.Context, lookback t
 		return nil, fmt.Errorf("event fetch failed: %w", err)
 	}
 
+	cap := a.MaxEvents
+	if cap == 0 {
+		cap = defaultMaxEvents
+	}
+	if cap > 0 && len(events) > cap {
+		// kubectl returns events sorted by lastTimestamp ascending — drop
+		// the oldest, keep the newest cap events.
+		events = events[len(events)-cap:]
+		report.EventsTruncated = true
+	}
+	report.EventsProcessed = len(events)
+
 	cutoff := time.Now().Add(-lookback)
 	podReasonCounts := map[string]*ReasonCount{}
 	nodeReasonCounts := map[string]*ReasonCount{}
@@ -182,25 +222,26 @@ func (a *AutoscalerAnalyzer) AnalyzeScalingWaste(ctx context.Context, lookback t
 			continue
 		}
 
+		c := effectiveEventCount(e)
 		switch e.Reason {
 		case "FailedScheduling":
-			report.FailedScheduling += e.Count
+			report.FailedScheduling += c
 			bumpPod(podFailures, e, "FailedScheduling")
 			bump(podReasonCounts, e)
 		case "NotTriggerScaleUp":
-			report.NotTriggerScaleUp += e.Count
+			report.NotTriggerScaleUp += c
 			bumpPod(podFailures, e, "NotTriggerScaleUp")
 			bump(podReasonCounts, e)
 		case "TriggeredScaleUp":
-			report.TriggeredScaleUp += e.Count
+			report.TriggeredScaleUp += c
 		case "ScaleDownEmpty":
-			report.ScaleDownEmpty += e.Count
+			report.ScaleDownEmpty += c
 			bump(nodeReasonCounts, e)
 		case "ScaleDown":
-			report.ScaleDownUnneeded += e.Count
+			report.ScaleDownUnneeded += c
 			bump(nodeReasonCounts, e)
 		case "NodeNotReady":
-			report.NodeNotReadyEvents += e.Count
+			report.NodeNotReadyEvents += c
 			bump(nodeReasonCounts, e)
 		}
 	}
@@ -220,16 +261,25 @@ func (a *AutoscalerAnalyzer) gatherRelevantEvents(ctx context.Context) ([]EventI
 	return a.diagnostics.GetEvents(ctx, "", "")
 }
 
+// effectiveEventCount normalises a zero/negative event Count to 1. Events
+// fetched from `kubectl get events` sometimes have an unset Count (the new
+// events.k8s.io/v1 API drops Count entirely on single-occurrence events),
+// and the previous "guard the accumulator" approach miscounted multiple
+// zero-count events as a single occurrence.
+func effectiveEventCount(e EventInfo) int {
+	if e.Count <= 0 {
+		return 1
+	}
+	return e.Count
+}
+
 func bump(m map[string]*ReasonCount, e EventInfo) {
 	rc, ok := m[e.Reason]
 	if !ok {
 		rc = &ReasonCount{Reason: e.Reason, SampleMessage: e.Message}
 		m[e.Reason] = rc
 	}
-	rc.Count += e.Count
-	if rc.Count <= 0 {
-		rc.Count++ // events without a Count default to 1
-	}
+	rc.Count += effectiveEventCount(e)
 }
 
 func bumpPod(m map[string]*PodFailure, e EventInfo, reason string) {
@@ -242,17 +292,18 @@ func bumpPod(m map[string]*PodFailure, e EventInfo, reason string) {
 		pf = &PodFailure{Namespace: e.InvolvedObject.Namespace, Name: e.InvolvedObject.Name}
 		m[key] = pf
 	}
-	count := e.Count
-	if count <= 0 {
-		count = 1
-	}
+	count := effectiveEventCount(e)
 	switch reason {
 	case "FailedScheduling":
 		pf.FailedSchedCount += count
 	case "NotTriggerScaleUp":
 		pf.NotScaleUpCount += count
 	}
-	if pf.LastReason == "" || (!e.LastTimestamp.IsZero()) {
+	// Only adopt the new event's reason if it's strictly more recent than
+	// what we've already recorded. Falls back to "first non-zero timestamp
+	// wins" when the existing record has no timestamp yet.
+	if pf.lastTimestamp.IsZero() || e.LastTimestamp.After(pf.lastTimestamp) {
+		pf.lastTimestamp = e.LastTimestamp
 		pf.LastReason = e.Reason
 		pf.LastMessage = strings.TrimSpace(e.Message)
 	}

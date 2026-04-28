@@ -283,12 +283,19 @@ func TestHumanAge(t *testing.T) {
 
 func TestIsMissingResource(t *testing.T) {
 	cases := map[string]bool{
+		// Genuine "CRD not installed" signals from kubectl
 		"the server doesn't have a resource type \"nodepools.karpenter.sh\"": true,
-		"no resources found in default namespace":                            true,
 		"no matches for kind \"NodePool\" in version \"karpenter.sh/v1\"":    true,
-		"Error from server (Forbidden)":                                      false,
-		"connection refused":                                                 false,
-		"":                                                                   false,
+
+		// Real failures must NOT be classified as missing
+		"Error from server (Forbidden)": false,
+		"connection refused":            false,
+		"":                              false,
+
+		// Regression: "no resources found" used to match this predicate,
+		// which mis-classified an empty-but-installed Karpenter cluster as
+		// "not installed". Must NOT match.
+		"no resources found in default namespace": false,
 	}
 	for msg, want := range cases {
 		var err error
@@ -298,5 +305,33 @@ func TestIsMissingResource(t *testing.T) {
 		if got := isMissingResource(err); got != want {
 			t.Errorf("isMissingResource(%q) = %v, want %v", msg, got, want)
 		}
+	}
+}
+
+// Regression: an empty-but-installed Karpenter cluster used to surface as
+// "not installed" because the "no resources found" string was mis-handled.
+// This test exercises the integration: the mock returns an empty items list
+// (not an error), so ListNodePools should yield an empty slice, NOT nil.
+func TestListNodePools_EmptyButInstalledCluster(t *testing.T) {
+	d := NewKarpenterDetector(&karpenterMock{
+		nodePoolsJSON: []byte(`{"items": []}`),
+	}, false)
+	pools, err := d.ListNodePools(context.Background())
+	if err != nil {
+		t.Fatalf("empty list should not error: %v", err)
+	}
+	if pools == nil {
+		t.Fatal("empty installed cluster should return empty slice, not nil")
+	}
+	if len(pools) != 0 {
+		t.Errorf("expected 0 pools for empty cluster, got %d", len(pools))
+	}
+}
+
+func TestHumanAge_BoundaryAt24h(t *testing.T) {
+	// Exactly 24h must render as 1d, not 24h, to match `kubectl get`.
+	got := humanAge(24 * time.Hour)
+	if got != "1d" {
+		t.Errorf("humanAge(24h) = %q, want \"1d\"", got)
 	}
 }
