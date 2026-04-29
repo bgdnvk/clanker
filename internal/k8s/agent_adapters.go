@@ -3,6 +3,7 @@ package k8s
 import (
 	"context"
 
+	"github.com/bgdnvk/clanker/internal/k8s/cost"
 	"github.com/bgdnvk/clanker/internal/k8s/networking"
 	"github.com/bgdnvk/clanker/internal/k8s/sre"
 	"github.com/bgdnvk/clanker/internal/k8s/storage"
@@ -182,4 +183,20 @@ func (a *telemetryClientAdapter) RunJSON(ctx context.Context, args ...string) ([
 
 func (a *telemetryClientAdapter) GetJSON(ctx context.Context, resourceType, name, namespace string) ([]byte, error) {
 	return a.client.GetJSON(ctx, resourceType, name, namespace)
+}
+
+// NewK8sCostAdapter returns a cost.K8sClient backed by the given kubectl
+// Client. Exposed so callers outside this package can build the workload
+// cost attributor without poking at the unexported adapter type.
+func NewK8sCostAdapter(client *Client) cost.K8sClient {
+	return &k8sCostClientAdapter{client: client}
+}
+
+// k8sCostClientAdapter wraps Client to implement cost.K8sClient.
+type k8sCostClientAdapter struct {
+	client *Client
+}
+
+func (a *k8sCostClientAdapter) RunJSON(ctx context.Context, args ...string) ([]byte, error) {
+	return a.client.RunJSON(ctx, args...)
 }
