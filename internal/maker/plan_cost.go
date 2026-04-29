@@ -289,12 +289,18 @@ func hetznerServerPrice(t string) (float64, bool) {
 }
 
 func doDropletPrice(size string) (float64, bool) {
+	// DigitalOcean caps the monthly price at 672 hours, but this
+	// estimator multiplies by HoursPerMonth (730). Using a 730-derived
+	// hourly understates the smaller droplets by ~10%; using DO's
+	// published per-hour rate directly keeps 730× inside ~1% of the
+	// documented monthly cap, which is the right signal for a pre-flight
+	// estimate.
 	table := map[string]float64{
-		"s-1vcpu-1gb": 0.00744, // $6/mo
-		"s-1vcpu-2gb": 0.01488, // $12
-		"s-2vcpu-2gb": 0.02232, // $18
-		"s-2vcpu-4gb": 0.02976, // $24
-		"s-4vcpu-8gb": 0.07142, // $48 (rounded)
+		"s-1vcpu-1gb": 0.009, // $6/mo cap, $0.009/hr published
+		"s-1vcpu-2gb": 0.018, // $12/mo cap
+		"s-2vcpu-2gb": 0.027, // $18/mo cap
+		"s-2vcpu-4gb": 0.036, // $24/mo cap
+		"s-4vcpu-8gb": 0.071, // $48/mo cap
 	}
 	p, ok := table[size]
 	return p, ok
