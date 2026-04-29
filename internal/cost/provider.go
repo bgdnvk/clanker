@@ -40,3 +40,17 @@ type TagProvider interface {
 	Provider
 	GetCostsByTag(ctx context.Context, tagKey string, start, end time.Time) ([]TagCost, error)
 }
+
+// SavingsProvider is implemented by providers that surface commitment-based
+// purchase recommendations (AWS Savings Plans + Reserved Instances). The
+// shape is intentionally vendor-neutral so a future GCP CUD or Azure
+// Reservation provider can plug in.
+type SavingsProvider interface {
+	Provider
+	// GetSavingsRecommendations returns Savings Plan / Reserved Instance
+	// purchase recommendations. lookback selects the AWS Cost Explorer
+	// LookbackPeriodInDays — empty defaults to "SIXTY_DAYS". term selects
+	// the commitment term — "ONE_YEAR" or "THREE_YEARS"; empty defaults
+	// to "ONE_YEAR".
+	GetSavingsRecommendations(ctx context.Context, lookback, term string) (*SavingsReport, error)
+}
