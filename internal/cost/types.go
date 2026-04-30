@@ -145,3 +145,40 @@ type TagAuditReport struct {
 	Entries []TagAuditEntry `json:"entries"`
 	Period  CostPeriod      `json:"period"`
 }
+
+// SavingsKind names the recommendation type — "savings_plan" (AWS
+// Savings Plan, also covers Compute / EC2 Instance / SageMaker SP) or
+// "reserved_instance" (RDS / ElastiCache / Redshift / OpenSearch RI).
+type SavingsKind string
+
+const (
+	SavingsKindSavingsPlan      SavingsKind = "savings_plan"
+	SavingsKindReservedInstance SavingsKind = "reserved_instance"
+)
+
+// SavingsRecommendation is one purchase recommendation row.
+type SavingsRecommendation struct {
+	Provider           string      `json:"provider"`
+	Kind               SavingsKind `json:"kind"`
+	Service            string      `json:"service,omitempty"`       // e.g. "EC2", "RDS"
+	Family             string      `json:"family,omitempty"`        // e.g. "Compute", "EC2 Instance"
+	Term               string      `json:"term"`                    // "ONE_YEAR" or "THREE_YEARS"
+	PaymentOption      string      `json:"paymentOption,omitempty"` // "ALL_UPFRONT" / "PARTIAL_UPFRONT" / "NO_UPFRONT"
+	UpfrontCost        float64     `json:"upfrontCost"`             // USD
+	HourlyCommitment   float64     `json:"hourlyCommitment,omitempty"`
+	EstimatedSavings   float64     `json:"estimatedSavingsUsd"`       // monthly USD
+	EstimatedSavingsPc float64     `json:"estimatedSavingsPct"`       // 0..100
+	BreakevenMonths    float64     `json:"breakevenMonths,omitempty"` // upfront / monthly savings; 0 if NO_UPFRONT
+	Detail             string      `json:"detail,omitempty"`
+}
+
+// SavingsReport rolls up commitment-purchase recommendations.
+type SavingsReport struct {
+	GeneratedAt           time.Time               `json:"generatedAt"`
+	Provider              string                  `json:"provider"`
+	Lookback              string                  `json:"lookback"`
+	Term                  string                  `json:"term"`
+	Recommendations       []SavingsRecommendation `json:"recommendations,omitempty"`
+	TotalEstimatedSavings float64                 `json:"totalEstimatedSavingsUsd"`
+	Notes                 string                  `json:"notes,omitempty"`
+}
