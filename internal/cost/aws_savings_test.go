@@ -128,6 +128,17 @@ func TestSavingsPlanFamilyLabel(t *testing.T) {
 
 func TestRIServiceLabel(t *testing.T) {
 	cases := map[string]string{
+		// Full AWS Cost Explorer service names (the canonical inputs
+		// the live API accepts and that fetchRIRecs now passes).
+		"Amazon Elastic Compute Cloud - Compute": "EC2",
+		"Amazon Relational Database Service":     "RDS",
+		"Amazon ElastiCache":                     "ElastiCache",
+		"Amazon OpenSearch Service":              "OpenSearch",
+		"Amazon Redshift":                        "Redshift",
+		"Amazon MemoryDB Service":                "MemoryDB",
+		"Amazon DynamoDB Service":                "DynamoDB",
+		// Legacy short codes preserved for backward-compat with any
+		// caller still passing the SDK-style identifier.
 		"AmazonEC2":               "EC2",
 		"AmazonRDS":               "RDS",
 		"AmazonElastiCache":       "ElastiCache",

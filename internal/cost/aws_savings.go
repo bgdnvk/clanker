@@ -52,10 +52,26 @@ func (p *AWSProvider) GetSavingsRecommendations(ctx context.Context, lookback, t
 
 	// 2) Reserved Instances — services that have RI offerings on
 	// Cost Explorer. Each call hits one service.
-	for _, svc := range []string{"AmazonEC2", "AmazonRDS", "AmazonElastiCache", "AmazonOpenSearchService", "AmazonRedshift"} {
+	//
+	// AWS Cost Explorer's GetReservationPurchaseRecommendation expects
+	// the *full* service name as it appears in the AWS billing console,
+	// not the short SDK identifier ("AmazonEC2"). Passing the short
+	// form returns ValidationException with a helpful list of the
+	// 8 supported full names — those are exactly what's enumerated
+	// here. Adding MemoryDB + DynamoDB to surface RI recs that were
+	// previously silently dropped.
+	for _, svc := range []string{
+		"Amazon Elastic Compute Cloud - Compute",
+		"Amazon Relational Database Service",
+		"Amazon ElastiCache",
+		"Amazon OpenSearch Service",
+		"Amazon Redshift",
+		"Amazon MemoryDB Service",
+		"Amazon DynamoDB Service",
+	} {
 		recs, err := p.fetchRIRecs(ctx, svc, lookback, term)
 		if err != nil {
-			appendCostNote(&report.Notes, fmt.Sprintf("%s RI recommendations skipped: %v", svc, err))
+			appendCostNote(&report.Notes, fmt.Sprintf("%s RI recommendations skipped: %v", riServiceLabel(svc), err))
 			continue
 		}
 		report.Recommendations = append(report.Recommendations, recs...)
@@ -231,18 +247,27 @@ func savingsPlanDetail(d types.SavingsPlansPurchaseRecommendationDetail) string 
 	return strings.Join(parts, ", ")
 }
 
+// riServiceLabel maps the full AWS service name (which Cost Explorer's
+// GetReservationPurchaseRecommendation API requires) to the short
+// human-readable label rendered in the CLI table and the JSON output's
+// `service` field. The legacy short codes ("AmazonEC2") are kept as
+// fall-throughs so callers carrying older identifiers still work.
 func riServiceLabel(svc string) string {
 	switch svc {
-	case "AmazonEC2":
+	case "Amazon Elastic Compute Cloud - Compute", "AmazonEC2":
 		return "EC2"
-	case "AmazonRDS":
+	case "Amazon Relational Database Service", "AmazonRDS":
 		return "RDS"
-	case "AmazonElastiCache":
+	case "Amazon ElastiCache", "AmazonElastiCache":
 		return "ElastiCache"
-	case "AmazonOpenSearchService":
+	case "Amazon OpenSearch Service", "AmazonOpenSearchService":
 		return "OpenSearch"
-	case "AmazonRedshift":
+	case "Amazon Redshift", "AmazonRedshift":
 		return "Redshift"
+	case "Amazon MemoryDB Service":
+		return "MemoryDB"
+	case "Amazon DynamoDB Service":
+		return "DynamoDB"
 	}
 	return svc
 }
