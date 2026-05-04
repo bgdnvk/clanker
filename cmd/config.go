@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bgdnvk/clanker/internal/updater"
 	"github.com/spf13/cobra"
 )
 
@@ -28,6 +29,12 @@ var configInitCmd = &cobra.Command{
 	Short: "Initialize configuration file",
 	Long:  `Create a default configuration file in your home directory.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		updateChannel, _ := cmd.Flags().GetString("update-channel")
+		normalizedUpdateChannel, err := updater.NormalizeChannel(updateChannel)
+		if err != nil {
+			return err
+		}
+
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return fmt.Errorf("error finding home directory: %w", err)
@@ -209,7 +216,13 @@ codebase:
 
 # General settings
 timeout: 30  # Timeout for AI requests in seconds
+
+# Self-update settings for 'clanker update'.
+# Use "release" for the latest GitHub release, or "main" for the latest commit on the default branch.
+update:
+  channel: __UPDATE_CHANNEL__
 `
+		defaultConfig = strings.ReplaceAll(defaultConfig, "__UPDATE_CHANNEL__", normalizedUpdateChannel)
 
 		err = os.WriteFile(configPath, []byte(defaultConfig), 0644)
 		if err != nil {
@@ -935,6 +948,7 @@ func init() {
 	configCmd.AddCommand(configShowCmd)
 	configCmd.AddCommand(configScanCmd)
 
+	configInitCmd.Flags().String("update-channel", updater.ChannelRelease, "default self-update channel for clanker update: release or main")
 	configScanCmd.Flags().StringP("output", "o", "", "Output format (json for JSON output)")
 	configScanCmd.Flags().StringSlice("aws-paths", []string{}, "Custom AWS credential file paths to scan (comma-separated)")
 	configScanCmd.Flags().StringSlice("gcp-paths", []string{}, "Custom GCP credential file paths to scan (comma-separated)")

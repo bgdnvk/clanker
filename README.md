@@ -30,6 +30,34 @@ brew install clanker
 make install
 ```
 
+### Self-update
+
+```bash
+clanker update
+```
+
+By default, `clanker update` replaces the current binary with the latest GitHub
+release from `bgdnvk/clanker`. To track the latest commit on the repository's
+default branch instead, set the update channel during setup:
+
+```bash
+clanker config init --update-channel main
+```
+
+or edit `~/.clanker.yaml`:
+
+```yaml
+update:
+  channel: main # release or main
+```
+
+You can also override it for one run:
+
+```bash
+clanker update --channel release
+clanker update --channel main
+```
+
 ### Requirements
 
 - Go
