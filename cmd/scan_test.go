@@ -67,10 +67,28 @@ func TestBuildFixCommandArgs_HandlesEachCategory(t *testing.T) {
 		contains []string
 	}{
 		{
-			name:     "orphan NAT gateway emits aws ec2 describe",
-			f:        cost.ScanFinding{Category: "orphan", Service: "EC2", ResourceID: "nat-1"},
+			name:     "orphan NAT gateway emits describe-nat-gateways",
+			f:        cost.ScanFinding{Category: "orphan", Service: "NAT Gateway", ResourceID: "nat-1"},
 			profile:  "prod",
 			contains: []string{"aws", "ec2", "describe-nat-gateways", "--nat-gateway-ids", "nat-1", "--profile", "prod"},
+		},
+		{
+			name:     "orphan EC2 emits describe-instances",
+			f:        cost.ScanFinding{Category: "orphan", Service: "EC2", ResourceID: "i-abc"},
+			profile:  "prod",
+			contains: []string{"aws", "ec2", "describe-instances", "--instance-ids", "i-abc"},
+		},
+		{
+			name:     "rightsize EBS volume emits describe-volumes",
+			f:        cost.ScanFinding{Category: "rightsize", Service: "EBS", ResourceID: "vol-1"},
+			profile:  "default",
+			contains: []string{"aws", "ec2", "describe-volumes", "--volume-ids", "vol-1"},
+		},
+		{
+			name:     "orphan ALB LB emits elbv2 describe-load-balancers",
+			f:        cost.ScanFinding{Category: "orphan", Service: "ALB LB", ResourceID: "arn:aws:elasticloadbalancing:..."},
+			profile:  "",
+			contains: []string{"aws", "elbv2", "describe-load-balancers", "--load-balancer-arns"},
 		},
 		{
 			name:     "version-eol EKS emits describe-cluster",
@@ -177,8 +195,32 @@ func TestWriteFixPlan_WritesValidMakerPlanJSON(t *testing.T) {
 }
 
 func TestWriteFixPlan_NilReceiptErrors(t *testing.T) {
-	_, err := writeFixPlan(nil, "/tmp/x.json", "", time.Now())
+	_, err := writeFixPlan(nil, filepath.Join(t.TempDir(), "x.json"), "", time.Now())
 	if err == nil {
 		t.Fatal("expected error for nil receipt")
+	}
+}
+
+func TestWriteFixPlan_RefusesOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "fix.json")
+
+	receipt := &cost.ScanReceipt{
+		ProvidersScanned: []string{"aws"},
+		Findings: []cost.ScanFinding{
+			{Provider: "aws", Category: "orphan", Service: "EC2", ResourceID: "i-1", MonthlyWasteUSD: 5},
+		},
+	}
+	if _, err := writeFixPlan(receipt, out, "", time.Now()); err != nil {
+		t.Fatalf("first write should succeed: %v", err)
+	}
+	// Second call must refuse rather than silently destroying the
+	// user's edits to the first plan.
+	_, err := writeFixPlan(receipt, out, "", time.Now())
+	if err == nil {
+		t.Fatal("expected refuse-to-overwrite error on second write")
+	}
+	if !strings.Contains(err.Error(), "refusing to overwrite") {
+		t.Errorf("err=%q, want to mention overwrite", err)
 	}
 }

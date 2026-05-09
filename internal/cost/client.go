@@ -29,8 +29,11 @@ func NewClient(baseURL string, debug bool) *Client {
 	}
 }
 
-// doRequest performs an HTTP request
-func (c *Client) doRequest(ctx context.Context, method, path string, body interface{}) ([]byte, error) {
+// doRequest performs an HTTP request. Existing callers passing nil
+// for headers retain the original behaviour. The new headers parameter
+// is used by the scan client to forward per-request creds (e.g.
+// X-AWS-Profile) without growing a parallel doRequestWithHeaders.
+func (c *Client) doRequest(ctx context.Context, method, path string, body interface{}, headers ...map[string]string) ([]byte, error) {
 	reqURL := c.baseURL + path
 
 	var bodyReader io.Reader
@@ -48,6 +51,14 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	for _, hs := range headers {
+		for k, v := range hs {
+			if v == "" {
+				continue
+			}
+			req.Header.Set(k, v)
+		}
+	}
 
 	if c.debug {
 		fmt.Printf("[cost] %s %s\n", method, path)

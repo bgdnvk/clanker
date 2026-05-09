@@ -229,11 +229,24 @@ func (r *scanRenderer) render(receipt *ScanReceipt) string {
 	if len(receipt.Anomalies) > 0 {
 		b.WriteString(r.color1(colorBold+colorRed, "  ANOMALIES\n"))
 		for _, a := range receipt.Anomalies {
-			b.WriteString(fmt.Sprintf("    • %s/%s — $%.2f", strings.ToUpper(a.Provider), a.Service, a.Cost))
+			// Prefer ActualCost (modern backend shape); fall back to
+			// Cost for receipts produced before the wire shape was
+			// aligned with the backend.
+			cost := a.ActualCost
+			if cost == 0 {
+				cost = a.Cost
+			}
+			b.WriteString(fmt.Sprintf("    • %s/%s — $%.2f", strings.ToUpper(a.Provider), a.Service, cost))
 			if a.PercentChange != 0 {
-				b.WriteString(fmt.Sprintf(" (%.0f%%)", a.PercentChange))
+				b.WriteString(fmt.Sprintf(" (%+.0f%%)", a.PercentChange))
+			}
+			if a.ExpectedCost > 0 && a.ActualCost > 0 {
+				b.WriteString(fmt.Sprintf(" (expected $%.2f)", a.ExpectedCost))
 			}
 			b.WriteString("\n")
+			if a.Description != "" {
+				b.WriteString(r.color1(colorWhite, "      "+a.Description+"\n"))
+			}
 		}
 		b.WriteString("\n")
 	}

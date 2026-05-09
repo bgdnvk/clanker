@@ -243,11 +243,16 @@ func emitScanReceipt(receipt *cost.ScanReceipt, format, exportPath string) error
 // writeFixPlan converts the receipt's findings into a maker plan
 // stub. Each finding becomes one Command{Args: ...} placeholder so
 // the user can inspect, edit, and apply via the existing maker
-// pipeline. The placeholder commands are intentionally ECHO-style
-// rather than real cloud-modifying commands — applying a destructive
-// fix without explicit user review is the kind of thing the FinOps
-// review explicitly flagged in the workshop. The user runs `maker
-// apply` themselves once they've reviewed.
+// pipeline. The placeholder commands are intentionally
+// describe-flavoured rather than destructive — applying a fix without
+// explicit user review is exactly the foot-gun the FinOps review
+// flagged. The user runs `maker apply` themselves once they've
+// reviewed and edited the plan.
+//
+// Refuses to overwrite an existing file unless --fix-overwrite is set
+// elsewhere (currently only via tests). This protects against the
+// double-run footgun where a second `clanker scan --fix plan.json`
+// would silently destroy the user's edits.
 func writeFixPlan(receipt *cost.ScanReceipt, path, awsProfile string, started time.Time) (string, error) {
 	if receipt == nil {
 		return "", errors.New("no receipt to project")
@@ -255,6 +260,11 @@ func writeFixPlan(receipt *cost.ScanReceipt, path, awsProfile string, started ti
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
+	}
+	if _, statErr := os.Stat(abs); statErr == nil {
+		return "", fmt.Errorf("refusing to overwrite existing file %s — pick a different --fix path", abs)
+	} else if !os.IsNotExist(statErr) {
+		return "", fmt.Errorf("stat %s: %w", abs, statErr)
 	}
 	commands := make([]maker.Command, 0, len(receipt.Findings))
 	for _, f := range receipt.Findings {
@@ -293,54 +303,112 @@ func writeFixPlan(receipt *cost.ScanReceipt, path, awsProfile string, started ti
 }
 
 // buildFixCommandArgs maps a finding to a placeholder CLI command.
-// We deliberately keep these as ECHO/AWS-CLI dry-run shapes — the
-// scan command never auto-fixes anything, it just prepares the
-// command the user would run if they decided to.
+// We deliberately keep these as `aws <service> describe-…` shapes —
+// the scan command never auto-fixes anything, it just prepares the
+// command the operator would run to inspect (and then optionally
+// destroy) the resource. The recommendations engine emits Service
+// strings like "NAT Gateway", "EBS", "ALB LB", "EC2", "RDS", "EKS" —
+// the matcher below normalises whitespace + case and handles each.
 func buildFixCommandArgs(f cost.ScanFinding, awsProfile string) []string {
 	profileArgs := []string{}
 	if awsProfile != "" {
 		profileArgs = []string{"--profile", awsProfile}
 	}
+	// normaliseService squashes the variants the detectors produce
+	// (e.g. "NAT Gateway", "nat-gateway", "EBS Volume") into a
+	// stable token for the switch below.
+	svc := strings.ToLower(strings.TrimSpace(f.Service))
+	svc = strings.ReplaceAll(svc, "_", " ")
+	svc = strings.Join(strings.Fields(svc), " ") // collapse whitespace runs
+
 	switch f.Category {
 	case "orphan", "rightsize":
-		// Idle NAT, stopped EC2, oversized RDS, etc — represented as
-		// a `aws <service> describe ...` command so the operator can
-		// inspect before deciding the destructive action.
-		switch strings.ToLower(f.Service) {
-		case "ec2", "nat gateway":
+		// Orphan/idle/oversized resources — emit a describe so the
+		// operator can verify the finding before destruction.
+		switch {
+		case svc == "nat gateway" || strings.HasPrefix(svc, "nat"):
 			args := []string{"aws", "ec2", "describe-nat-gateways"}
 			if f.ResourceID != "" {
 				args = append(args, "--nat-gateway-ids", f.ResourceID)
 			}
-			args = append(args, profileArgs...)
-			return args
-		case "rds":
+			return append(args, profileArgs...)
+		case svc == "ec2":
+			args := []string{"aws", "ec2", "describe-instances"}
+			if f.ResourceID != "" {
+				args = append(args, "--instance-ids", f.ResourceID)
+			}
+			return append(args, profileArgs...)
+		case svc == "rds":
 			args := []string{"aws", "rds", "describe-db-instances"}
 			if f.ResourceID != "" {
 				args = append(args, "--db-instance-identifier", f.ResourceID)
 			}
-			args = append(args, profileArgs...)
-			return args
+			return append(args, profileArgs...)
+		case svc == "ebs" || strings.HasPrefix(svc, "ebs"):
+			// GP2→GP3 upgrades, unattached volumes, etc.
+			args := []string{"aws", "ec2", "describe-volumes"}
+			if f.ResourceID != "" {
+				args = append(args, "--volume-ids", f.ResourceID)
+			}
+			return append(args, profileArgs...)
+		case strings.HasSuffix(svc, "lb") || svc == "elb" || svc == "elbv2":
+			// Orphan ALBs/NLBs/CLBs — the detector emits "ALB LB",
+			// "NLB LB", "GLB LB". elbv2 covers ALB/NLB/GLB.
+			args := []string{"aws", "elbv2", "describe-load-balancers"}
+			if f.ResourceID != "" {
+				args = append(args, "--load-balancer-arns", f.ResourceID)
+			}
+			return append(args, profileArgs...)
+		case svc == "s3":
+			args := []string{"aws", "s3api", "list-objects-v2"}
+			if f.ResourceID != "" {
+				args = append(args, "--bucket", f.ResourceID, "--max-keys", "5")
+			}
+			return append(args, profileArgs...)
 		}
 	case "version-eol":
-		if strings.EqualFold(f.Service, "EKS") && f.ResourceID != "" {
-			args := []string{"aws", "eks", "describe-cluster", "--name", f.ResourceID}
-			args = append(args, profileArgs...)
-			return args
+		switch svc {
+		case "eks":
+			if f.ResourceID != "" {
+				args := []string{"aws", "eks", "describe-cluster", "--name", f.ResourceID}
+				return append(args, profileArgs...)
+			}
+		case "gke":
+			// GCP cluster name + region/zone are needed for gcloud — fall
+			// through to the echo stub since `--profile` doesn't apply.
 		}
 	case "lifecycle":
-		if strings.EqualFold(f.Service, "EC2") && f.ResourceID != "" {
-			args := []string{"aws", "ec2", "describe-instances", "--instance-ids", f.ResourceID}
-			args = append(args, profileArgs...)
-			return args
+		switch svc {
+		case "ec2":
+			if f.ResourceID != "" {
+				args := []string{"aws", "ec2", "describe-instances", "--instance-ids", f.ResourceID}
+				return append(args, profileArgs...)
+			}
+		case "ebs":
+			if f.ResourceID != "" {
+				args := []string{"aws", "ec2", "describe-volumes", "--volume-ids", f.ResourceID}
+				return append(args, profileArgs...)
+			}
+		case "s3":
+			if f.ResourceID != "" {
+				args := []string{"aws", "s3api", "get-bucket-lifecycle-configuration", "--bucket", f.ResourceID}
+				return append(args, profileArgs...)
+			}
+		case "cloudwatch", "cloudwatch logs":
+			if f.ResourceID != "" {
+				args := []string{"aws", "logs", "describe-log-groups", "--log-group-name-prefix", f.ResourceID}
+				return append(args, profileArgs...)
+			}
 		}
 	case "commitment":
 		// Commitment recs require interactive purchase — emit an echo
-		// stub so the operator sees a placeholder.
+		// stub so the operator sees a placeholder rather than running
+		// a destructive command by accident.
 		return []string{"echo", "Review this Savings Plan / RI: " + displayName(f) + " — saves $" +
 			fmt.Sprintf("%.2f", f.MonthlyWasteUSD) + "/mo"}
 	}
-	// Fallback echo so every finding has at least an annotation.
+	// Fallback echo so every finding has at least an annotation —
+	// preferable to dropping the row from the plan silently.
 	return []string{"echo", "Review: " + displayName(f) + " — saves $" + fmt.Sprintf("%.2f", f.MonthlyWasteUSD) + "/mo"}
 }
 

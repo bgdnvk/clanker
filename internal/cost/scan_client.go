@@ -95,8 +95,8 @@ func (c *Client) FetchScanReceipt(ctx context.Context, mode, awsProfile, lookbac
 	}
 	path := "/api/cost/scan?" + params.Encode()
 
-	body, err := c.doRequestWithHeaders(ctx, http.MethodPost, path, nil,
-		map[string]string{"X-AWS-Profile": awsProfile})
+	headers := map[string]string{"X-AWS-Profile": awsProfile}
+	body, err := c.doRequest(ctx, http.MethodPost, path, nil, headers)
 	if err != nil {
 		return nil, fmt.Errorf("scan request: %w", err)
 	}
@@ -105,50 +105,4 @@ func (c *Client) FetchScanReceipt(ctx context.Context, mode, awsProfile, lookbac
 		return nil, fmt.Errorf("decode scan receipt: %w", err)
 	}
 	return &receipt, nil
-}
-
-// doRequestWithHeaders is a thin variant of doRequest that allows
-// callers to attach extra request headers (X-AWS-Profile etc) without
-// changing the existing doRequest signature used by every other client
-// method. Keeps the patch surface for this PR small.
-func (c *Client) doRequestWithHeaders(ctx context.Context, method, path string, body interface{}, headers map[string]string) ([]byte, error) {
-	// Use the existing doRequest path but inject headers via a custom
-	// HTTP roundtrip — Go's stdlib doesn't expose a "decorate then
-	// continue" hook, so we duplicate the small handful of lines from
-	// doRequest. The duplication is intentional: the existing
-	// doRequest stays untouched (no surface-area drift for unrelated
-	// callers).
-	reqURL := c.baseURL + path
-	req, err := http.NewRequestWithContext(ctx, method, reqURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	for k, v := range headers {
-		if v == "" {
-			continue
-		}
-		req.Header.Set(k, v)
-	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	out := make([]byte, 0, 16384)
-	buf := make([]byte, 8192)
-	for {
-		n, rerr := resp.Body.Read(buf)
-		if n > 0 {
-			out = append(out, buf[:n]...)
-		}
-		if rerr != nil {
-			break
-		}
-	}
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("API error: status %d - %s", resp.StatusCode, strings.TrimSpace(string(out)))
-	}
-	return out, nil
 }

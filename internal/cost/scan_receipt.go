@@ -60,12 +60,24 @@ type ScanFinding struct {
 	DocsURL         string  `json:"docsUrl,omitempty"`
 }
 
-// ScanAnomaly is a cost spike surfaced by the deep-mode scan.
+// ScanAnomaly is a cost spike surfaced by the deep-mode scan. The
+// shape mirrors clanker-cloud's models.CostAnomaly so JSON-decoding
+// a backend-sourced receipt doesn't silently drop fields. Earlier
+// drafts only carried `Cost` and lost expectedCost/actualCost/
+// description on every deep scan — the renderer now has the data
+// it needs to show context if it ever wants to.
 type ScanAnomaly struct {
-	Provider      string  `json:"provider"`
 	Service       string  `json:"service"`
-	Cost          float64 `json:"cost"`
-	PercentChange float64 `json:"percentChange,omitempty"`
+	Provider      string  `json:"provider"`
+	ExpectedCost  float64 `json:"expectedCost"`
+	ActualCost    float64 `json:"actualCost"`
+	PercentChange float64 `json:"percentChange"`
+	Description   string  `json:"description,omitempty"`
+	// Cost is retained for backwards compatibility — older receipts
+	// produced by the local fallback path before this PR set it
+	// instead of ActualCost. Renderers should prefer ActualCost
+	// when non-zero, falling back to Cost.
+	Cost float64 `json:"cost,omitempty"`
 }
 
 // ScanLLMSpend is the AI-tax line item.
