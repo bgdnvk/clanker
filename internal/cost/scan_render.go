@@ -177,11 +177,17 @@ func (r *scanRenderer) render(receipt *ScanReceipt) string {
 			cat := f.Category
 			sev := f.Severity
 			res := f.Service
-			if f.ResourceID != "" {
+			// Prefer Label (friendly display, e.g. "eval-dev (i-xxx)")
+			// over the bare ResourceID where the detector provided one.
+			displayID := f.Label
+			if displayID == "" {
+				displayID = f.ResourceID
+			}
+			if displayID != "" {
 				if res != "" {
-					res = res + " · " + truncateScan(f.ResourceID, 32)
+					res = res + " · " + truncateScan(displayID, 40)
 				} else {
-					res = truncateScan(f.ResourceID, 32)
+					res = truncateScan(displayID, 40)
 				}
 			}
 			if f.Region != "" {

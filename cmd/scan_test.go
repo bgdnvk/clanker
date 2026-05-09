@@ -28,11 +28,15 @@ func TestStripANSI_PassesThroughCleanText(t *testing.T) {
 	}
 }
 
-func TestDisplayName_PrefersServiceAndResource(t *testing.T) {
+func TestDisplayName_PrefersLabelOverResourceID(t *testing.T) {
 	cases := []struct {
 		f    cost.ScanFinding
 		want string
 	}{
+		// Label preferred when present (the friendly display string).
+		{cost.ScanFinding{Service: "EC2", ResourceID: "i-0abc", Label: "eval-dev (i-0abc)", Region: "us-east-1"},
+			"EC2 · eval-dev (i-0abc) · us-east-1"},
+		// Falls back to ResourceID when Label is empty (legacy receipts).
 		{cost.ScanFinding{Service: "EKS", ResourceID: "old", Region: "us-east-1"}, "EKS · old · us-east-1"},
 		{cost.ScanFinding{Service: "EC2"}, "EC2"},
 		{cost.ScanFinding{ResourceID: "i-abc"}, "i-abc"},
@@ -42,6 +46,28 @@ func TestDisplayName_PrefersServiceAndResource(t *testing.T) {
 		if got := displayName(c.f); got != c.want {
 			t.Errorf("displayName(%+v) = %q, want %q", c.f, got, c.want)
 		}
+	}
+}
+
+// TestBuildFixCommandArgs_UsesCanonicalResourceID is the round-2
+// regression test for the live bug — even when the receipt carries a
+// human-friendly Label, the maker plan command must use only the bare
+// AWS ID from ResourceID. (Detector emits canonical i-xxx; CLI must
+// not concatenate Label into the --instance-ids flag.)
+func TestBuildFixCommandArgs_UsesCanonicalResourceID(t *testing.T) {
+	f := cost.ScanFinding{
+		Category:   "lifecycle",
+		Service:    "EC2",
+		ResourceID: "i-0abc123",
+		Label:      "eval-dev (i-0abc123)", // present but must NOT leak into the args
+	}
+	args := buildFixCommandArgs(f, "")
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--instance-ids i-0abc123") {
+		t.Errorf("args=%q, want '--instance-ids i-0abc123' (bare ID, not Label)", joined)
+	}
+	if strings.Contains(joined, "eval-dev") {
+		t.Errorf("args=%q must NOT contain Label content; ResourceID stays canonical", joined)
 	}
 }
 

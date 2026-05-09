@@ -417,7 +417,13 @@ func displayName(f cost.ScanFinding) string {
 	if f.Service != "" {
 		parts = append(parts, f.Service)
 	}
-	if f.ResourceID != "" {
+	// Label is the friendly display string ("eval-dev (i-xxx)") and
+	// is preferred over the bare ResourceID for human-readable
+	// output. ResourceID stays in the maker-plan args path because
+	// the AWS CLI rejects friendly names there.
+	if f.Label != "" {
+		parts = append(parts, f.Label)
+	} else if f.ResourceID != "" {
 		parts = append(parts, f.ResourceID)
 	}
 	if f.Region != "" {

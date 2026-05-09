@@ -45,13 +45,21 @@ type ScanCategorySummary struct {
 	HighestSeverity string  `json:"highestSeverity"`
 }
 
-// ScanFinding is one waste row.
+// ScanFinding is one waste row. Mirrors clanker-cloud's
+// models.ScanFinding wire shape (see backend/pkg/models/scan.go).
+//
+// ResourceID is the canonical cloud identifier — i-xxx, nat-xxx,
+// vol-xxx, ARN — and is what `clanker scan --fix` uses as a verbatim
+// AWS-CLI argument. Label carries any human-friendly display string
+// (e.g. "eval-dev (i-xxx)") and is used only for terminal output, not
+// commands.
 type ScanFinding struct {
 	Provider        string  `json:"provider"`
 	Category        string  `json:"category"`
 	Severity        string  `json:"severity"`
 	Service         string  `json:"service,omitempty"`
 	ResourceID      string  `json:"resourceId,omitempty"`
+	Label           string  `json:"label,omitempty"`
 	ResourceArn     string  `json:"resourceArn,omitempty"`
 	Region          string  `json:"region,omitempty"`
 	MonthlyWasteUSD float64 `json:"monthlyWasteUsd"`
