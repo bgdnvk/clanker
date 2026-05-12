@@ -331,6 +331,20 @@ Examples:
 				})
 			}
 
+			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "flyio") {
+				flyToken, flyOrg, flyErr := resolveFlyioToken(ctx, debug)
+				if flyErr != nil {
+					return flyErr
+				}
+				return maker.ExecuteFlyioPlan(ctx, makerPlan, maker.ExecOptions{
+					FlyioAPIToken: flyToken,
+					FlyioOrgSlug:  flyOrg,
+					Writer:        os.Stdout,
+					Destroyer:     destroyer,
+					Debug:         debug,
+				})
+			}
+
 			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "railway") {
 				rwToken, rwWorkspaceID, rwErr := resolveRailwayToken(ctx, debug)
 				if rwErr != nil {
@@ -575,6 +589,9 @@ Examples:
 					makerProviderReason = "inferred"
 				} else if svcCtx.Vercel {
 					makerProvider = "vercel"
+					makerProviderReason = "inferred"
+				} else if svcCtx.Flyio {
+					makerProvider = "flyio"
 					makerProviderReason = "inferred"
 				} else if svcCtx.Railway {
 					makerProvider = "railway"
@@ -894,6 +911,11 @@ Format as a professional compliance table suitable for government security docum
 			// Handle Vercel queries
 			if svcCtx.Vercel {
 				return handleVercelQuery(context.Background(), routingQuestion, debug)
+			}
+
+			// Handle Fly.io queries
+			if svcCtx.Flyio {
+				return handleFlyioQuery(context.Background(), routingQuestion, debug)
 			}
 
 			// Handle Railway queries

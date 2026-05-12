@@ -235,6 +235,10 @@ type ExecOptions struct {
 	VercelAPIToken string
 	VercelTeamID   string
 
+	// Fly.io options
+	FlyioAPIToken string
+	FlyioOrgSlug  string
+
 	// Railway options
 	RailwayAPIToken    string
 	RailwayWorkspaceID string
