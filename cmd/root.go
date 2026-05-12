@@ -8,6 +8,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/azure"
 	"github.com/bgdnvk/clanker/internal/cloudflare"
 	"github.com/bgdnvk/clanker/internal/digitalocean"
+	"github.com/bgdnvk/clanker/internal/flyio"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	"github.com/bgdnvk/clanker/internal/hetzner"
 	"github.com/bgdnvk/clanker/internal/railway"
@@ -119,6 +120,12 @@ func init() {
 	// credentials, fetches context, and drives the configured AI provider.
 	vercelCmd := vercel.CreateVercelCommands()
 	rootCmd.AddCommand(vercelCmd)
+
+	// Register Fly.io static commands. Natural-language queries go through
+	// `clanker ask --flyio "..."`. The top-level command is `fly` with `flyio`
+	// as an alias so users can type either form.
+	flyioCmd := flyio.CreateFlyioCommands()
+	rootCmd.AddCommand(flyioCmd)
 
 	// Register Railway static commands. Natural-language queries go through
 	// `clanker ask --railway "..."`.

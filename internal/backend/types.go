@@ -54,6 +54,14 @@ type VercelCredentials struct {
 	TeamID   string `json:"team_id,omitempty"`
 }
 
+// FlyioCredentials represents Fly.io credentials stored in the backend.
+// OrgSlug is optional — a token can see resources across every org it has
+// access to; the slug is a filter rather than a scope.
+type FlyioCredentials struct {
+	APIToken string `json:"api_token"`
+	OrgSlug  string `json:"org_slug,omitempty"`
+}
+
 // RailwayCredentials represents Railway credentials stored in the backend.
 // WorkspaceID is optional — single-workspace accounts can omit it and the
 // GraphQL API infers scope from the account token.

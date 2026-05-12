@@ -589,6 +589,103 @@ clanker ask --apply --plan-file plan.json | cat
 clanker ask --hetzner --maker --destroyer "delete the test server" | cat
 ```
 
+## Fly.io
+
+Clanker supports Fly.io apps, machines, volumes, secrets, and addons via the Machines REST API plus the legacy GraphQL endpoint for orgs, Postgres, Wireguard, tokens, and marketplace extensions. The `flyctl` (a.k.a. `fly`) CLI is required only for `deploy`, `ssh`, `proxy`, and `secrets set` (which pipes values over stdin so they never appear on the command line).
+
+### Setup
+
+Install the flyctl CLI:
+
+```bash
+# macOS
+brew install flyctl
+
+# Linux / WSL
+curl -L https://fly.io/install.sh | sh
+
+# Windows
+iwr https://fly.io/install.ps1 -useb | iex
+```
+
+Set your API token (generate one with `flyctl auth token` or at fly.io/dashboard/personal/tokens):
+
+```bash
+export FLY_API_TOKEN="your-token-here"
+```
+
+Or configure in `~/.clanker.yaml`:
+
+```yaml
+flyio:
+    api_token: "your-token-here"
+    org_slug: "personal"          # optional — filter to one org
+```
+
+### Static Commands
+
+```bash
+# Apps + machines + volumes
+clanker fly list apps
+clanker fly list machines --app my-app
+clanker fly list volumes --app my-app
+clanker fly get app my-app
+clanker fly get machine 1234abcd --app my-app
+
+# Lifecycle
+clanker fly restart machine 1234abcd --app my-app
+clanker fly stop 1234abcd --app my-app
+clanker fly start 1234abcd --app my-app
+clanker fly destroy machine 1234abcd --app my-app --force
+
+# Secrets (names + digests only; values never echoed)
+clanker fly list secrets --app my-app
+clanker fly secrets set DATABASE_URL=... --app my-app
+clanker fly secrets unset OLD_KEY --app my-app
+
+# Networking
+clanker fly list ips --app my-app
+clanker fly ips allocate --app my-app --type v4
+clanker fly list certs --app my-app
+clanker fly certs add example.com --app my-app
+
+# Addons
+clanker fly list postgres
+clanker fly list redis
+clanker fly list tigris
+clanker fly list extensions
+
+# Platform
+clanker fly list regions
+clanker fly list orgs
+clanker fly auth whoami
+```
+
+### AI Queries
+
+```bash
+# Ask questions about your Fly.io infrastructure
+clanker ask --flyio "what apps are running and in which regions?"
+clanker ask --flyio "which machines are using the most memory?"
+clanker ask --flyio "do I have any unattached volumes?"
+```
+
+Conversation history is preserved per-org at `~/.clanker/conversations/flyio_<org>.json` so follow-ups stay in context.
+
+### Deploy + Scale (via flyctl)
+
+```bash
+# Deploy from the working directory
+clanker fly deploy --app my-app --region iad
+
+# Adjust scale
+clanker fly scale count 3 --app my-app
+clanker fly scale vm performance-2x --app my-app
+
+# Roll back a release
+clanker fly rollback --app my-app
+```
+
 ## Verda Cloud
 
 Clanker supports [Verda Cloud](https://verda.com) (ex-DataCrunch), a European GPU/AI cloud. Every operation runs against Verda's REST API directly — the `verda` CLI binary is optional and only needed for `verda auth login` and `verda skills install`.

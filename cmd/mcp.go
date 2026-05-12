@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bgdnvk/clanker/internal/ai"
+	"github.com/bgdnvk/clanker/internal/flyio"
 	"github.com/bgdnvk/clanker/internal/railway"
 	"github.com/bgdnvk/clanker/internal/vercel"
 	"github.com/bgdnvk/clanker/internal/verda"
@@ -46,6 +47,20 @@ type vercelListArgs struct {
 	Token    string `json:"token,omitempty" jsonschema:"description=Vercel API token (falls back to config/env)"`
 	TeamID   string `json:"teamId,omitempty" jsonschema:"description=Vercel team ID"`
 	Project  string `json:"project,omitempty" jsonschema:"description=Project ID for scoped resources (deployments and env)"`
+}
+
+type flyioAskArgs struct {
+	Question string `json:"question" jsonschema:"description=Natural language question about Fly.io infrastructure,required"`
+	Token    string `json:"token,omitempty" jsonschema:"description=Fly.io API token (falls back to config/env)"`
+	OrgSlug  string `json:"orgSlug,omitempty" jsonschema:"description=Fly.io org slug filter (empty = all orgs)"`
+	Debug    bool   `json:"debug,omitempty" jsonschema:"description=Enable debug output"`
+}
+
+type flyioListArgs struct {
+	Resource string `json:"resource" jsonschema:"description=Resource type: apps|machines|volumes|secrets|ips|certs|releases|orgs|regions|postgres|redis|tigris|extensions|tokens,required"`
+	Token    string `json:"token,omitempty" jsonschema:"description=Fly.io API token (falls back to config/env)"`
+	OrgSlug  string `json:"orgSlug,omitempty" jsonschema:"description=Fly.io org slug filter"`
+	App      string `json:"app,omitempty" jsonschema:"description=App name for app-scoped resources (machines/volumes/secrets/ips/certs/releases)"`
 }
 
 type railwayAskArgs struct {
@@ -169,6 +184,29 @@ func newClankerMCPServer() *mcptransport.MCPServer {
 		),
 		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args vercelListArgs) (*mcp.CallToolResult, error) {
 			return handleMCPVercelList(ctx, args)
+		}),
+	)
+
+	server.AddTool(
+		mcp.NewTool(
+			"clanker_flyio_ask",
+			mcp.WithDescription("Ask a natural language question about your Fly.io infrastructure. Gathers Fly.io context (apps, machines, volumes, regions) and uses the configured AI provider to answer."),
+			mcp.WithInputSchema[flyioAskArgs](),
+		),
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args flyioAskArgs) (*mcp.CallToolResult, error) {
+			return handleMCPFlyioAsk(ctx, args)
+		}),
+	)
+
+	server.AddTool(
+		mcp.NewTool(
+			"clanker_flyio_list",
+			mcp.WithDescription("List Fly.io resources (apps, machines, volumes, secrets, ips, certs, releases, orgs, regions, postgres, redis, tigris, extensions, tokens). Returns JSON from the Fly.io API."),
+			mcp.WithInputSchema[flyioListArgs](),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args flyioListArgs) (*mcp.CallToolResult, error) {
+			return handleMCPFlyioList(ctx, args)
 		}),
 	)
 
@@ -328,6 +366,142 @@ func handleMCPVercelList(ctx context.Context, args vercelListArgs) (*mcp.CallToo
 		return mcp.NewToolResultError(fmt.Sprintf("Vercel API error: %v", err)), nil
 	}
 
+	return mcp.NewToolResultText(result), nil
+}
+
+// handleMCPFlyioAsk resolves Fly.io credentials, gathers context, and asks
+// the configured AI provider about the user's Fly.io infrastructure.
+func handleMCPFlyioAsk(ctx context.Context, args flyioAskArgs) (*mcp.CallToolResult, error) {
+	token := args.Token
+	if token == "" {
+		token = flyio.ResolveAPIToken()
+	}
+	if token == "" {
+		return mcp.NewToolResultError("Fly.io token not configured. Set flyio.api_token in ~/.clanker.yaml or export FLY_API_TOKEN"), nil
+	}
+
+	orgSlug := args.OrgSlug
+	if orgSlug == "" {
+		orgSlug = flyio.ResolveOrgSlug()
+	}
+
+	client, err := flyio.NewClient(token, orgSlug, args.Debug)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to create Fly.io client: %v", err)), nil
+	}
+
+	flyioContext, _ := client.GetRelevantContext(ctx, args.Question)
+
+	prompt := buildFlyioPrompt(args.Question, flyioContext, "")
+
+	provider := viper.GetString("ai.default_provider")
+	if provider == "" {
+		provider = "openai"
+	}
+	apiKey := mcpResolveProviderKey(provider)
+
+	aiClient := ai.NewClient(provider, apiKey, args.Debug, provider)
+
+	response, err := aiClient.AskPrompt(ctx, prompt)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("AI query failed: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(response), nil
+}
+
+// handleMCPFlyioList resolves Fly.io credentials and lists the requested
+// resource type. App-scoped resources require the App argument. Returns the
+// raw JSON response from either the REST Machines API or the GraphQL endpoint
+// depending on the resource.
+func handleMCPFlyioList(ctx context.Context, args flyioListArgs) (*mcp.CallToolResult, error) {
+	token := args.Token
+	if token == "" {
+		token = flyio.ResolveAPIToken()
+	}
+	if token == "" {
+		return mcp.NewToolResultError("Fly.io token not configured. Set flyio.api_token in ~/.clanker.yaml or export FLY_API_TOKEN"), nil
+	}
+
+	orgSlug := args.OrgSlug
+	if orgSlug == "" {
+		orgSlug = flyio.ResolveOrgSlug()
+	}
+
+	client, err := flyio.NewClient(token, orgSlug, false)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to create Fly.io client: %v", err)), nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	resource := strings.ToLower(strings.TrimSpace(args.Resource))
+
+	// App-scoped REST resources need --app.
+	appScoped := map[string]string{
+		"machines": "/machines",
+		"machine":  "/machines",
+		"volumes":  "/volumes",
+		"volume":   "/volumes",
+		"secrets":  "/secrets",
+		"ips":      "/ips",
+		"ip":       "/ips",
+		"certs":    "/certificates",
+		"cert":     "/certificates",
+		"releases": "/releases",
+		"release":  "/releases",
+	}
+	if suffix, ok := appScoped[resource]; ok {
+		if args.App == "" {
+			return mcp.NewToolResultError(fmt.Sprintf("app is required to list %s", resource)), nil
+		}
+		result, err := client.RunAPIWithContext(ctx, "GET", "/apps/"+url.PathEscape(args.App)+suffix, "")
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Fly.io API error: %v", err)), nil
+		}
+		return mcp.NewToolResultText(result), nil
+	}
+
+	// Top-level REST resources.
+	switch resource {
+	case "apps", "app":
+		result, err := client.RunAPIWithContext(ctx, "GET", "/apps", "")
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Fly.io API error: %v", err)), nil
+		}
+		return mcp.NewToolResultText(result), nil
+	case "regions", "region":
+		result, err := client.RunAPIWithContext(ctx, "GET", "/platform/regions", "")
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Fly.io API error: %v", err)), nil
+		}
+		return mcp.NewToolResultText(result), nil
+	}
+
+	// GraphQL-backed resources.
+	var query string
+	switch resource {
+	case "orgs", "org", "organizations", "organization":
+		query = `query { organizations { nodes { id slug name type paidPlan } } }`
+	case "postgres", "pg":
+		query = `query { apps(role: "postgres_cluster") { nodes { id name status organization { slug } } } }`
+	case "redis":
+		query = `query { addOns(type: "upstash_redis") { nodes { id name primaryRegion readRegions plan { name } status } } }`
+	case "tigris":
+		query = `query { addOns(type: "tigris") { nodes { id name primaryRegion } } }`
+	case "extensions", "extension":
+		query = `query { addOns(type: ["sentry","tigris","upstash_redis","planetscale"]) { nodes { id name } } }`
+	case "tokens", "token":
+		query = `query { viewer { personalAccountTokens { nodes { id name expiresAt } } } }`
+	default:
+		return mcp.NewToolResultError(fmt.Sprintf("unknown resource type: %s (expected: apps, machines, volumes, secrets, ips, certs, releases, orgs, regions, postgres, redis, tigris, extensions, tokens)", resource)), nil
+	}
+
+	result, err := client.RunGraphQL(ctx, query, nil)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Fly.io GraphQL error: %v", err)), nil
+	}
 	return mcp.NewToolResultText(result), nil
 }
 

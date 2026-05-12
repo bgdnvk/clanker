@@ -25,6 +25,7 @@ type ServiceContext struct {
 	DigitalOcean bool
 	Hetzner      bool
 	Vercel       bool
+	Flyio        bool
 	Railway      bool
 	Verda        bool
 	IAM          bool
@@ -43,7 +44,7 @@ type Classification struct {
 func DefaultInfraProvider() string {
 	p := strings.ToLower(strings.TrimSpace(viper.GetString("infra.default_provider")))
 	switch p {
-	case "aws", "gcp", "azure", "cloudflare", "digitalocean", "hetzner", "vercel", "railway", "verda":
+	case "aws", "gcp", "azure", "cloudflare", "digitalocean", "hetzner", "vercel", "flyio", "railway", "verda":
 		return p
 	default:
 		return "aws"
@@ -61,6 +62,7 @@ func applyConfiguredDefaultContext(ctx *ServiceContext) {
 	ctx.DigitalOcean = false
 	ctx.Hetzner = false
 	ctx.Vercel = false
+	ctx.Flyio = false
 	ctx.Railway = false
 	ctx.Verda = false
 	ctx.IAM = false
@@ -78,6 +80,8 @@ func applyConfiguredDefaultContext(ctx *ServiceContext) {
 		ctx.Hetzner = true
 	case "vercel":
 		ctx.Vercel = true
+	case "flyio":
+		ctx.Flyio = true
 	case "railway":
 		ctx.Railway = true
 	case "verda":
@@ -269,6 +273,30 @@ func InferContext(question string) ServiceContext {
 		"edge middleware",
 	}
 
+	flyioKeywords := []string{
+		// Only match when Fly.io is explicitly referenced. "machine" alone is
+		// ambiguous (could mean an EC2/GCP VM), so we require a Fly-qualified
+		// phrase or one of the Fly-specific binaries/files.
+		"fly.io",
+		"flyio",
+		"flyctl",
+		"fly machine",
+		"fly machines",
+		"fly app",
+		"fly apps",
+		"fly deploy",
+		"fly secrets",
+		"fly volume",
+		"fly volumes",
+		"fly postgres",
+		"fly redis",
+		"fly tigris",
+		"fly.toml",
+		"fly-toml",
+		"fly region",
+		"machines.dev",
+	}
+
 	railwayKeywords := []string{
 		// Only match when Railway is explicitly referenced. Generic deploy/
 		// service/env phrasing is intentionally excluded so we do not
@@ -392,6 +420,13 @@ func InferContext(question string) ServiceContext {
 		}
 	}
 
+	for _, keyword := range flyioKeywords {
+		if contains(questionLower, keyword) {
+			ctx.Flyio = true
+			break
+		}
+	}
+
 	for _, keyword := range railwayKeywords {
 		if contains(questionLower, keyword) {
 			ctx.Railway = true
@@ -416,7 +451,7 @@ func InferContext(question string) ServiceContext {
 
 	// Default to the configured provider if nothing is detected.
 	// AWS keeps GitHub enabled for backward compatibility.
-	if !ctx.AWS && !ctx.GitHub && !ctx.Terraform && !ctx.K8s && !ctx.GCP && !ctx.Azure && !ctx.Cloudflare && !ctx.DigitalOcean && !ctx.Hetzner && !ctx.Vercel && !ctx.Verda && !ctx.IAM {
+	if !ctx.AWS && !ctx.GitHub && !ctx.Terraform && !ctx.K8s && !ctx.GCP && !ctx.Azure && !ctx.Cloudflare && !ctx.DigitalOcean && !ctx.Hetzner && !ctx.Vercel && !ctx.Flyio && !ctx.Verda && !ctx.IAM {
 		applyConfiguredDefaultContext(&ctx)
 	}
 
@@ -440,6 +475,7 @@ Available services:
 - digitalocean: Digital Ocean (Droplets, DOKS, Managed Databases, Spaces, App Platform, Load Balancers, VPCs, etc.)
 - hetzner: Hetzner Cloud (Servers, Load Balancers, Volumes, Networks, Firewalls, Floating IPs, Primary IPs, etc.)
 - vercel: Vercel projects, deployments, domains, env vars, edge functions, KV/Blob/Postgres/Edge Config, analytics
+- flyio: Fly.io apps, machines (VMs), volumes, secrets, IPs, certificates, regions, Postgres clusters (managed + unmanaged), Upstash Redis, Tigris object storage, WireGuard peers, flyctl, fly.toml
 - verda: Verda Cloud / DataCrunch GPU instances, Instant Clusters, volumes (incl. SFS), serverless containers & jobs, SSH keys, startup scripts, container registry
 - github: GitHub repositories, PRs, issues, actions, workflows
 - terraform: Infrastructure as code, Terraform plans, state, modules
@@ -453,13 +489,14 @@ IMPORTANT RULES:
 5. Only classify as "digitalocean" if the query EXPLICITLY mentions Digital Ocean, doctl, droplets, DOKS, or Digital Ocean-specific products
 6. Only classify as "hetzner" if the query EXPLICITLY mentions Hetzner, hcloud, or Hetzner-specific products
 7. Only classify as "vercel" if the query EXPLICITLY mentions Vercel, vercel.app, a Vercel deployment/project, or Vercel-specific products (Edge Config, Vercel KV / Blob / Postgres)
-8. Only classify as "railway" if the query EXPLICITLY mentions Railway, railway.app, a Railway project/service/deployment/volume/environment, Nixpacks, or a railway.json/railway.toml file
-9. Only classify as "verda" if the query EXPLICITLY mentions Verda, DataCrunch, Verda clusters/instances, or an Instant Cluster (Verda's managed cluster product)
-10. If uncertain, classify as "%s" (the configured default cloud provider)
+8. Only classify as "flyio" if the query EXPLICITLY mentions Fly.io, flyctl, fly.toml, a Fly machine/app/volume, or Fly-managed Postgres/Redis/Tigris (do NOT route generic "machine" or "deploy" questions to flyio)
+9. Only classify as "railway" if the query EXPLICITLY mentions Railway, railway.app, a Railway project/service/deployment/volume/environment, Nixpacks, or a railway.json/railway.toml file
+10. Only classify as "verda" if the query EXPLICITLY mentions Verda, DataCrunch, Verda clusters/instances, or an Instant Cluster (Verda's managed cluster product)
+11. If uncertain, classify as "%s" (the configured default cloud provider)
 
 Respond with ONLY a JSON object:
 {
-	"service": "cloudflare|aws|iam|k8s|gcp|azure|digitalocean|hetzner|vercel|railway|verda|github|terraform|general",
+	"service": "cloudflare|aws|iam|k8s|gcp|azure|digitalocean|hetzner|vercel|flyio|railway|verda|github|terraform|general",
     "confidence": "high|medium|low",
     "reason": "brief explanation of why this classification"
 }`, question, defaultProvider, defaultProvider)
@@ -561,6 +598,9 @@ func NeedsLLMClassification(ctx ServiceContext) bool {
 	if ctx.Vercel {
 		count++
 	}
+	if ctx.Flyio {
+		count++
+	}
 	if ctx.Railway {
 		count++
 	}
@@ -577,9 +617,10 @@ func NeedsLLMClassification(ctx ServiceContext) bool {
 	// 3. Digital Ocean was inferred (verify it's actually DO-related)
 	// 4. Hetzner was inferred (verify it's actually Hetzner-related)
 	// 5. Vercel was inferred (verify it's actually Vercel-related)
-	// 6. Verda was inferred (verify it's actually Verda-related)
-	// 7. IAM was inferred (verify it's actually IAM-related for disambiguation)
-	return count > 1 || ctx.Cloudflare || ctx.DigitalOcean || ctx.Hetzner || ctx.Vercel || ctx.Railway || ctx.Verda || ctx.IAM
+	// 6. Fly.io was inferred (verify it's actually Fly-related)
+	// 7. Verda was inferred (verify it's actually Verda-related)
+	// 8. IAM was inferred (verify it's actually IAM-related for disambiguation)
+	return count > 1 || ctx.Cloudflare || ctx.DigitalOcean || ctx.Hetzner || ctx.Vercel || ctx.Flyio || ctx.Railway || ctx.Verda || ctx.IAM
 }
 
 // ApplyLLMClassification updates the ServiceContext based on LLM classification result
@@ -594,6 +635,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Flyio = false
 		ctx.Railway = false
 		ctx.Verda = false
 		ctx.IAM = false
@@ -605,6 +647,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Flyio = false
 		ctx.Railway = false
 		ctx.Verda = false
 		ctx.IAM = false
@@ -616,6 +659,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Flyio = false
 		ctx.Railway = false
 		ctx.Verda = false
 		ctx.IAM = false
@@ -628,6 +672,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Flyio = false
 		ctx.Railway = false
 		ctx.Verda = false
 		ctx.IAM = false
@@ -640,6 +685,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Azure = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Flyio = false
 		ctx.Railway = false
 		ctx.Verda = false
 		ctx.IAM = false
@@ -652,6 +698,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Azure = false
 		ctx.DigitalOcean = false
 		ctx.Vercel = false
+		ctx.Flyio = false
 		ctx.Railway = false
 		ctx.Verda = false
 		ctx.IAM = false
@@ -664,7 +711,21 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Azure = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Flyio = false
 		ctx.Verda = false
+		ctx.IAM = false
+	case "flyio":
+		ctx.Flyio = true
+		ctx.AWS = false
+		ctx.GCP = false
+		ctx.Cloudflare = false
+		ctx.K8s = false
+		ctx.Azure = false
+		ctx.DigitalOcean = false
+		ctx.Hetzner = false
+		ctx.Vercel = false
+		ctx.Verda = false
+		ctx.Railway = false
 		ctx.IAM = false
 	case "verda":
 		ctx.Verda = true
@@ -676,6 +737,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Flyio = false
 		ctx.Railway = false
 		ctx.IAM = false
 	case "railway":
@@ -688,6 +750,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Flyio = false
 		ctx.Verda = false
 		ctx.IAM = false
 	case "aws":
@@ -699,6 +762,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Flyio = false
 		ctx.Railway = false
 		ctx.Verda = false
 		ctx.IAM = false
@@ -712,6 +776,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Flyio = false
 		ctx.Railway = false
 		ctx.Verda = false
 	case "terraform":
@@ -720,6 +785,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Flyio = false
 		ctx.Railway = false
 		ctx.Verda = false
 	case "github":
@@ -728,6 +794,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Flyio = false
 		ctx.Railway = false
 		ctx.Verda = false
 	default:
@@ -737,6 +804,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
 		ctx.Vercel = false
+		ctx.Flyio = false
 		ctx.Railway = false
 		ctx.Verda = false
 		ctx.Azure = false
@@ -755,6 +823,8 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 			ctx.Hetzner = true
 		case "vercel":
 			ctx.Vercel = true
+		case "flyio":
+			ctx.Flyio = true
 		case "railway":
 			ctx.Railway = true
 		case "verda":
