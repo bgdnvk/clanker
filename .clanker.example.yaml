@@ -186,6 +186,12 @@ infra:
 #   api_token: ""            # Vercel API token (or set VERCEL_TOKEN / VERCEL_API_TOKEN)
 #   team_id: ""              # Optional team ID for team-scoped accounts (or set VERCEL_TEAM_ID / VERCEL_ORG_ID)
 
+# Fly.io (for `clanker fly ...` and `clanker ask --flyio ...`):
+# flyio:
+#   api_token: ""            # Fly.io API token (or set FLY_API_TOKEN / FLY_ACCESS_TOKEN)
+#   org_slug: ""             # Optional org slug filter (or set FLY_ORG / FLY_ORG_SLUG).
+#                            # Empty = see resources across every org the token can access.
+
 # Verda Cloud (for `clanker verda ...` and `clanker ask --verda ...`):
 # verda:
 #   client_id: ""            # Verda OAuth2 client ID (or set VERDA_CLIENT_ID, or run `verda auth login`)

@@ -449,6 +449,45 @@ func (c *Client) GetVercelCredentials(ctx context.Context) (*VercelCredentials, 
 	return &response.Data.Credentials, nil
 }
 
+// GetFlyioCredentials retrieves Fly.io credentials from the backend. May
+// return 404 today (route may not be provisioned server-side yet); the caller
+// treats that as "fall back to local creds" so behaviour degrades gracefully
+// until the server adds the endpoint.
+func (c *Client) GetFlyioCredentials(ctx context.Context) (*FlyioCredentials, error) {
+	respBody, err := c.doRequest(ctx, http.MethodGet, "/api/v1/cli/credentials/flyio", nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var response struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Provider    string           `json:"provider"`
+			Credentials FlyioCredentials `json:"credentials"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(respBody, &response); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !response.Success {
+		return nil, fmt.Errorf("failed to get Fly.io credentials")
+	}
+
+	return &response.Data.Credentials, nil
+}
+
+// StoreFlyioCredentials stores Fly.io credentials in the backend.
+func (c *Client) StoreFlyioCredentials(ctx context.Context, creds *FlyioCredentials) error {
+	body := map[string]interface{}{
+		"provider":    "flyio",
+		"credentials": creds,
+	}
+	_, err := c.doRequest(ctx, http.MethodPut, "/api/v1/cli/credentials/flyio", body)
+	return err
+}
+
 // GetVerdaCredentials retrieves Verda Cloud credentials from the backend.
 // The clanker backend may return 404 today (route may not be provisioned
 // server-side yet); the caller treats that as "fall back to local creds" so

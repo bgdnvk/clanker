@@ -23,6 +23,7 @@ import (
 	cfzerotrust "github.com/bgdnvk/clanker/internal/cloudflare/zerotrust"
 	"github.com/bgdnvk/clanker/internal/dbcontext"
 	"github.com/bgdnvk/clanker/internal/digitalocean"
+	"github.com/bgdnvk/clanker/internal/flyio"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	ghclient "github.com/bgdnvk/clanker/internal/github"
 	"github.com/bgdnvk/clanker/internal/hermes"
@@ -114,6 +115,7 @@ Examples:
 		includeDigitalOcean, _ := cmd.Flags().GetBool("digitalocean")
 		includeHetzner, _ := cmd.Flags().GetBool("hetzner")
 		includeVercel, _ := cmd.Flags().GetBool("vercel")
+		includeFlyio, _ := cmd.Flags().GetBool("flyio")
 		includeRailway, _ := cmd.Flags().GetBool("railway")
 		includeVerda, _ := cmd.Flags().GetBool("verda")
 		includeTerraform, _ := cmd.Flags().GetBool("terraform")
@@ -803,6 +805,11 @@ Format as a professional compliance table suitable for government security docum
 			return handleVercelQuery(context.Background(), question, debug)
 		}
 
+		// Handle explicit --flyio flag
+		if includeFlyio && !makerMode {
+			return handleFlyioQuery(context.Background(), question, debug)
+		}
+
 		// Handle explicit --railway flag
 		if includeRailway && !makerMode {
 			return handleRailwayQuery(context.Background(), question, debug)
@@ -813,7 +820,7 @@ Format as a professional compliance table suitable for government security docum
 			return handleVerdaQuery(cmd.Context(), question, debug)
 		}
 
-		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare && !includeDigitalOcean && !includeHetzner && !includeVercel && !includeRailway && !includeVerda && !includeDB {
+		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare && !includeDigitalOcean && !includeHetzner && !includeVercel && !includeFlyio && !includeRailway && !includeVerda && !includeDB {
 			routingQuestion := questionForRouting(question)
 
 			// First, do quick keyword check for explicit terms
@@ -1383,6 +1390,7 @@ func init() {
 	askCmd.Flags().Bool("digitalocean", false, "Include Digital Ocean infrastructure context")
 	askCmd.Flags().Bool("hetzner", false, "Include Hetzner Cloud infrastructure context")
 	askCmd.Flags().Bool("vercel", false, "Include Vercel context")
+	askCmd.Flags().Bool("flyio", false, "Include Fly.io context")
 	askCmd.Flags().Bool("railway", false, "Include Railway context")
 	askCmd.Flags().Bool("verda", false, "Include Verda Cloud (GPU/AI) infrastructure context")
 	askCmd.Flags().Bool("github", false, "Include GitHub repository context")
@@ -2427,6 +2435,142 @@ func buildVercelPrompt(question, vercelContext, historyContext string) string {
 	if vercelContext != "" {
 		sb.WriteString("Vercel Context:\n")
 		sb.WriteString(vercelContext)
+		sb.WriteString("\n\n")
+	}
+	if historyContext != "" {
+		sb.WriteString("Recent Conversation:\n")
+		sb.WriteString(historyContext)
+		sb.WriteString("\n\n")
+	}
+	sb.WriteString("User Question: ")
+	sb.WriteString(question)
+	sb.WriteString("\n\nProvide a helpful, concise response in markdown format.")
+	return sb.String()
+}
+
+// resolveFlyioToken resolves the Fly.io API token and optional org slug from
+// config or environment, falling back to the backend credential store when
+// configured. Resolution chain:
+//   - flyio.api_token (viper) → FLY_API_TOKEN → FLY_ACCESS_TOKEN
+//   - flyio.org_slug (viper) → FLY_ORG → FLY_ORG_SLUG
+//
+// Empty org slug is valid — Fly tokens see resources across every org they
+// can access; the slug is a filter, not a scope.
+func resolveFlyioToken(ctx context.Context, debug bool) (apiToken string, orgSlug string, err error) {
+	apiToken = flyio.ResolveAPIToken()
+	if apiToken != "" {
+		return apiToken, flyio.ResolveOrgSlug(), nil
+	}
+
+	backendAPIKey := backend.ResolveAPIKey("")
+	if backendAPIKey != "" {
+		backendClient := backend.NewClient(backendAPIKey, debug)
+		creds, bErr := backendClient.GetFlyioCredentials(ctx)
+		if bErr == nil && strings.TrimSpace(creds.APIToken) != "" {
+			if debug {
+				fmt.Println("[backend] Using Fly.io credentials from backend")
+			}
+			return strings.TrimSpace(creds.APIToken), strings.TrimSpace(creds.OrgSlug), nil
+		}
+		if debug {
+			fmt.Printf("[backend] No Fly.io credentials available (%v), falling back to local\n", bErr)
+		}
+	}
+
+	return "", "", fmt.Errorf("Fly.io token not configured. Set flyio.api_token in ~/.clanker.yaml or export FLY_API_TOKEN")
+}
+
+// handleFlyioQuery delegates a Fly.io query to the Fly.io agent with per-org
+// conversation history for multi-turn context.
+func handleFlyioQuery(ctx context.Context, question string, debug bool) error {
+	if debug {
+		fmt.Println("Delegating query to Fly.io agent...")
+	}
+
+	apiToken, orgSlug, err := resolveFlyioToken(ctx, debug)
+	if err != nil {
+		return err
+	}
+
+	client, err := flyio.NewClient(apiToken, orgSlug, debug)
+	if err != nil {
+		return fmt.Errorf("failed to create Fly.io client: %w", err)
+	}
+
+	// Load conversation history keyed by org slug (or "personal" when unscoped).
+	conversationID := orgSlug
+	if conversationID == "" {
+		conversationID = "personal"
+	}
+	history := flyio.NewConversationHistory(conversationID)
+	if err := history.Load(); err != nil && debug {
+		fmt.Fprintf(os.Stderr, "[debug] conversation history: %v\n", err)
+	}
+
+	flyioContext, err := client.GetRelevantContext(ctx, question)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[flyio] warning: failed to fetch context: %v\n", err)
+		if strings.TrimSpace(flyioContext) == "" {
+			return fmt.Errorf("failed to fetch Fly.io context: %w", err)
+		}
+	}
+
+	// Resolve AI provider + key using the same pattern as other handlers.
+	provider := viper.GetString("ai.default_provider")
+	if provider == "" {
+		provider = "openai"
+	}
+
+	var apiKey string
+	switch provider {
+	case "bedrock", "claude":
+		apiKey = ""
+	case "gemini", "gemini-api":
+		apiKey = ""
+	case "openai":
+		apiKey = resolveOpenAIKey("")
+	case "anthropic":
+		apiKey = resolveAnthropicKey("")
+	case "cohere":
+		apiKey = resolveCohereKey("")
+	case "deepseek":
+		apiKey = resolveDeepSeekKey("")
+	case "minimax":
+		apiKey = resolveMiniMaxKey("")
+	default:
+		apiKey = viper.GetString(fmt.Sprintf("ai.providers.%s.api_key", provider))
+	}
+
+	aiClient := ai.NewClient(provider, apiKey, debug, provider)
+
+	historyContext := history.GetRecentContext(5)
+	prompt := buildFlyioPrompt(question, flyioContext, historyContext)
+
+	response, err := aiClient.AskPrompt(ctx, prompt)
+	if err != nil {
+		return fmt.Errorf("Fly.io AI query failed: %w", err)
+	}
+
+	fmt.Println(response)
+
+	history.AddEntry(question, response)
+	if err := history.Save(); err != nil && debug {
+		fmt.Fprintf(os.Stderr, "[debug] save history: %v\n", err)
+	}
+
+	return nil
+}
+
+// buildFlyioPrompt assembles the system prompt for a Fly.io ask query,
+// injecting infrastructure context and recent conversation history.
+func buildFlyioPrompt(question, flyioContext, historyContext string) string {
+	var sb strings.Builder
+	sb.WriteString("You are a Fly.io infrastructure assistant. ")
+	sb.WriteString("Answer questions about the user's Fly.io apps, machines, volumes, and addons based on the provided context. ")
+	sb.WriteString("Fly.io organizes resources as: organizations contain apps, apps contain machines (VMs) and volumes, machines run in specific regions, and addons (Postgres, Redis, Tigris) attach to apps.\n\n")
+	if flyioContext != "" {
+		sb.WriteString("Fly.io Context:\n")
+		sb.WriteString(flyioContext)
 		sb.WriteString("\n\n")
 	}
 	if historyContext != "" {
