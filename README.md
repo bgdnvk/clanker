@@ -1,14 +1,13 @@
 # Clanker CLI
 
 Beta version.  
-Main agent powering [Clanker Cloud](https://clankercloud.ai), currently in beta. 
+Main agent powering [Clanker Cloud](https://clankercloud.ai), currently in beta.
 
 Docs available at [docs.clankercloud.ai](https://docs.clankercloud.ai/)
 
-
 Ask questions about your infra (and optionally GitHub/etc). Clanker can inspect existing environments and also generate or apply infrastructure and deploy plans through its maker and deploy flows.
 
-Repo: [bgdnvk/clanker](https://github.com/bgdnvk/clanker)  
+Repo: [bgdnvk/clanker](https://github.com/bgdnvk/clanker)
 
 Interactive docs: [Clanker Cloud: How It Works](https://codexsims.com/explainers/clanker-cloud-how-it-works/)  
 Courtesy of [@cto_junior](https://x.com/cto_junior)
@@ -48,7 +47,7 @@ or edit `~/.clanker.yaml`:
 
 ```yaml
 update:
-  channel: main # release or main
+    channel: main # release or main
 ```
 
 You can also override it for one run:
@@ -267,6 +266,39 @@ Notes:
 - DigitalOcean live coverage works with either `digitalocean.api_token` / `DO_API_TOKEN` / `DIGITALOCEAN_ACCESS_TOKEN` or an authenticated `doctl` session.
 - Supabase live coverage needs a configured `databases.connections` entry with `vendor: supabase`, or a runtime `CLANKER_RUNTIME_DB_CONNECTION_JSON` connection.
 - Verda live coverage needs `verda.client_id` / `verda.client_secret`, `VERDA_CLIENT_ID` / `VERDA_CLIENT_SECRET`, or `verda auth login`.
+
+### SRE Bot
+
+Clanker can run a lightweight SRE bot that adapts to the infrastructure it finds and reports heartbeat/discovery events into Clanker Cloud Cerebro. Docker is the default runtime, but local foreground, launchd, systemd, Kubernetes, and minimal cloud VM install assets are available on request.
+
+```bash
+# Inspect what the SRE bot can see before installing anything
+clanker sre discover | cat
+clanker sre discover --format json | cat
+
+# Plan the default Docker install
+clanker sre plan --sre | cat
+
+# Build a local Docker image from this repository if you are not using a published image
+docker build -f Dockerfile.sre -t clanker-sre:local . | cat
+clanker sre plan --sre --image clanker-sre:local | cat
+
+# Generate Docker install assets under ~/.clanker/sre/install
+export CLANKER_CEREBRO_URL="http://127.0.0.1:8080/api"
+export CLANKER_CEREBRO_INGEST_TOKEN="..."
+clanker sre install --sre --target docker --image clanker-sre:local --apply | cat
+
+# Run locally in the foreground instead of Docker
+clanker sre run --sre --target local --interval 60s | cat
+
+# Request other install recipes explicitly
+clanker sre install --sre --target launchd --apply | cat
+clanker sre install --sre --target systemd --apply | cat
+clanker sre install --sre --target k8s --apply | cat
+clanker sre install --sre --target cloud-vm --apply | cat
+```
+
+The SRE bot does not assume Kubernetes, Helm, or OpenTelemetry. It detects Docker, kubeconfig, provider CLIs/tokens, database config, CI/CD signals, Terraform, and OTel collectors/env vars, then only enables the matching checks. If Cerebro is running locally, `clanker sre run` can auto-detect the desktop backend on ports `8080` to `8084`; remote ingestion requires `CLANKER_CEREBRO_INGEST_TOKEN` on the backend and the same token in the bot environment.
 
 ### Maker apply behavior
 

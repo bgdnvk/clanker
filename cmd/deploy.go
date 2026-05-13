@@ -61,6 +61,7 @@ Examples:
 		minimaxModel, _ := cmd.Flags().GetString("minimax-model")
 		targetProvider, _ := cmd.Flags().GetString("provider")
 		deployTarget, _ := cmd.Flags().GetString("target")
+		sreMode, _ := cmd.Flags().GetBool("sre")
 		instanceType, _ := cmd.Flags().GetString("instance-type")
 		newVPC, _ := cmd.Flags().GetBool("new-vpc")
 		gcpProject, _ := cmd.Flags().GetString("gcp-project")
@@ -121,6 +122,9 @@ Examples:
 		// log helper
 		logf := func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, format+"\n", args...)
+		}
+		if sreMode {
+			logf("[deploy] --sre requested; Docker is the default SRE runtime. After deployment, run: clanker sre install --target docker --apply")
 		}
 
 		// 3. Resolve AWS profile/region early so intelligence pipeline can scan infra
@@ -2147,6 +2151,7 @@ func init() {
 	deployCmd.Flags().Bool("apply", false, "Apply the plan immediately after generation")
 	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws, gcp, azure, cloudflare, digitalocean, or hetzner")
 	deployCmd.Flags().String("target", "fargate", "Deployment target: fargate (default), ec2, or eks")
+	deployCmd.Flags().Bool("sre", false, "Include Clanker SRE install guidance for the deployed app")
 	deployCmd.Flags().String("instance-type", "t3.small", "EC2 instance type (only used with --target ec2)")
 	deployCmd.Flags().Bool("new-vpc", false, "Create a new VPC instead of using default")
 	deployCmd.Flags().Bool("enforce-image-deploy", false, "Force ECR image-based deploy path (avoid docker build-on-EC2 user-data)")
