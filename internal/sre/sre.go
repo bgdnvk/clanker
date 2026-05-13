@@ -98,6 +98,7 @@ type RunOptions struct {
 	Interval    time.Duration
 	Once        bool
 	Writer      io.Writer
+	Provider    string
 }
 
 func Discover(ctx context.Context) Discovery {
@@ -280,6 +281,19 @@ func PostHeartbeat(ctx context.Context, discovery Discovery, observations map[st
 		return fmt.Errorf("no Cerebro URL configured")
 	}
 	token := strings.TrimSpace(firstNonEmpty(opts.IngestToken, viper.GetString("sre.ingest_token"), os.Getenv(DefaultIngestTokenEnv)))
+
+	// Detect provider from RunOptions or discovery
+	provider := strings.ToLower(strings.TrimSpace(opts.Provider))
+	if provider == "" {
+		// Infer primary provider from discovery
+		if len(discovery.Providers) > 0 {
+			provider = discovery.Providers[0].Name
+		}
+	}
+	if provider == "" {
+		provider = "local"
+	}
+
 	payload := map[string]any{
 		"runId":             agentID,
 		"type":              "agent.running",
@@ -288,6 +302,7 @@ func PostHeartbeat(ctx context.Context, discovery Discovery, observations map[st
 		"message":           fmt.Sprintf("%s heartbeat from %s (%d findings)", agentName, discovery.Hostname, len(BuildFindings(discovery, observations))),
 		"agentId":           agentID,
 		"agentName":         agentName,
+		"provider":          provider,
 		"target":            normalizeTarget(opts.Target),
 		"recommendedTarget": discovery.RecommendedTarget,
 		"discovery":         discovery,

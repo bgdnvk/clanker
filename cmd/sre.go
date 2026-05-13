@@ -95,6 +95,7 @@ var sreRunCmd = &cobra.Command{
 		name, _ := cmd.Flags().GetString("name")
 		cerebroURL, _ := cmd.Flags().GetString("cerebro-url")
 		ingestToken, _ := cmd.Flags().GetString("ingest-token")
+		provider, _ := cmd.Flags().GetString("provider")
 		interval, err := durationFlag(cmd, "interval", sre.DefaultInterval)
 		if err != nil {
 			return err
@@ -112,6 +113,7 @@ var sreRunCmd = &cobra.Command{
 			Interval:    interval,
 			Once:        once,
 			Writer:      os.Stdout,
+			Provider:    provider,
 		})
 		if errors.Is(err, context.Canceled) {
 			return nil
@@ -192,6 +194,7 @@ func addSRERunFlags(cmd *cobra.Command) {
 	cmd.Flags().String("name", sre.DefaultAgentName, "SRE bot name")
 	cmd.Flags().String("cerebro-url", "", "Cerebro API base URL, e.g. http://127.0.0.1:8080/api")
 	cmd.Flags().String("ingest-token", "", "Cerebro ingest token (or set CLANKER_CEREBRO_INGEST_TOKEN)")
+	cmd.Flags().String("provider", "", "Cloud provider name for heartbeat identification (aws, gcp, azure, etc.)")
 	cmd.Flags().String("interval", sre.DefaultInterval.String(), "Heartbeat/discovery interval")
 	cmd.Flags().Bool("once", false, "Send one heartbeat and exit")
 }
