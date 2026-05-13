@@ -43,4 +43,3 @@ func collectDockerExtended(ctx context.Context) map[string]any {
 }
 
 // --- time helpers ---
-
