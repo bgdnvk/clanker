@@ -208,6 +208,14 @@ infra:
 #   base_url: "https://openrouter.ai/api/v1"
 #   openrouter_api_key: ""           # Or set OPENROUTER_API_KEY env var
 
+# Clanker SRE bot (for `clanker sre ...`):
+# sre:
+#   enabled: true
+#   cerebro_url: "http://127.0.0.1:8080/api"  # Or set CLANKER_CEREBRO_URL
+#   ingest_token: ""                          # Prefer CLANKER_CEREBRO_INGEST_TOKEN
+#   interval: "60s"
+#   target: "docker"                          # docker, local, launchd, systemd, k8s, cloud-vm
+
 # Backend integration (for storing and retrieving credentials across machines):
 # backend:
 #   # API key for clanker backend authentication (or set CLANKER_BACKEND_API_KEY)

@@ -118,6 +118,7 @@ Examples:
 		includeFlyio, _ := cmd.Flags().GetBool("flyio")
 		includeRailway, _ := cmd.Flags().GetBool("railway")
 		includeVerda, _ := cmd.Flags().GetBool("verda")
+		sreMode, _ := cmd.Flags().GetBool("sre")
 		includeTerraform, _ := cmd.Flags().GetBool("terraform")
 		includeIAM, _ := cmd.Flags().GetBool("iam")
 		dbConnection, _ := cmd.Flags().GetString("db-connection")
@@ -161,6 +162,9 @@ Examples:
 		}
 
 		routingQuestion := questionForRouting(question)
+		if sreMode {
+			discovery = true
+		}
 		if includeCICD {
 			includeGitHub = true
 		}
@@ -176,6 +180,12 @@ Examples:
 
 		// Handle route-only mode: return routing decision as JSON without executing
 		if routeOnly {
+			if sreMode {
+				return json.NewEncoder(os.Stdout).Encode(map[string]string{
+					"agent":  "sre",
+					"reason": "--sre requested adaptive SRE discovery/runtime context",
+				})
+			}
 			decision := determineRoutingDecisionDetailsWithContext(question, dbConnection)
 			result := map[string]string{
 				"agent":  decision.Agent,
@@ -1415,6 +1425,7 @@ func init() {
 	askCmd.Flags().Bool("flyio", false, "Include Fly.io context")
 	askCmd.Flags().Bool("railway", false, "Include Railway context")
 	askCmd.Flags().Bool("verda", false, "Include Verda Cloud (GPU/AI) infrastructure context")
+	askCmd.Flags().Bool("sre", false, "Use adaptive Clanker SRE discovery context")
 	askCmd.Flags().Bool("github", false, "Include GitHub repository context")
 	askCmd.Flags().Bool("cicd", false, "Include CI/CD context (currently GitHub Actions)")
 	askCmd.Flags().Bool("db", false, "Include configured database context")
