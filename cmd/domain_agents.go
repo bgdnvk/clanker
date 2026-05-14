@@ -1386,7 +1386,15 @@ func shouldRouteToDatabaseAgent(question string) bool {
 		!containsAnyPhrase(lower, "database", "schema", "sql", "nosql", "table", "tables", "column", "columns", "migration", "postgres", "mysql", "sqlite", "supabase", "neon", "dynamodb", "firestore", "spanner", "bigtable", "cosmos", "d1", "redis", "mongo") {
 		return false
 	}
-	if containsAnyPhrase(lower, "schema", "schemas", "sql query", "sql", "nosql", "migration", "migrations", "foreign key", "primary key", "index", "indexes", "connection string", "database connection", "db connection") {
+	// NOTE: dropped bare "schema"/"schemas" and bare "index"/"indexes" from
+	// this phrase list. "schema" alone matches GraphQL/JSON/zod/OpenAPI
+	// schemas; "index" alone matches search indexes, web pages, etc. Real
+	// database schema/index questions still match via the engine-name +
+	// table/column combo below (line gated by a database engine list) or
+	// the explicit "database"/engine phrases lower down. Mirrors the
+	// equivalent fix in clanker-cloud/backend/internal/agent/router.go
+	// (#409 — universal fall-through to database agent).
+	if containsAnyPhrase(lower, "sql query", "sql", "nosql", "migration", "migrations", "foreign key", "primary key", "connection string", "database connection", "db connection") {
 		return true
 	}
 	if containsAnyPhrase(lower, "table", "tables", "column", "columns") &&

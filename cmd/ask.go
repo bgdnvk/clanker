@@ -1817,10 +1817,17 @@ func shouldIncludeDatabaseContextWithContext(question string, dbConnection strin
 	if shouldRouteToDatabaseAgentWithContext(q, dbConnection) {
 		return true
 	}
-	if containsAnyPhrase(q, "supabase", "neon", "sqlite", "sqlite3", "database connection", "db connection", "schema", "schemas", "column", "columns", "migration", "migrations") {
+	// NOTE: dropped bare "schema"/"schemas", "column"/"columns", and
+	// "index"/"indexes" from these phrase lists. They matched GraphQL/JSON/
+	// zod schemas, search indexes, web pages, and spreadsheet-style
+	// questions that have nothing to do with databases. The unambiguous
+	// engine names + multi-word phrases ("sql query", "sql schema",
+	// "foreign key", "database connection") still pull in DB context.
+	// See clanker-cloud router fix #409 for the matching backend change.
+	if containsAnyPhrase(q, "supabase", "neon", "sqlite", "sqlite3", "database connection", "db connection", "migration", "migrations") {
 		return true
 	}
-	if containsAnyPhrase(q, "table", "tables", "sql query", "sql schema", "foreign key", "primary key", "index", "indexes") {
+	if containsAnyPhrase(q, "tables", "sql query", "sql schema", "foreign key", "primary key") {
 		return true
 	}
 	if containsAnyPhrase(q, "postgres", "postgresql", "mysql") && containsAnyPhrase(q, "table", "tables", "schema", "schemas", "column", "columns", "sql", "query", "connect", "connection") {
