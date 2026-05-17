@@ -149,6 +149,7 @@ The CLI MCP currently exposes tools to:
 - return the installed Clanker version
 - return Clanker routing decisions for a prompt
 - run local `clanker` commands through MCP, including `ask`, `openclaw`, and other subcommands
+- launch and talk to the Clanker Cloud desktop app through its local backend
 
 Clanker chat routing also recognizes Clanker Cloud app questions now. If you use `clanker talk` and ask about the running desktop app or its saved settings, it will try the local Clanker Cloud backend first and fall back to Hermes if the app is not running.
 
@@ -202,6 +203,10 @@ The standalone CLI MCP currently exposes these tools:
 - `clanker_version`
 - `clanker_route_question`
 - `clanker_run_command`
+- `clanker_cloud_app_status`
+- `clanker_cloud_launch_app`
+- `clanker_cloud_ask_app`
+- `clanker_cloud_call_backend_api`
 
 Flags:
 
@@ -651,7 +656,7 @@ Or configure in `~/.clanker.yaml`:
 ```yaml
 flyio:
     api_token: "your-token-here"
-    org_slug: "personal"          # optional — filter to one org
+    org_slug: "personal" # optional — filter to one org
 ```
 
 ### Static Commands

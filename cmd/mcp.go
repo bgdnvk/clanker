@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bgdnvk/clanker/internal/ai"
+	"github.com/bgdnvk/clanker/internal/clankercloud"
 	"github.com/bgdnvk/clanker/internal/flyio"
 	"github.com/bgdnvk/clanker/internal/railway"
 	"github.com/bgdnvk/clanker/internal/vercel"
@@ -33,6 +35,28 @@ type commandArgs struct {
 	BackendURL string   `json:"backendUrl,omitempty"`
 	BackendEnv string   `json:"backendEnv,omitempty"`
 	Debug      *bool    `json:"debug,omitempty"`
+}
+
+type cloudAppStatusArgs struct{}
+
+type cloudAppLaunchArgs struct {
+	AppPath        string `json:"appPath,omitempty" jsonschema:"description=Optional explicit path to the Clanker Cloud app or executable"`
+	BundleID       string `json:"bundleId,omitempty" jsonschema:"description=Optional macOS bundle identifier override; defaults to com.clanker.cloud"`
+	Wait           *bool  `json:"wait,omitempty" jsonschema:"description=Wait for the local app backend to become healthy; defaults to true"`
+	TimeoutSeconds int    `json:"timeoutSeconds,omitempty" jsonschema:"description=How long to wait for the backend when wait=true; defaults to 60 seconds"`
+}
+
+type cloudAppAskArgs struct {
+	Question string `json:"question" jsonschema:"description=Question to ask the running Clanker Cloud app,required"`
+	Profile  string `json:"profile,omitempty" jsonschema:"description=Optional AWS profile override"`
+}
+
+type cloudBackendAPIArgs struct {
+	Method   string            `json:"method" jsonschema:"description=HTTP method; defaults to GET"`
+	Path     string            `json:"path" jsonschema:"description=Local Clanker Cloud backend path starting with /api/,required"`
+	Query    map[string]string `json:"query,omitempty" jsonschema:"description=Optional query string parameters"`
+	BodyJSON string            `json:"bodyJson,omitempty" jsonschema:"description=Optional JSON request body"`
+	Profile  string            `json:"profile,omitempty" jsonschema:"description=Optional AWS profile header"`
 }
 
 type vercelAskArgs struct {
@@ -157,6 +181,83 @@ func newClankerMCPServer() *mcptransport.MCPServer {
 		),
 		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args commandArgs) (*mcp.CallToolResult, error) {
 			result, err := runClankerCommand(ctx, args)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return mcp.NewToolResultJSON(result)
+		}),
+	)
+
+	server.AddTool(
+		mcp.NewTool(
+			"clanker_cloud_app_status",
+			mcp.WithDescription("Report whether the Clanker Cloud desktop app backend is running, including the detected API base URL and MCP endpoint."),
+			mcp.WithInputSchema[cloudAppStatusArgs](),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, _ cloudAppStatusArgs) (*mcp.CallToolResult, error) {
+			client := clankercloud.NewClient()
+			return mcp.NewToolResultJSON(client.Status(ctx))
+		}),
+	)
+
+	server.AddTool(
+		mcp.NewTool(
+			"clanker_cloud_launch_app",
+			mcp.WithDescription("Launch the Clanker Cloud desktop app and optionally wait for the local backend MCP endpoint to become healthy."),
+			mcp.WithInputSchema[cloudAppLaunchArgs](),
+			mcp.WithDestructiveHintAnnotation(false),
+			mcp.WithIdempotentHintAnnotation(true),
+		),
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args cloudAppLaunchArgs) (*mcp.CallToolResult, error) {
+			client := clankercloud.NewClient()
+			result := client.LaunchApp(ctx, clankercloud.LaunchOptions{
+				AppPath:        args.AppPath,
+				BundleID:       args.BundleID,
+				Wait:           boolDefault(args.Wait, true),
+				TimeoutSeconds: args.TimeoutSeconds,
+			})
+			return mcp.NewToolResultJSON(result)
+		}),
+	)
+
+	server.AddTool(
+		mcp.NewTool(
+			"clanker_cloud_ask_app",
+			mcp.WithDescription("Ask the running Clanker Cloud app a question through its local backend. Use clanker_cloud_launch_app first if the app is not running."),
+			mcp.WithInputSchema[cloudAppAskArgs](),
+		),
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args cloudAppAskArgs) (*mcp.CallToolResult, error) {
+			question := strings.TrimSpace(args.Question)
+			if question == "" {
+				return mcp.NewToolResultError("question is required"), nil
+			}
+			client := clankercloud.NewClient()
+			result, err := client.AskAgent(ctx, question, args.Profile)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return mcp.NewToolResultJSON(result)
+		}),
+	)
+
+	server.AddTool(
+		mcp.NewTool(
+			"clanker_cloud_call_backend_api",
+			mcp.WithDescription("Call a local Clanker Cloud backend /api endpoint directly. Use this after clanker_cloud_launch_app when a specific app API is needed."),
+			mcp.WithInputSchema[cloudBackendAPIArgs](),
+		),
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args cloudBackendAPIArgs) (*mcp.CallToolResult, error) {
+			var body []byte
+			if strings.TrimSpace(args.BodyJSON) != "" {
+				body = []byte(args.BodyJSON)
+				var probe any
+				if err := json.Unmarshal(body, &probe); err != nil {
+					return mcp.NewToolResultError(fmt.Sprintf("bodyJson must be valid JSON: %v", err)), nil
+				}
+			}
+			client := clankercloud.NewClient()
+			result, err := client.CallAPI(ctx, args.Method, args.Path, args.Query, body, args.Profile)
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
@@ -835,6 +936,13 @@ func runClankerCommand(ctx context.Context, args commandArgs) (map[string]any, e
 	}
 	result["exitCode"] = 0
 	return result, nil
+}
+
+func boolDefault(value *bool, fallback bool) bool {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }
 
 func init() {
