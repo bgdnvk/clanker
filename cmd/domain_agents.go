@@ -1386,7 +1386,15 @@ func shouldRouteToDatabaseAgent(question string) bool {
 		!containsAnyPhrase(lower, "database", "schema", "sql", "nosql", "table", "tables", "column", "columns", "migration", "postgres", "mysql", "sqlite", "supabase", "neon", "dynamodb", "firestore", "spanner", "bigtable", "cosmos", "d1", "redis", "mongo") {
 		return false
 	}
-	if containsAnyPhrase(lower, "schema", "schemas", "sql query", "sql", "nosql", "migration", "migrations", "foreign key", "primary key", "index", "indexes", "connection string", "database connection", "db connection") {
+	// NOTE: bare "schema"/"schemas" and "index"/"indexes" intentionally dropped
+	// from this list. They produced false-positive DB routing for non-database
+	// queries like "the graphql schema is broken", "validate the json schema",
+	// "the search index is stale", "reindex the docs". The longer phrases
+	// ("sql query", "database connection") plus explicit engine-name routing
+	// below cover the real database cases. The earlier block at line ~1392 ALSO
+	// matches "table/column" combined with "schema" or an engine name, so DB
+	// schema questions still resolve correctly.
+	if containsAnyPhrase(lower, "sql query", "sql", "nosql", "migration", "migrations", "foreign key", "primary key", "connection string", "database connection", "db connection") {
 		return true
 	}
 	if containsAnyPhrase(lower, "table", "tables", "column", "columns") &&
