@@ -1817,10 +1817,20 @@ func shouldIncludeDatabaseContextWithContext(question string, dbConnection strin
 	if shouldRouteToDatabaseAgentWithContext(q, dbConnection) {
 		return true
 	}
-	if containsAnyPhrase(q, "supabase", "neon", "sqlite", "sqlite3", "database connection", "db connection", "schema", "schemas", "column", "columns", "migration", "migrations") {
+	// NOTE: bare "schema"/"schemas", "column"/"columns", "table" (singular),
+	// "index"/"indexes" intentionally dropped from these lists. They produced
+	// false-positive DB-context inclusion for GraphQL/JSON/zod schemas, search
+	// indexes, doc reindexing, and ambiguous table mentions. The remaining
+	// matchers cover the real cases:
+	//   • Engine names ("supabase", "neon", "sqlite", "sqlite3") + the
+	//     postgres/mysql combination check below.
+	//   • Multi-word phrases that are unambiguously DB-related
+	//     ("sql query", "sql schema", "foreign key", "primary key",
+	//     "database connection", "db connection", "migration").
+	if containsAnyPhrase(q, "supabase", "neon", "sqlite", "sqlite3", "database connection", "db connection", "migration", "migrations") {
 		return true
 	}
-	if containsAnyPhrase(q, "table", "tables", "sql query", "sql schema", "foreign key", "primary key", "index", "indexes") {
+	if containsAnyPhrase(q, "tables", "sql query", "sql schema", "foreign key", "primary key") {
 		return true
 	}
 	if containsAnyPhrase(q, "postgres", "postgresql", "mysql") && containsAnyPhrase(q, "table", "tables", "schema", "schemas", "column", "columns", "sql", "query", "connect", "connection") {
@@ -3543,13 +3553,24 @@ func determineRoutingDecisionDetailsWithContext(question string, dbConnection st
 		"delete", "remove", "destroy", "terminate", "tear down", "teardown",
 	}
 
-	// K8s resources (checked first as more specific)
+	// K8s resources (checked first as more specific).
+	// NOTE: dropped "postgres", "mysql", "redis", "mongodb" from this list.
+	// They are database engines that happen to be deployable on K8s, but
+	// also exist as managed services (AWS RDS / ElastiCache, GCP Cloud SQL,
+	// Supabase, etc.) and as in-process libraries. Including them here was
+	// causing "create a postgres table" / "spin up a redis cluster" to
+	// route to `k8s-maker` ahead of `maker` or `agent-database` — wrong in
+	// the common case. With these removed, those queries fall through to
+	// the AWS-resources check (maker) or the database-routing check below.
+	// "nginx" stays — it's overwhelmingly used as a K8s workload today;
+	// people running nginx on a VM tend to say "an nginx server" or
+	// "configure nginx" which still works via the cli fallback.
 	k8sResources := []string{
 		"kubernetes", "k8s", "pod", "pods", "deployment", "deployments",
 		"service", "services", "ingress", "namespace", "configmap",
 		"secret", "pvc", "persistent volume", "statefulset", "daemonset",
 		"replicaset", "cronjob", "job", "container", "helm", "chart",
-		"kubectl", "eksctl", "kubeadm", "nginx", "redis", "mysql", "postgres", "mongodb",
+		"kubectl", "eksctl", "kubeadm", "nginx",
 		"cluster", "node", "nodes", "kube",
 	}
 
@@ -3580,6 +3601,19 @@ func determineRoutingDecisionDetailsWithContext(question string, dbConnection st
 			hasK8sResource = true
 			break
 		}
+	}
+
+	// CICD intent (github actions / workflow / pipeline / runner / cloud
+	// build / etc.) takes precedence over the hasAction+resource check
+	// below, even when "deployment" is in the question. Otherwise queries
+	// like "setup github actions for deployment" route to k8s-maker
+	// (because "deployment" overlaps with the K8s resources list and
+	// "setup" is an action verb) — wrong, because "github actions"
+	// unambiguously signals CI/CD. shouldRouteToCICDAgent already guards
+	// against database-context overlap (sql/schema/migration), so this
+	// early-out is safe.
+	if shouldRouteToCICDAgent(questionLower) {
+		return routingDecisionDetails{Agent: "agent-cicd", Reason: "CI/CD agent request detected"}
 	}
 
 	if hasAction {
