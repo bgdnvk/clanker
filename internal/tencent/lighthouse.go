@@ -90,12 +90,17 @@ func (c *Client) JSONLighthouses(ctx context.Context) (string, error) {
 // Mirrors CVMMetricsJSON but uses the QCE/LIGHTHOUSE namespace and the
 // metric-name convention Tencent uses for Lighthouse (Cpu_Usage, Mem_Usage,
 // Public_Bandwidth_In/Out, Internal_Bandwidth_In/Out).
-// Cloud Monitor reports the Lighthouse dimension as lowercase "instanceid"
-// (verified empirically via DescribeBaseMetrics — Lighthouse differs from
-// CVM, which uses "InstanceId"). Likewise the metric names are CamelCase
-// without underscores (CpuUsage, MemUsage, ...) — Tencent's English docs
-// list snake_case names, but the API rejects those.
-const lighthouseDimensionKey = "instanceid"
+// Cloud Monitor's GetMonitorData accepts the Lighthouse dimension as
+// PascalCase "InstanceId" — same as CVM. Note that DescribeBaseMetrics
+// reports it as lowercase "instanceid" in the metric metadata, but
+// passing the lowercase form to GetMonitorData triggers the misleading
+// error "unauthorized operation or the instance has been destroyed".
+// Tencent's two APIs disagree about the canonical name; PascalCase is
+// what the data API actually serves.
+//
+// Metric names are CamelCase without underscores (CpuUsage, MemUsage, ...)
+// — Tencent's English docs list snake_case names but the API rejects those.
+const lighthouseDimensionKey = "InstanceId"
 
 func (c *Client) LighthouseMetricsJSON(ctx context.Context, region, metricName string, minutes int) (string, error) {
 	if strings.TrimSpace(region) != "" {
