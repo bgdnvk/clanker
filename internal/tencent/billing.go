@@ -122,8 +122,95 @@ func newBillingClient(c *Client) (*billing.Client, error) {
 	return billing.NewClient(cred, "ap-guangzhou", cpf) // billing is global
 }
 
+// billFeeBreakdown is the fee-type decomposition of a month's bill. It comes
+// from DescribeCostExplorerSummary — the only Tencent billing API that
+// separates out tax. DescribeBillSummaryByProduct (used for the per-product
+// list) returns RealCost but no tax field, which is why a Clanker cost
+// total never matched the console's tax-inclusive headline.
+//
+// Reconciliation (verified against a real April bill):
+//
+//	consumption = voucher + cash_before_tax + tax
+//	cash_incl_tax = cash_before_tax + tax   ← the console's headline "Total Cost"
+type billFeeBreakdown struct {
+	Consumption   float64 `json:"consumption"`     // total RealCost: voucher + cash + tax
+	Voucher       float64 `json:"voucher"`         // amount covered by vouchers
+	CashBeforeTax float64 `json:"cash_before_tax"` // cash portion, pre-tax
+	Tax           float64 `json:"tax"`             // tax amount
+	CashInclTax   float64 `json:"cash_incl_tax"`   // cash_before_tax + tax (out-of-pocket)
+	Note          string  `json:"note,omitempty"`  // set when the breakdown call failed
+}
+
+// monthDateRange turns "2026-04" into the [begin, end] datetime strings
+// DescribeCostExplorerSummary expects (yyyy-mm-dd hh:ii:ss). Begin is the
+// first day at 00:00:00, end is the last day at 23:59:59.
+func monthDateRange(month string) (string, string) {
+	t, err := time.Parse("2006-01", strings.TrimSpace(month))
+	if err != nil {
+		now := time.Now()
+		t = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	}
+	begin := t.Format("2006-01-02") + " 00:00:00"
+	end := t.AddDate(0, 1, -1).Format("2006-01-02") + " 23:59:59"
+	return begin, end
+}
+
+// billFeeSummary pulls the voucher / cash-before-tax / tax decomposition for
+// a month via DescribeCostExplorerSummary (Dimensions=feeType, FeeType=cost).
+//
+// The Detail item names are localized display strings — for an English
+// account they are "Voucher", "Tax Amount", "Total Amount After Discount
+// (Excluding Tax)". We match defensively on lowercased substrings so a
+// locale change doesn't silently break the mapping.
+func billFeeSummary(client *billing.Client, month string) (billFeeBreakdown, error) {
+	var out billFeeBreakdown
+	begin, end := monthDateRange(month)
+
+	req := billing.NewDescribeCostExplorerSummaryRequest()
+	billType, periodType, dim, feeType := "1", "month", "feeType", "cost"
+	req.BeginTime, req.EndTime = &begin, &end
+	req.BillType, req.PeriodType = &billType, &periodType
+	req.Dimensions, req.FeeType = &dim, &feeType
+	var pageSize, pageNo uint64 = 100, 1
+	req.PageSize, req.PageNo = &pageSize, &pageNo
+
+	resp, err := client.DescribeCostExplorerSummary(req)
+	if err != nil {
+		return out, friendlyError(err)
+	}
+	if resp == nil || resp.Response == nil {
+		return out, nil
+	}
+	if td := resp.Response.TotalDetail; td != nil {
+		out.Consumption = parseFloat(derefString(td.Total))
+	}
+	for _, d := range resp.Response.Detail {
+		if d == nil {
+			continue
+		}
+		name := strings.ToLower(derefStringRaw(d.Name))
+		val := parseFloat(derefString(d.Total))
+		// Order matters: the cash line is literally "Total Amount After
+		// Discount (Excluding Tax)" — it contains the word "tax", so the
+		// discount check MUST come before the tax check or the cash line
+		// gets misclassified as tax.
+		switch {
+		case strings.Contains(name, "discount"):
+			out.CashBeforeTax = val
+		case strings.Contains(name, "voucher"):
+			out.Voucher = val
+		case strings.Contains(name, "tax"):
+			out.Tax = val
+		}
+	}
+	out.CashInclTax = out.CashBeforeTax + out.Tax
+	return out, nil
+}
+
 // BillByProductJSON returns the per-service cost breakdown as JSON for the
-// dashboard's Cost Explorer view.
+// dashboard's Cost Explorer view. The `summary` object adds the tax-aware
+// waterfall (consumption → voucher / cash / tax) so the dashboard total can
+// match the Tencent console's tax-inclusive headline.
 func (c *Client) BillByProductJSON(ctx context.Context, month string) (string, error) {
 	if month == "" {
 		month = time.Now().Format("2006-01")
@@ -140,13 +227,13 @@ func (c *Client) BillByProductJSON(ctx context.Context, month string) (string, e
 		return "", friendlyError(err)
 	}
 	type productCost struct {
-		Code           string  `json:"code"`
-		Name           string  `json:"name"`
-		RealCost       float64 `json:"real_cost"`
-		CashPay        float64 `json:"cash_pay"`
-		IncentivePay   float64 `json:"incentive_pay"`
-		VoucherPay     float64 `json:"voucher_pay"`
-		Ratio          string  `json:"ratio,omitempty"`
+		Code         string  `json:"code"`
+		Name         string  `json:"name"`
+		RealCost     float64 `json:"real_cost"`
+		CashPay      float64 `json:"cash_pay"`
+		IncentivePay float64 `json:"incentive_pay"`
+		VoucherPay   float64 `json:"voucher_pay"`
+		Ratio        string  `json:"ratio,omitempty"`
 	}
 	var items []productCost
 	var total float64
@@ -165,11 +252,20 @@ func (c *Client) BillByProductJSON(ctx context.Context, month string) (string, e
 			})
 		}
 	}
+
+	// Pull the tax-aware waterfall. A failure here is non-fatal — the
+	// per-product list is still useful; summary just stays zero-valued.
+	summary, ferr := billFeeSummary(client, month)
+	if ferr != nil {
+		summary.Note = "fee breakdown unavailable: " + ferr.Error()
+	}
+
 	out := struct {
-		Month string        `json:"month"`
-		Total float64       `json:"total"`
-		Items []productCost `json:"items"`
-	}{month, total, items}
+		Month   string           `json:"month"`
+		Total   float64          `json:"total"`
+		Summary billFeeBreakdown `json:"summary"`
+		Items   []productCost    `json:"items"`
+	}{month, total, summary, items}
 	b, err := json.Marshal(out)
 	if err != nil {
 		return "", err
