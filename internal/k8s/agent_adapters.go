@@ -10,6 +10,14 @@ import (
 	"github.com/bgdnvk/clanker/internal/k8s/workloads"
 )
 
+// NewWorkloadsAdapter returns a workloads.K8sClient backed by the given
+// kubectl Client. Exposed so callers outside this package (cmd/) can build
+// workload managers without reimplementing the adapter (mirrors
+// NewNetworkingAdapter / NewStorageAdapter).
+func NewWorkloadsAdapter(client *Client) workloads.K8sClient {
+	return &clientAdapter{client: client}
+}
+
 // clientAdapter wraps Client to implement workloads.K8sClient interface
 type clientAdapter struct {
 	client *Client
