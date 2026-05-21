@@ -357,6 +357,8 @@ func newClankerMCPServer() *mcptransport.MCPServer {
 		}),
 	)
 
+	registerK8sMCPTools(server)
+
 	return server
 }
 
