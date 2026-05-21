@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -330,6 +331,146 @@ func (c *Client) BillResourceTopJSON(ctx context.Context, month string, top int)
 		return "", err
 	}
 	return string(b), nil
+}
+
+// VoucherByOwnerJSON attributes a month's voucher deduction to the account
+// that owns each billed resource.
+//
+// This is the only month-scoped, per-account view of voucher spend. The
+// voucher APIs (DescribeVoucherInfo / DescribeVoucherUsageDetails) carry an
+// OwnerUin only on the voucher itself and have no month dimension, but
+// DescribeBillResourceSummary tags every billed line with OwnerUin /
+// PayerUin / OperateUin alongside VoucherPayAmount — so summing
+// VoucherPayAmount grouped by OwnerUin answers "which account had voucher
+// deductions, and how much, this month".
+//
+// It pages the full month (DescribeBillResourceSummary, byUsedTime, 1000
+// lines/page) rather than a top-N slice.
+func (c *Client) VoucherByOwnerJSON(ctx context.Context, month string) (string, error) {
+	if month == "" {
+		month = time.Now().Format("2006-01")
+	}
+	client, err := newBillingClient(c)
+	if err != nil {
+		return "", err
+	}
+
+	type ownerAgg struct {
+		voucherPay    float64
+		realCost      float64
+		cashPay       float64
+		resourceCount int
+		payers        map[string]bool
+		operators     map[string]bool
+	}
+	owners := map[string]*ownerAgg{}
+	var totalVoucher, totalReal float64
+	var lineItems int
+
+	var offset uint64 = 0
+	const pageSize uint64 = 1000
+	period := "byUsedTime"
+	for {
+		req := billing.NewDescribeBillResourceSummaryRequest()
+		o, l := offset, pageSize
+		req.Offset = &o
+		req.Limit = &l
+		req.Month = &month
+		req.PeriodType = &period
+		resp, err := client.DescribeBillResourceSummary(req)
+		if err != nil {
+			return "", friendlyError(err)
+		}
+		if resp == nil || resp.Response == nil {
+			break
+		}
+		set := resp.Response.ResourceSummarySet
+		for _, r := range set {
+			if r == nil {
+				continue
+			}
+			ow := derefStringRaw(r.OwnerUin)
+			a := owners[ow]
+			if a == nil {
+				a = &ownerAgg{payers: map[string]bool{}, operators: map[string]bool{}}
+				owners[ow] = a
+			}
+			vp := parseFloat(derefString(r.VoucherPayAmount))
+			rc := parseFloat(derefString(r.RealTotalCost))
+			a.voucherPay += vp
+			a.realCost += rc
+			a.cashPay += parseFloat(derefString(r.CashPayAmount))
+			a.resourceCount++
+			if p := derefStringRaw(r.PayerUin); p != "" {
+				a.payers[p] = true
+			}
+			if op := derefStringRaw(r.OperateUin); op != "" {
+				a.operators[op] = true
+			}
+			totalVoucher += vp
+			totalReal += rc
+			lineItems++
+		}
+		if uint64(len(set)) < pageSize {
+			break
+		}
+		offset += pageSize
+	}
+
+	type ownerVoucher struct {
+		OwnerUin      string   `json:"owner_uin"`
+		VoucherPay    float64  `json:"voucher_pay"`
+		RealCost      float64  `json:"real_cost"`
+		CashPay       float64  `json:"cash_pay"`
+		ResourceCount int      `json:"resource_count"`
+		PayerUins     []string `json:"payer_uins,omitempty"`
+		OperateUins   []string `json:"operate_uins,omitempty"`
+	}
+	items := make([]ownerVoucher, 0, len(owners))
+	for uin, a := range owners {
+		items = append(items, ownerVoucher{
+			OwnerUin:      uin,
+			VoucherPay:    a.voucherPay,
+			RealCost:      a.realCost,
+			CashPay:       a.cashPay,
+			ResourceCount: a.resourceCount,
+			PayerUins:     sortedKeys(a.payers),
+			OperateUins:   sortedKeys(a.operators),
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].VoucherPay != items[j].VoucherPay {
+			return items[i].VoucherPay > items[j].VoucherPay
+		}
+		return items[i].OwnerUin < items[j].OwnerUin
+	})
+
+	out := struct {
+		Month        string         `json:"month"`
+		TotalVoucher float64        `json:"total_voucher"`
+		TotalReal    float64        `json:"total_real_cost"`
+		OwnerCount   int            `json:"owner_count"`
+		LineItems    int            `json:"line_items"`
+		Owners       []ownerVoucher `json:"owners"`
+	}{month, totalVoucher, totalReal, len(items), lineItems, items}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// sortedKeys returns a set's keys as a sorted slice.
+func sortedKeys(m map[string]bool) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func parseFloat(s string) float64 {

@@ -266,8 +266,56 @@ externally-routable endpoint when running from outside the cluster's VPC.`,
 	}
 	costTopCmd.Flags().StringVar(&costMonth, "month", "", "YYYY-MM (default: current month)")
 	costTopCmd.Flags().Int("limit", 20, "Number of resources to return (max 200)")
+
+	var voucherStatus string
+	costVouchersCmd := &cobra.Command{
+		Use:   "vouchers",
+		Short: "List vouchers (credits) and voucher spending by owner account",
+		Long: `List the account's vouchers and a per-owner-UIN breakdown of voucher
+spending (nominal − remaining balance).
+
+By default every voucher is shown. Use --status to filter by Tencent's
+voucher-status enum:
+  unUsed     - still usable (this is what "active vouchers" means)
+  used       - fully consumed
+  delivered  - issued but not yet effective
+  cancel     - voided
+  overdue    - expired`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			creds := ResolveCredentials()
+			if region != "" {
+				creds.Region = region
+			}
+			client, err := NewClient(creds, viper.GetBool("debug"))
+			if err != nil {
+				return err
+			}
+			return listVouchers(client, strings.TrimSpace(voucherStatus))
+		},
+	}
+	costVouchersCmd.Flags().StringVar(&voucherStatus, "status", "", "Filter by voucher status: unUsed, used, delivered, cancel, overdue (default: all)")
+
+	costVoucherUsageCmd := &cobra.Command{
+		Use:   "voucher-usage [voucher-id]",
+		Short: "Show the deduction history for a single voucher",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			creds := ResolveCredentials()
+			if region != "" {
+				creds.Region = region
+			}
+			client, err := NewClient(creds, viper.GetBool("debug"))
+			if err != nil {
+				return err
+			}
+			return listVoucherUsage(client, strings.TrimSpace(args[0]))
+		},
+	}
+
 	costCmd.AddCommand(costByProductCmd)
 	costCmd.AddCommand(costTopCmd)
+	costCmd.AddCommand(costVouchersCmd)
+	costCmd.AddCommand(costVoucherUsageCmd)
 
 	tencentCmd.AddCommand(listCmd)
 	tencentCmd.AddCommand(regionsCmd)
