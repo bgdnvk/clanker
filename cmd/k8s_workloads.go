@@ -52,7 +52,6 @@ var rolloutKinds = map[string]string{
 var (
 	k8sWorkloadReplicas   int
 	k8sWorkloadNamespace  string
-	k8sWorkloadCluster    string
 	k8sWorkloadContext    string
 	k8sWorkloadKubeconfig string
 	k8sWorkloadDebug      bool
@@ -158,11 +157,13 @@ func init() {
 
 	// Shared connection flags. We don't reuse k8sAsk* because those mark
 	// 'namespace' with shorthand 'n' already on k8sLogsCmd; here we want a
-	// dedicated set so flags from other subcommands don't bleed in.
+	// dedicated set so flags from other subcommands don't bleed in. The
+	// EKS/GKE/AKS --cluster auto-kubeconfig flow lives on `k8s ask` only
+	// for now; here you point at the cluster via --context (or the
+	// active kubeconfig).
 	for _, cmd := range []*cobra.Command{k8sScaleCmd, k8sRestartCmd, k8sRolloutStatusCmd, k8sRolloutUndoCmd, k8sRolloutHistoryCmd, k8sRmCmd} {
 		cmd.Flags().StringVarP(&k8sWorkloadNamespace, "namespace", "n", "default", "Kubernetes namespace")
-		cmd.Flags().StringVar(&k8sWorkloadCluster, "cluster", "", "Cluster name (used to update kubeconfig for EKS/GKE/AKS before running)")
-		cmd.Flags().StringVar(&k8sWorkloadContext, "context", "", "kubectl context to use (overrides --cluster)")
+		cmd.Flags().StringVar(&k8sWorkloadContext, "context", "", "kubectl context to use (defaults to active context)")
 		cmd.Flags().StringVar(&k8sWorkloadKubeconfig, "kubeconfig", "", "Path to kubeconfig file (default: ~/.kube/config)")
 		cmd.Flags().BoolVar(&k8sWorkloadDebug, "debug", false, "Enable debug output")
 	}
@@ -251,16 +252,14 @@ func runK8sRestart(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 	client := buildK8sWorkloadClient()
 
-	// We use the deployment manager only as a thin wrapper for restart; the
-	// underlying call still goes through (*Client).Rollout.
-	mgr := workloads.NewDeploymentManager(k8s.NewWorkloadsAdapter(client), k8sWorkloadDebug)
-	output, err := mgr.RolloutRestart(ctx, name, k8sWorkloadNamespace)
+	// Dispatch on the resolved kind. We used to delegate to
+	// DeploymentManager.RolloutRestart and fall back on error, but
+	// RolloutRestart hardcodes 'deployment' internally — when a
+	// Deployment AND a StatefulSet share a name, the deployment call
+	// silently succeeded against the wrong target.
+	output, err := client.Rollout(ctx, "restart", kind, name, k8sWorkloadNamespace)
 	if err != nil {
-		// Fall back to a direct rollout restart for non-deployment kinds.
-		output, err = client.Rollout(ctx, "restart", kind, name, k8sWorkloadNamespace)
-		if err != nil {
-			return fmt.Errorf("restart %s/%s failed: %w", kind, name, err)
-		}
+		return fmt.Errorf("restart %s/%s failed: %w", kind, name, err)
 	}
 	fmt.Print(output)
 	if !strings.HasSuffix(output, "\n") {

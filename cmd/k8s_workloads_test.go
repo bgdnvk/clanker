@@ -101,6 +101,18 @@ func TestK8sRmCmd_HasDestructiveFlags(t *testing.T) {
 	}
 }
 
+func TestK8sRestartCmd_HasNoClusterFlag(t *testing.T) {
+	// The --cluster flag used to be wired but was a silent no-op (the
+	// EKS/GKE/AKS kubeconfig auto-update flow only lives on `k8s ask`).
+	// Guard against it sneaking back without an implementation behind it.
+	if k8sRestartCmd.Flags().Lookup("cluster") != nil {
+		t.Error("k8s restart should not advertise --cluster until the kubeconfig auto-update path is wired up")
+	}
+	if k8sScaleCmd.Flags().Lookup("cluster") != nil {
+		t.Error("k8s scale should not advertise --cluster until the kubeconfig auto-update path is wired up")
+	}
+}
+
 func TestK8sWorkloadCmds_RegisteredOnRoot(t *testing.T) {
 	parents := map[string]bool{}
 	for _, c := range k8sCmd.Commands() {
