@@ -42,12 +42,6 @@ type ClusterStatus struct {
 // CLANKER_K8S_HISTORY_MAX is not set or invalid.
 const DefaultMaxHistoryEntries = 20
 
-// MaxHistoryEntries is kept for backwards compatibility with callers that
-// previously read the constant. Treat it as a fallback only — the live
-// cap is resolved by resolveMaxHistoryEntries(), which honours the env
-// override.
-const MaxHistoryEntries = DefaultMaxHistoryEntries
-
 // resolveMaxHistoryEntries returns the cap to apply when trimming
 // ConversationHistory. Reads CLANKER_K8S_HISTORY_MAX once per call, so
 // the value can be changed without restarting (matters for long-running
@@ -91,12 +85,12 @@ func (h *ConversationHistory) AddEntry(question, answer, cluster string) {
 
 	h.Entries = append(h.Entries, entry)
 
-	// Trim old entries to keep history manageable. The cap is resolved
+	// Trim old entries to keep history manageable. The limit is resolved
 	// on every append (via env) so long-running processes pick up
 	// CLANKER_K8S_HISTORY_MAX changes without restart.
-	cap := resolveMaxHistoryEntries()
-	if len(h.Entries) > cap {
-		h.Entries = h.Entries[len(h.Entries)-cap:]
+	limit := resolveMaxHistoryEntries()
+	if len(h.Entries) > limit {
+		h.Entries = h.Entries[len(h.Entries)-limit:]
 	}
 }
 
