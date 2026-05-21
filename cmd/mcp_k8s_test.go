@@ -116,6 +116,58 @@ func TestK8sNodeDrain_IgnoreDaemonsetsTristate(t *testing.T) {
 	}
 }
 
+func TestMCPK8sHelmListNormalize_ParsesArray(t *testing.T) {
+	got := normalizeHelmListOutput(`[{"name":"foo"},{"name":"bar"}]`)
+	releases, ok := got["releases"].([]any)
+	if !ok {
+		t.Fatalf("releases is not []any, got %T", got["releases"])
+	}
+	if len(releases) != 2 {
+		t.Errorf("expected 2 releases, got %d", len(releases))
+	}
+	if _, hasRaw := got["raw"]; !hasRaw {
+		t.Error("raw field should be present even on success")
+	}
+}
+
+func TestMCPK8sHelmListNormalize_EmptyArrayStaysEmpty(t *testing.T) {
+	got := normalizeHelmListOutput("[]")
+	releases, ok := got["releases"].([]any)
+	if !ok {
+		t.Fatalf("releases is not []any, got %T", got["releases"])
+	}
+	if len(releases) != 0 {
+		t.Errorf("expected empty releases, got %d", len(releases))
+	}
+}
+
+func TestMCPK8sHelmListNormalize_NullStaysEmpty(t *testing.T) {
+	// helm list -o json can emit 'null' instead of '[]' on no releases.
+	got := normalizeHelmListOutput("null")
+	releases, ok := got["releases"].([]any)
+	if !ok {
+		t.Fatalf("releases is not []any, got %T", got["releases"])
+	}
+	if len(releases) != 0 {
+		t.Errorf("expected empty releases for null input, got %d", len(releases))
+	}
+}
+
+func TestMCPK8sHelmListNormalize_UnparseableSurfacesRaw(t *testing.T) {
+	raw := "WARN: something bad\n[{\"name\":\"foo\"}]"
+	got := normalizeHelmListOutput(raw)
+	releases, ok := got["releases"].([]any)
+	if !ok {
+		t.Fatalf("releases is not []any, got %T", got["releases"])
+	}
+	if len(releases) != 0 {
+		t.Errorf("expected empty releases on parse failure, got %d", len(releases))
+	}
+	if got["raw"] != raw {
+		t.Errorf("raw should preserve unparseable input verbatim, got %v", got["raw"])
+	}
+}
+
 // drainArgsIncludeIgnoreDaemonsets is a test-only helper that mirrors
 // the dispatch in the drain handler. Kept here (not in production code)
 // so the rule lives next to its tests.

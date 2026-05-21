@@ -176,6 +176,30 @@ func mcpAppendBoolIf(args []string, flag string, v bool) []string {
 	return append(args, flag)
 }
 
+// normalizeHelmListOutput turns `helm list -o json` output into a
+// stable response shape: {"releases": [...], "raw": "..."}.
+//
+// helm list -o json normally emits an array (possibly empty), but
+// can also emit 'null' when there are no releases, and can occasionally
+// prefix the JSON with a warning line. We always return an array for
+// 'releases' (empty on no-op or parse failure) so MCP clients can
+// iterate without nil-checking; 'raw' carries the verbatim stdout for
+// callers that need to inspect anything the parser dropped.
+func normalizeHelmListOutput(output string) map[string]any {
+	result := map[string]any{
+		"releases": []any{},
+		"raw":      output,
+	}
+	var parsed []any
+	if err := json.Unmarshal([]byte(output), &parsed); err == nil {
+		if parsed == nil {
+			parsed = []any{}
+		}
+		result["releases"] = parsed
+	}
+	return result
+}
+
 // registerK8sMCPTools adds every native Kubernetes tool to the MCP server.
 // Called from newClankerMCPServer so the registration order remains
 // auditable in one place.
@@ -469,7 +493,7 @@ func registerK8sMCPTools(server *mcptransport.MCPServer) {
 	server.AddTool(
 		mcp.NewTool(
 			"clanker_k8s_helm_list",
-			mcp.WithDescription("List Helm releases on the active context. Pass allNamespaces=true to span every namespace."),
+			mcp.WithDescription("List Helm releases on the active context. Pass allNamespaces=true to span every namespace. Note: passing namespace=\"all\" also spans every namespace (it is the buildHelmArgs sentinel that suppresses -n injection)."),
 			mcp.WithInputSchema[k8sHelmListArgs](),
 			mcp.WithReadOnlyHintAnnotation(true),
 		),
@@ -489,14 +513,7 @@ func registerK8sMCPTools(server *mcptransport.MCPServer) {
 			if err != nil {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
-			// helm list -o json gives us a parseable array; surface
-			// both the raw string (for clients that just want it) and
-			// the parsed form (for downstream LLM use).
-			var parsed any
-			if uerr := json.Unmarshal([]byte(output), &parsed); uerr == nil {
-				return mcp.NewToolResultJSON(map[string]any{"releases": parsed})
-			}
-			return mcp.NewToolResultJSON(map[string]any{"output": output})
+			return mcp.NewToolResultJSON(normalizeHelmListOutput(output))
 		}),
 	)
 
