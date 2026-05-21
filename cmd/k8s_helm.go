@@ -225,8 +225,9 @@ func appendBoolIf(args []string, flag string, v bool) []string {
 }
 
 // runHelmAndPrint executes helm with the given args (helm subcommand is the
-// first arg, e.g., "install"). It uses RunHelm so the namespace flag is
-// passed via args explicitly to avoid double-injection from the client default.
+// first arg, e.g., "install"). It uses RunHelm so the '-n' flag is injected
+// once by buildHelmArgs from the client's default namespace — callers must
+// NOT also append '-n' into args (see buildK8sHelmClient).
 func runHelmAndPrint(ctx context.Context, client *k8s.Client, args []string) error {
 	output, err := client.RunHelm(ctx, args...)
 	if err != nil {
