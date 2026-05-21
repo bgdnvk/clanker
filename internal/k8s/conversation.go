@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,8 +38,33 @@ type ClusterStatus struct {
 	Context        string    `json:"context"`
 }
 
-// MaxHistoryEntries limits the conversation history size
-const MaxHistoryEntries = 20
+// DefaultMaxHistoryEntries is the per-cluster conversation cap used when
+// CLANKER_K8S_HISTORY_MAX is not set or invalid.
+const DefaultMaxHistoryEntries = 20
+
+// MaxHistoryEntries is kept for backwards compatibility with callers that
+// previously read the constant. Treat it as a fallback only — the live
+// cap is resolved by resolveMaxHistoryEntries(), which honours the env
+// override.
+const MaxHistoryEntries = DefaultMaxHistoryEntries
+
+// resolveMaxHistoryEntries returns the cap to apply when trimming
+// ConversationHistory. Reads CLANKER_K8S_HISTORY_MAX once per call, so
+// the value can be changed without restarting (matters for long-running
+// MCP / cloud-backend processes that own a ConversationHistory across
+// many user sessions). Invalid or non-positive values fall back to the
+// default so a typo can't accidentally erase the user's history.
+func resolveMaxHistoryEntries() int {
+	raw := strings.TrimSpace(os.Getenv("CLANKER_K8S_HISTORY_MAX"))
+	if raw == "" {
+		return DefaultMaxHistoryEntries
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return DefaultMaxHistoryEntries
+	}
+	return n
+}
 
 // MaxAnswerLengthInContext limits how much of previous answers to include in context
 const MaxAnswerLengthInContext = 500
@@ -65,9 +91,12 @@ func (h *ConversationHistory) AddEntry(question, answer, cluster string) {
 
 	h.Entries = append(h.Entries, entry)
 
-	// Trim old entries to keep history manageable
-	if len(h.Entries) > MaxHistoryEntries {
-		h.Entries = h.Entries[len(h.Entries)-MaxHistoryEntries:]
+	// Trim old entries to keep history manageable. The cap is resolved
+	// on every append (via env) so long-running processes pick up
+	// CLANKER_K8S_HISTORY_MAX changes without restart.
+	cap := resolveMaxHistoryEntries()
+	if len(h.Entries) > cap {
+		h.Entries = h.Entries[len(h.Entries)-cap:]
 	}
 }
 
