@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -150,9 +151,28 @@ func (c *Client) RunJSON(ctx context.Context, args ...string) ([]byte, error) {
 	return []byte(output), nil
 }
 
+// ApplyDryRunServer runs `kubectl apply -f - --dry-run=server` against the
+// active context. Mirrors Apply but appends --dry-run=server so callers can
+// preview what apply would do without mutating the cluster. Returned output
+// is the server's response (which kubectl prints in its normal "<kind>/<name>
+// configured (server dry run)" form).
+func (c *Client) ApplyDryRunServer(ctx context.Context, manifest, namespace string) (string, error) {
+	return c.applyManifest(ctx, manifest, namespace, true)
+}
+
 // Apply applies a manifest from a string
 func (c *Client) Apply(ctx context.Context, manifest string, namespace string) (string, error) {
-	cmdArgs := c.buildArgs(namespace, []string{"apply", "-f", "-"})
+	return c.applyManifest(ctx, manifest, namespace, false)
+}
+
+// applyManifest is the shared implementation behind Apply / ApplyDryRunServer.
+// dryRunServer toggles --dry-run=server.
+func (c *Client) applyManifest(ctx context.Context, manifest, namespace string, dryRunServer bool) (string, error) {
+	applyArgs := []string{"apply", "-f", "-"}
+	if dryRunServer {
+		applyArgs = append(applyArgs, "--dry-run=server")
+	}
+	cmdArgs := c.buildArgs(namespace, applyArgs)
 
 	if c.debug {
 		fmt.Printf("[kubectl] apply manifest (%d bytes)\n", len(manifest))
@@ -277,6 +297,50 @@ func (c *Client) PortForward(ctx context.Context, podName, namespace string, loc
 		return nil, fmt.Errorf("failed to start port forward: %w", err)
 	}
 
+	return cmd, nil
+}
+
+// PortForwardStreamOptions controls PortForwardStream behaviour. Wire
+// Stdout/Stderr to your own writers (typically os.Stdout/os.Stderr) so the
+// caller can see kubectl's "Forwarding from ..." log in real time.
+type PortForwardStreamOptions struct {
+	Target    string    // e.g. "pod/my-pod" or "svc/my-svc"; required.
+	PortSpec  string    // "<local>:<remote>" or ":<remote>"; required.
+	Addresses string    // optional, passed to --address
+	Stdout    io.Writer // optional; nil = discard.
+	Stderr    io.Writer // optional; nil = discard.
+}
+
+// PortForwardStream starts `kubectl port-forward` with stdout/stderr wired
+// to the supplied writers and returns the running *exec.Cmd. Use this when
+// you want to surface kubectl's log lines live (the CLI port-forward verb
+// does), as opposed to PortForward which discards them.
+func (c *Client) PortForwardStream(ctx context.Context, namespace string, opts PortForwardStreamOptions) (*exec.Cmd, error) {
+	if opts.Target == "" {
+		return nil, fmt.Errorf("PortForwardStream: Target is required")
+	}
+	if opts.PortSpec == "" {
+		return nil, fmt.Errorf("PortForwardStream: PortSpec is required")
+	}
+
+	pfArgs := []string{"port-forward", opts.Target, opts.PortSpec}
+	if opts.Addresses != "" {
+		pfArgs = append(pfArgs, "--address", opts.Addresses)
+	}
+	args := c.buildArgs(namespace, pfArgs)
+
+	cmd := exec.CommandContext(ctx, "kubectl", args...)
+	cmd.Env = os.Environ()
+	if opts.Stdout != nil {
+		cmd.Stdout = opts.Stdout
+	}
+	if opts.Stderr != nil {
+		cmd.Stderr = opts.Stderr
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start port forward: %w", err)
+	}
 	return cmd, nil
 }
 
