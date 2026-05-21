@@ -183,6 +183,140 @@ func TestKubectlArgs_OmitsFlagsWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestKubectlArgsClusterScoped_NeverEmitsNamespace(t *testing.T) {
+	got := kubectlArgsClusterScoped(PlaybookInput{Namespace: "prod", Context: "my-eks"}, "get", "nodes")
+	if contains(got, "-n") || contains(got, "prod") {
+		t.Errorf("cluster-scoped helper must not emit namespace: %v", got)
+	}
+	if !contains(got, "--context") || !contains(got, "my-eks") {
+		t.Errorf("cluster-scoped helper should still pass --context: %v", got)
+	}
+}
+
+// ============================================================
+// stuckRolloutPlaybook
+// ============================================================
+
+func TestStuckRollout_RequiresDeploymentName(t *testing.T) {
+	p := &stuckRolloutPlaybook{}
+	_, err := p.Plan(context.Background(), &stubK8sClient{}, PlaybookInput{Namespace: "prod"})
+	if err == nil {
+		t.Fatal("expected error when name is empty")
+	}
+	if !strings.Contains(err.Error(), "deployment name is required") {
+		t.Errorf("error should mention deployment name, got %q", err.Error())
+	}
+}
+
+func TestStuckRollout_EmitsCanonicalPlan(t *testing.T) {
+	p := &stuckRolloutPlaybook{}
+	plan, err := p.Plan(context.Background(), &stubK8sClient{}, PlaybookInput{
+		Name: "my-app", Namespace: "prod",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	wantIDs := []string{"rollout-status", "rollout-history", "describe", "rollout-undo"}
+	if len(plan.Steps) != len(wantIDs) {
+		t.Fatalf("expected %d steps, got %d", len(wantIDs), len(plan.Steps))
+	}
+	for i, want := range wantIDs {
+		if plan.Steps[i].ID != want {
+			t.Errorf("step %d id = %q, want %q", i, plan.Steps[i].ID, want)
+		}
+	}
+}
+
+func TestStuckRollout_OnlyUndoIsMutating(t *testing.T) {
+	p := &stuckRolloutPlaybook{}
+	plan, _ := p.Plan(context.Background(), &stubK8sClient{}, PlaybookInput{
+		Name: "my-app", Namespace: "prod",
+	})
+	for i, step := range plan.Steps {
+		isUndo := step.ID == "rollout-undo"
+		if step.Mutating != isUndo {
+			t.Errorf("step %d (%s) mutating=%v; want %v", i, step.ID, step.Mutating, isUndo)
+		}
+		if isUndo && !step.RequiresApproval {
+			t.Errorf("rollout-undo must require explicit approval")
+		}
+	}
+}
+
+func TestStuckRollout_TargetEncodesDeploymentAndNS(t *testing.T) {
+	p := &stuckRolloutPlaybook{}
+	plan, _ := p.Plan(context.Background(), &stubK8sClient{}, PlaybookInput{
+		Name: "my-app", Namespace: "prod",
+	})
+	if plan.Target != "deployment/my-app@prod" {
+		t.Errorf("target = %q, want deployment/my-app@prod", plan.Target)
+	}
+}
+
+// ============================================================
+// pendingPodSchedulingPlaybook
+// ============================================================
+
+func TestPendingPodScheduling_RequiresPodName(t *testing.T) {
+	p := &pendingPodSchedulingPlaybook{}
+	_, err := p.Plan(context.Background(), &stubK8sClient{}, PlaybookInput{Namespace: "prod"})
+	if err == nil {
+		t.Fatal("expected error when name is empty")
+	}
+}
+
+func TestPendingPodScheduling_AllStepsAreReadOnly(t *testing.T) {
+	p := &pendingPodSchedulingPlaybook{}
+	plan, err := p.Plan(context.Background(), &stubK8sClient{}, PlaybookInput{
+		Name: "my-pod", Namespace: "prod",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for i, step := range plan.Steps {
+		if step.Mutating {
+			t.Errorf("step %d (%s) is marked mutating; pending-pod-scheduling is diagnostic-only", i, step.ID)
+		}
+		if step.RequiresApproval {
+			t.Errorf("step %d (%s) requires approval; diagnostic-only playbook shouldn't", i, step.ID)
+		}
+	}
+}
+
+func TestPendingPodScheduling_GetNodesIsClusterScoped(t *testing.T) {
+	p := &pendingPodSchedulingPlaybook{}
+	plan, _ := p.Plan(context.Background(), &stubK8sClient{}, PlaybookInput{
+		Name: "my-pod", Namespace: "prod", Context: "my-eks",
+	})
+	var nodeStep *PlaybookStep
+	for i := range plan.Steps {
+		if plan.Steps[i].ID == "get-nodes" {
+			nodeStep = &plan.Steps[i]
+			break
+		}
+	}
+	if nodeStep == nil {
+		t.Fatal("get-nodes step missing from plan")
+	}
+	// Nodes are cluster-scoped → no -n flag.
+	if contains(nodeStep.Args, "-n") || contains(nodeStep.Args, "prod") {
+		t.Errorf("get-nodes must not emit -n: %v", nodeStep.Args)
+	}
+	// Context still propagates.
+	if !contains(nodeStep.Args, "--context") || !contains(nodeStep.Args, "my-eks") {
+		t.Errorf("get-nodes should pass --context: %v", nodeStep.Args)
+	}
+}
+
+func TestRegistry_ContainsAllThreePlaybooks(t *testing.T) {
+	r := NewPlaybookRegistry()
+	for _, id := range []string{"crashloop-recovery", "stuck-rollout", "pending-pod-scheduling"} {
+		if _, err := r.Get(id); err != nil {
+			t.Errorf("playbook %q not registered: %v", id, err)
+		}
+	}
+}
+
 // ============================================================
 // helpers
 // ============================================================
