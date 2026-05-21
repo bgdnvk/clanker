@@ -71,6 +71,21 @@ Example:
 	RunE: runCreateGKE,
 }
 
+var k8sCreateAKSCmd = &cobra.Command{
+	Use:   "aks [cluster-name]",
+	Short: "Create an AKS cluster",
+	Long: `Create a new Azure Kubernetes Service (AKS) cluster. The Azure
+subscription and resource group must already exist (this command does
+not provision them).
+
+Example:
+  clanker k8s create aks my-cluster \
+      --azure-subscription <sub-id> --azure-resource-group my-rg --azure-region eastus
+  clanker k8s create aks my-cluster --azure-resource-group my-rg --node-type Standard_DS2_v2 --plan`,
+	Args: cobra.ExactArgs(1),
+	RunE: runCreateAKS,
+}
+
 var k8sDeleteCmd = &cobra.Command{
 	Use:   "delete [cluster-type] [cluster-name]",
 	Short: "Delete a Kubernetes cluster",
@@ -79,6 +94,7 @@ var k8sDeleteCmd = &cobra.Command{
 Example:
   clanker k8s delete eks my-cluster
   clanker k8s delete gke my-cluster --gcp-project my-project
+  clanker k8s delete aks my-cluster --azure-resource-group my-rg
   clanker k8s delete kubeadm my-cluster`,
 	Args: cobra.ExactArgs(2),
 	RunE: runDeleteCluster,
@@ -291,6 +307,7 @@ func init() {
 	k8sCreateCmd.AddCommand(k8sCreateEKSCmd)
 	k8sCreateCmd.AddCommand(k8sCreateKubeadmCmd)
 	k8sCreateCmd.AddCommand(k8sCreateGKECmd)
+	k8sCreateCmd.AddCommand(k8sCreateAKSCmd)
 
 	// EKS create flags
 	k8sCreateEKSCmd.Flags().IntVar(&k8sNodes, "nodes", 1, "Number of worker nodes")
@@ -318,6 +335,17 @@ func init() {
 	k8sCreateGKECmd.Flags().BoolVar(&k8sPlanOnly, "plan", false, "Show plan without applying")
 	k8sCreateGKECmd.Flags().BoolVar(&k8sApply, "apply", false, "Apply the plan (default prompts for confirmation)")
 	k8sCreateGKECmd.MarkFlagRequired("gcp-project")
+
+	// AKS create flags
+	k8sCreateAKSCmd.Flags().StringVar(&k8sAzureSubscription, "azure-subscription", "", "Azure subscription ID (defaults to infra.azure.subscription / az CLI)")
+	k8sCreateAKSCmd.Flags().StringVar(&k8sAzureResourceGroup, "azure-resource-group", "", "Azure resource group for the cluster (required)")
+	k8sCreateAKSCmd.Flags().StringVar(&k8sAzureRegion, "azure-region", "eastus", "Azure region (location) for the cluster")
+	k8sCreateAKSCmd.Flags().IntVar(&k8sNodes, "nodes", 1, "Number of worker nodes")
+	k8sCreateAKSCmd.Flags().StringVar(&k8sNodeType, "node-type", "Standard_DS2_v2", "Azure VM size for nodes")
+	k8sCreateAKSCmd.Flags().StringVar(&k8sK8sVersion, "version", "", "Kubernetes version (default: AKS default)")
+	k8sCreateAKSCmd.Flags().BoolVar(&k8sPlanOnly, "plan", false, "Show plan without applying")
+	k8sCreateAKSCmd.Flags().BoolVar(&k8sApply, "apply", false, "Apply the plan (default prompts for confirmation)")
+	k8sCreateAKSCmd.MarkFlagRequired("azure-resource-group")
 
 	// Deploy flags
 	k8sDeployCmd.Flags().StringVar(&k8sDeployName, "name", "", "Deployment name (default: image name)")
@@ -387,6 +415,9 @@ func init() {
 	k8sListCmd.Flags().StringVar(&k8sGCPRegion, "gcp-region", "", "GCP region for GKE clusters")
 	k8sDeleteCmd.Flags().StringVar(&k8sGCPProject, "gcp-project", "", "GCP project ID for GKE clusters")
 	k8sDeleteCmd.Flags().StringVar(&k8sGCPRegion, "gcp-region", "", "GCP region for GKE clusters")
+	k8sDeleteCmd.Flags().StringVar(&k8sAzureSubscription, "azure-subscription", "", "Azure subscription ID for AKS clusters")
+	k8sDeleteCmd.Flags().StringVar(&k8sAzureResourceGroup, "azure-resource-group", "", "Azure resource group for AKS clusters (required for AKS)")
+	k8sDeleteCmd.Flags().StringVar(&k8sAzureRegion, "azure-region", "", "Azure region for AKS clusters")
 	k8sGetKubeconfigCmd.Flags().StringVar(&k8sGCPProject, "gcp-project", "", "GCP project ID for GKE clusters")
 	k8sGetKubeconfigCmd.Flags().StringVar(&k8sGCPRegion, "gcp-region", "", "GCP region for GKE clusters")
 	k8sListCmd.Flags().StringVar(&k8sAzureSubscription, "azure-subscription", "", "Azure subscription ID for AKS clusters")
@@ -1270,6 +1301,108 @@ func runCreateGKE(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// runCreateAKS provisions an AKS cluster using the existing AKSProvider.
+// Mirrors runCreateGKE in shape, minus the dedicated plan generator (we
+// build a small inline summary because internal/k8s/plan doesn't expose a
+// GenerateAKSCreatePlan yet — symmetry can land later without breaking
+// flag compat here).
+func runCreateAKS(cmd *cobra.Command, args []string) error {
+	clusterName := args[0]
+	ctx := context.Background()
+	debug := viper.GetBool("debug")
+
+	subscription, resourceGroup, region := getAKSConfig()
+	if resourceGroup == "" {
+		return fmt.Errorf("Azure resource group is required (use --azure-resource-group or set infra.azure.resource_group)")
+	}
+	if region == "" {
+		region = "eastus"
+	}
+
+	// Build the cluster create options now so both the plan summary and
+	// the actual provisioning call share the exact same inputs.
+	opts := cluster.CreateOptions{
+		Name:               clusterName,
+		Region:             region,
+		WorkerCount:        k8sNodes,
+		WorkerType:         k8sNodeType,
+		KubernetesVersion:  k8sK8sVersion,
+		AzureSubscription:  subscription,
+		AzureResourceGroup: resourceGroup,
+	}
+
+	// Inline summary — keeps parity with the GKE/EKS UX (a user-facing
+	// confirmation that lists what's about to be created) without needing
+	// a dedicated plan generator.
+	fmt.Println("AKS cluster create plan:")
+	fmt.Printf("  Name:           %s\n", opts.Name)
+	fmt.Printf("  Resource group: %s\n", opts.AzureResourceGroup)
+	fmt.Printf("  Location:       %s\n", opts.Region)
+	fmt.Printf("  Node count:     %d\n", opts.WorkerCount)
+	fmt.Printf("  Node VM size:   %s\n", opts.WorkerType)
+	if opts.KubernetesVersion != "" {
+		fmt.Printf("  K8s version:    %s\n", opts.KubernetesVersion)
+	} else {
+		fmt.Println("  K8s version:    (AKS default)")
+	}
+	if opts.AzureSubscription != "" {
+		fmt.Printf("  Subscription:   %s\n", opts.AzureSubscription)
+	}
+
+	if k8sPlanOnly {
+		fmt.Println()
+		fmt.Println("Plan JSON:")
+		planJSON, _ := json.MarshalIndent(opts, "", "  ")
+		fmt.Println(string(planJSON))
+		return nil
+	}
+
+	if !k8sApply {
+		fmt.Print("\nDo you want to create this cluster? [y/N]: ")
+		var response string
+		fmt.Scanln(&response)
+		if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
+			fmt.Println("Cancelled.")
+			return nil
+		}
+	}
+
+	fmt.Println()
+
+	// Register the provider and provision.
+	agent := k8s.NewAgentWithOptions(k8s.AgentOptions{Debug: debug})
+	agent.RegisterAKSProvider(subscription, resourceGroup, region)
+
+	info, err := agent.CreateAKSCluster(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("failed to create AKS cluster: %w", err)
+	}
+
+	// Pull kubeconfig (best-effort).
+	kubeconfigPath, kErr := agent.GetAKSKubeconfig(ctx, clusterName)
+	if kErr != nil && debug {
+		fmt.Printf("[k8s] warning: failed to update kubeconfig: %v\n", kErr)
+	}
+	if kubeconfigPath == "" {
+		kubeconfigPath = "~/.kube/config"
+	}
+
+	fmt.Println()
+	fmt.Println("AKS cluster created.")
+	fmt.Printf("  Name:       %s\n", info.Name)
+	fmt.Printf("  Status:     %s\n", info.Status)
+	if info.Endpoint != "" {
+		fmt.Printf("  Endpoint:   %s\n", info.Endpoint)
+	}
+	fmt.Printf("  Kubeconfig: %s\n", kubeconfigPath)
+	fmt.Println()
+	fmt.Println("Next steps:")
+	fmt.Println("  kubectl get nodes")
+	fmt.Println("  kubectl get pods -A")
+
+	return nil
+}
+
 func runDeleteCluster(cmd *cobra.Command, args []string) error {
 	clusterType := args[0]
 	clusterName := args[1]
@@ -1307,6 +1440,49 @@ func runDeleteCluster(cmd *cobra.Command, args []string) error {
 
 		if err := agent.DeleteGKECluster(ctx, clusterName); err != nil {
 			return fmt.Errorf("failed to delete GKE cluster: %w", err)
+		}
+
+		fmt.Printf("[k8s] cluster '%s' deleted successfully.\n", clusterName)
+		return nil
+	}
+
+	// Handle AKS separately — it pulls its subscription / resource-group
+	// from getAKSConfig (env / infra.azure.* / az CLI) and uses its own
+	// agent registration, so the EKS-flavoured plan/agent below would
+	// not work.
+	if clusterType == "aks" {
+		subscription, resourceGroup, region := getAKSConfig()
+		if resourceGroup == "" {
+			return fmt.Errorf("Azure resource group is required (use --azure-resource-group or set infra.azure.resource_group)")
+		}
+		if region == "" {
+			region = "eastus"
+		}
+
+		fmt.Println("AKS cluster delete plan:")
+		fmt.Printf("  Name:           %s\n", clusterName)
+		fmt.Printf("  Resource group: %s\n", resourceGroup)
+		if subscription != "" {
+			fmt.Printf("  Subscription:   %s\n", subscription)
+		}
+		fmt.Printf("  Location:       %s\n", region)
+
+		fmt.Print("\nAre you sure you want to delete this cluster? [y/N]: ")
+		var response string
+		fmt.Scanln(&response)
+		if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
+			fmt.Println("Cancelled.")
+			return nil
+		}
+
+		fmt.Println()
+		fmt.Printf("[k8s] deleting AKS cluster '%s' in resource group '%s'...\n", clusterName, resourceGroup)
+
+		agent := k8s.NewAgentWithOptions(k8s.AgentOptions{Debug: viper.GetBool("debug")})
+		agent.RegisterAKSProvider(subscription, resourceGroup, region)
+
+		if err := agent.DeleteAKSCluster(ctx, clusterName); err != nil {
+			return fmt.Errorf("failed to delete AKS cluster: %w", err)
 		}
 
 		fmt.Printf("[k8s] cluster '%s' deleted successfully.\n", clusterName)
@@ -1354,7 +1530,7 @@ func runDeleteCluster(cmd *cobra.Command, args []string) error {
 		}
 		err = provider.Delete(ctx, clusterName)
 	default:
-		return fmt.Errorf("unsupported cluster type: %s (use 'eks', 'gke', or 'kubeadm')", clusterType)
+		return fmt.Errorf("unsupported cluster type: %s (use 'eks', 'gke', 'aks', or 'kubeadm')", clusterType)
 	}
 
 	if err != nil {
