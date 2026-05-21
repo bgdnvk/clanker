@@ -123,6 +123,18 @@ func TestK8sExecCmd_RequiresPodAndCommand(t *testing.T) {
 	}
 }
 
+func TestK8sExecCmd_NoInteractiveFlags(t *testing.T) {
+	// '-i' and '-t' would silently break the run (kubectl errors with
+	// 'stdin is not a tty' because we buffer stdout). They will land
+	// alongside the WebSocket-backed interactive exec; until then the
+	// flags must not be advertised.
+	for _, name := range []string{"stdin", "tty"} {
+		if k8sExecCmd.Flags().Lookup(name) != nil {
+			t.Errorf("k8s exec should not advertise --%s until interactive exec is wired up", name)
+		}
+	}
+}
+
 func TestK8sPortForwardCmd_RequiresTwoArgs(t *testing.T) {
 	if err := k8sPortForwardCmd.Args(k8sPortForwardCmd, []string{"my-pod"}); err == nil {
 		t.Error("expected error for pf with only one arg")

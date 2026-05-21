@@ -2,12 +2,15 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/bgdnvk/clanker/internal/k8s"
 	"github.com/spf13/cobra"
@@ -29,8 +32,6 @@ var (
 
 	// exec
 	k8sExecContainer string
-	k8sExecStdin     bool
-	k8sExecTTY       bool
 
 	// port-forward
 	k8sPFAddresses string
@@ -103,11 +104,11 @@ func init() {
 	k8sApplyCmd.Flags().BoolVar(&k8sApplyServerDry, "server-dry-run", false, "Submit server-side dry-run (kubectl apply --dry-run=server)")
 
 	k8sExecCmd.Flags().StringVarP(&k8sExecContainer, "container", "c", "", "Container name (if pod has multiple)")
-	// stdin/tty flags are accepted but not yet streaming — once the
-	// WebSocket-backed interactive exec lands we'll wire them through
-	// without breaking flag compat.
-	k8sExecCmd.Flags().BoolVarP(&k8sExecStdin, "stdin", "i", false, "Pass stdin to the container (not yet streaming)")
-	k8sExecCmd.Flags().BoolVarP(&k8sExecTTY, "tty", "t", false, "Allocate a TTY (not yet streaming)")
+	// '-i' and '-t' are intentionally not surfaced here: this exec
+	// captures stdout/stderr into a buffer (one-shot), so passing them
+	// through to kubectl would break the run ('-t' errors with 'stdin
+	// is not a tty'). They will land alongside the WebSocket-backed
+	// interactive exec in the cloud backend.
 
 	k8sPortForwardCmd.Flags().StringVar(&k8sPFAddresses, "address", "", "Addresses to listen on (default localhost)")
 	k8sPortForwardCmd.Flags().StringVar(&k8sPFKind, "kind", "pod", "Target kind: pod, svc, or deploy (used only when the arg has no kind/ prefix)")
@@ -210,12 +211,6 @@ func runK8sExec(cmd *cobra.Command, args []string) error {
 	if k8sExecContainer != "" {
 		kubectlArgs = append(kubectlArgs, "-c", k8sExecContainer)
 	}
-	if k8sExecStdin {
-		kubectlArgs = append(kubectlArgs, "-i")
-	}
-	if k8sExecTTY {
-		kubectlArgs = append(kubectlArgs, "-t")
-	}
 	kubectlArgs = append(kubectlArgs, "--")
 	kubectlArgs = append(kubectlArgs, command...)
 
@@ -283,20 +278,61 @@ func runK8sPortForward(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("start port-forward %s %s: %w", target, portSpec, err)
 	}
 
-	// Forward SIGINT/SIGTERM to kubectl so Ctrl-C tears it down cleanly.
+	// On Ctrl-C, give kubectl SIGINT so it can release the local socket
+	// gracefully; only fall back to context-cancel (SIGKILL) if it
+	// refuses to die within a short window. Without this kubectl gets
+	// killed hard and may leave the port half-bound on rapid reconnects.
 	sigCh := make(chan os.Signal, 1)
+	done := make(chan struct{})
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 	go func() {
-		<-sigCh
-		cancel()
+		select {
+		case <-sigCh:
+			if pf.Process != nil {
+				_ = pf.Process.Signal(syscall.SIGINT)
+			}
+			// Hard cancel after a grace window if kubectl is still up.
+			select {
+			case <-time.After(2 * time.Second):
+				cancel()
+			case <-done:
+			}
+		case <-done:
+		}
 	}()
 
-	if err := pf.Wait(); err != nil {
-		if ctx.Err() != nil {
-			// User cancelled via signal — clean exit.
+	err = pf.Wait()
+	close(done)
+	if err != nil {
+		// kubectl exits non-zero on SIGINT/SIGTERM; treat that as clean
+		// shutdown so we don't paper the user with a useless error.
+		if ctx.Err() != nil || isInterruptedExit(err) {
 			return nil
 		}
 		return fmt.Errorf("port-forward exited: %w", err)
 	}
 	return nil
+}
+
+// isInterruptedExit returns true when the underlying *exec.ExitError was
+// produced by a SIGINT/SIGTERM/SIGKILL — i.e., the user (or our cancel
+// path) tore down kubectl on purpose.
+func isInterruptedExit(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	ws, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok {
+		return false
+	}
+	if !ws.Signaled() {
+		return false
+	}
+	switch ws.Signal() {
+	case syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL:
+		return true
+	}
+	return false
 }
