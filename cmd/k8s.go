@@ -94,6 +94,7 @@ var k8sDeleteCmd = &cobra.Command{
 Example:
   clanker k8s delete eks my-cluster
   clanker k8s delete gke my-cluster --gcp-project my-project
+  clanker k8s delete aks my-cluster --azure-resource-group my-rg
   clanker k8s delete kubeadm my-cluster`,
 	Args: cobra.ExactArgs(2),
 	RunE: runDeleteCluster,
@@ -414,6 +415,9 @@ func init() {
 	k8sListCmd.Flags().StringVar(&k8sGCPRegion, "gcp-region", "", "GCP region for GKE clusters")
 	k8sDeleteCmd.Flags().StringVar(&k8sGCPProject, "gcp-project", "", "GCP project ID for GKE clusters")
 	k8sDeleteCmd.Flags().StringVar(&k8sGCPRegion, "gcp-region", "", "GCP region for GKE clusters")
+	k8sDeleteCmd.Flags().StringVar(&k8sAzureSubscription, "azure-subscription", "", "Azure subscription ID for AKS clusters")
+	k8sDeleteCmd.Flags().StringVar(&k8sAzureResourceGroup, "azure-resource-group", "", "Azure resource group for AKS clusters (required for AKS)")
+	k8sDeleteCmd.Flags().StringVar(&k8sAzureRegion, "azure-region", "", "Azure region for AKS clusters")
 	k8sGetKubeconfigCmd.Flags().StringVar(&k8sGCPProject, "gcp-project", "", "GCP project ID for GKE clusters")
 	k8sGetKubeconfigCmd.Flags().StringVar(&k8sGCPRegion, "gcp-region", "", "GCP region for GKE clusters")
 	k8sListCmd.Flags().StringVar(&k8sAzureSubscription, "azure-subscription", "", "Azure subscription ID for AKS clusters")
@@ -1442,6 +1446,49 @@ func runDeleteCluster(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Handle AKS separately — it pulls its subscription / resource-group
+	// from getAKSConfig (env / infra.azure.* / az CLI) and uses its own
+	// agent registration, so the EKS-flavoured plan/agent below would
+	// not work.
+	if clusterType == "aks" {
+		subscription, resourceGroup, region := getAKSConfig()
+		if resourceGroup == "" {
+			return fmt.Errorf("Azure resource group is required (use --azure-resource-group or set infra.azure.resource_group)")
+		}
+		if region == "" {
+			region = "eastus"
+		}
+
+		fmt.Println("AKS cluster delete plan:")
+		fmt.Printf("  Name:           %s\n", clusterName)
+		fmt.Printf("  Resource group: %s\n", resourceGroup)
+		if subscription != "" {
+			fmt.Printf("  Subscription:   %s\n", subscription)
+		}
+		fmt.Printf("  Location:       %s\n", region)
+
+		fmt.Print("\nAre you sure you want to delete this cluster? [y/N]: ")
+		var response string
+		fmt.Scanln(&response)
+		if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
+			fmt.Println("Cancelled.")
+			return nil
+		}
+
+		fmt.Println()
+		fmt.Printf("[k8s] deleting AKS cluster '%s' in resource group '%s'...\n", clusterName, resourceGroup)
+
+		agent := k8s.NewAgentWithOptions(k8s.AgentOptions{Debug: viper.GetBool("debug")})
+		agent.RegisterAKSProvider(subscription, resourceGroup, region)
+
+		if err := agent.DeleteAKSCluster(ctx, clusterName); err != nil {
+			return fmt.Errorf("failed to delete AKS cluster: %w", err)
+		}
+
+		fmt.Printf("[k8s] cluster '%s' deleted successfully.\n", clusterName)
+		return nil
+	}
+
 	// Handle EKS and kubeadm
 	agent, awsProfile, awsRegion := getK8sAgent()
 
@@ -1483,7 +1530,7 @@ func runDeleteCluster(cmd *cobra.Command, args []string) error {
 		}
 		err = provider.Delete(ctx, clusterName)
 	default:
-		return fmt.Errorf("unsupported cluster type: %s (use 'eks', 'gke', or 'kubeadm')", clusterType)
+		return fmt.Errorf("unsupported cluster type: %s (use 'eks', 'gke', 'aks', or 'kubeadm')", clusterType)
 	}
 
 	if err != nil {
