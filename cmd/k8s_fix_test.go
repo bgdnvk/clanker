@@ -33,29 +33,31 @@ func TestK8sFixCmd_RegisteredOnK8sRoot(t *testing.T) {
 
 func TestListPlaybooks_RendersTable(t *testing.T) {
 	r := sre.NewPlaybookRegistry()
-	var buf bytes.Buffer
-
-	// listPlaybooks signature takes *os.File; use a thin shim via the
-	// underlying tabwriter rendering rather than restructure the
-	// helper for testability. We assert the *content* by re-rendering
-	// what the function would render through a regular Stdout-like
-	// path: that's hard to do without DI, so we compromise and
-	// assert the registry side of the contract — listPlaybooks
-	// reads All() and prints each playbook's ID + Description.
 	playbooks := r.All()
 	if len(playbooks) == 0 {
 		t.Skip("no built-in playbooks registered; list table check requires at least one")
 	}
+
+	var buf bytes.Buffer
+	if err := listPlaybooks(&buf, r); err != nil {
+		t.Fatalf("listPlaybooks: %v", err)
+	}
+	out := buf.String()
+	// Sanity: header rendered, every registered playbook's ID + title
+	// surfaced. The exact tabwriter spacing isn't load-bearing, so we
+	// match on substrings rather than full lines.
+	if !strings.Contains(out, "Available playbooks") {
+		t.Errorf("expected 'Available playbooks' header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "ID") || !strings.Contains(out, "TITLE") {
+		t.Errorf("expected table header columns, got:\n%s", out)
+	}
 	for _, p := range playbooks {
-		if p.ID() == "" {
-			t.Errorf("playbook missing ID: %#v", p)
+		if !strings.Contains(out, p.ID()) {
+			t.Errorf("rendered list missing playbook ID %q\n%s", p.ID(), out)
 		}
-		if p.Title() == "" {
-			t.Errorf("playbook %q missing title", p.ID())
-		}
-		if p.Description() == "" {
-			t.Errorf("playbook %q missing description", p.ID())
+		if !strings.Contains(out, p.Title()) {
+			t.Errorf("rendered list missing playbook title %q\n%s", p.Title(), out)
 		}
 	}
-	_ = buf
 }

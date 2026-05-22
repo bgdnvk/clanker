@@ -2,6 +2,7 @@ package sre
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -51,6 +52,91 @@ func TestRegistry_GetUnknownIDReturnsHelpfulError(t *testing.T) {
 	// Error should list the known IDs so the CLI surface gets a hint.
 	if !strings.Contains(err.Error(), "crashloop-recovery") {
 		t.Errorf("error should list known IDs, got %q", err.Error())
+	}
+}
+
+// TestValidationErrorStrings_BackwardsCompatibleWithCloudBackend pins
+// the exact substrings the clanker-cloud backend uses to discriminate
+// 400 (client error) from 500 (execution failure). The cloud's
+// isPlaybookClientValidationError does:
+//
+//	strings.Contains(msg, "unknown playbook")  → 400
+//	strings.Contains(msg, "name is required")  → 400
+//	strings.Contains(msg, "playbookId is required") → 400
+//
+// If anyone reworks these messages (say, to "--name is required") the
+// cloud silently regresses to 500 on a user typo. This test makes the
+// contract explicit so a refactor at least sees a failing assertion
+// it can update intentionally.
+func TestValidationErrorStrings_BackwardsCompatibleWithCloudBackend(t *testing.T) {
+	r := NewPlaybookRegistry()
+	t.Run("unknown playbook id contains 'unknown playbook'", func(t *testing.T) {
+		_, err := r.Get("definitely-not-real")
+		if err == nil || !strings.Contains(err.Error(), "unknown playbook") {
+			t.Errorf("unknown-id error must contain 'unknown playbook', got %v", err)
+		}
+	})
+	t.Run("crashloop-recovery missing name contains 'name is required'", func(t *testing.T) {
+		p, _ := r.Get("crashloop-recovery")
+		_, err := p.Plan(context.Background(), &stubK8sClient{}, PlaybookInput{})
+		if err == nil || !strings.Contains(err.Error(), "name is required") {
+			t.Errorf("missing-name error must contain 'name is required', got %v", err)
+		}
+	})
+	t.Run("stuck-rollout missing name contains 'name is required'", func(t *testing.T) {
+		p, _ := r.Get("stuck-rollout")
+		_, err := p.Plan(context.Background(), &stubK8sClient{}, PlaybookInput{})
+		if err == nil || !strings.Contains(err.Error(), "name is required") {
+			t.Errorf("missing-name error must contain 'name is required', got %v", err)
+		}
+	})
+	t.Run("pending-pod-scheduling missing name contains 'name is required'", func(t *testing.T) {
+		p, _ := r.Get("pending-pod-scheduling")
+		_, err := p.Plan(context.Background(), &stubK8sClient{}, PlaybookInput{})
+		if err == nil || !strings.Contains(err.Error(), "name is required") {
+			t.Errorf("missing-name error must contain 'name is required', got %v", err)
+		}
+	})
+}
+
+// TestPlaybookPlan_JSONRoundTrip pins the wire format the cloud
+// backend depends on when it shells out to `clanker k8s fix --json`.
+// If a field's json tag changes or a non-marshallable type sneaks in,
+// the cloud's json.Unmarshal returns a confusing decode error with
+// zero context — this test catches it at the CLI test layer instead.
+func TestPlaybookPlan_JSONRoundTrip(t *testing.T) {
+	p := &crashLoopRecoveryPlaybook{}
+	plan, err := p.Plan(context.Background(), &stubK8sClient{}, PlaybookInput{
+		Name:      "my-pod",
+		Namespace: "prod",
+	})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	raw, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got PlaybookPlan
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v\nwire: %s", err, raw)
+	}
+	if got.PlaybookID != plan.PlaybookID {
+		t.Errorf("PlaybookID lost in round-trip: got %q want %q", got.PlaybookID, plan.PlaybookID)
+	}
+	if got.Target != plan.Target {
+		t.Errorf("Target lost: got %q want %q", got.Target, plan.Target)
+	}
+	if len(got.Steps) != len(plan.Steps) {
+		t.Fatalf("Steps length lost: got %d want %d", len(got.Steps), len(plan.Steps))
+	}
+	for i := range plan.Steps {
+		if got.Steps[i].ID != plan.Steps[i].ID {
+			t.Errorf("Steps[%d].ID lost: got %q want %q", i, got.Steps[i].ID, plan.Steps[i].ID)
+		}
+		if got.Steps[i].Mutating != plan.Steps[i].Mutating {
+			t.Errorf("Steps[%d].Mutating lost: got %v want %v", i, got.Steps[i].Mutating, plan.Steps[i].Mutating)
+		}
 	}
 }
 

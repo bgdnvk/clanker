@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -60,6 +61,7 @@ func init() {
 }
 
 func runK8sFix(cmd *cobra.Command, args []string) error {
+	ctx := cmd.Context()
 	registry := sre.NewPlaybookRegistry()
 
 	if len(args) == 0 {
@@ -67,6 +69,17 @@ func runK8sFix(cmd *cobra.Command, args []string) error {
 	}
 	if len(args) > 1 {
 		return fmt.Errorf("expected 0 or 1 playbook ID, got %d", len(args))
+	}
+
+	// Validate --approve BEFORE planning so a typo doesn't waste a
+	// cluster round-trip generating a plan we'll then refuse to act
+	// on. Plan generation can be expensive (fetches logs, queries
+	// rollout state); fail fast on cheap input errors.
+	approve := strings.ToLower(strings.TrimSpace(k8sFixApprove))
+	switch approve {
+	case "step", "auto", "plan-only":
+	default:
+		return fmt.Errorf("--approve must be one of: step, auto, plan-only (got %q)", k8sFixApprove)
 	}
 
 	id := strings.TrimSpace(args[0])
@@ -79,7 +92,7 @@ func runK8sFix(cmd *cobra.Command, args []string) error {
 	kubeconfig := getKubeconfigPath()
 	client := newSREClient(kubeconfig, k8sFixContext, debug)
 
-	plan, err := playbook.Plan(context.Background(), client, sre.PlaybookInput{
+	plan, err := playbook.Plan(ctx, client, sre.PlaybookInput{
 		Namespace: k8sFixNamespace,
 		Name:      k8sFixName,
 		Context:   k8sFixContext,
@@ -90,16 +103,16 @@ func runK8sFix(cmd *cobra.Command, args []string) error {
 	}
 
 	if k8sFixJSON {
-		out, _ := json.MarshalIndent(plan, "", "  ")
+		// The cloud backend shells out to `clanker k8s fix --json`
+		// and unmarshals the stdout. A silent marshal error would
+		// produce empty stdout and a confusing decode error on the
+		// backend — surface it explicitly.
+		out, err := json.MarshalIndent(plan, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal playbook plan: %w", err)
+		}
 		fmt.Println(string(out))
 		return nil
-	}
-
-	approve := strings.ToLower(strings.TrimSpace(k8sFixApprove))
-	switch approve {
-	case "step", "auto", "plan-only":
-	default:
-		return fmt.Errorf("--approve must be one of: step, auto, plan-only (got %q)", k8sFixApprove)
 	}
 
 	printPlaybookPlan(os.Stdout, plan)
@@ -112,12 +125,13 @@ func runK8sFix(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	return executePlaybookPlan(context.Background(), plan, approve)
+	return executePlaybookPlan(ctx, plan, approve)
 }
 
 // listPlaybooks prints a table of registered playbooks for the user
-// who ran 'clanker k8s fix' with no arguments.
-func listPlaybooks(out *os.File, registry *sre.PlaybookRegistry) error {
+// who ran 'clanker k8s fix' with no arguments. Takes io.Writer so
+// tests can pass a buffer and assert the rendered table.
+func listPlaybooks(out io.Writer, registry *sre.PlaybookRegistry) error {
 	playbooks := registry.All()
 	if len(playbooks) == 0 {
 		fmt.Fprintln(out, "No playbooks registered.")
@@ -139,8 +153,9 @@ func listPlaybooks(out *os.File, registry *sre.PlaybookRegistry) error {
 
 // printPlaybookPlan renders the plan as a human-readable summary so
 // the user can review before approving. Mirrors the layout the
-// frontend's K8sPlaybookRunner will use (Phase 4e).
-func printPlaybookPlan(out *os.File, plan *sre.PlaybookPlan) {
+// frontend's K8sPlaybookRunner will use (Phase 4e). Takes io.Writer
+// so tests can pass a buffer and assert the rendered output.
+func printPlaybookPlan(out io.Writer, plan *sre.PlaybookPlan) {
 	fmt.Fprintf(out, "Playbook: %s\n", plan.Title)
 	if plan.Target != "" {
 		fmt.Fprintf(out, "Target:   %s\n", plan.Target)
