@@ -37,6 +37,8 @@ type lighthouseInstance struct {
 	PublicIP    []string          `json:"public_ip,omitempty"`
 	OSName      string            `json:"os,omitempty"`
 	CreatedAt   string            `json:"created_at,omitempty"`
+	ExpiresAt   string            `json:"expires_at,omitempty"`
+	BillingMode string            `json:"billing_mode,omitempty"`
 	Tags        map[string]string `json:"tags,omitempty"`
 }
 
@@ -69,6 +71,8 @@ func (c *Client) contextLighthouses(ctx context.Context) (string, error) {
 			PublicIP:    stringSlice(in.PublicAddresses),
 			OSName:      derefStringRaw(in.OsName),
 			CreatedAt:   derefStringRaw(in.CreatedTime),
+			ExpiresAt:   derefStringRaw(in.ExpiredTime),
+			BillingMode: normChargeTypeStr(in.InstanceChargeType),
 			Tags:        extractTags(in.Tags),
 		}
 		out = append(out, row)

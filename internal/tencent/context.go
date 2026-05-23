@@ -244,30 +244,34 @@ func (c *Client) contextCVMs(ctx context.Context) (string, error) {
 	}
 
 	type instSummary struct {
-		ID        string            `json:"id"`
-		Name      string            `json:"name"`
-		State     string            `json:"state"`
-		Type      string            `json:"type"`
-		Zone      string            `json:"zone"`
-		PrivateIP []string          `json:"private_ip,omitempty"`
-		PublicIP  []string          `json:"public_ip,omitempty"`
-		CreatedAt string            `json:"created_at,omitempty"`
-		OSName    string            `json:"os,omitempty"`
-		Tags      map[string]string `json:"tags,omitempty"`
+		ID          string            `json:"id"`
+		Name        string            `json:"name"`
+		State       string            `json:"state"`
+		Type        string            `json:"type"`
+		Zone        string            `json:"zone"`
+		PrivateIP   []string          `json:"private_ip,omitempty"`
+		PublicIP    []string          `json:"public_ip,omitempty"`
+		CreatedAt   string            `json:"created_at,omitempty"`
+		ExpiresAt   string            `json:"expires_at,omitempty"`
+		BillingMode string            `json:"billing_mode,omitempty"`
+		OSName      string            `json:"os,omitempty"`
+		Tags        map[string]string `json:"tags,omitempty"`
 	}
 	var slim []instSummary
 	for _, in := range resp.Response.InstanceSet {
 		slim = append(slim, instSummary{
-			ID:        derefStringRaw(in.InstanceId),
-			Name:      derefStringRaw(in.InstanceName),
-			State:     derefStringRaw(in.InstanceState),
-			Type:      derefStringRaw(in.InstanceType),
-			Zone:      derefStringRaw(in.Placement.Zone),
-			PrivateIP: stringSlice(in.PrivateIpAddresses),
-			PublicIP:  stringSlice(in.PublicIpAddresses),
-			CreatedAt: derefStringRaw(in.CreatedTime),
-			OSName:    derefStringRaw(in.OsName),
-			Tags:      extractTags(in.Tags),
+			ID:          derefStringRaw(in.InstanceId),
+			Name:        derefStringRaw(in.InstanceName),
+			State:       derefStringRaw(in.InstanceState),
+			Type:        derefStringRaw(in.InstanceType),
+			Zone:        derefStringRaw(in.Placement.Zone),
+			PrivateIP:   stringSlice(in.PrivateIpAddresses),
+			PublicIP:    stringSlice(in.PublicIpAddresses),
+			CreatedAt:   derefStringRaw(in.CreatedTime),
+			ExpiresAt:   derefStringRaw(in.ExpiredTime),
+			BillingMode: normChargeTypeStr(in.InstanceChargeType),
+			OSName:      derefStringRaw(in.OsName),
+			Tags:        extractTags(in.Tags),
 		})
 	}
 	b, err := json.Marshal(slim)
@@ -378,6 +382,8 @@ func (c *Client) contextMySQL(ctx context.Context) (string, error) {
 		PrivateIP   string            `json:"private_ip,omitempty"`
 		PrivatePort int64             `json:"private_port,omitempty"`
 		PublicAddr  string            `json:"public_addr,omitempty"`
+		ExpiresAt   string            `json:"expires_at,omitempty"`
+		BillingMode string            `json:"billing_mode,omitempty"`
 		Tags        map[string]string `json:"tags,omitempty"`
 	}
 	var slim []mysqlSummary
@@ -392,6 +398,8 @@ func (c *Client) contextMySQL(ctx context.Context) (string, error) {
 			Zone:        derefStringRaw(i.Zone),
 			PrivateIP:   derefStringRaw(i.Vip),
 			PrivatePort: derefInt64Raw(i.Vport),
+			ExpiresAt:   derefStringRaw(i.DeadlineTime),
+			BillingMode: normPayTypeCDB(i.PayType),
 			// MySQL tags are not on DescribeDBInstances — they require a
 			// separate DescribeTagsOfInstanceIds call. Left as a TODO.
 		}
@@ -424,30 +432,34 @@ func (c *Client) contextPostgres(ctx context.Context) (string, error) {
 		return "", nil
 	}
 	type pgSummary struct {
-		ID        string            `json:"id"`
-		Name      string            `json:"name"`
-		Status    string            `json:"status"`
-		Engine    string            `json:"engine"`
-		CPU       uint64            `json:"cpu,omitempty"`
-		MemoryGB  uint64            `json:"memory_gb,omitempty"`
-		StorageGB uint64            `json:"storage_gb,omitempty"`
-		Zone      string            `json:"zone,omitempty"`
-		CreatedAt string            `json:"created_at,omitempty"`
-		Tags      map[string]string `json:"tags,omitempty"`
+		ID          string            `json:"id"`
+		Name        string            `json:"name"`
+		Status      string            `json:"status"`
+		Engine      string            `json:"engine"`
+		CPU         uint64            `json:"cpu,omitempty"`
+		MemoryGB    uint64            `json:"memory_gb,omitempty"`
+		StorageGB   uint64            `json:"storage_gb,omitempty"`
+		Zone        string            `json:"zone,omitempty"`
+		CreatedAt   string            `json:"created_at,omitempty"`
+		ExpiresAt   string            `json:"expires_at,omitempty"`
+		BillingMode string            `json:"billing_mode,omitempty"`
+		Tags        map[string]string `json:"tags,omitempty"`
 	}
 	var slim []pgSummary
 	for _, i := range resp.Response.DBInstanceSet {
 		slim = append(slim, pgSummary{
-			ID:        derefStringRaw(i.DBInstanceId),
-			Name:      derefStringRaw(i.DBInstanceName),
-			Status:    derefStringRaw(i.DBInstanceStatus),
-			Engine:    derefStringRaw(i.DBVersion),
-			CPU:       derefUint64Raw(i.DBInstanceCpu),
-			MemoryGB:  derefUint64Raw(i.DBInstanceMemory),
-			StorageGB: derefUint64Raw(i.DBInstanceStorage),
-			Zone:      derefStringRaw(i.Zone),
-			CreatedAt: derefStringRaw(i.CreateTime),
-			Tags:      extractTags(i.TagList),
+			ID:          derefStringRaw(i.DBInstanceId),
+			Name:        derefStringRaw(i.DBInstanceName),
+			Status:      derefStringRaw(i.DBInstanceStatus),
+			Engine:      derefStringRaw(i.DBVersion),
+			CPU:         derefUint64Raw(i.DBInstanceCpu),
+			MemoryGB:    derefUint64Raw(i.DBInstanceMemory),
+			StorageGB:   derefUint64Raw(i.DBInstanceStorage),
+			Zone:        derefStringRaw(i.Zone),
+			CreatedAt:   derefStringRaw(i.CreateTime),
+			ExpiresAt:   derefStringRaw(i.ExpireTime),
+			BillingMode: normChargeTypeStr(i.PayType),
+			Tags:        extractTags(i.TagList),
 		})
 	}
 	b, err := json.Marshal(slim)
@@ -582,24 +594,28 @@ func (c *Client) contextCLB(ctx context.Context) (string, error) {
 		return "", nil
 	}
 	type lbSummary struct {
-		ID      string   `json:"id"`
-		Name    string   `json:"name"`
-		Type    string   `json:"type"`
-		Status  string   `json:"status"`
-		VIPs    []string `json:"vips,omitempty"`
-		VpcID   string   `json:"vpc_id,omitempty"`
-		Created string   `json:"created_at,omitempty"`
+		ID          string   `json:"id"`
+		Name        string   `json:"name"`
+		Type        string   `json:"type"`
+		Status      string   `json:"status"`
+		VIPs        []string `json:"vips,omitempty"`
+		VpcID       string   `json:"vpc_id,omitempty"`
+		Created     string   `json:"created_at,omitempty"`
+		ExpiresAt   string   `json:"expires_at,omitempty"`
+		BillingMode string   `json:"billing_mode,omitempty"`
 	}
 	var slim []lbSummary
 	for _, lb := range resp.Response.LoadBalancerSet {
 		slim = append(slim, lbSummary{
-			ID:      derefStringRaw(lb.LoadBalancerId),
-			Name:    derefStringRaw(lb.LoadBalancerName),
-			Type:    derefStringRaw(lb.LoadBalancerType),
-			Status:  clbStatus(lb.Status),
-			VIPs:    stringSlice(lb.LoadBalancerVips),
-			VpcID:   derefStringRaw(lb.VpcId),
-			Created: derefStringRaw(lb.CreateTime),
+			ID:          derefStringRaw(lb.LoadBalancerId),
+			Name:        derefStringRaw(lb.LoadBalancerName),
+			Type:        derefStringRaw(lb.LoadBalancerType),
+			Status:      clbStatus(lb.Status),
+			VIPs:        stringSlice(lb.LoadBalancerVips),
+			VpcID:       derefStringRaw(lb.VpcId),
+			Created:     derefStringRaw(lb.CreateTime),
+			ExpiresAt:   derefStringRaw(lb.ExpireTime),
+			BillingMode: normChargeTypeStr(lb.ChargeType),
 		})
 	}
 	b, err := json.Marshal(slim)
@@ -670,14 +686,16 @@ func (c *Client) contextCBS(ctx context.Context) (string, error) {
 		return "", nil
 	}
 	type diskSummary struct {
-		ID         string `json:"id"`
-		Name       string `json:"name,omitempty"`
-		Type       string `json:"type"`
-		SizeGB     uint64 `json:"size_gb"`
-		State      string `json:"state"`
-		Encrypted  bool   `json:"encrypted"`
-		InstanceID string `json:"instance_id,omitempty"`
-		Zone       string `json:"zone,omitempty"`
+		ID          string `json:"id"`
+		Name        string `json:"name,omitempty"`
+		Type        string `json:"type"`
+		SizeGB      uint64 `json:"size_gb"`
+		State       string `json:"state"`
+		Encrypted   bool   `json:"encrypted"`
+		InstanceID  string `json:"instance_id,omitempty"`
+		Zone        string `json:"zone,omitempty"`
+		ExpiresAt   string `json:"expires_at,omitempty"`
+		BillingMode string `json:"billing_mode,omitempty"`
 	}
 	var slim []diskSummary
 	for _, d := range resp.Response.DiskSet {
@@ -686,14 +704,16 @@ func (c *Client) contextCBS(ctx context.Context) (string, error) {
 			zone = derefStringRaw(d.Placement.Zone)
 		}
 		slim = append(slim, diskSummary{
-			ID:         derefStringRaw(d.DiskId),
-			Name:       derefStringRaw(d.DiskName),
-			Type:       derefStringRaw(d.DiskType),
-			SizeGB:     derefUint64Raw(d.DiskSize),
-			State:      derefStringRaw(d.DiskState),
-			Encrypted:  derefBool(d.Encrypt),
-			InstanceID: derefStringRaw(d.InstanceId),
-			Zone:       zone,
+			ID:          derefStringRaw(d.DiskId),
+			Name:        derefStringRaw(d.DiskName),
+			Type:        derefStringRaw(d.DiskType),
+			SizeGB:      derefUint64Raw(d.DiskSize),
+			State:       derefStringRaw(d.DiskState),
+			Encrypted:   derefBool(d.Encrypt),
+			InstanceID:  derefStringRaw(d.InstanceId),
+			Zone:        zone,
+			ExpiresAt:   derefStringRaw(d.DeadlineTime),
+			BillingMode: normChargeTypeStr(d.DiskChargeType),
 		})
 	}
 	b, err := json.Marshal(slim)
@@ -806,14 +826,16 @@ func (c *Client) contextRedis(ctx context.Context) (string, error) {
 		return "", nil
 	}
 	type s struct {
-		ID         string `json:"id"`
-		Name       string `json:"name,omitempty"`
-		Status     string `json:"status"`
-		MemoryMB   int64  `json:"memory_mb,omitempty"`
-		Vip        string `json:"vip,omitempty"`
-		Port       int64  `json:"port,omitempty"`
-		PublicAddr string `json:"public_addr,omitempty"`
-		Created    string `json:"created_at,omitempty"`
+		ID          string `json:"id"`
+		Name        string `json:"name,omitempty"`
+		Status      string `json:"status"`
+		MemoryMB    int64  `json:"memory_mb,omitempty"`
+		Vip         string `json:"vip,omitempty"`
+		Port        int64  `json:"port,omitempty"`
+		PublicAddr  string `json:"public_addr,omitempty"`
+		Created     string `json:"created_at,omitempty"`
+		ExpiresAt   string `json:"expires_at,omitempty"`
+		BillingMode string `json:"billing_mode,omitempty"`
 	}
 	var slim []s
 	for _, i := range resp.Response.InstanceSet {
@@ -822,14 +844,16 @@ func (c *Client) contextRedis(ctx context.Context) (string, error) {
 			size = int64(*i.Size)
 		}
 		slim = append(slim, s{
-			ID:         derefStringRaw(i.InstanceId),
-			Name:       derefStringRaw(i.InstanceName),
-			Status:     redisStatus(i.Status),
-			MemoryMB:   size,
-			Vip:        derefStringRaw(i.WanIp),
-			Port:       derefInt64Raw(i.Port),
-			PublicAddr: derefStringRaw(i.WanAddress),
-			Created:    derefStringRaw(i.Createtime),
+			ID:          derefStringRaw(i.InstanceId),
+			Name:        derefStringRaw(i.InstanceName),
+			Status:      redisStatus(i.Status),
+			MemoryMB:    size,
+			Vip:         derefStringRaw(i.WanIp),
+			Port:        derefInt64Raw(i.Port),
+			PublicAddr:  derefStringRaw(i.WanAddress),
+			Created:     derefStringRaw(i.Createtime),
+			ExpiresAt:   derefStringRaw(i.DeadlineTime),
+			BillingMode: normBillingModeInt64(i.BillingMode),
 		})
 	}
 	b, err := json.Marshal(slim)
@@ -855,6 +879,10 @@ func (c *Client) contextMongoDB(ctx context.Context) (string, error) {
 	if resp == nil || resp.Response == nil || len(resp.Response.InstanceDetails) == 0 {
 		return "", nil
 	}
+	// Note: Tencent's MongoDB DescribeDBInstances returns PayMode but not a
+	// DeadlineTime/ExpiredTime field on MongoDBInstanceDetail — the per-instance
+	// expiry is only available via the renewal API. We surface billing_mode
+	// alone here so the consistency with other resources is preserved.
 	type s struct {
 		ID          string `json:"id"`
 		Name        string `json:"name,omitempty"`
@@ -864,6 +892,7 @@ func (c *Client) contextMongoDB(ctx context.Context) (string, error) {
 		Port        uint64 `json:"port,omitempty"`
 		Zone        string `json:"zone,omitempty"`
 		Created     string `json:"created_at,omitempty"`
+		BillingMode string `json:"billing_mode,omitempty"`
 	}
 	var slim []s
 	for _, i := range resp.Response.InstanceDetails {
@@ -876,6 +905,7 @@ func (c *Client) contextMongoDB(ctx context.Context) (string, error) {
 			Port:        derefUint64Raw(i.Vport),
 			Zone:        derefStringRaw(i.Zone),
 			Created:     derefStringRaw(i.CreateTime),
+			BillingMode: normBillingModeUint64(i.PayMode),
 		})
 	}
 	b, err := json.Marshal(slim)
@@ -909,6 +939,8 @@ func (c *Client) contextCynosDB(ctx context.Context) (string, error) {
 		DBVersion   string `json:"db_version,omitempty"`
 		InstanceNum int64  `json:"instance_num"`
 		Zone        string `json:"zone,omitempty"`
+		ExpiresAt   string `json:"expires_at,omitempty"`
+		BillingMode string `json:"billing_mode,omitempty"`
 	}
 	var slim []s
 	for _, cl := range resp.Response.ClusterSet {
@@ -920,6 +952,8 @@ func (c *Client) contextCynosDB(ctx context.Context) (string, error) {
 			DBVersion:   derefStringRaw(cl.DbVersion),
 			InstanceNum: derefInt64Raw(cl.InstanceNum),
 			Zone:        derefStringRaw(cl.Zone),
+			ExpiresAt:   derefStringRaw(cl.PeriodEndTime),
+			BillingMode: normBillingModeInt64(cl.PayMode),
 		})
 	}
 	b, err := json.Marshal(slim)
@@ -1065,12 +1099,13 @@ func (c *Client) contextAntiDDoS(ctx context.Context) (string, error) {
 		return "", nil
 	}
 	type s struct {
-		ID      string `json:"id"`
-		Name    string `json:"name,omitempty"`
-		Status  string `json:"status"`
-		Region  string `json:"region,omitempty"`
-		Created string `json:"created_at,omitempty"`
-		Expires string `json:"expires_at,omitempty"`
+		ID          string `json:"id"`
+		Name        string `json:"name,omitempty"`
+		Status      string `json:"status"`
+		Region      string `json:"region,omitempty"`
+		Created     string `json:"created_at,omitempty"`
+		ExpiresAt   string `json:"expires_at,omitempty"`
+		BillingMode string `json:"billing_mode,omitempty"`
 	}
 	var slim []s
 	for _, i := range resp.Response.InstanceList {
@@ -1082,13 +1117,18 @@ func (c *Client) contextAntiDDoS(ctx context.Context) (string, error) {
 		if i.Region != nil {
 			region = derefStringRaw(i.Region.Region)
 		}
+		// AntiDDoS Pro (BGP-IP) is sold as a fixed-term subscription only —
+		// every instance is implicitly PREPAID. The SDK doesn't expose a
+		// charge-type field for this product, so we hardcode the value to
+		// keep the JSON shape consistent with other prepaid resources.
 		slim = append(slim, s{
-			ID:      id,
-			Name:    derefStringRaw(i.Name),
-			Status:  derefStringRaw(i.Status),
-			Region:  region,
-			Created: derefStringRaw(i.CreatedTime),
-			Expires: derefStringRaw(i.ExpiredTime),
+			ID:          id,
+			Name:        derefStringRaw(i.Name),
+			Status:      derefStringRaw(i.Status),
+			Region:      region,
+			Created:     derefStringRaw(i.CreatedTime),
+			ExpiresAt:   derefStringRaw(i.ExpiredTime),
+			BillingMode: billingPrepaid,
 		})
 	}
 	b, err := json.Marshal(slim)
