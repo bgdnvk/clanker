@@ -1,8 +1,11 @@
+//go:generate go run gen_services.go
+
 package tencent
 
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
@@ -10,28 +13,9 @@ import (
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 )
 
-// serviceVersions maps Tencent service short names to their public API
-// versions. The maker executor builds a CommonRequest from these.
-//
-// Versions are pinned to the values the Tencent SDK uses internally for each
-// typed service. Adding a new service is a one-line change here plus an
-// endpoint mapping in serviceEndpoints.
-var serviceVersions = map[string]string{
-	"cvm":      "2017-03-12",
-	"vpc":      "2017-03-12",
-	"cbs":      "2017-03-12",
-	"clb":      "2018-03-17",
-	"cdb":      "2017-03-20",
-	"postgres": "2017-03-12",
-	"redis":    "2018-04-12",
-	"mongodb":  "2019-07-25",
-	"tke":      "2018-05-25",
-	"cos":      "", // COS uses object-storage REST API (different shape), not handled here
-	"tag":      "2018-08-13",
-	"cam":      "2019-01-16",
-	"monitor":  "2018-07-24",
-	"cls":      "2020-10-16",
-}
+// serviceVersions is generated from the vendored Tencent SDK by
+// gen_services.go — see service_versions_gen.go. Don't edit it by hand;
+// run `go generate ./internal/tencent/...` after upgrading the SDK.
 
 // knownHallucinatedActions maps LLM-invented action names to the real Tencent
 // action they probably meant. Curated empirically from Qwen3 maker output —
@@ -73,7 +57,7 @@ func (c *Client) SendRaw(service, action, region, paramsJSON string) (string, er
 
 	version, ok := serviceVersions[service]
 	if !ok {
-		return "", fmt.Errorf("unsupported tencent service %q (known: cvm, vpc, cbs, clb, cdb, postgres, redis, mongodb, tke, tag, cam, monitor, cls)", service)
+		return "", fmt.Errorf("unsupported tencent service %q (known: %s)", service, knownServices())
 	}
 	if version == "" {
 		return "", fmt.Errorf("service %q does not use the generic action API (use service-specific path)", service)
@@ -106,4 +90,16 @@ func (c *Client) SendRaw(service, action, region, paramsJSON string) (string, er
 		return "", friendlyError(err)
 	}
 	return string(resp.GetBody()), nil
+}
+
+// knownServices returns a comma-separated, sorted list of services in the
+// generated map — used in error messages so the list stays accurate as the
+// SDK gains or drops services.
+func knownServices() string {
+	keys := make([]string, 0, len(serviceVersions))
+	for k := range serviceVersions {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ", ")
 }
