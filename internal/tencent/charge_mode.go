@@ -68,3 +68,42 @@ func normBillingModeUint64(v *uint64) string {
 	}
 	return billingPostpaid
 }
+
+// Auto-renew normalizers. Tencent expresses "is this resource set to renew
+// itself?" with the same kind of inconsistency as billing mode:
+//
+//   - String form (CVM, CBS, Lighthouse): "NOTIFY_AND_AUTO_RENEW" /
+//     "NOTIFY_AND_MANUAL_RENEW" / "DISABLE_NOTIFY_AND_MANUAL_RENEW".
+//     Only the first means "will auto-renew".
+//   - String form (CLB, nested in PrepaidAttributes): "AUTO_RENEW" /
+//     "MANUAL_RENEW".
+//   - Integer form (CDB AutoRenew, Redis AutoRenewFlag, CynosDB RenewFlag):
+//     0=manual, 1=auto, 2=cancelled. Only 1 means "will auto-renew".
+//   - Integer form (Postgres AutoRenew *uint64): same 0/1/2 convention.
+//
+// All helpers return *bool so the JSON field can be `omitempty` — the
+// caller's cron uses missing-field semantics to skip resources where the
+// renew state is unknown. nil input → nil output (field omitted).
+func boolPtr(b bool) *bool { return &b }
+
+func normRenewFlagAutoStr(s *string) *bool {
+	if s == nil {
+		return nil
+	}
+	// "NOTIFY_AND_AUTO_RENEW" (CVM/CBS/Lighthouse) and "AUTO_RENEW" (CLB).
+	return boolPtr(strings.EqualFold(*s, "NOTIFY_AND_AUTO_RENEW") || strings.EqualFold(*s, "AUTO_RENEW"))
+}
+
+func normAutoRenewInt64(v *int64) *bool {
+	if v == nil {
+		return nil
+	}
+	return boolPtr(*v == 1)
+}
+
+func normAutoRenewUint64(v *uint64) *bool {
+	if v == nil {
+		return nil
+	}
+	return boolPtr(*v == 1)
+}

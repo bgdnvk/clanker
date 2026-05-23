@@ -254,6 +254,7 @@ func (c *Client) contextCVMs(ctx context.Context) (string, error) {
 		CreatedAt   string            `json:"created_at,omitempty"`
 		ExpiresAt   string            `json:"expires_at,omitempty"`
 		BillingMode string            `json:"billing_mode,omitempty"`
+		AutoRenew   *bool             `json:"auto_renew,omitempty"`
 		OSName      string            `json:"os,omitempty"`
 		Tags        map[string]string `json:"tags,omitempty"`
 	}
@@ -270,6 +271,7 @@ func (c *Client) contextCVMs(ctx context.Context) (string, error) {
 			CreatedAt:   derefStringRaw(in.CreatedTime),
 			ExpiresAt:   derefStringRaw(in.ExpiredTime),
 			BillingMode: normChargeTypeStr(in.InstanceChargeType),
+			AutoRenew:   normRenewFlagAutoStr(in.RenewFlag),
 			OSName:      derefStringRaw(in.OsName),
 			Tags:        extractTags(in.Tags),
 		})
@@ -384,6 +386,7 @@ func (c *Client) contextMySQL(ctx context.Context) (string, error) {
 		PublicAddr  string            `json:"public_addr,omitempty"`
 		ExpiresAt   string            `json:"expires_at,omitempty"`
 		BillingMode string            `json:"billing_mode,omitempty"`
+		AutoRenew   *bool             `json:"auto_renew,omitempty"`
 		Tags        map[string]string `json:"tags,omitempty"`
 	}
 	var slim []mysqlSummary
@@ -400,6 +403,7 @@ func (c *Client) contextMySQL(ctx context.Context) (string, error) {
 			PrivatePort: derefInt64Raw(i.Vport),
 			ExpiresAt:   derefStringRaw(i.DeadlineTime),
 			BillingMode: normPayTypeCDB(i.PayType),
+			AutoRenew:   normAutoRenewInt64(i.AutoRenew),
 			// MySQL tags are not on DescribeDBInstances — they require a
 			// separate DescribeTagsOfInstanceIds call. Left as a TODO.
 		}
@@ -443,6 +447,7 @@ func (c *Client) contextPostgres(ctx context.Context) (string, error) {
 		CreatedAt   string            `json:"created_at,omitempty"`
 		ExpiresAt   string            `json:"expires_at,omitempty"`
 		BillingMode string            `json:"billing_mode,omitempty"`
+		AutoRenew   *bool             `json:"auto_renew,omitempty"`
 		Tags        map[string]string `json:"tags,omitempty"`
 	}
 	var slim []pgSummary
@@ -459,6 +464,7 @@ func (c *Client) contextPostgres(ctx context.Context) (string, error) {
 			CreatedAt:   derefStringRaw(i.CreateTime),
 			ExpiresAt:   derefStringRaw(i.ExpireTime),
 			BillingMode: normChargeTypeStr(i.PayType),
+			AutoRenew:   normAutoRenewUint64(i.AutoRenew),
 			Tags:        extractTags(i.TagList),
 		})
 	}
@@ -603,9 +609,17 @@ func (c *Client) contextCLB(ctx context.Context) (string, error) {
 		Created     string   `json:"created_at,omitempty"`
 		ExpiresAt   string   `json:"expires_at,omitempty"`
 		BillingMode string   `json:"billing_mode,omitempty"`
+		AutoRenew   *bool    `json:"auto_renew,omitempty"`
 	}
 	var slim []lbSummary
 	for _, lb := range resp.Response.LoadBalancerSet {
+		// CLB nests the renew flag inside PrepaidAttributes — only set
+		// when the LB is actually prepaid. The flag value uses "AUTO_RENEW"
+		// / "MANUAL_RENEW" (no NOTIFY_AND_ prefix unlike CVM).
+		var renew *string
+		if lb.PrepaidAttributes != nil {
+			renew = lb.PrepaidAttributes.RenewFlag
+		}
 		slim = append(slim, lbSummary{
 			ID:          derefStringRaw(lb.LoadBalancerId),
 			Name:        derefStringRaw(lb.LoadBalancerName),
@@ -616,6 +630,7 @@ func (c *Client) contextCLB(ctx context.Context) (string, error) {
 			Created:     derefStringRaw(lb.CreateTime),
 			ExpiresAt:   derefStringRaw(lb.ExpireTime),
 			BillingMode: normChargeTypeStr(lb.ChargeType),
+			AutoRenew:   normRenewFlagAutoStr(renew),
 		})
 	}
 	b, err := json.Marshal(slim)
@@ -696,6 +711,7 @@ func (c *Client) contextCBS(ctx context.Context) (string, error) {
 		Zone        string `json:"zone,omitempty"`
 		ExpiresAt   string `json:"expires_at,omitempty"`
 		BillingMode string `json:"billing_mode,omitempty"`
+		AutoRenew   *bool  `json:"auto_renew,omitempty"`
 	}
 	var slim []diskSummary
 	for _, d := range resp.Response.DiskSet {
@@ -714,6 +730,7 @@ func (c *Client) contextCBS(ctx context.Context) (string, error) {
 			Zone:        zone,
 			ExpiresAt:   derefStringRaw(d.DeadlineTime),
 			BillingMode: normChargeTypeStr(d.DiskChargeType),
+			AutoRenew:   normRenewFlagAutoStr(d.RenewFlag),
 		})
 	}
 	b, err := json.Marshal(slim)
@@ -836,6 +853,7 @@ func (c *Client) contextRedis(ctx context.Context) (string, error) {
 		Created     string `json:"created_at,omitempty"`
 		ExpiresAt   string `json:"expires_at,omitempty"`
 		BillingMode string `json:"billing_mode,omitempty"`
+		AutoRenew   *bool  `json:"auto_renew,omitempty"`
 	}
 	var slim []s
 	for _, i := range resp.Response.InstanceSet {
@@ -854,6 +872,7 @@ func (c *Client) contextRedis(ctx context.Context) (string, error) {
 			Created:     derefStringRaw(i.Createtime),
 			ExpiresAt:   derefStringRaw(i.DeadlineTime),
 			BillingMode: normBillingModeInt64(i.BillingMode),
+			AutoRenew:   normAutoRenewInt64(i.AutoRenewFlag),
 		})
 	}
 	b, err := json.Marshal(slim)
@@ -941,6 +960,7 @@ func (c *Client) contextCynosDB(ctx context.Context) (string, error) {
 		Zone        string `json:"zone,omitempty"`
 		ExpiresAt   string `json:"expires_at,omitempty"`
 		BillingMode string `json:"billing_mode,omitempty"`
+		AutoRenew   *bool  `json:"auto_renew,omitempty"`
 	}
 	var slim []s
 	for _, cl := range resp.Response.ClusterSet {
@@ -954,6 +974,7 @@ func (c *Client) contextCynosDB(ctx context.Context) (string, error) {
 			Zone:        derefStringRaw(cl.Zone),
 			ExpiresAt:   derefStringRaw(cl.PeriodEndTime),
 			BillingMode: normBillingModeInt64(cl.PayMode),
+			AutoRenew:   normAutoRenewInt64(cl.RenewFlag),
 		})
 	}
 	b, err := json.Marshal(slim)

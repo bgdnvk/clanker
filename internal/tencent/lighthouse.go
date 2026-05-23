@@ -39,6 +39,7 @@ type lighthouseInstance struct {
 	CreatedAt   string            `json:"created_at,omitempty"`
 	ExpiresAt   string            `json:"expires_at,omitempty"`
 	BillingMode string            `json:"billing_mode,omitempty"`
+	AutoRenew   *bool             `json:"auto_renew,omitempty"`
 	Tags        map[string]string `json:"tags,omitempty"`
 }
 
@@ -73,6 +74,7 @@ func (c *Client) contextLighthouses(ctx context.Context) (string, error) {
 			CreatedAt:   derefStringRaw(in.CreatedTime),
 			ExpiresAt:   derefStringRaw(in.ExpiredTime),
 			BillingMode: normChargeTypeStr(in.InstanceChargeType),
+			AutoRenew:   normRenewFlagAutoStr(in.RenewFlag),
 			Tags:        extractTags(in.Tags),
 		}
 		out = append(out, row)
