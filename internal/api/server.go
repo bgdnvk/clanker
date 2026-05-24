@@ -19,14 +19,16 @@ import (
 )
 
 // Config controls how the HTTP server is bound and how requests are
-// authorised. Empty Token disables auth (a loud warning is logged).
+// authorised. A missing Token aborts startup unless Insecure is set
+// explicitly — see Server.Run.
 type Config struct {
-	Addr        string // listen address, e.g. ":8080"
-	Token       string // bearer token; if empty, auth is disabled
-	CORSOrigin  string // value for Access-Control-Allow-Origin; "*" by default
-	ReadTimeout time.Duration
+	Addr         string // listen address, e.g. ":8080"
+	Token        string // bearer token; required unless Insecure is true
+	Insecure     bool   // explicit opt-in to running without auth; refused otherwise
+	CORSOrigin   string // value for Access-Control-Allow-Origin; "*" by default
+	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
-	Debug       bool
+	Debug        bool
 }
 
 // Server wraps an *http.Server plus the routes the API exposes. Build it
@@ -65,7 +67,15 @@ func New(cfg Config, logger *log.Logger) *Server {
 // ListenAndServe returns an error.
 func (s *Server) Run(ctx context.Context) error {
 	if strings.TrimSpace(s.cfg.Token) == "" {
-		s.logger.Println("[api] WARNING: no token set — server is open. Pass --token or set CLANKER_API_TOKEN.")
+		if !s.cfg.Insecure {
+			// Refusing to start prevents the most common production
+			// footgun: leaving the server reachable on a public IP with
+			// POST /api/v1/maker/apply (which can mutate cloud
+			// resources) unauthenticated. Pass --insecure explicitly to
+			// override for trusted-network setups.
+			return fmt.Errorf("refusing to start without a bearer token: pass --token, set CLANKER_API_TOKEN, or pass --insecure to opt in to running without auth (NOT recommended on a public address)")
+		}
+		s.logger.Println("[api] WARNING: --insecure set, no token — server is OPEN; /api/v1/maker/apply will accept unauthenticated mutations.")
 	}
 	srv := &http.Server{
 		Addr:         s.cfg.Addr,

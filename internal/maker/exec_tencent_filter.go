@@ -6,6 +6,19 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
+)
+
+// Caps on the `matches` operator. Go's regexp engine is RE2-based and runs in
+// linear time — `(a+)+$` style patterns don't catastrophically backtrack
+// like they would in PCRE/JS — so a pure ReDoS isn't really possible here.
+// We still cap pattern length and add a wall-clock deadline as defense in
+// depth: the filter values originate from LLM plan output and travel through
+// POST /api/v1/maker/apply, so any future engine swap or pathologically
+// memory-heavy pattern shouldn't be able to stall the request.
+const (
+	maxFilterPatternLen = 256
+	filterMatchTimeout  = 100 * time.Millisecond
 )
 
 // validFilterOps lists the operators the filter verb accepts. Kept small and
@@ -176,11 +189,26 @@ func filterMatch(v any, op, value string) bool {
 		return ok && strings.HasPrefix(s, value)
 	case "matches":
 		s, ok := v.(string)
-		if !ok {
+		if !ok || len(value) > maxFilterPatternLen {
 			return false
 		}
 		re, err := regexp.Compile(value)
-		return err == nil && re.MatchString(s)
+		if err != nil {
+			return false
+		}
+		// Buffered channel + select-with-timeout: if MatchString ever
+		// hangs the abandoned goroutine still has somewhere to write,
+		// so we don't leak it forever — it just exits when GC frees the
+		// channel after the result drains. With Go's RE2 the timeout
+		// path is effectively unreachable in practice.
+		done := make(chan bool, 1)
+		go func() { done <- re.MatchString(s) }()
+		select {
+		case match := <-done:
+			return match
+		case <-time.After(filterMatchTimeout):
+			return false
+		}
 	}
 	return false
 }

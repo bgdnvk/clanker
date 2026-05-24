@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"strings"
 	"time"
@@ -40,7 +41,18 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 		auth := r.Header.Get("Authorization")
 		const prefix = "Bearer "
-		if !strings.HasPrefix(auth, prefix) || strings.TrimSpace(auth[len(prefix):]) != s.cfg.Token {
+		if !strings.HasPrefix(auth, prefix) {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
+			return
+		}
+		// ConstantTimeCompare avoids a timing side-channel that would let an
+		// attacker recover the token byte-by-byte by measuring response latency
+		// across many requests. The byte-length check is constant-time-safe
+		// because Tokens are configured at startup and never user-controlled
+		// in length, so leaking that the lengths differ does not leak content.
+		got := []byte(strings.TrimSpace(auth[len(prefix):]))
+		want := []byte(s.cfg.Token)
+		if len(got) != len(want) || subtle.ConstantTimeCompare(got, want) != 1 {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
 			return
 		}

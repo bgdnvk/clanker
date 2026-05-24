@@ -19,6 +19,7 @@ func init() {
 		port                   int
 		host                   string
 		token                  string
+		insecure               bool
 		corsOrigin             string
 		debug                  bool
 		aiProfile              string
@@ -38,8 +39,9 @@ func init() {
 This is the gateway for the Clanker web dashboard. Inventory + maker
 apply + plan-generation endpoints all live here.
 
-Auth: pass --token or set CLANKER_API_TOKEN. If neither is set, the
-server runs in open mode (loud warning to stderr).
+Auth: pass --token or set CLANKER_API_TOKEN. The server refuses to start
+without one — POST /api/v1/maker/apply can mutate real cloud resources, so
+unauthenticated startup is gated behind an explicit --insecure flag.
 
 AI provider: pass the same --ai-profile / --openai-key / --openai-model
 / --local-model-inference-url flags you'd give to ` + "`clanker ask`" + ` so the
@@ -47,11 +49,11 @@ plan-generation endpoint can call your configured LLM. Server reads from
 ~/.clanker.yaml as well, so flags only override what's already there.
 
 Examples:
-  # Open server for local dev
-  clanker server --port 8080
-
-  # Token-gated server
+  # Token-gated server (recommended)
   clanker server --port 8080 --token "$(openssl rand -hex 32)"
+
+  # Trusted-network mode (no auth) — NEVER on a public address
+  clanker server --port 8080 --host 127.0.0.1 --insecure
 
   # With vLLM-backed plan generation
   clanker server --port 8080 \
@@ -95,6 +97,7 @@ Examples:
 			srv := api.New(api.Config{
 				Addr:       addr,
 				Token:      resolved,
+				Insecure:   insecure,
 				CORSOrigin: corsOrigin,
 				Debug:      debug,
 			}, log.New(os.Stderr, "", log.LstdFlags))
@@ -114,7 +117,8 @@ Examples:
 
 	serverCmd.Flags().IntVar(&port, "port", 8080, "Port to listen on")
 	serverCmd.Flags().StringVar(&host, "host", "127.0.0.1", "Host to bind on (use 0.0.0.0 for all interfaces)")
-	serverCmd.Flags().StringVar(&token, "token", "", "Bearer token required for /api/v1/* (or set CLANKER_API_TOKEN; empty disables auth)")
+	serverCmd.Flags().StringVar(&token, "token", "", "Bearer token required for /api/v1/* (or set CLANKER_API_TOKEN). Required unless --insecure is passed.")
+	serverCmd.Flags().BoolVar(&insecure, "insecure", false, "Allow startup without a bearer token. NEVER use on a publicly reachable address — /api/v1/maker/apply mutates real cloud resources.")
 	serverCmd.Flags().StringVar(&corsOrigin, "cors-origin", "*", "Value for Access-Control-Allow-Origin")
 	serverCmd.Flags().BoolVar(&debug, "server-debug", false, "Log every request, not just errors")
 
