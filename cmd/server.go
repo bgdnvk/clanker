@@ -119,7 +119,7 @@ Examples:
 	serverCmd.Flags().StringVar(&host, "host", "127.0.0.1", "Host to bind on (use 0.0.0.0 for all interfaces)")
 	serverCmd.Flags().StringVar(&token, "token", "", "Bearer token required for /api/v1/* (or set CLANKER_API_TOKEN). Required unless --insecure is passed.")
 	serverCmd.Flags().BoolVar(&insecure, "insecure", false, "Allow startup without a bearer token. NEVER use on a publicly reachable address — /api/v1/maker/apply mutates real cloud resources.")
-	serverCmd.Flags().StringVar(&corsOrigin, "cors-origin", "*", "Value for Access-Control-Allow-Origin")
+	serverCmd.Flags().StringVar(&corsOrigin, "cors-origin", "", "Value for Access-Control-Allow-Origin (defaults to http://localhost:4173 — pass an explicit value for non-localhost dashboards; \"*\" allowed but discouraged)")
 	serverCmd.Flags().BoolVar(&debug, "server-debug", false, "Log every request, not just errors")
 
 	// LLM provider flags — push into viper so the plan-generation endpoint

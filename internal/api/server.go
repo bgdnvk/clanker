@@ -47,7 +47,14 @@ func New(cfg Config, logger *log.Logger) *Server {
 		cfg.Addr = ":8080"
 	}
 	if cfg.CORSOrigin == "" {
-		cfg.CORSOrigin = "*"
+		// Default to the local dashboard origin only. The previous "*"
+		// default was too permissive — any page could read responses.
+		// Bearer auth on the Authorization header mitigates CSRF (browsers
+		// don't auto-send custom headers cross-origin), but allowing any
+		// origin to *read* responses still leaks data to a hostile page if
+		// the user pastes a token there. Operators who actually need a
+		// public dashboard pass --cors-origin explicitly.
+		cfg.CORSOrigin = "http://localhost:4173"
 	}
 	if cfg.ReadTimeout == 0 {
 		cfg.ReadTimeout = 30 * time.Second

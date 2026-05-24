@@ -3,14 +3,48 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/bgdnvk/clanker/internal/tencent"
 )
+
+// regionRegex matches every Tencent public region prefix that currently
+// exists: ap-* (Asia-Pacific), na-* (North America), eu-* (Europe), sa-*
+// (South America), and cn-* (mainland China). The optional numeric/letter
+// suffix accommodates regions like `ap-shanghai-fsi`. Region NAMES never
+// contain digits (those are zone-level only), so we don't accept them.
+//
+// Reviewer flagged that the unvalidated ?region= value was reaching the
+// SDK signing layer verbatim — enabling enumeration of arbitrary
+// Tencent endpoints and potentially driving unintended API charges.
+var regionRegex = regexp.MustCompile(`^(ap|na|eu|sa|cn)-[a-z]+(-[a-z]+)?$`)
+
+// errInvalidRegion is returned by validateRegion so the handler chokepoint
+// can surface it as a 400 instead of the catch-all 401.
+type errInvalidRegion struct{ value string }
+
+func (e *errInvalidRegion) Error() string {
+	return fmt.Sprintf("invalid region %q: must match prefix-name (e.g. ap-singapore, na-ashburn, eu-frankfurt)", e.value)
+}
+
+// validateRegion accepts an empty string (the daemon falls back to its
+// configured default) or one of the patterns described above. Anything
+// else is rejected before the value can reach the Tencent SDK.
+func validateRegion(s string) error {
+	if s == "" {
+		return nil
+	}
+	if !regionRegex.MatchString(s) {
+		return &errInvalidRegion{value: s}
+	}
+	return nil
+}
 
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
@@ -70,7 +104,7 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTencentRegions(w http.ResponseWriter, r *http.Request) {
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	regions, err := client.ListAllRegions()
@@ -90,7 +124,7 @@ func (s *Server) handleTencentResources(w http.ResponseWriter, r *http.Request) 
 
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 
@@ -201,7 +235,7 @@ func (s *Server) handleTencentSGRules(w http.ResponseWriter, r *http.Request) {
 	}
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	body, err := client.JSONSGRules(r.Context(), sgID)
@@ -221,7 +255,7 @@ func (s *Server) handleTencentKubeconfig(w http.ResponseWriter, r *http.Request)
 	publicEndpoint := strings.EqualFold(r.URL.Query().Get("public"), "true")
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	kc, err := client.FetchKubeconfig(r.Context(), clusterID, publicEndpoint)
@@ -240,7 +274,7 @@ func (s *Server) handleTencentKubeconfig(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleTencentTopology(w http.ResponseWriter, r *http.Request) {
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	region := strings.TrimSpace(r.URL.Query().Get("region"))
@@ -255,7 +289,7 @@ func (s *Server) handleTencentTopology(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTencentPublicExposure(w http.ResponseWriter, r *http.Request) {
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	region := strings.TrimSpace(r.URL.Query().Get("region"))
@@ -269,13 +303,30 @@ func (s *Server) handleTencentPublicExposure(w http.ResponseWriter, r *http.Requ
 
 // tencentClient builds a Tencent client for this request. The region can be
 // overridden per request via ?region=ap-jakarta; otherwise the daemon's
-// default (resolved from config / env at startup) is used.
+// default (resolved from config / env at startup) is used. Returns an
+// *errInvalidRegion when the query param fails validation so handlers can
+// distinguish a client-mistake (400) from a credential failure (401).
 func (s *Server) tencentClient(r *http.Request) (*tencent.Client, error) {
 	creds := tencent.ResolveCredentials()
 	if region := strings.TrimSpace(r.URL.Query().Get("region")); region != "" {
+		if err := validateRegion(region); err != nil {
+			return nil, err
+		}
 		creds.Region = region
 	}
 	return tencent.NewClient(creds, s.cfg.Debug)
+}
+
+// writeTencentClientErr emits the right status+code envelope for the two
+// failure modes of tencentClient. Use this from every handler that calls
+// tencentClient so the validation surface stays consistent.
+func writeTencentClientErr(w http.ResponseWriter, err error) {
+	var ir *errInvalidRegion
+	if errors.As(err, &ir) {
+		writeError(w, http.StatusBadRequest, "invalid_region", err.Error())
+		return
+	}
+	writeTencentClientErr(w, err)
 }
 
 // jsonValid is used by tests to assert that an internal JSON payload is
@@ -288,7 +339,7 @@ func jsonValid(s string) bool {
 func (s *Server) handleTencentCLBExposure(w http.ResponseWriter, r *http.Request) {
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	region := strings.TrimSpace(r.URL.Query().Get("region"))
@@ -303,7 +354,7 @@ func (s *Server) handleTencentCLBExposure(w http.ResponseWriter, r *http.Request
 func (s *Server) handleTencentIdleEIPs(w http.ResponseWriter, r *http.Request) {
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	region := strings.TrimSpace(r.URL.Query().Get("region"))
@@ -318,7 +369,7 @@ func (s *Server) handleTencentIdleEIPs(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTencentUnencryptedCBS(w http.ResponseWriter, r *http.Request) {
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	region := strings.TrimSpace(r.URL.Query().Get("region"))
@@ -333,7 +384,7 @@ func (s *Server) handleTencentUnencryptedCBS(w http.ResponseWriter, r *http.Requ
 func (s *Server) handleTencentCertExpiry(w http.ResponseWriter, r *http.Request) {
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	days := 30
@@ -353,7 +404,7 @@ func (s *Server) handleTencentCertExpiry(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleTencentCAMHygiene(w http.ResponseWriter, r *http.Request) {
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	body, err := client.CAMHygieneScanJSON(r.Context())
@@ -367,7 +418,7 @@ func (s *Server) handleTencentCAMHygiene(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleTencentDBExposure(w http.ResponseWriter, r *http.Request) {
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	region := strings.TrimSpace(r.URL.Query().Get("region"))
@@ -382,7 +433,7 @@ func (s *Server) handleTencentDBExposure(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleTencentWAFCoverage(w http.ResponseWriter, r *http.Request) {
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	body, err := client.WAFCoverageScanJSON(r.Context())
@@ -396,7 +447,7 @@ func (s *Server) handleTencentWAFCoverage(w http.ResponseWriter, r *http.Request
 func (s *Server) handleTencentAntiDDoSCoverage(w http.ResponseWriter, r *http.Request) {
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	region := strings.TrimSpace(r.URL.Query().Get("region"))
@@ -411,7 +462,7 @@ func (s *Server) handleTencentAntiDDoSCoverage(w http.ResponseWriter, r *http.Re
 func (s *Server) handleTencentAuditCoverage(w http.ResponseWriter, r *http.Request) {
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	body, err := client.AuditLogCoverageScanJSON(r.Context())
@@ -425,7 +476,7 @@ func (s *Server) handleTencentAuditCoverage(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleTencentCVMMetrics(w http.ResponseWriter, r *http.Request) {
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	region := strings.TrimSpace(r.URL.Query().Get("region"))
@@ -451,7 +502,7 @@ func (s *Server) handleTencentCVMMetrics(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleTencentLighthouseMetrics(w http.ResponseWriter, r *http.Request) {
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	region := strings.TrimSpace(r.URL.Query().Get("region"))
@@ -473,7 +524,7 @@ func (s *Server) handleTencentLighthouseMetrics(w http.ResponseWriter, r *http.R
 func (s *Server) handleTencentCostByProduct(w http.ResponseWriter, r *http.Request) {
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	month := strings.TrimSpace(r.URL.Query().Get("month"))
@@ -488,7 +539,7 @@ func (s *Server) handleTencentCostByProduct(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleTencentCostResources(w http.ResponseWriter, r *http.Request) {
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	month := strings.TrimSpace(r.URL.Query().Get("month"))
@@ -512,7 +563,7 @@ func (s *Server) handleTencentCostResources(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleTencentCostVouchers(w http.ResponseWriter, r *http.Request) {
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
@@ -529,7 +580,7 @@ func (s *Server) handleTencentCostVouchers(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleTencentCostVoucherByOwner(w http.ResponseWriter, r *http.Request) {
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	month := strings.TrimSpace(r.URL.Query().Get("month"))
@@ -550,7 +601,7 @@ func (s *Server) handleTencentCostVoucherUsage(w http.ResponseWriter, r *http.Re
 	}
 	client, err := s.tencentClient(r)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
+		writeTencentClientErr(w, err)
 		return
 	}
 	body, err := client.VoucherUsageJSON(r.Context(), voucherID)

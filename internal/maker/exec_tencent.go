@@ -174,21 +174,45 @@ func validateTencentCommand(args []string, allowDestructive bool) error {
 	return nil
 }
 
-// isTencentDestructive flags actions that delete, terminate, or reset
-// resources. Conservative: anything ambiguous is treated as destructive so the
-// --destroyer gate is opt-in.
+// readOnlyVerbPrefixes are the Tencent action-name prefixes that
+// indicate a read-only operation. Anything that does NOT match one of
+// these is treated as destructive and gated behind --destroyer.
+//
+// Tencent's naming conventions for reads:
+//   - Describe* — canonical "read inventory" verb (DescribeInstances)
+//   - Get*      — point lookups (GetMonitorData, GetBucket)
+//   - List*     — enumerate CAM/COS resources
+//   - Query*    — rare read variant
+//   - Lookup*   — LookupEvents (CloudAudit)
+//   - Search*   — SearchTopics (CLS)
+//   - Check*    — idempotent existence/availability checks
+//   - Inquiry*  — InquiryPriceX (price quotes, no side effects)
+//
+// Anything else — Create*, Run*, Add*, Modify*, Update*, Set*, Enable*,
+// Disable*, Bind*, Unbind*, Associate*, Allocate*, Assign*, Apply*,
+// Terminate*, Delete*, Destroy*, Reset*, Release*, Discontinue* etc. —
+// can mutate state, costs money, or compromises security and must be
+// explicitly approved via --destroyer.
+var readOnlyVerbPrefixes = []string{
+	"Describe", "Get", "List", "Query", "Lookup", "Search", "Check", "Inquiry",
+}
+
+// isTencentDestructive returns true when the action is NOT in the
+// read-only verb allowlist above.
+//
+// This was previously a prefix DENY-list (Terminate|Delete|Destroy|Reset|
+// Release|Discontinue) which silently permitted CAM mutations like
+// AddUser, CreateAccessKey, and AttachUserPolicy — none of which match
+// those verbs but absolutely require --destroyer approval. Flipping to
+// an allowlist is fail-safe: any unrecognized verb is now treated as
+// destructive by default.
 func isTencentDestructive(action string) bool {
-	a := action
-	for _, prefix := range []string{"Terminate", "Delete", "Destroy", "Reset", "Release", "Discontinue"} {
-		if strings.HasPrefix(a, prefix) {
-			// Whitelist: ResetInstancesPassword only changes the password, not data.
-			if a == "ResetInstancesPassword" {
-				return false
-			}
-			return true
+	for _, prefix := range readOnlyVerbPrefixes {
+		if strings.HasPrefix(action, prefix) {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // isTencentSoftFailure returns true for error codes that indicate the desired
