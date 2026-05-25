@@ -248,6 +248,11 @@ type ExecOptions struct {
 	VerdaClientSecret string
 	VerdaProjectID    string
 
+	// Tencent Cloud options
+	TencentSecretID  string
+	TencentSecretKey string
+	TencentRegion    string
+
 	CheckpointKey            string
 	DisableDurableCheckpoint bool
 
@@ -1449,6 +1454,41 @@ func jsonPathString(obj any, path string) (string, bool) {
 			}
 			idxStr := strings.TrimSpace(rest[1:end])
 			rest = rest[end+1:]
+
+			// Wildcard: collect the chosen field from EVERY element of the
+			// current array and bind as a JSON array literal. The remainder
+			// of the path (e.g. ".InstanceId") is applied to each element.
+			// Returned as: ["ins-1","ins-2"] — drop into a position that
+			// accepts a JSON array, e.g.  "InstanceIds": <CVM_IDS>.
+			if idxStr == "*" {
+				arr, ok := cur.([]any)
+				if !ok {
+					return "", false
+				}
+				remainder := strings.TrimPrefix(path[len(seg):], ".") + strings.TrimPrefix(rest, ".")
+				remainder = strings.TrimSpace(remainder)
+				var out []any
+				for _, item := range arr {
+					if remainder == "" {
+						out = append(out, item)
+						continue
+					}
+					sub, ok := jsonPathRaw(item, remainder)
+					if !ok {
+						continue
+					}
+					out = append(out, sub)
+				}
+				if len(out) == 0 {
+					return "", false
+				}
+				b, err := json.Marshal(out)
+				if err != nil {
+					return "", false
+				}
+				return string(b), true
+			}
+
 			idx, err := strconv.Atoi(idxStr)
 			if err != nil {
 				return "", false
@@ -1488,6 +1528,68 @@ func jsonPathString(obj any, path string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// jsonPathRaw is the value-returning counterpart of jsonPathString — used by
+// the [*] wildcard branch to walk into each array element with a remainder
+// path. Returns the matched value (string/number/bool/object) as `any` plus
+// an ok flag. It does NOT itself recurse into wildcards; the wildcard is
+// expanded in the caller.
+func jsonPathRaw(obj any, path string) (any, bool) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return obj, true
+	}
+	path = strings.TrimPrefix(path, "$")
+	path = strings.TrimPrefix(path, ".")
+
+	cur := obj
+	for len(path) > 0 {
+		seg := path
+		if i := strings.Index(seg, "."); i >= 0 {
+			seg = seg[:i]
+		}
+		name := seg
+		rest := ""
+		if i := strings.Index(name, "["); i >= 0 {
+			rest = name[i:]
+			name = name[:i]
+		}
+		name = strings.TrimSpace(name)
+		if name != "" {
+			m, ok := cur.(map[string]any)
+			if !ok {
+				return nil, false
+			}
+			cur, ok = m[name]
+			if !ok {
+				return nil, false
+			}
+		}
+		for strings.HasPrefix(rest, "[") {
+			end := strings.Index(rest, "]")
+			if end < 0 {
+				return nil, false
+			}
+			idxStr := strings.TrimSpace(rest[1:end])
+			rest = rest[end+1:]
+			idx, err := strconv.Atoi(idxStr)
+			if err != nil {
+				return nil, false
+			}
+			arr, ok := cur.([]any)
+			if !ok || idx < 0 || idx >= len(arr) {
+				return nil, false
+			}
+			cur = arr[idx]
+		}
+		if len(path) == len(seg) {
+			path = ""
+		} else {
+			path = strings.TrimPrefix(path[len(seg):], ".")
+		}
+	}
+	return cur, true
 }
 
 func applyPlanBindings(args []string, bindings map[string]string) []string {

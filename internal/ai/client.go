@@ -297,8 +297,15 @@ type ClaudeContent struct {
 
 // OpenAI types (keeping for compatibility)
 type OpenAIRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
+	Model              string                 `json:"model"`
+	Messages           []Message              `json:"messages"`
+	// ChatTemplateKwargs is a vLLM/SGLang vendor extension. The most useful
+	// case is `enable_thinking: false` for Qwen3-style reasoning models —
+	// it skips the internal "thinking" trace and emits the answer directly,
+	// dropping plan-generation latency from ~60-90s to ~1-10s. Empty map
+	// omits the field entirely thanks to omitempty, so the request shape
+	// is unchanged for non-reasoning providers.
+	ChatTemplateKwargs map[string]interface{} `json:"chat_template_kwargs,omitempty"`
 }
 
 type Message struct {
@@ -1103,6 +1110,9 @@ func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
 			},
 		},
 	}
+	if v := viper.GetStringMap("ai.providers.openai.chat_template_kwargs"); len(v) > 0 {
+		request.ChatTemplateKwargs = v
+	}
 
 	jsonData, err := json.Marshal(request)
 	if err != nil {
@@ -1215,6 +1225,9 @@ func (c *Client) askGitHubModels(ctx context.Context, prompt string) (string, er
 			Role:    "user",
 			Content: sanitizeASCII(prompt),
 		}},
+	}
+	if v := viper.GetStringMap("ai.providers.openai.chat_template_kwargs"); len(v) > 0 {
+		reqBody.ChatTemplateKwargs = v
 	}
 
 	jsonData, err := json.Marshal(reqBody)
@@ -2209,6 +2222,9 @@ func (c *Client) askOpenAIWithHistory(ctx context.Context, conv *ConversationCon
 		Model:    model,
 		Messages: messages,
 	}
+	if v := viper.GetStringMap("ai.providers.openai.chat_template_kwargs"); len(v) > 0 {
+		reqBody.ChatTemplateKwargs = v
+	}
 
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
@@ -2295,6 +2311,9 @@ func (c *Client) askGitHubModelsWithHistory(ctx context.Context, conv *Conversat
 	}
 
 	reqBody := OpenAIRequest{Model: model, Messages: messages}
+	if v := viper.GetStringMap("ai.providers.openai.chat_template_kwargs"); len(v) > 0 {
+		reqBody.ChatTemplateKwargs = v
+	}
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal request: %w", err)

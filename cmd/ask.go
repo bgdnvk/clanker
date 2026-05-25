@@ -23,6 +23,7 @@ import (
 	cfzerotrust "github.com/bgdnvk/clanker/internal/cloudflare/zerotrust"
 	"github.com/bgdnvk/clanker/internal/dbcontext"
 	"github.com/bgdnvk/clanker/internal/digitalocean"
+	"github.com/bgdnvk/clanker/internal/tencent"
 	"github.com/bgdnvk/clanker/internal/flyio"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	ghclient "github.com/bgdnvk/clanker/internal/github"
@@ -118,6 +119,7 @@ Examples:
 		includeFlyio, _ := cmd.Flags().GetBool("flyio")
 		includeRailway, _ := cmd.Flags().GetBool("railway")
 		includeVerda, _ := cmd.Flags().GetBool("verda")
+		includeTencent, _ := cmd.Flags().GetBool("tencent")
 		sreMode, _ := cmd.Flags().GetBool("sre")
 		includeTerraform, _ := cmd.Flags().GetBool("terraform")
 		includeIAM, _ := cmd.Flags().GetBool("iam")
@@ -384,6 +386,21 @@ Examples:
 				})
 			}
 
+			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "tencent") {
+				tcCreds := tencent.ResolveCredentials()
+				if tcCreds.SecretID == "" || tcCreds.SecretKey == "" {
+					return fmt.Errorf("tencent credentials are required for --apply (set tencent.secret_id / tencent.secret_key, TENCENTCLOUD_SECRET_ID / TENCENTCLOUD_SECRET_KEY, or TENCENT_SECRET_ID / TENCENT_SECRET_KEY)")
+				}
+				return maker.ExecuteTencentPlan(ctx, makerPlan, maker.ExecOptions{
+					TencentSecretID:  tcCreds.SecretID,
+					TencentSecretKey: tcCreds.SecretKey,
+					TencentRegion:    tcCreds.Region,
+					Writer:           os.Stdout,
+					Destroyer:        destroyer,
+					Debug:            debug,
+				})
+			}
+
 			// Resolve AWS profile/region for execution.
 			targetProfile := resolveAWSProfile(profile)
 
@@ -521,6 +538,7 @@ Examples:
 			explicitVercel := cmd.Flags().Changed("vercel") && includeVercel
 			explicitRailway := cmd.Flags().Changed("railway") && includeRailway
 			explicitVerda := cmd.Flags().Changed("verda") && includeVerda
+			explicitTencent := cmd.Flags().Changed("tencent") && includeTencent
 			explicitCount := 0
 			if explicitGCP {
 				explicitCount++
@@ -549,8 +567,11 @@ Examples:
 			if explicitVerda {
 				explicitCount++
 			}
+			if explicitTencent {
+				explicitCount++
+			}
 			if explicitCount > 1 {
-				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --azure, --cloudflare, --digitalocean, --hetzner, --vercel, --railway, --verda) together with --maker")
+				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --azure, --cloudflare, --digitalocean, --hetzner, --vercel, --railway, --verda, --tencent) together with --maker")
 			}
 			switch {
 			case explicitHetzner:
@@ -579,6 +600,9 @@ Examples:
 				makerProviderReason = "explicit"
 			case explicitVerda:
 				makerProvider = "verda"
+				makerProviderReason = "explicit"
+			case explicitTencent:
+				makerProvider = "tencent"
 				makerProviderReason = "explicit"
 			default:
 				svcCtx := routing.InferContext(questionForRouting(question))
@@ -634,6 +658,8 @@ Examples:
 				prompt = maker.RailwayPlanPromptWithMode(question, destroyer)
 			case "verda":
 				prompt = maker.VerdaPlanPromptWithMode(question, destroyer)
+			case "tencent":
+				prompt = maker.TencentPlanPromptWithMode(question, destroyer)
 			default:
 				prompt = maker.PlanPromptWithMode(question, destroyer)
 			}
@@ -696,7 +722,7 @@ Examples:
 
 			// Handle GCP, Azure, Cloudflare, Digital Ocean, Hetzner, Vercel, Verda, and Railway plans (output directly, no enrichment)
 			providerLower := strings.ToLower(strings.TrimSpace(plan.Provider))
-			if providerLower == "gcp" || providerLower == "azure" || providerLower == "cloudflare" || providerLower == "digitalocean" || providerLower == "hetzner" || providerLower == "vercel" || providerLower == "verda" || providerLower == "railway" {
+			if providerLower == "gcp" || providerLower == "azure" || providerLower == "cloudflare" || providerLower == "digitalocean" || providerLower == "hetzner" || providerLower == "vercel" || providerLower == "verda" || providerLower == "railway" || providerLower == "tencent" {
 				if plan.CreatedAt.IsZero() {
 					plan.CreatedAt = time.Now().UTC()
 				}
@@ -845,6 +871,11 @@ Format as a professional compliance table suitable for government security docum
 		// Handle explicit --verda flag
 		if includeVerda && !makerMode {
 			return handleVerdaQuery(cmd.Context(), question, debug)
+		}
+
+		// Handle explicit --tencent flag
+		if includeTencent && !makerMode {
+			return handleTencentQuery(context.Background(), question, debug)
 		}
 
 		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare && !includeDigitalOcean && !includeHetzner && !includeVercel && !includeFlyio && !includeRailway && !includeVerda && !includeDB {
@@ -1425,6 +1456,7 @@ func init() {
 	askCmd.Flags().Bool("flyio", false, "Include Fly.io context")
 	askCmd.Flags().Bool("railway", false, "Include Railway context")
 	askCmd.Flags().Bool("verda", false, "Include Verda Cloud (GPU/AI) infrastructure context")
+	askCmd.Flags().Bool("tencent", false, "Include Tencent Cloud infrastructure context")
 	askCmd.Flags().Bool("sre", false, "Use adaptive Clanker SRE discovery context")
 	askCmd.Flags().Bool("github", false, "Include GitHub repository context")
 	askCmd.Flags().Bool("cicd", false, "Include CI/CD context (currently GitHub Actions)")
@@ -2258,6 +2290,68 @@ Digital Ocean Context:
 User Question: %s
 
 Provide a clear, concise answer based on the data above. If the data doesn't contain enough information to fully answer the question, say so and suggest what additional information might be needed.`, doContext, question)
+
+	response, err := aiClient.AskPrompt(ctx, prompt)
+	if err != nil {
+		return fmt.Errorf("failed to get AI response: %w", err)
+	}
+
+	fmt.Println(response)
+	return nil
+}
+
+// handleTencentQuery delegates a Tencent Cloud query to the tencent client.
+// Mirrors handleDigitalOceanQuery: gather relevant context from the SDK,
+// stuff it into the prompt, hand to the configured AI provider.
+func handleTencentQuery(ctx context.Context, question string, debug bool) error {
+	if debug {
+		fmt.Println("Delegating query to Tencent Cloud agent...")
+	}
+
+	creds := tencent.ResolveCredentials()
+	client, err := tencent.NewClient(creds, debug)
+	if err != nil {
+		return err
+	}
+
+	tcContext, err := client.GetRelevantContext(ctx, question)
+	if err != nil {
+		return fmt.Errorf("failed to get Tencent Cloud context: %w", err)
+	}
+
+	provider := viper.GetString("ai.default_provider")
+	if provider == "" {
+		provider = "openai"
+	}
+
+	var apiKey string
+	switch provider {
+	case "gemini", "gemini-api":
+		apiKey = ""
+	case "openai":
+		apiKey = resolveOpenAIKey("")
+	case "anthropic":
+		apiKey = resolveAnthropicKey("")
+	case "cohere":
+		apiKey = resolveCohereKey("")
+	case "deepseek":
+		apiKey = resolveDeepSeekKey("")
+	case "minimax":
+		apiKey = resolveMiniMaxKey("")
+	default:
+		apiKey = viper.GetString("ai.api_key")
+	}
+
+	aiClient := ai.NewClient(provider, apiKey, debug, provider)
+
+	prompt := fmt.Sprintf(`You are a Tencent Cloud infrastructure expert. Answer the user's question using the inventory data below. Tencent service abbreviations: CVM=Cloud Virtual Machine, VPC=Virtual Private Cloud, SG=Security Group, COS=Cloud Object Storage, CLB=Cloud Load Balancer, TKE=Tencent Kubernetes Engine, CDB=TencentDB for MySQL.
+
+Tencent Cloud Context:
+%s
+
+User Question: %s
+
+Provide a clear, concise answer based on the data above. Cite specific resource IDs (ins-*, vpc-*, sg-*) when relevant. If the data is insufficient, say what is missing and suggest the specific clanker subcommand that would surface it (e.g. clanker tencent list cvm --all-regions, clanker tencent sg-rules <sg-id>).`, tcContext, question)
 
 	response, err := aiClient.AskPrompt(ctx, prompt)
 	if err != nil {

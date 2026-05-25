@@ -12,6 +12,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/gcp"
 	"github.com/bgdnvk/clanker/internal/hetzner"
 	"github.com/bgdnvk/clanker/internal/railway"
+	"github.com/bgdnvk/clanker/internal/tencent"
 	"github.com/bgdnvk/clanker/internal/vercel"
 	"github.com/bgdnvk/clanker/internal/verda"
 	"github.com/spf13/cobra"
@@ -136,6 +137,11 @@ func init() {
 	verdaCmd := verda.CreateVerdaCommands()
 	AddVerdaAskCommand(verdaCmd)
 	rootCmd.AddCommand(verdaCmd)
+
+	// Register Tencent Cloud static commands. Natural-language queries
+	// (`clanker ask --tencent ...`) will land in a later phase.
+	tencentCmd := tencent.CreateTencentCommands()
+	rootCmd.AddCommand(tencentCmd)
 }
 
 // initConfig reads in config file and ENV variables if set.
