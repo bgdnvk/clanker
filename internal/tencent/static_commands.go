@@ -322,5 +322,6 @@ voucher-status enum:
 	tencentCmd.AddCommand(sgRulesCmd)
 	tencentCmd.AddCommand(kubeconfigCmd)
 	tencentCmd.AddCommand(costCmd)
+	tencentCmd.AddCommand(buildExpiryCmd(&region))
 	return tencentCmd
 }
