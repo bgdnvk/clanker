@@ -141,26 +141,22 @@ func (s *Server) handleMakerHistory(w http.ResponseWriter, r *http.Request) {
 	writeData(w, s.history.list(limit))
 }
 
-// countDestructiveCommands inspects each Tencent plan command's action arg
-// (args[2]) and counts the ones matching destructive prefixes. Mirrors the
-// classifier used by the dashboard preview and the executor's safety gate.
+// countDestructiveCommands counts plan commands whose Tencent action is
+// gated by --destroyer in the executor. Delegates the classification to
+// maker.IsTencentDestructive so the displayed count never drifts away from
+// what the executor's safety gate actually enforces — the previous local
+// prefix denylist would have undercounted any CAM mutation like AddUser /
+// CreateAccessKey / AttachUserPolicy (none of which match the old
+// Terminate|Delete|Destroy|Reset|Release|Discontinue prefixes).
 func countDestructiveCommands(cmds []maker.Command) int {
 	n := 0
-	prefixes := []string{"Terminate", "Delete", "Destroy", "Reset", "Release", "Discontinue"}
 	for _, c := range cmds {
 		if len(c.Args) < 3 {
 			continue
 		}
 		action := c.Args[2]
-		for _, p := range prefixes {
-			if strings.HasPrefix(action, p) {
-				// ResetInstancesPassword is benign (just changes password).
-				if action == "ResetInstancesPassword" {
-					break
-				}
-				n++
-				break
-			}
+		if maker.IsTencentDestructive(action) {
+			n++
 		}
 	}
 	return n

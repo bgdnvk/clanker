@@ -322,7 +322,11 @@ func writeTencentClientErr(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "invalid_region", err.Error())
 		return
 	}
-	writeTencentClientErr(w, err)
+	// Catch-all: most often the missing-credentials error from
+	// tencent.NewClient. The previous revision recursed here instead of
+	// writing the response, which stack-overflowed the process on the
+	// first credential-missing request — see PR #165 review by rafeegnash.
+	writeError(w, http.StatusUnauthorized, "tencent_credentials", err.Error())
 }
 
 // jsonValid is used by tests to assert that an internal JSON payload is

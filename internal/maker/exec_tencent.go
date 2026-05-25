@@ -122,8 +122,9 @@ func ExecuteTencentPlan(ctx context.Context, plan *Plan, opts ExecOptions) error
 }
 
 // validateTencentCommand rejects anything that isn't a well-formed tencent-api
-// call. Destructive actions (Terminate*, Delete*, Reset*) are gated behind
-// --destroyer to match the policy applied to every other provider.
+// call. Any action NOT in the read-only verb allowlist (Describe, Get, List,
+// Query, Lookup, Search, Check, Inquiry — see IsTencentDestructive) is gated
+// behind --destroyer, matching the policy applied to every other provider.
 func validateTencentCommand(args []string, allowDestructive bool) error {
 	if len(args) == 0 {
 		return fmt.Errorf("empty command")
@@ -168,7 +169,7 @@ func validateTencentCommand(args []string, allowDestructive bool) error {
 		}
 	}
 
-	if !allowDestructive && isTencentDestructive(action) {
+	if !allowDestructive && IsTencentDestructive(action) {
 		return fmt.Errorf("destructive tencent operation blocked (use --destroyer to allow): %s.%s", service, action)
 	}
 	return nil
@@ -197,16 +198,20 @@ var readOnlyVerbPrefixes = []string{
 	"Describe", "Get", "List", "Query", "Lookup", "Search", "Check", "Inquiry",
 }
 
-// isTencentDestructive returns true when the action is NOT in the
-// read-only verb allowlist above.
+// IsTencentDestructive returns true when the action is NOT in the
+// read-only verb allowlist (Describe, Get, List, Query, Lookup, Search,
+// Check, Inquiry). Exported so the HTTP audit-record layer can count
+// destructive commands using the SAME classifier the executor's safety
+// gate uses — otherwise the displayed count drifts away from what's
+// actually enforced.
 //
-// This was previously a prefix DENY-list (Terminate|Delete|Destroy|Reset|
+// Was previously a prefix DENY-list (Terminate|Delete|Destroy|Reset|
 // Release|Discontinue) which silently permitted CAM mutations like
 // AddUser, CreateAccessKey, and AttachUserPolicy — none of which match
 // those verbs but absolutely require --destroyer approval. Flipping to
-// an allowlist is fail-safe: any unrecognized verb is now treated as
+// an allowlist is fail-safe: any unrecognized verb is treated as
 // destructive by default.
-func isTencentDestructive(action string) bool {
+func IsTencentDestructive(action string) bool {
 	for _, prefix := range readOnlyVerbPrefixes {
 		if strings.HasPrefix(action, prefix) {
 			return false

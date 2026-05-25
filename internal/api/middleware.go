@@ -42,6 +42,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		auth := r.Header.Get("Authorization")
 		const prefix = "Bearer "
 		if !strings.HasPrefix(auth, prefix) {
+			s.log401(r, "missing or non-bearer Authorization header")
 			writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
 			return
 		}
@@ -53,11 +54,23 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		got := []byte(strings.TrimSpace(auth[len(prefix):]))
 		want := []byte(s.cfg.Token)
 		if len(got) != len(want) || subtle.ConstantTimeCompare(got, want) != 1 {
+			s.log401(r, "bearer token mismatch")
 			writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// log401 records a rejected authentication attempt. authMiddleware is the
+// OUTERMOST handler-wrapper (CORS → auth → log → handler), so a 401 short-
+// circuits before logMiddleware runs and the rejection would otherwise be
+// silent in stderr — which makes prod credential rotations or attacks
+// invisible. We log unconditionally rather than gated on s.cfg.Debug so
+// "why is my dashboard returning 401?" is answerable from the logs.
+func (s *Server) log401(r *http.Request, reason string) {
+	s.logger.Printf("[api] 401 %s %s from %s — %s",
+		r.Method, r.URL.RequestURI(), r.RemoteAddr, reason)
 }
 
 func (s *Server) logMiddleware(next http.Handler) http.Handler {

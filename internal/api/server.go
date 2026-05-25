@@ -25,7 +25,7 @@ type Config struct {
 	Addr         string // listen address, e.g. ":8080"
 	Token        string // bearer token; required unless Insecure is true
 	Insecure     bool   // explicit opt-in to running without auth; refused otherwise
-	CORSOrigin   string // value for Access-Control-Allow-Origin; "*" by default
+	CORSOrigin   string // value for Access-Control-Allow-Origin; defaults to http://localhost:4173 (the bundled dashboard)
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	Debug        bool

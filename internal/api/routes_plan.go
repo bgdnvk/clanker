@@ -90,16 +90,22 @@ func (s *Server) handleMakerPlan(w http.ResponseWriter, r *http.Request) {
 	// Validate by parsing — we don't return ParsedPlan because the
 	// dashboard wants the raw JSON for display in the editor.
 	if _, parseErr := maker.ParsePlan(cleaned); parseErr != nil {
-		// Surface the bad JSON to the user so they can hand-edit if needed.
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"data": planResponse{
-				Provider: provider,
-				Plan:     json.RawMessage(cleaned),
-				Model:    model,
-				AIProfile: aiProfile,
-				Duration: time.Since(start).Round(time.Millisecond).String(),
+		// 422 (not 200) so clients can branch on the status code without
+		// having to inspect the body for a "warning" key. The raw cleaned
+		// text and parse error are still returned so the dashboard can
+		// show them in the plan editor for hand-correction.
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
+			"error": map[string]string{
+				"code":    "unparseable_plan",
+				"message": "generated plan did not parse cleanly: " + parseErr.Error(),
 			},
-			"warning": "generated plan did not parse cleanly: " + parseErr.Error(),
+			"data": planResponse{
+				Provider:  provider,
+				Plan:      json.RawMessage(cleaned),
+				Model:     model,
+				AIProfile: aiProfile,
+				Duration:  time.Since(start).Round(time.Millisecond).String(),
+			},
 		})
 		return
 	}
