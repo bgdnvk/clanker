@@ -134,16 +134,10 @@ func (s *Server) handleTencentResources(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
-	question := strings.ToLower(resourceType) // makes context.go pick the right section
-	raw, err := client.GetRelevantContext(ctx, question)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "tencent_api_error", err.Error())
-		return
-	}
-	// GetRelevantContext returns multi-section text; for an HTTP endpoint
-	// we want a single-typed JSON answer. Strip the wrapper text and parse
-	// just the requested section. Simpler approach: call the typed gather
-	// directly.
+	// Call the typed gather for the requested resource type directly.
+	// Earlier revisions also invoked GetRelevantContext (the multi-section
+	// LLM gather) before this and discarded the result — doubling every
+	// SDK call. The HTTP endpoint only needs the one typed section.
 	body, err := gatherTencentByType(ctx, client, resourceType)
 	if err != nil {
 		// Service not enabled or unsupported — return an empty list with
@@ -152,7 +146,6 @@ func (s *Server) handleTencentResources(w http.ResponseWriter, r *http.Request) 
 			"data":    []interface{}{},
 			"warning": err.Error(),
 		})
-		_ = raw
 		return
 	}
 	if strings.TrimSpace(body) == "" {

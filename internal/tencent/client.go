@@ -1,6 +1,7 @@
 package tencent
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -14,10 +15,37 @@ import (
 const defaultRegion = "ap-singapore"
 
 // Credentials holds the resolved Tencent Cloud credentials and target region.
+//
+// SecretKey is redacted in every String() / %v / %+v / json.Marshal output —
+// the raw bytes only flow into the SDK's signature path. Add new fields with
+// the same care: anything secret-shaped MUST be excluded from the redacted
+// shape below.
 type Credentials struct {
 	SecretID  string
 	SecretKey string
 	Region    string
+}
+
+// String renders Credentials with SecretKey redacted. Reached by any %v /
+// %+v / Println formatting — including accidental logs of a Client (which
+// embeds Credentials).
+func (c Credentials) String() string {
+	return fmt.Sprintf("{SecretID:%s SecretKey:**** Region:%s}", c.SecretID, c.Region)
+}
+
+// MarshalJSON ensures SecretKey is never serialised verbatim. Returns the
+// same shape as String() so dashboards and debug endpoints can safely
+// json.Marshal a Credentials value.
+func (c Credentials) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		SecretID  string `json:"secret_id"`
+		SecretKey string `json:"secret_key"`
+		Region    string `json:"region"`
+	}{
+		SecretID:  c.SecretID,
+		SecretKey: "****",
+		Region:    c.Region,
+	})
 }
 
 // Client wraps Tencent Cloud SDK clients scoped to a region.
@@ -60,6 +88,41 @@ func NewClient(creds Credentials, debug bool) (*Client, error) {
 		creds.Region = defaultRegion
 	}
 	return &Client{creds: creds, debug: debug}, nil
+}
+
+// BackendTencentCredentials represents Tencent Cloud credentials retrieved
+// from the backend credential store (clanker-backend), matching the shape
+// every other provider's backend-creds struct has (AWS, GCP, Fly.io, etc.).
+type BackendTencentCredentials struct {
+	SecretID  string
+	SecretKey string
+	Region    string
+}
+
+// NewClientWithCredentials constructs a Tencent client from backend-provided
+// credentials. Mirrors NewClientWithCredentials on the other providers so
+// the backend wiring layer can dispatch by provider name without special-
+// casing Tencent. Not yet wired into the backend credential flow — kept
+// for parity until the backend learns to issue Tencent credentials.
+func NewClientWithCredentials(creds *BackendTencentCredentials, debug bool) (*Client, error) {
+	if creds == nil {
+		return nil, fmt.Errorf("credentials cannot be nil")
+	}
+	if strings.TrimSpace(creds.SecretID) == "" || strings.TrimSpace(creds.SecretKey) == "" {
+		return nil, fmt.Errorf("tencent secret_id and secret_key are required")
+	}
+	region := strings.TrimSpace(creds.Region)
+	if region == "" {
+		region = defaultRegion
+	}
+	return &Client{
+		creds: Credentials{
+			SecretID:  creds.SecretID,
+			SecretKey: creds.SecretKey,
+			Region:    region,
+		},
+		debug: debug,
+	}, nil
 }
 
 // Region returns the region this client is targeting.

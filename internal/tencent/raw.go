@@ -74,9 +74,15 @@ func (c *Client) SendRaw(service, action, region, paramsJSON string) (string, er
 
 	req := tchttp.NewCommonRequest(service, version, action)
 	if strings.TrimSpace(paramsJSON) != "" {
+		if len(paramsJSON) > maxParamsJSONBytes {
+			return "", fmt.Errorf("params JSON too large (%d bytes; cap %d)", len(paramsJSON), maxParamsJSONBytes)
+		}
 		var params map[string]interface{}
 		if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {
 			return "", fmt.Errorf("invalid params JSON: %w", err)
+		}
+		if err := checkParamsFieldSize(params, ""); err != nil {
+			return "", err
 		}
 		if err := req.SetActionParameters(params); err != nil {
 			return "", fmt.Errorf("set action parameters: %w", err)
@@ -88,6 +94,47 @@ func (c *Client) SendRaw(service, action, region, paramsJSON string) (string, er
 		return "", friendlyError(err)
 	}
 	return string(resp.GetBody()), nil
+}
+
+// maxParamsJSONBytes / maxParamsFieldBytes bound the LLM-supplied paramsJSON
+// for SendRaw. Effective ceiling without these would be the HTTP body limit
+// (~1 MiB), which is far larger than any legitimate Tencent action payload.
+// 64 KiB per field accommodates user-data scripts and policy documents while
+// rejecting accidentally-pasted dumps that would inflate the LLM context.
+const (
+	maxParamsJSONBytes  = 256 * 1024 // total payload cap
+	maxParamsFieldBytes = 64 * 1024  // per-string-field cap
+)
+
+// checkParamsFieldSize walks the parsed params and rejects any string field
+// (recursing into nested maps and slices) that exceeds maxParamsFieldBytes.
+// path is the dotted location used in the error message so the caller knows
+// which field tripped the limit.
+func checkParamsFieldSize(v interface{}, path string) error {
+	switch x := v.(type) {
+	case string:
+		if len(x) > maxParamsFieldBytes {
+			return fmt.Errorf("params field %q too large (%d bytes; cap %d)", path, len(x), maxParamsFieldBytes)
+		}
+	case map[string]interface{}:
+		for k, val := range x {
+			sub := k
+			if path != "" {
+				sub = path + "." + k
+			}
+			if err := checkParamsFieldSize(val, sub); err != nil {
+				return err
+			}
+		}
+	case []interface{}:
+		for i, val := range x {
+			sub := fmt.Sprintf("%s[%d]", path, i)
+			if err := checkParamsFieldSize(val, sub); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // knownServices returns a comma-separated, sorted list of services in the
