@@ -7,7 +7,6 @@ import (
 	"text/tabwriter"
 
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 
 	cdb "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cdb/v20170320"
 	postgres "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/postgres/v20170312"
@@ -170,8 +169,7 @@ func newCDBClient(c *Client, region string) (*cdb.Client, error) {
 		region = c.creds.Region
 	}
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "cdb.tencentcloudapi.com"
+	cpf := newClientProfile("cdb.tencentcloudapi.com")
 	return cdb.NewClient(cred, region, cpf)
 }
 
@@ -180,8 +178,7 @@ func newPostgresClient(c *Client, region string) (*postgres.Client, error) {
 		region = c.creds.Region
 	}
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "postgres.tencentcloudapi.com"
+	cpf := newClientProfile("postgres.tencentcloudapi.com")
 	return postgres.NewClient(cred, region, cpf)
 }
 

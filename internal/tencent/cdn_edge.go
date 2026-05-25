@@ -8,7 +8,6 @@ import (
 
 	cdn "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cdn/v20180606"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 )
 
 // listCDNDomains prints every CDN domain. CDN is account-global.
@@ -50,8 +49,7 @@ func listCDNDomains(c *Client) error {
 
 func newCDNClient(c *Client) (*cdn.Client, error) {
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "cdn.tencentcloudapi.com"
+	cpf := newClientProfile("cdn.tencentcloudapi.com")
 	return cdn.NewClient(cred, "ap-guangzhou", cpf) // CDN ignores region
 }
 

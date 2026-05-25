@@ -7,7 +7,6 @@ import (
 	"text/tabwriter"
 
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 	dc "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/dc/v20180410"
 	vpc "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/vpc/v20170312"
 )
@@ -284,7 +283,6 @@ func newDCClient(c *Client, region string) (*dc.Client, error) {
 		region = c.creds.Region
 	}
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "dc.tencentcloudapi.com"
+	cpf := newClientProfile("dc.tencentcloudapi.com")
 	return dc.NewClient(cred, region, cpf)
 }

@@ -9,7 +9,6 @@ import (
 	cloudaudit "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cloudaudit/v20190319"
 	cls "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cls/v20201016"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 	monitor "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/monitor/v20180724"
 )
 
@@ -94,8 +93,7 @@ func newMonitorClient(c *Client, region string) (*monitor.Client, error) {
 		region = c.creds.Region
 	}
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "monitor.tencentcloudapi.com"
+	cpf := newClientProfile("monitor.tencentcloudapi.com")
 	return monitor.NewClient(cred, region, cpf)
 }
 
@@ -173,8 +171,7 @@ func newCLSClient(c *Client, region string) (*cls.Client, error) {
 		region = c.creds.Region
 	}
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "cls.tencentcloudapi.com"
+	cpf := newClientProfile("cls.tencentcloudapi.com")
 	return cls.NewClient(cred, region, cpf)
 }
 
@@ -220,7 +217,6 @@ func listCloudAuditTracks(c *Client) error {
 
 func newCloudAuditClient(c *Client) (*cloudaudit.Client, error) {
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "cloudaudit.tencentcloudapi.com"
+	cpf := newClientProfile("cloudaudit.tencentcloudapi.com")
 	return cloudaudit.NewClient(cred, "ap-guangzhou", cpf)
 }

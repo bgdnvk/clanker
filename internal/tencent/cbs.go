@@ -8,7 +8,6 @@ import (
 
 	cbs "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cbs/v20170312"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 )
 
 // listCBS prints every Cloud Block Storage (disk) across the given regions.
@@ -96,7 +95,6 @@ func newCBSClient(c *Client, region string) (*cbs.Client, error) {
 		region = c.creds.Region
 	}
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "cbs.tencentcloudapi.com"
+	cpf := newClientProfile("cbs.tencentcloudapi.com")
 	return cbs.NewClient(cred, region, cpf)
 }

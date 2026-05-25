@@ -7,7 +7,6 @@ import (
 	"text/tabwriter"
 
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 	mongodb "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/mongodb/v20190725"
 )
 
@@ -90,8 +89,7 @@ func newMongoDBClient(c *Client, region string) (*mongodb.Client, error) {
 		region = c.creds.Region
 	}
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "mongodb.tencentcloudapi.com"
+	cpf := newClientProfile("mongodb.tencentcloudapi.com")
 	return mongodb.NewClient(cred, region, cpf)
 }
 

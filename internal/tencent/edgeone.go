@@ -7,7 +7,6 @@ import (
 	"text/tabwriter"
 
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 	teo "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/teo/v20220901"
 )
 
@@ -49,8 +48,7 @@ func listEdgeOneZones(c *Client) error {
 
 func newEdgeOneClient(c *Client) (*teo.Client, error) {
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "teo.tencentcloudapi.com"
+	cpf := newClientProfile("teo.tencentcloudapi.com")
 	return teo.NewClient(cred, "ap-guangzhou", cpf)
 }
 

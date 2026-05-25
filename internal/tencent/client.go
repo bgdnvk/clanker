@@ -7,7 +7,6 @@ import (
 
 	"github.com/spf13/viper"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 	cvm "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cvm/v20170312"
 	vpc "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/vpc/v20170312"
 )
@@ -110,16 +109,14 @@ func (c *Client) ListAllRegions() ([]string, error) {
 // CVM returns a region-scoped CVM SDK client.
 func (c *Client) CVM() (*cvm.Client, error) {
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "cvm.tencentcloudapi.com"
+	cpf := newClientProfile("cvm.tencentcloudapi.com")
 	return cvm.NewClient(cred, c.creds.Region, cpf)
 }
 
 // VPC returns a region-scoped VPC SDK client (also serves subnets + SGs).
 func (c *Client) VPC() (*vpc.Client, error) {
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "vpc.tencentcloudapi.com"
+	cpf := newClientProfile("vpc.tencentcloudapi.com")
 	return vpc.NewClient(cred, c.creds.Region, cpf)
 }
 

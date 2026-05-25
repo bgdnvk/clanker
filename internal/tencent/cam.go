@@ -8,7 +8,6 @@ import (
 
 	cam "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cam/v20190116"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 )
 
 // listCAMUsers prints every CAM sub-account user. CAM is account-global so
@@ -50,7 +49,6 @@ func listCAMUsers(c *Client) error {
 
 func newCAMClient(c *Client) (*cam.Client, error) {
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "cam.tencentcloudapi.com"
+	cpf := newClientProfile("cam.tencentcloudapi.com")
 	return cam.NewClient(cred, "ap-guangzhou", cpf)
 }

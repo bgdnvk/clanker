@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 	lighthouse "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/lighthouse/v20200324"
 	monitor "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/monitor/v20180724"
 )
@@ -19,8 +18,7 @@ import (
 // namespace QCE/LIGHTHOUSE with its own metric names.
 func (c *Client) Lighthouse() (*lighthouse.Client, error) {
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "lighthouse.tencentcloudapi.com"
+	cpf := newClientProfile("lighthouse.tencentcloudapi.com")
 	return lighthouse.NewClient(cred, c.creds.Region, cpf)
 }
 

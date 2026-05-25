@@ -8,7 +8,6 @@ import (
 
 	antiddos "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/antiddos/v20200309"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 )
 
 // listAntiDDoS prints every Anti-DDoS Advanced BGP-IP instance.
@@ -58,8 +57,7 @@ func listAntiDDoS(c *Client) error {
 
 func newAntiDDoSClient(c *Client) (*antiddos.Client, error) {
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "antiddos.tencentcloudapi.com"
+	cpf := newClientProfile("antiddos.tencentcloudapi.com")
 	return antiddos.NewClient(cred, "ap-guangzhou", cpf)
 }
 

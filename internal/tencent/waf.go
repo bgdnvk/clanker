@@ -7,7 +7,6 @@ import (
 	"text/tabwriter"
 
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 	waf "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/waf/v20180125"
 )
 
@@ -46,8 +45,7 @@ func listWAFHosts(c *Client) error {
 
 func newWAFClient(c *Client) (*waf.Client, error) {
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "waf.tencentcloudapi.com"
+	cpf := newClientProfile("waf.tencentcloudapi.com")
 	return waf.NewClient(cred, "ap-guangzhou", cpf)
 }
 

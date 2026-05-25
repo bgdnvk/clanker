@@ -13,7 +13,6 @@ import (
 
 	billing "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/billing/v20180709"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 )
 
 // listBillByProduct prints a per-service cost breakdown for a given month.
@@ -118,8 +117,7 @@ func listBillResourceTop(c *Client, month string, top int) error {
 
 func newBillingClient(c *Client) (*billing.Client, error) {
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "billing.tencentcloudapi.com"
+	cpf := newClientProfile("billing.tencentcloudapi.com")
 	return billing.NewClient(cred, "ap-guangzhou", cpf) // billing is global
 }
 

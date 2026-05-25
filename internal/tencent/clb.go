@@ -8,7 +8,6 @@ import (
 
 	clb "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/clb/v20180317"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 )
 
 // listCLBs prints every Cloud Load Balancer in the given regions.
@@ -90,8 +89,7 @@ func newCLBClient(c *Client, region string) (*clb.Client, error) {
 		region = c.creds.Region
 	}
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "clb.tencentcloudapi.com"
+	cpf := newClientProfile("clb.tencentcloudapi.com")
 	return clb.NewClient(cred, region, cpf)
 }
 

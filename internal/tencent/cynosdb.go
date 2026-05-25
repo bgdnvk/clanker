@@ -7,7 +7,6 @@ import (
 	"text/tabwriter"
 
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 	cynosdb "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cynosdb/v20190107"
 )
 
@@ -90,7 +89,6 @@ func newCynosDBClient(c *Client, region string) (*cynosdb.Client, error) {
 		region = c.creds.Region
 	}
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "cynosdb.tencentcloudapi.com"
+	cpf := newClientProfile("cynosdb.tencentcloudapi.com")
 	return cynosdb.NewClient(cred, region, cpf)
 }

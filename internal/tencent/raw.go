@@ -10,7 +10,6 @@ import (
 
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 	tchttp "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/http"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 )
 
 // serviceVersions is generated from the vendored Tencent SDK by
@@ -70,8 +69,7 @@ func (c *Client) SendRaw(service, action, region, paramsJSON string) (string, er
 	}
 
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = service + ".tencentcloudapi.com"
+	cpf := newClientProfile(service + ".tencentcloudapi.com")
 	client := common.NewCommonClient(cred, region, cpf)
 
 	req := tchttp.NewCommonRequest(service, version, action)

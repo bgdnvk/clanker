@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -234,14 +235,6 @@ func (c *Client) contextCVMs(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req := cvm.NewDescribeInstancesRequest()
-	resp, err := client.DescribeInstances(req)
-	if err != nil {
-		return "", friendlyError(err)
-	}
-	if resp == nil || resp.Response == nil || len(resp.Response.InstanceSet) == 0 {
-		return "", nil
-	}
 
 	type instSummary struct {
 		ID          string            `json:"id"`
@@ -259,22 +252,50 @@ func (c *Client) contextCVMs(ctx context.Context) (string, error) {
 		Tags        map[string]string `json:"tags,omitempty"`
 	}
 	var slim []instSummary
-	for _, in := range resp.Response.InstanceSet {
-		slim = append(slim, instSummary{
-			ID:          derefStringRaw(in.InstanceId),
-			Name:        derefStringRaw(in.InstanceName),
-			State:       derefStringRaw(in.InstanceState),
-			Type:        derefStringRaw(in.InstanceType),
-			Zone:        derefStringRaw(in.Placement.Zone),
-			PrivateIP:   stringSlice(in.PrivateIpAddresses),
-			PublicIP:    stringSlice(in.PublicIpAddresses),
-			CreatedAt:   derefStringRaw(in.CreatedTime),
-			ExpiresAt:   derefStringRaw(in.ExpiredTime),
-			BillingMode: normChargeTypeStr(in.InstanceChargeType),
-			AutoRenew:   normRenewFlagAutoStr(in.RenewFlag),
-			OSName:      derefStringRaw(in.OsName),
-			Tags:        extractTags(in.Tags),
-		})
+	var offset, limit int64 = 0, gatherPageSize
+	for {
+		if err := ctxDone(ctx); err != nil {
+			return "", err
+		}
+		req := cvm.NewDescribeInstancesRequest()
+		req.Offset = &offset
+		req.Limit = &limit
+		resp, err := client.DescribeInstances(req)
+		if err != nil {
+			return "", friendlyError(err)
+		}
+		if resp == nil || resp.Response == nil {
+			break
+		}
+		for _, in := range resp.Response.InstanceSet {
+			slim = append(slim, instSummary{
+				ID:          derefStringRaw(in.InstanceId),
+				Name:        derefStringRaw(in.InstanceName),
+				State:       derefStringRaw(in.InstanceState),
+				Type:        derefStringRaw(in.InstanceType),
+				Zone:        derefStringRaw(in.Placement.Zone),
+				PrivateIP:   stringSlice(in.PrivateIpAddresses),
+				PublicIP:    stringSlice(in.PublicIpAddresses),
+				CreatedAt:   derefStringRaw(in.CreatedTime),
+				ExpiresAt:   derefStringRaw(in.ExpiredTime),
+				BillingMode: normChargeTypeStr(in.InstanceChargeType),
+				AutoRenew:   normRenewFlagAutoStr(in.RenewFlag),
+				OSName:      derefStringRaw(in.OsName),
+				Tags:        extractTags(in.Tags),
+			})
+		}
+		total := derefInt64(resp.Response.TotalCount)
+		offset += int64(len(resp.Response.InstanceSet))
+		if offset >= total || len(resp.Response.InstanceSet) == 0 {
+			break
+		}
+		if len(slim) >= gatherMaxItems {
+			logGatherTruncated("CVM", c.creds.Region, total, len(slim))
+			break
+		}
+	}
+	if len(slim) == 0 {
+		return "", nil
 	}
 	b, err := json.Marshal(slim)
 	if err != nil {
@@ -288,14 +309,6 @@ func (c *Client) contextVPCs(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req := vpc.NewDescribeVpcsRequest()
-	resp, err := client.DescribeVpcs(req)
-	if err != nil {
-		return "", friendlyError(err)
-	}
-	if resp == nil || resp.Response == nil || len(resp.Response.VpcSet) == 0 {
-		return "", nil
-	}
 	type vpcSummary struct {
 		ID        string            `json:"id"`
 		Name      string            `json:"name"`
@@ -305,15 +318,43 @@ func (c *Client) contextVPCs(ctx context.Context) (string, error) {
 		Tags      map[string]string `json:"tags,omitempty"`
 	}
 	var slim []vpcSummary
-	for _, v := range resp.Response.VpcSet {
-		slim = append(slim, vpcSummary{
-			ID:        derefStringRaw(v.VpcId),
-			Name:      derefStringRaw(v.VpcName),
-			CIDR:      derefStringRaw(v.CidrBlock),
-			IsDefault: derefBool(v.IsDefault),
-			CreatedAt: derefStringRaw(v.CreatedTime),
-			Tags:      extractTags(v.TagSet),
-		})
+	offsetStr, limitStr := "0", strconv.FormatInt(gatherPageSize, 10)
+	for {
+		if err := ctxDone(ctx); err != nil {
+			return "", err
+		}
+		req := vpc.NewDescribeVpcsRequest()
+		req.Offset = &offsetStr
+		req.Limit = &limitStr
+		resp, err := client.DescribeVpcs(req)
+		if err != nil {
+			return "", friendlyError(err)
+		}
+		if resp == nil || resp.Response == nil {
+			break
+		}
+		for _, v := range resp.Response.VpcSet {
+			slim = append(slim, vpcSummary{
+				ID:        derefStringRaw(v.VpcId),
+				Name:      derefStringRaw(v.VpcName),
+				CIDR:      derefStringRaw(v.CidrBlock),
+				IsDefault: derefBool(v.IsDefault),
+				CreatedAt: derefStringRaw(v.CreatedTime),
+				Tags:      extractTags(v.TagSet),
+			})
+		}
+		total := derefUint64Raw(resp.Response.TotalCount)
+		if uint64(len(slim)) >= total || len(resp.Response.VpcSet) == 0 {
+			break
+		}
+		if len(slim) >= gatherMaxItems {
+			logGatherTruncated("VPC", c.creds.Region, int64(total), len(slim))
+			break
+		}
+		offsetStr = strconv.FormatInt(int64(len(slim)), 10)
+	}
+	if len(slim) == 0 {
+		return "", nil
 	}
 	b, err := json.Marshal(slim)
 	if err != nil {
@@ -322,18 +363,11 @@ func (c *Client) contextVPCs(ctx context.Context) (string, error) {
 	return string(b), nil
 }
 
+
 func (c *Client) contextSecurityGroups(ctx context.Context) (string, error) {
 	client, err := c.VPC()
 	if err != nil {
 		return "", err
-	}
-	req := vpc.NewDescribeSecurityGroupsRequest()
-	resp, err := client.DescribeSecurityGroups(req)
-	if err != nil {
-		return "", friendlyError(err)
-	}
-	if resp == nil || resp.Response == nil || len(resp.Response.SecurityGroupSet) == 0 {
-		return "", nil
 	}
 	type sgSummary struct {
 		ID          string `json:"id"`
@@ -342,13 +376,41 @@ func (c *Client) contextSecurityGroups(ctx context.Context) (string, error) {
 		IsDefault   bool   `json:"is_default"`
 	}
 	var slim []sgSummary
-	for _, g := range resp.Response.SecurityGroupSet {
-		slim = append(slim, sgSummary{
-			ID:          derefStringRaw(g.SecurityGroupId),
-			Name:        derefStringRaw(g.SecurityGroupName),
-			Description: derefStringRaw(g.SecurityGroupDesc),
-			IsDefault:   derefBool(g.IsDefault),
-		})
+	offsetStr, limitStr := "0", strconv.FormatInt(gatherPageSize, 10)
+	for {
+		if err := ctxDone(ctx); err != nil {
+			return "", err
+		}
+		req := vpc.NewDescribeSecurityGroupsRequest()
+		req.Offset = &offsetStr
+		req.Limit = &limitStr
+		resp, err := client.DescribeSecurityGroups(req)
+		if err != nil {
+			return "", friendlyError(err)
+		}
+		if resp == nil || resp.Response == nil {
+			break
+		}
+		for _, g := range resp.Response.SecurityGroupSet {
+			slim = append(slim, sgSummary{
+				ID:          derefStringRaw(g.SecurityGroupId),
+				Name:        derefStringRaw(g.SecurityGroupName),
+				Description: derefStringRaw(g.SecurityGroupDesc),
+				IsDefault:   derefBool(g.IsDefault),
+			})
+		}
+		total := derefUint64Raw(resp.Response.TotalCount)
+		if uint64(len(slim)) >= total || len(resp.Response.SecurityGroupSet) == 0 {
+			break
+		}
+		if len(slim) >= gatherMaxItems {
+			logGatherTruncated("SecurityGroup", c.creds.Region, int64(total), len(slim))
+			break
+		}
+		offsetStr = strconv.FormatInt(int64(len(slim)), 10)
+	}
+	if len(slim) == 0 {
+		return "", nil
 	}
 	b, err := json.Marshal(slim)
 	if err != nil {

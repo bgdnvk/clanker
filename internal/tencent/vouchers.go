@@ -11,7 +11,6 @@ import (
 
 	billing "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/billing/v20180709"
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 )
 
 // newVoucherClient builds a billing client for the voucher APIs. The cost
@@ -24,8 +23,7 @@ func newVoucherClient(c *Client) (*billing.Client, error) {
 		region = "ap-singapore"
 	}
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "billing.tencentcloudapi.com"
+	cpf := newClientProfile("billing.tencentcloudapi.com")
 	return billing.NewClient(cred, region, cpf)
 }
 

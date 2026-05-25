@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
-	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common/profile"
 	ssl "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/ssl/v20191205"
 )
 
@@ -60,8 +59,7 @@ func listSSLCerts(c *Client) error {
 
 func newSSLClient(c *Client) (*ssl.Client, error) {
 	cred := common.NewCredential(c.creds.SecretID, c.creds.SecretKey)
-	cpf := profile.NewClientProfile()
-	cpf.HttpProfile.Endpoint = "ssl.tencentcloudapi.com"
+	cpf := newClientProfile("ssl.tencentcloudapi.com")
 	// SSL is global; pass an arbitrary region (the service ignores it).
 	return ssl.NewClient(cred, "ap-guangzhou", cpf)
 }
