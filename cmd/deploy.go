@@ -124,7 +124,7 @@ Examples:
 			fmt.Fprintf(os.Stderr, format+"\n", args...)
 		}
 		if sreMode {
-			logf("[deploy] --sre requested; Docker is the default SRE runtime. After deployment, run: clanker sre install --target docker --apply")
+			logf("[deploy] --sre requested; planning a long-running Clanker SRE agent with heartbeat verification")
 		}
 
 		// 3. Resolve AWS profile/region early so intelligence pipeline can scan infra
@@ -323,7 +323,7 @@ Examples:
 		if planProvider == "" {
 			planProvider = "aws"
 		}
-		deployObjectiveContext := withOneClickDeployContext(baseQuestion, planProvider, intel.Architecture.Method, enforceImageDeploy)
+		deployObjectiveContext := withOneClickDeployContext(baseQuestion, planProvider, intel.Architecture.Method, enforceImageDeploy, sreMode)
 		planningContext := compactPlanningContext(deployObjectiveContext, planProvider)
 		projectSummaryForLLM := strings.TrimSpace(rp.Summary)
 		if intel.DeepAnalysis != nil && strings.TrimSpace(intel.DeepAnalysis.AppDescription) != "" {
@@ -1773,8 +1773,8 @@ func compactOneLine(raw string, limit int) string {
 
 var shellStylePlaceholderRe = regexp.MustCompile(`\$\{([A-Z0-9_]+)\}`)
 
-func withOneClickDeployContext(base, provider, method string, enforceImageDeploy bool) string {
-	context := buildOneClickDeployObjective(provider, method, enforceImageDeploy)
+func withOneClickDeployContext(base, provider, method string, enforceImageDeploy bool, sreMode bool) string {
+	context := buildOneClickDeployObjective(provider, method, enforceImageDeploy, sreMode)
 	base = strings.TrimSpace(base)
 	if base == "" {
 		return context
@@ -1782,10 +1782,17 @@ func withOneClickDeployContext(base, provider, method string, enforceImageDeploy
 	return context + "\n\n" + base
 }
 
-func buildOneClickDeployObjective(provider, method string, enforceImageDeploy bool) string {
+func buildOneClickDeployObjective(provider, method string, enforceImageDeploy bool, sreMode bool) string {
 	prov := strings.ToLower(strings.TrimSpace(provider))
 	if prov == "" {
 		prov = "aws"
+	}
+	if sreMode {
+		deployID := strings.TrimSpace(os.Getenv("CLANKER_SRE_DEPLOY_ID"))
+		if deployID == "" {
+			deployID = "$CLANKER_SRE_DEPLOY_ID"
+		}
+		return fmt.Sprintf("[one-click SRE deploy objective]\nGenerate command plan steps that deploy only the long-running Clanker SRE agent, not the analyzed app. Use provider=%s and the smallest practical always-on runtime for that provider. Prefer ghcr.io/bgdnvk/clanker:latest and run: clanker sre run --sre --target cloud-vm --provider %s --deploy-id %s. The runtime MUST set CLANKER_CEREBRO_URL, CLANKER_CEREBRO_INGEST_TOKEN, CLANKER_SRE_DEPLOY_ID, and CLANKER_SRE_PROVIDER. Tag or label every created resource with clanker-sre=true and clanker-sre-deploy-id=%s. Keep commands idempotent, preserve created resource IDs, and include a final non-secret health/verification command that checks the service/container is still running. Never print token values.", prov, prov, deployID, deployID)
 	}
 	m := strings.ToLower(strings.TrimSpace(method))
 	if m == "" {

@@ -69,6 +69,8 @@ type PlanOptions struct {
 	Name           string
 	BackendURL     string
 	IngestTokenEnv string
+	Provider       string
+	DeployID       string
 	Interval       time.Duration
 }
 
@@ -99,6 +101,7 @@ type RunOptions struct {
 	Once        bool
 	Writer      io.Writer
 	Provider    string
+	DeployID    string
 }
 
 func Discover(ctx context.Context) Discovery {
@@ -174,23 +177,25 @@ func BuildPlan(discovery Discovery, opts PlanOptions) InstallPlan {
 	if backendURL == "" {
 		backendURL = firstNonEmpty(viper.GetString("sre.cerebro_url"), os.Getenv("CLANKER_CEREBRO_URL"), os.Getenv("CLANKER_CLOUD_API_BASE_URL"), viper.GetString("backend.url"))
 	}
+	provider := strings.ToLower(strings.TrimSpace(firstNonEmpty(opts.Provider, os.Getenv("CLANKER_SRE_PROVIDER"), viper.GetString("sre.provider"))))
+	deployID := strings.TrimSpace(firstNonEmpty(opts.DeployID, os.Getenv("CLANKER_SRE_DEPLOY_ID"), viper.GetString("sre.deploy_id")))
 
 	plan := InstallPlan{Target: target, Discovery: discovery}
 	switch target {
 	case "docker":
-		plan = dockerPlan(discovery, image, name, backendURL, tokenEnv, interval)
+		plan = dockerPlan(discovery, image, name, backendURL, tokenEnv, provider, deployID, interval)
 	case "local":
-		plan = localPlan(discovery, name, backendURL, tokenEnv, interval)
+		plan = localPlan(discovery, name, backendURL, tokenEnv, provider, deployID, interval)
 	case "launchd":
-		plan = launchdPlan(discovery, name, backendURL, tokenEnv, interval)
+		plan = launchdPlan(discovery, name, backendURL, tokenEnv, provider, deployID, interval)
 	case "systemd":
-		plan = systemdPlan(discovery, name, backendURL, tokenEnv, interval)
+		plan = systemdPlan(discovery, name, backendURL, tokenEnv, provider, deployID, interval)
 	case "k8s", "kubernetes":
-		plan = k8sPlan(discovery, image, name, backendURL, tokenEnv, interval)
+		plan = k8sPlan(discovery, image, name, backendURL, tokenEnv, provider, deployID, interval)
 	case "cloud-vm":
-		plan = cloudVMPlan(discovery, image, name, backendURL, tokenEnv, interval)
+		plan = cloudVMPlan(discovery, image, name, backendURL, tokenEnv, provider, deployID, interval)
 	default:
-		plan = dockerPlan(discovery, image, name, backendURL, tokenEnv, interval)
+		plan = dockerPlan(discovery, image, name, backendURL, tokenEnv, provider, deployID, interval)
 		plan.Warnings = append(plan.Warnings, "unknown target "+target+"; using docker plan")
 	}
 	plan.Target = target
@@ -245,8 +250,9 @@ func Run(ctx context.Context, opts RunOptions) error {
 		interval = DefaultInterval
 	}
 	agentID := strings.TrimSpace(opts.AgentID)
+	deployID := strings.TrimSpace(firstNonEmpty(opts.DeployID, viper.GetString("sre.deploy_id"), os.Getenv("CLANKER_SRE_DEPLOY_ID")))
 	if agentID == "" {
-		agentID = defaultAgentID()
+		agentID = firstNonEmpty(deployID, defaultAgentID())
 	}
 	agentName := strings.TrimSpace(opts.AgentName)
 	if agentName == "" {
@@ -283,7 +289,8 @@ func PostHeartbeat(ctx context.Context, discovery Discovery, observations map[st
 	token := strings.TrimSpace(firstNonEmpty(opts.IngestToken, viper.GetString("sre.ingest_token"), os.Getenv(DefaultIngestTokenEnv)))
 
 	// Detect provider from RunOptions or discovery
-	provider := strings.ToLower(strings.TrimSpace(opts.Provider))
+	deployID := strings.TrimSpace(firstNonEmpty(opts.DeployID, viper.GetString("sre.deploy_id"), os.Getenv("CLANKER_SRE_DEPLOY_ID")))
+	provider := strings.ToLower(strings.TrimSpace(firstNonEmpty(opts.Provider, viper.GetString("sre.provider"), os.Getenv("CLANKER_SRE_PROVIDER"))))
 	if provider == "" {
 		// Infer primary provider from discovery
 		if len(discovery.Providers) > 0 {
@@ -302,6 +309,7 @@ func PostHeartbeat(ctx context.Context, discovery Discovery, observations map[st
 		"message":           fmt.Sprintf("%s heartbeat from %s (%d findings)", agentName, discovery.Hostname, len(BuildFindings(discovery, observations))),
 		"agentId":           agentID,
 		"agentName":         agentName,
+		"deployId":          deployID,
 		"provider":          provider,
 		"target":            normalizeTarget(opts.Target),
 		"recommendedTarget": discovery.RecommendedTarget,
@@ -888,7 +896,54 @@ func detectTerraform(tools map[string]ToolStatus) CapabilityStatus {
 	return CapabilityStatus{Available: false, Detail: "terraform not detected"}
 }
 
-func dockerPlan(discovery Discovery, image string, name string, backendURL string, tokenEnv string, interval time.Duration) InstallPlan {
+func sreRunArgs(target string, interval time.Duration, provider string, deployID string) []string {
+	args := []string{"sre", "run", "--sre", "--target", target, "--interval", interval.String()}
+	if strings.TrimSpace(provider) != "" {
+		args = append(args, "--provider", strings.TrimSpace(provider))
+	}
+	if strings.TrimSpace(deployID) != "" {
+		args = append(args, "--deploy-id", strings.TrimSpace(deployID))
+	}
+	return args
+}
+
+func sreRunShell(target string, interval time.Duration, provider string, deployID string) string {
+	args := sreRunArgs(target, interval, provider, deployID)
+	quoted := make([]string, 0, len(args))
+	for _, arg := range args {
+		quoted = append(quoted, fmt.Sprintf("%q", arg))
+	}
+	return strings.Join(quoted, " ")
+}
+
+func sreRunJSONArgs(target string, interval time.Duration, provider string, deployID string) string {
+	data, _ := json.Marshal(sreRunArgs(target, interval, provider, deployID))
+	return string(data)
+}
+
+func sreDockerEnvArgs(backendURL string, tokenEnv string, provider string, deployID string) string {
+	parts := []string{fmt.Sprintf("-e CLANKER_CEREBRO_URL=%q", backendURL), fmt.Sprintf("-e %s=\"$%s\"", tokenEnv, tokenEnv)}
+	if strings.TrimSpace(provider) != "" {
+		parts = append(parts, fmt.Sprintf("-e CLANKER_SRE_PROVIDER=%q", strings.TrimSpace(provider)))
+	}
+	if strings.TrimSpace(deployID) != "" {
+		parts = append(parts, fmt.Sprintf("-e CLANKER_SRE_DEPLOY_ID=%q", strings.TrimSpace(deployID)))
+	}
+	return strings.Join(parts, " ")
+}
+
+func sreShellEnvPrefix(backendURL string, tokenEnv string, provider string, deployID string) string {
+	parts := []string{fmt.Sprintf("CLANKER_CEREBRO_URL=%q", backendURL), fmt.Sprintf("%s=\"$%s\"", tokenEnv, tokenEnv)}
+	if strings.TrimSpace(provider) != "" {
+		parts = append(parts, fmt.Sprintf("CLANKER_SRE_PROVIDER=%q", strings.TrimSpace(provider)))
+	}
+	if strings.TrimSpace(deployID) != "" {
+		parts = append(parts, fmt.Sprintf("CLANKER_SRE_DEPLOY_ID=%q", strings.TrimSpace(deployID)))
+	}
+	return strings.Join(parts, " ")
+}
+
+func dockerPlan(discovery Discovery, image string, name string, backendURL string, tokenEnv string, provider string, deployID string, interval time.Duration) InstallPlan {
 	available := discovery.Docker.Available
 	warnings := []string{}
 	if !available {
@@ -900,27 +955,46 @@ func dockerPlan(discovery Discovery, image string, name string, backendURL strin
 	commands := []string{
 		fmt.Sprintf("docker pull %s", image),
 		fmt.Sprintf("docker rm -f %s 2>/dev/null || true", name),
-		fmt.Sprintf("docker run -d --name %s --restart unless-stopped -e CLANKER_CEREBRO_URL=%q -e %s=\"$%s\" -v $HOME/.clanker:/root/.clanker:ro -v $HOME/.aws:/root/.aws:ro -v $HOME/.kube:/root/.kube:ro %s sre run --sre --target docker --interval %s", name, backendURL, tokenEnv, tokenEnv, image, interval.String()),
+		fmt.Sprintf("docker run -d --name %s --restart unless-stopped %s -v $HOME/.clanker:/root/.clanker:ro -v $HOME/.aws:/root/.aws:ro -v $HOME/.kube:/root/.kube:ro %s %s", name, sreDockerEnvArgs(backendURL, tokenEnv, provider, deployID), image, sreRunShell("docker", interval, provider, deployID)),
 	}
-	compose := fmt.Sprintf("services:\n  %s:\n    image: %s\n    restart: unless-stopped\n    environment:\n      CLANKER_CEREBRO_URL: %q\n      %s: ${%s}\n    volumes:\n      - ${HOME}/.clanker:/root/.clanker:ro\n      - ${HOME}/.aws:/root/.aws:ro\n      - ${HOME}/.kube:/root/.kube:ro\n    command: [\"sre\", \"run\", \"--sre\", \"--target\", \"docker\", \"--interval\", %q]\n", name, image, backendURL, tokenEnv, tokenEnv, interval.String())
+	composeEnv := fmt.Sprintf("      CLANKER_CEREBRO_URL: %q\n      %s: ${%s}\n", backendURL, tokenEnv, tokenEnv)
+	if strings.TrimSpace(provider) != "" {
+		composeEnv += fmt.Sprintf("      CLANKER_SRE_PROVIDER: %q\n", strings.TrimSpace(provider))
+	}
+	if strings.TrimSpace(deployID) != "" {
+		composeEnv += fmt.Sprintf("      CLANKER_SRE_DEPLOY_ID: %q\n", strings.TrimSpace(deployID))
+	}
+	compose := fmt.Sprintf("services:\n  %s:\n    image: %s\n    restart: unless-stopped\n    environment:\n%s    volumes:\n      - ${HOME}/.clanker:/root/.clanker:ro\n      - ${HOME}/.aws:/root/.aws:ro\n      - ${HOME}/.kube:/root/.kube:ro\n    command: %s\n", name, image, composeEnv, sreRunJSONArgs("docker", interval, provider, deployID))
 	return InstallPlan{Target: "docker", Summary: "Run Clanker SRE as a small Docker container", Available: available, Warnings: warnings, Commands: commands, Files: []InstallFile{{Path: "docker-compose.sre.yml", Mode: "0644", Content: compose}}, NextSteps: []string{"export " + tokenEnv + "=...", "run the docker command or docker compose -f docker-compose.sre.yml up -d"}}
 }
 
-func localPlan(discovery Discovery, name string, backendURL string, tokenEnv string, interval time.Duration) InstallPlan {
+func localPlan(discovery Discovery, name string, backendURL string, tokenEnv string, provider string, deployID string, interval time.Duration) InstallPlan {
 	warnings := []string{}
 	if backendURL == "" {
 		warnings = append(warnings, "no Cerebro URL configured; local run will auto-detect a desktop backend if one is running")
 	}
-	command := fmt.Sprintf("CLANKER_CEREBRO_URL=%q %s=\"$%s\" clanker sre run --sre --target local --interval %s", backendURL, tokenEnv, tokenEnv, interval.String())
+	command := fmt.Sprintf("%s clanker %s", sreShellEnvPrefix(backendURL, tokenEnv, provider, deployID), sreRunShell("local", interval, provider, deployID))
 	script := "#!/usr/bin/env sh\nset -eu\nexec " + command + "\n"
 	return InstallPlan{Target: "local", Summary: "Run Clanker SRE in the foreground on this machine", Available: true, Warnings: warnings, Commands: []string{command}, Files: []InstallFile{{Path: name + ".sh", Mode: "0755", Content: script}}, NextSteps: []string{"run the generated script or foreground command"}, Discovery: discovery}
 }
 
-func launchdPlan(discovery Discovery, name string, backendURL string, tokenEnv string, interval time.Duration) InstallPlan {
+func launchdPlan(discovery Discovery, name string, backendURL string, tokenEnv string, provider string, deployID string, interval time.Duration) InstallPlan {
 	available := runtime.GOOS == "darwin"
 	warnings := []string{}
 	if !available {
 		warnings = append(warnings, "launchd target is only available on macOS")
+	}
+	args := sreRunArgs("launchd", interval, provider, deployID)
+	argXML := "    <string>clanker</string>"
+	for _, arg := range args {
+		argXML += fmt.Sprintf("<string>%s</string>", arg)
+	}
+	envXML := fmt.Sprintf("<key>CLANKER_CEREBRO_URL</key><string>%s</string><key>%s</key><string>$%s</string>", backendURL, tokenEnv, tokenEnv)
+	if strings.TrimSpace(provider) != "" {
+		envXML += fmt.Sprintf("<key>CLANKER_SRE_PROVIDER</key><string>%s</string>", strings.TrimSpace(provider))
+	}
+	if strings.TrimSpace(deployID) != "" {
+		envXML += fmt.Sprintf("<key>CLANKER_SRE_DEPLOY_ID</key><string>%s</string>", strings.TrimSpace(deployID))
 	}
 	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -929,23 +1003,30 @@ func launchdPlan(discovery Discovery, name string, backendURL string, tokenEnv s
   <key>Label</key><string>ai.clanker.%s</string>
   <key>ProgramArguments</key>
   <array>
-    <string>clanker</string><string>sre</string><string>run</string><string>--sre</string><string>--target</string><string>launchd</string><string>--interval</string><string>%s</string>
+%s
   </array>
   <key>EnvironmentVariables</key>
-  <dict><key>CLANKER_CEREBRO_URL</key><string>%s</string><key>%s</key><string>$%s</string></dict>
+  <dict>%s</dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
 </dict>
 </plist>
-`, name, interval.String(), backendURL, tokenEnv, tokenEnv)
+`, name, argXML, envXML)
 	return InstallPlan{Target: "launchd", Summary: "Install Clanker SRE as a macOS launchd service", Available: available, Warnings: warnings, Commands: []string{"launchctl load ~/Library/LaunchAgents/ai.clanker." + name + ".plist"}, Files: []InstallFile{{Path: "ai.clanker." + name + ".plist", Mode: "0644", Content: plist}}, NextSteps: []string{"copy plist into ~/Library/LaunchAgents", "load it with launchctl"}, Discovery: discovery}
 }
 
-func systemdPlan(discovery Discovery, name string, backendURL string, tokenEnv string, interval time.Duration) InstallPlan {
+func systemdPlan(discovery Discovery, name string, backendURL string, tokenEnv string, provider string, deployID string, interval time.Duration) InstallPlan {
 	available := runtime.GOOS == "linux"
 	warnings := []string{}
 	if !available {
 		warnings = append(warnings, "systemd target is only available on Linux")
+	}
+	envLines := fmt.Sprintf("Environment=CLANKER_CEREBRO_URL=%s\nEnvironment=%s=${%s}\n", backendURL, tokenEnv, tokenEnv)
+	if strings.TrimSpace(provider) != "" {
+		envLines += fmt.Sprintf("Environment=CLANKER_SRE_PROVIDER=%s\n", strings.TrimSpace(provider))
+	}
+	if strings.TrimSpace(deployID) != "" {
+		envLines += fmt.Sprintf("Environment=CLANKER_SRE_DEPLOY_ID=%s\n", strings.TrimSpace(deployID))
 	}
 	unit := fmt.Sprintf(`[Unit]
 Description=Clanker SRE
@@ -954,23 +1035,28 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-Environment=CLANKER_CEREBRO_URL=%s
-Environment=%s=${%s}
-ExecStart=/usr/bin/env clanker sre run --sre --target systemd --interval %s
+%sExecStart=/usr/bin/env clanker %s
 Restart=always
 RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
-`, backendURL, tokenEnv, tokenEnv, interval.String())
+`, envLines, sreRunShell("systemd", interval, provider, deployID))
 	return InstallPlan{Target: "systemd", Summary: "Install Clanker SRE as a Linux systemd service", Available: available, Warnings: warnings, Commands: []string{"sudo cp " + name + ".service /etc/systemd/system/", "sudo systemctl daemon-reload", "sudo systemctl enable --now " + name}, Files: []InstallFile{{Path: name + ".service", Mode: "0644", Content: unit}}, NextSteps: []string{"copy the unit to /etc/systemd/system", "enable the service"}, Discovery: discovery}
 }
 
-func k8sPlan(discovery Discovery, image string, name string, backendURL string, tokenEnv string, interval time.Duration) InstallPlan {
+func k8sPlan(discovery Discovery, image string, name string, backendURL string, tokenEnv string, provider string, deployID string, interval time.Duration) InstallPlan {
 	available := discovery.Kubernetes.Available
 	warnings := []string{}
 	if !available {
 		warnings = append(warnings, "kubernetes was not detected; use this target only when kubeconfig is available")
+	}
+	extraEnv := ""
+	if strings.TrimSpace(provider) != "" {
+		extraEnv += fmt.Sprintf("            - name: CLANKER_SRE_PROVIDER\n              value: %q\n", strings.TrimSpace(provider))
+	}
+	if strings.TrimSpace(deployID) != "" {
+		extraEnv += fmt.Sprintf("            - name: CLANKER_SRE_DEPLOY_ID\n              value: %q\n", strings.TrimSpace(deployID))
 	}
 	manifest := fmt.Sprintf(`apiVersion: apps/v1
 kind: Deployment
@@ -990,7 +1076,7 @@ spec:
       containers:
         - name: sre
           image: %s
-          args: ["sre", "run", "--sre", "--target", "k8s", "--interval", "%s"]
+					args: %s
           env:
             - name: CLANKER_CEREBRO_URL
               value: %q
@@ -999,18 +1085,18 @@ spec:
                 secretKeyRef:
                   name: clanker-sre
                   key: ingest-token
-`, name, name, name, image, interval.String(), backendURL, tokenEnv)
+%s`, name, name, name, image, sreRunJSONArgs("k8s", interval, provider, deployID), backendURL, tokenEnv, extraEnv)
 	return InstallPlan{Target: "k8s", Summary: "Run Clanker SRE in an existing Kubernetes cluster", Available: available, Warnings: warnings, Commands: []string{"kubectl create namespace clanker --dry-run=client -o yaml | kubectl apply -f -", "kubectl -n clanker create secret generic clanker-sre --from-literal=ingest-token=\"$" + tokenEnv + "\" --dry-run=client -o yaml | kubectl apply -f -", "kubectl apply -f clanker-sre.yaml"}, Files: []InstallFile{{Path: "clanker-sre.yaml", Mode: "0644", Content: manifest}}, NextSteps: []string{"create the ingest token secret", "apply clanker-sre.yaml"}, Discovery: discovery}
 }
 
-func cloudVMPlan(discovery Discovery, image string, name string, backendURL string, tokenEnv string, interval time.Duration) InstallPlan {
+func cloudVMPlan(discovery Discovery, image string, name string, backendURL string, tokenEnv string, provider string, deployID string, interval time.Duration) InstallPlan {
 	cloudInit := fmt.Sprintf(`#cloud-config
 packages:
   - docker.io
 runcmd:
   - docker pull %s
-  - docker run -d --name %s --restart unless-stopped -e CLANKER_CEREBRO_URL=%q -e %s="$%s" %s sre run --sre --target cloud-vm --interval %s
-`, image, name, backendURL, tokenEnv, tokenEnv, image, interval.String())
+	- docker run -d --name %s --restart unless-stopped %s %s %s
+`, image, name, sreDockerEnvArgs(backendURL, tokenEnv, provider, deployID), image, sreRunShell("cloud-vm", interval, provider, deployID))
 	return InstallPlan{Target: "cloud-vm", Summary: "Run Clanker SRE on a minimal VM in a user-owned provider", Available: true, Warnings: []string{"cloud-vm target generates bootstrap assets only; provision the VM with your chosen provider"}, Commands: []string{"use clanker-sre-cloud-init.yaml as cloud-init user data on a small VM"}, Files: []InstallFile{{Path: "clanker-sre-cloud-init.yaml", Mode: "0644", Content: cloudInit}}, NextSteps: []string{"create the smallest suitable VM", "attach cloud-init user data", "verify heartbeat in Cerebro"}, Discovery: discovery}
 }
 
