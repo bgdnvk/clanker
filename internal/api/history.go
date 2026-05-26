@@ -40,9 +40,9 @@ type ApplyRecord struct {
 // are safe; reads return a defensive copy so the response can be marshalled
 // without holding the lock.
 type history struct {
-	mu      sync.Mutex
-	items   []ApplyRecord
-	nextID  int64
+	mu     sync.Mutex
+	items  []ApplyRecord
+	nextID int64
 }
 
 func newHistory() *history {

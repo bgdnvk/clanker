@@ -42,12 +42,12 @@ func (c *Client) CLBExposureScanJSON(ctx context.Context, region string) (string
 		Risk       string `json:"risk,omitempty"`
 	}
 	type cveLB struct {
-		LBID      string        `json:"lb_id"`
-		Name      string        `json:"name,omitempty"`
-		Type      string        `json:"type"`
-		VIPs      []string      `json:"vips,omitempty"`
-		Listeners []listenerRow `json:"listeners"`
-		RiskyCount int          `json:"risky_count"`
+		LBID       string        `json:"lb_id"`
+		Name       string        `json:"name,omitempty"`
+		Type       string        `json:"type"`
+		VIPs       []string      `json:"vips,omitempty"`
+		Listeners  []listenerRow `json:"listeners"`
+		RiskyCount int           `json:"risky_count"`
 	}
 
 	var items []cveLB
@@ -315,12 +315,12 @@ func (c *Client) CAMHygieneScanJSON(ctx context.Context) (string, error) {
 		return "", friendlyError(err)
 	}
 	type userRow struct {
-		UID            uint64 `json:"uid"`
-		Name           string `json:"name"`
-		Email          string `json:"email,omitempty"`
-		ConsoleLogin   bool   `json:"console_login"`
-		PhoneRegistered bool  `json:"phone_registered"`
-		Findings       []string `json:"findings"`
+		UID             uint64   `json:"uid"`
+		Name            string   `json:"name"`
+		Email           string   `json:"email,omitempty"`
+		ConsoleLogin    bool     `json:"console_login"`
+		PhoneRegistered bool     `json:"phone_registered"`
+		Findings        []string `json:"findings"`
 	}
 	var items []userRow
 	totalUsers := 0
