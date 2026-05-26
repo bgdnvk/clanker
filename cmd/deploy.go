@@ -297,9 +297,14 @@ Examples:
 			sort.Strings(extraEnv)
 			if len(extraEnv) > 0 {
 				var envSection strings.Builder
-				envSection.WriteString("\n## User-Provided Secrets (ALL must be stored in Secrets Manager)\n")
-				envSection.WriteString("The user provided values for the following env vars. You MUST create a\n")
-				envSection.WriteString("secretsmanager create-secret command for EACH of them BEFORE ec2 run-instances:\n")
+				if sreMode {
+					envSection.WriteString("\n## Backend-Managed SRE Secrets\n")
+					envSection.WriteString("The Clanker Cloud backend injected these values from its local SQLite settings store. Use them for runtime configuration without asking the user to type secrets.\n")
+					envSection.WriteString("If the selected provider has native secret support, store/pass them through that provider's native secret or secure env mechanism; otherwise write a root-owned runtime env file with chmod 600. Never use a secret store from a different cloud provider and never print secret values.\n")
+				} else {
+					envSection.WriteString("\n## User-Provided Secrets (ALL must be stored in provider-native secrets)\n")
+					envSection.WriteString("The user provided values for the following env vars. You MUST create provider-native secret/env commands for EACH of them before launching the workload:\n")
+				}
 				for _, k := range extraEnv {
 					envSection.WriteString(fmt.Sprintf("- %s\n", k))
 				}
@@ -1792,7 +1797,7 @@ func buildOneClickDeployObjective(provider, method string, enforceImageDeploy bo
 		if deployID == "" {
 			deployID = "$CLANKER_SRE_DEPLOY_ID"
 		}
-		return fmt.Sprintf("[one-click SRE deploy objective]\nGenerate command plan steps that deploy only the long-running Clanker SRE agent, not the analyzed app. Use provider=%s and the smallest practical always-on runtime for that provider. Prefer ghcr.io/bgdnvk/clanker:latest and run: clanker sre run --sre --target cloud-vm --provider %s --deploy-id %s. The runtime MUST set CLANKER_CEREBRO_URL, CLANKER_CEREBRO_INGEST_TOKEN, CLANKER_SRE_DEPLOY_ID, and CLANKER_SRE_PROVIDER. Tag or label every created resource with clanker-sre=true and clanker-sre-deploy-id=%s. Keep commands idempotent, preserve created resource IDs, and include a final non-secret health/verification command that checks the service/container is still running. Never print token values.", prov, prov, deployID, deployID)
+		return fmt.Sprintf("[one-click SRE deploy objective]\nGenerate command plan steps that deploy only the long-running Clanker SRE agent, not the analyzed app. Use provider=%s and the smallest practical always-on runtime for that provider. Prefer ghcr.io/bgdnvk/clanker:latest and run: clanker sre run --sre --target cloud-vm --provider %s --deploy-id %s. The runtime MUST set CLANKER_CEREBRO_URL, CLANKER_CEREBRO_INGEST_TOKEN, CLANKER_SRE_DEPLOY_ID, and CLANKER_SRE_PROVIDER. Tag or label every created resource with clanker-sre=true and clanker-sre-deploy-id=%s. Keep commands idempotent, preserve created resource IDs, and include a final non-secret health/verification command that checks the service/container is still running. Never print token values.\n\n%s", prov, prov, deployID, deployID, sreObserverPermissionContract(prov, deployID))
 	}
 	m := strings.ToLower(strings.TrimSpace(method))
 	if m == "" {
@@ -1802,6 +1807,31 @@ func buildOneClickDeployObjective(provider, method string, enforceImageDeploy bo
 		return fmt.Sprintf("[one-click deploy objective]\nGenerate command plan steps for one-click deploy. The runner executes plan.commands strictly in order, sequentially, to provision infrastructure and ship the app to production.\nUse provider=%s method=%s. Keep commands actionable/idempotent and preserve earlier produced bindings for later steps.\nImage deployment is enforced: do not rely on docker build on EC2 user-data. Ensure ECR image build/push + IMAGE_URI/ECR_URI bindings are preserved and workload launches by pulling that image.", prov, m)
 	}
 	return fmt.Sprintf("[one-click deploy objective]\nGenerate command plan steps for one-click deploy. The runner executes plan.commands strictly in order, sequentially, to provision infrastructure and ship the app to production.\nUse provider=%s method=%s. Keep commands actionable/idempotent and preserve earlier produced bindings for later steps.", prov, m)
+}
+
+func sreObserverPermissionContract(provider, deployID string) string {
+	identityName := "clanker-sre-observer"
+	if trimmed := strings.TrimSpace(deployID); trimmed != "" && !strings.Contains(trimmed, "$") {
+		identityName += "-" + trimmed
+	}
+	common := fmt.Sprintf("SRE observer identity contract: create or reuse a provider-native read-only observer identity named %s, attach it to the SRE runtime, and verify it with the provider's identity command plus at least one real read/list/describe collector command. The deploy-time credentials may create roles/service accounts/secrets, but the SRE runtime identity must be read-only for infrastructure observation. Secrets may be stored in Clanker Cloud SQLite before deploy and then copied into provider-native runtime secret/env configuration; do not ask the user for tokens.", identityName)
+
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "aws":
+		return common + " AWS: create an IAM policy/role or instance profile/task role for the SRE runtime. Required read actions include sts:GetCallerIdentity, cloudwatch:DescribeAlarms, cloudwatch:GetMetricStatistics, lambda:ListFunctions, ecs:ListClusters, ecs:ListServices, ecs:Describe*, eks:ListClusters, eks:DescribeCluster, rds:DescribeDBInstances, elasticache:DescribeCacheClusters, dynamodb:ListTables, dynamodb:DescribeTable, sqs:ListQueues, sqs:GetQueueAttributes, apigateway:GET, ec2:Describe*, s3:ListAllMyBuckets, s3:GetBucketLocation, states:ListStateMachines, cloudtrail:LookupEvents, iam:GenerateCredentialReport, iam:GetCredentialReport, route53:ListHealthChecks, logs:DescribeLogGroups, and resourcegroupstaggingapi:GetResources. Attach it to EC2/ECS/App Runner/Lambda with native IAM, not static AWS keys."
+	case "gcp":
+		return common + " GCP: create a service account for the SRE runtime and grant project-level viewer-style roles needed by the collectors: roles/viewer, roles/monitoring.viewer, roles/logging.viewer, roles/errorreporting.viewer, roles/cloudasset.viewer, roles/bigquery.metadataViewer, and service-specific viewer roles when the selected project requires them. Attach the service account to Cloud Run, Compute, or GKE using native IAM; do not bake service account JSON into images."
+	case "azure":
+		return common + " Azure: create or reuse a managed identity/service principal for the SRE runtime, assign Reader plus Monitoring Reader at the subscription or selected resource-group scope, and attach the identity to Container Apps, App Service, AKS, or VM using Azure-native identity. Store runtime secrets in Key Vault or native app secrets when available."
+	case "digitalocean":
+		return common + " DigitalOcean: use the backend-provided DigitalOcean token from SQLite/runtime injection and store it as a DO App secret env var named DIGITALOCEAN_ACCESS_TOKEN, or as a root-owned env file on Droplets. Prefer read-scoped tokens when the provider account supports scopes. Do not print the token."
+	case "hetzner":
+		return common + " Hetzner: use the backend-provided HCLOUD_TOKEN from SQLite/runtime injection, prefer a read-only project token when available, and store it as a locked-down runtime env secret or root-owned env file with chmod 600. Do not print the token."
+	case "cloudflare":
+		return common + " Cloudflare: use Cloudflare-native Worker/Container secret bindings for the backend-provided token and require an API token scoped to Account/Zone/Workers/D1/R2/Pages/Logs read capabilities needed by the collectors. This path is valid only when provider=cloudflare."
+	default:
+		return common + " Use only the selected provider's native identity and secret mechanisms. If the provider cannot create a scoped observer identity automatically, reuse the backend-managed secret from SQLite and store it in the provider's runtime secret/env mechanism without printing it."
+	}
 }
 
 func seedOpenClawRuntimeEnvBindings(bindings map[string]string, cfg *deploy.UserConfig) {
