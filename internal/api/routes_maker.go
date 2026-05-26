@@ -27,12 +27,12 @@ type applyRequest struct {
 // applyResponse summarises an apply attempt. Output is the captured writer
 // the executor used so the dashboard can render it like a CLI session.
 type applyResponse struct {
-	Provider string `json:"provider"`
-	Status   string `json:"status"` // "ok" or "error"
-	Output   string `json:"output"`
-	Error    string `json:"error,omitempty"`
-	Duration string `json:"duration"`
-	HistoryID int64 `json:"history_id,omitempty"`
+	Provider  string `json:"provider"`
+	Status    string `json:"status"` // "ok" or "error"
+	Output    string `json:"output"`
+	Error     string `json:"error,omitempty"`
+	Duration  string `json:"duration"`
+	HistoryID int64  `json:"history_id,omitempty"`
 }
 
 func (s *Server) handleMakerApply(w http.ResponseWriter, r *http.Request) {

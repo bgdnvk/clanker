@@ -34,9 +34,9 @@ type Config struct {
 // Server wraps an *http.Server plus the routes the API exposes. Build it
 // with New and start with Run; Run blocks until ctx is cancelled.
 type Server struct {
-	cfg    Config
-	mux    *http.ServeMux
-	logger *log.Logger
+	cfg     Config
+	mux     *http.ServeMux
+	logger  *log.Logger
 	started time.Time
 	history *history
 }

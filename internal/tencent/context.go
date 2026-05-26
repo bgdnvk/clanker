@@ -9,26 +9,26 @@ import (
 	"strings"
 	"time"
 
-	cdb "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cdb/v20170320"
-	monitor "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/monitor/v20180724"
-	cls "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cls/v20201016"
-	cloudaudit "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cloudaudit/v20190319"
-	dc "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/dc/v20180410"
 	antiddos "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/antiddos/v20200309"
-	waf "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/waf/v20180125"
-	teo "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/teo/v20220901"
-	cdn "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cdn/v20180606"
-	cynosdb "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cynosdb/v20190107"
-	mongodb "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/mongodb/v20190725"
-	redis "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/redis/v20180412"
-	ssl "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/ssl/v20191205"
 	cam "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cam/v20190116"
 	cbs "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cbs/v20170312"
+	cdb "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cdb/v20170320"
+	cdn "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cdn/v20180606"
 	clb "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/clb/v20180317"
+	cloudaudit "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cloudaudit/v20190319"
+	cls "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cls/v20201016"
 	cvm "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cvm/v20170312"
+	cynosdb "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cynosdb/v20190107"
+	dc "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/dc/v20180410"
+	mongodb "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/mongodb/v20190725"
+	monitor "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/monitor/v20180724"
 	postgres "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/postgres/v20170312"
+	redis "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/redis/v20180412"
+	ssl "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/ssl/v20191205"
+	teo "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/teo/v20220901"
 	tke "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/tke/v20180525"
 	vpc "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/vpc/v20170312"
+	waf "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/waf/v20180125"
 	cos "github.com/tencentyun/cos-go-sdk-v5"
 )
 
@@ -363,7 +363,6 @@ func (c *Client) contextVPCs(ctx context.Context) (string, error) {
 	return string(b), nil
 }
 
-
 func (c *Client) contextSecurityGroups(ctx context.Context) (string, error) {
 	client, err := c.VPC()
 	if err != nil {
@@ -593,14 +592,14 @@ func (c *Client) contextTKE(ctx context.Context) (string, error) {
 		return "", nil
 	}
 	type tkeSummary struct {
-		ID       string `json:"id"`
-		Name     string `json:"name"`
-		Status   string `json:"status"`
-		Version  string `json:"k8s_version"`
-		Type     string `json:"type"`
-		NodeNum  uint64 `json:"node_num,omitempty"`
-		VpcID    string `json:"vpc_id,omitempty"`
-		Created  string `json:"created_at,omitempty"`
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+		Status  string `json:"status"`
+		Version string `json:"k8s_version"`
+		Type    string `json:"type"`
+		NodeNum uint64 `json:"node_num,omitempty"`
+		VpcID   string `json:"vpc_id,omitempty"`
+		Created string `json:"created_at,omitempty"`
 	}
 	var slim []tkeSummary
 	for _, cl := range resp.Response.Clusters {
@@ -819,13 +818,13 @@ func (c *Client) contextSSL(ctx context.Context) (string, error) {
 		return "", nil
 	}
 	type certSummary struct {
-		ID         string `json:"id"`
-		Alias      string `json:"alias,omitempty"`
-		Domain     string `json:"domain,omitempty"`
-		Status     string `json:"status"`
-		From       string `json:"from,omitempty"`
-		CertEnd    string `json:"cert_end,omitempty"`
-		DaysLeft   int    `json:"days_left"`
+		ID       string `json:"id"`
+		Alias    string `json:"alias,omitempty"`
+		Domain   string `json:"domain,omitempty"`
+		Status   string `json:"status"`
+		From     string `json:"from,omitempty"`
+		CertEnd  string `json:"cert_end,omitempty"`
+		DaysLeft int    `json:"days_left"`
 	}
 	var slim []certSummary
 	for _, cert := range resp.Response.Certificates {
@@ -886,7 +885,6 @@ func (c *Client) contextCAM(ctx context.Context) (string, error) {
 	}
 	return string(b), nil
 }
-
 
 func (c *Client) contextRedis(ctx context.Context) (string, error) {
 	client, err := newRedisClient(c, c.creds.Region)
@@ -1045,7 +1043,6 @@ func (c *Client) contextCynosDB(ctx context.Context) (string, error) {
 	}
 	return string(b), nil
 }
-
 
 func (c *Client) contextCDN(ctx context.Context) (string, error) {
 	client, err := newCDNClient(c)
@@ -1221,7 +1218,6 @@ func (c *Client) contextAntiDDoS(ctx context.Context) (string, error) {
 	return string(b), nil
 }
 
-
 func (c *Client) contextNAT(ctx context.Context) (string, error) {
 	client, err := c.VPC()
 	if err != nil {
@@ -1239,12 +1235,12 @@ func (c *Client) contextNAT(ctx context.Context) (string, error) {
 		return "", nil
 	}
 	type s struct {
-		ID                string   `json:"id"`
-		Name              string   `json:"name,omitempty"`
-		State             string   `json:"state"`
-		BandwidthOutMbps  uint64   `json:"bandwidth_out_mbps,omitempty"`
-		PublicIPs         []string `json:"public_ips,omitempty"`
-		Created           string   `json:"created_at,omitempty"`
+		ID               string   `json:"id"`
+		Name             string   `json:"name,omitempty"`
+		State            string   `json:"state"`
+		BandwidthOutMbps uint64   `json:"bandwidth_out_mbps,omitempty"`
+		PublicIPs        []string `json:"public_ips,omitempty"`
+		Created          string   `json:"created_at,omitempty"`
 	}
 	var slim []s
 	for _, g := range resp.Response.NatGatewaySet {
@@ -1255,12 +1251,12 @@ func (c *Client) contextNAT(ctx context.Context) (string, error) {
 			}
 		}
 		slim = append(slim, s{
-			ID:                derefStringRaw(g.NatGatewayId),
-			Name:              derefStringRaw(g.NatGatewayName),
-			State:             derefStringRaw(g.State),
-			BandwidthOutMbps:  derefUint64Raw(g.InternetMaxBandwidthOut),
-			PublicIPs:         ips,
-			Created:           derefStringRaw(g.CreatedTime),
+			ID:               derefStringRaw(g.NatGatewayId),
+			Name:             derefStringRaw(g.NatGatewayName),
+			State:            derefStringRaw(g.State),
+			BandwidthOutMbps: derefUint64Raw(g.InternetMaxBandwidthOut),
+			PublicIPs:        ips,
+			Created:          derefStringRaw(g.CreatedTime),
 		})
 	}
 	b, err := json.Marshal(slim)
@@ -1369,10 +1365,10 @@ func (c *Client) contextDC(ctx context.Context) (string, error) {
 		return "", nil
 	}
 	type s struct {
-		ID           string `json:"id"`
-		Name         string `json:"name,omitempty"`
-		State        string `json:"state"`
-		AccessPoint  string `json:"access_point,omitempty"`
+		ID          string `json:"id"`
+		Name        string `json:"name,omitempty"`
+		State       string `json:"state"`
+		AccessPoint string `json:"access_point,omitempty"`
 	}
 	var slim []s
 	for _, d := range resp.Response.DirectConnectSet {
@@ -1389,7 +1385,6 @@ func (c *Client) contextDC(ctx context.Context) (string, error) {
 	}
 	return string(b), nil
 }
-
 
 func (c *Client) contextAlarmPolicies(ctx context.Context) (string, error) {
 	client, err := newMonitorClient(c, c.creds.Region)

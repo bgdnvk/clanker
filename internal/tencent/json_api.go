@@ -18,42 +18,41 @@ import (
 // the result for HTTP should embed it inside an envelope like
 // {"data": <result>} rather than re-encoding.
 
-func (c *Client) JSONCVMs(ctx context.Context) (string, error)             { return c.contextCVMs(ctx) }
-func (c *Client) JSONVPCs(ctx context.Context) (string, error)             { return c.contextVPCs(ctx) }
-func (c *Client) JSONSecurityGroups(ctx context.Context) (string, error)   { return c.contextSecurityGroups(ctx) }
-func (c *Client) JSONMySQL(ctx context.Context) (string, error)            { return c.contextMySQL(ctx) }
-func (c *Client) JSONPostgres(ctx context.Context) (string, error)         { return c.contextPostgres(ctx) }
-func (c *Client) JSONCOS(ctx context.Context) (string, error)              { return c.contextCOS(ctx) }
-func (c *Client) JSONTKE(ctx context.Context) (string, error)              { return c.contextTKE(ctx) }
+func (c *Client) JSONCVMs(ctx context.Context) (string, error) { return c.contextCVMs(ctx) }
+func (c *Client) JSONVPCs(ctx context.Context) (string, error) { return c.contextVPCs(ctx) }
+func (c *Client) JSONSecurityGroups(ctx context.Context) (string, error) {
+	return c.contextSecurityGroups(ctx)
+}
+func (c *Client) JSONMySQL(ctx context.Context) (string, error)    { return c.contextMySQL(ctx) }
+func (c *Client) JSONPostgres(ctx context.Context) (string, error) { return c.contextPostgres(ctx) }
+func (c *Client) JSONCOS(ctx context.Context) (string, error)      { return c.contextCOS(ctx) }
+func (c *Client) JSONTKE(ctx context.Context) (string, error)      { return c.contextTKE(ctx) }
 
+func (c *Client) JSONCLB(ctx context.Context) (string, error) { return c.contextCLB(ctx) }
+func (c *Client) JSONEIP(ctx context.Context) (string, error) { return c.contextEIP(ctx) }
+func (c *Client) JSONCBS(ctx context.Context) (string, error) { return c.contextCBS(ctx) }
+func (c *Client) JSONSSL(ctx context.Context) (string, error) { return c.contextSSL(ctx) }
+func (c *Client) JSONCAM(ctx context.Context) (string, error) { return c.contextCAM(ctx) }
 
-func (c *Client) JSONCLB(ctx context.Context) (string, error)        { return c.contextCLB(ctx) }
-func (c *Client) JSONEIP(ctx context.Context) (string, error)        { return c.contextEIP(ctx) }
-func (c *Client) JSONCBS(ctx context.Context) (string, error)        { return c.contextCBS(ctx) }
-func (c *Client) JSONSSL(ctx context.Context) (string, error)        { return c.contextSSL(ctx) }
-func (c *Client) JSONCAM(ctx context.Context) (string, error)        { return c.contextCAM(ctx) }
+func (c *Client) JSONRedis(ctx context.Context) (string, error)   { return c.contextRedis(ctx) }
+func (c *Client) JSONMongoDB(ctx context.Context) (string, error) { return c.contextMongoDB(ctx) }
+func (c *Client) JSONCynosDB(ctx context.Context) (string, error) { return c.contextCynosDB(ctx) }
 
+func (c *Client) JSONCDN(ctx context.Context) (string, error)      { return c.contextCDN(ctx) }
+func (c *Client) JSONEdgeOne(ctx context.Context) (string, error)  { return c.contextEdgeOne(ctx) }
+func (c *Client) JSONWAF(ctx context.Context) (string, error)      { return c.contextWAF(ctx) }
+func (c *Client) JSONAntiDDoS(ctx context.Context) (string, error) { return c.contextAntiDDoS(ctx) }
 
-func (c *Client) JSONRedis(ctx context.Context) (string, error)      { return c.contextRedis(ctx) }
-func (c *Client) JSONMongoDB(ctx context.Context) (string, error)    { return c.contextMongoDB(ctx) }
-func (c *Client) JSONCynosDB(ctx context.Context) (string, error)    { return c.contextCynosDB(ctx) }
-
-
-func (c *Client) JSONCDN(ctx context.Context) (string, error)        { return c.contextCDN(ctx) }
-func (c *Client) JSONEdgeOne(ctx context.Context) (string, error)    { return c.contextEdgeOne(ctx) }
-func (c *Client) JSONWAF(ctx context.Context) (string, error)        { return c.contextWAF(ctx) }
-func (c *Client) JSONAntiDDoS(ctx context.Context) (string, error)   { return c.contextAntiDDoS(ctx) }
-
-
-func (c *Client) JSONNATGateways(ctx context.Context) (string, error) { return c.contextNAT(ctx) }
-func (c *Client) JSONVPNGateways(ctx context.Context) (string, error) { return c.contextVPN(ctx) }
-func (c *Client) JSONCCNs(ctx context.Context) (string, error)        { return c.contextCCN(ctx) }
+func (c *Client) JSONNATGateways(ctx context.Context) (string, error)    { return c.contextNAT(ctx) }
+func (c *Client) JSONVPNGateways(ctx context.Context) (string, error)    { return c.contextVPN(ctx) }
+func (c *Client) JSONCCNs(ctx context.Context) (string, error)           { return c.contextCCN(ctx) }
 func (c *Client) JSONDirectConnects(ctx context.Context) (string, error) { return c.contextDC(ctx) }
 
-
-func (c *Client) JSONAlarmPolicies(ctx context.Context) (string, error)  { return c.contextAlarmPolicies(ctx) }
-func (c *Client) JSONCLSTopics(ctx context.Context) (string, error)      { return c.contextCLSTopics(ctx) }
-func (c *Client) JSONCloudAudit(ctx context.Context) (string, error)     { return c.contextCloudAudit(ctx) }
+func (c *Client) JSONAlarmPolicies(ctx context.Context) (string, error) {
+	return c.contextAlarmPolicies(ctx)
+}
+func (c *Client) JSONCLSTopics(ctx context.Context) (string, error)  { return c.contextCLSTopics(ctx) }
+func (c *Client) JSONCloudAudit(ctx context.Context) (string, error) { return c.contextCloudAudit(ctx) }
 
 // Lighthouse (Tencent's lightweight cloud server, separate product from CVM).
 // JSONLighthouses is declared in internal/tencent/lighthouse.go directly so it

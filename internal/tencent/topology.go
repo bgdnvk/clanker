@@ -19,15 +19,15 @@ import (
 // structure that supports both region-scoped views (group CVMs by subnet) and
 // orphan detection (any CVM whose subnet_id is empty).
 type Topology struct {
-	Region         string             `json:"region"`
-	VPCs           []TopologyVPC      `json:"vpcs"`
-	Subnets        []TopologySubnet   `json:"subnets"`
-	CVMs           []TopologyCVM      `json:"cvms"`
-	SecurityGroups []TopologySG       `json:"security_groups"`
-	MySQL          []TopologyDB       `json:"mysql"`
-	Postgres       []TopologyDB       `json:"postgres"`
-	Clusters       []TopologyCluster  `json:"clusters"`
-	Warnings       []string           `json:"warnings,omitempty"`
+	Region         string            `json:"region"`
+	VPCs           []TopologyVPC     `json:"vpcs"`
+	Subnets        []TopologySubnet  `json:"subnets"`
+	CVMs           []TopologyCVM     `json:"cvms"`
+	SecurityGroups []TopologySG      `json:"security_groups"`
+	MySQL          []TopologyDB      `json:"mysql"`
+	Postgres       []TopologyDB      `json:"postgres"`
+	Clusters       []TopologyCluster `json:"clusters"`
+	Warnings       []string          `json:"warnings,omitempty"`
 }
 
 type TopologyVPC struct {
@@ -66,21 +66,21 @@ type TopologySG struct {
 }
 
 type TopologyDB struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Status  string `json:"status,omitempty"`
-	Engine  string `json:"engine,omitempty"`
-	VpcID   string `json:"vpc_id,omitempty"` // empty for classic-network instances
-	Zone    string `json:"zone,omitempty"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Status string `json:"status,omitempty"`
+	Engine string `json:"engine,omitempty"`
+	VpcID  string `json:"vpc_id,omitempty"` // empty for classic-network instances
+	Zone   string `json:"zone,omitempty"`
 }
 
 type TopologyCluster struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Status   string `json:"status,omitempty"`
-	Version  string `json:"k8s_version,omitempty"`
-	NodeNum  uint64 `json:"node_num,omitempty"`
-	VpcID    string `json:"vpc_id,omitempty"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Status  string `json:"status,omitempty"`
+	Version string `json:"k8s_version,omitempty"`
+	NodeNum uint64 `json:"node_num,omitempty"`
+	VpcID   string `json:"vpc_id,omitempty"`
 }
 
 // TopologyJSON fetches every resource type concurrently for one region and

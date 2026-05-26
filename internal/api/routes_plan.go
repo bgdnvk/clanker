@@ -24,11 +24,11 @@ type planRequest struct {
 // planResponse wraps the generated plan plus diagnostic metadata so the
 // dashboard can show timings + which model produced the plan.
 type planResponse struct {
-	Provider string          `json:"provider"`
-	Plan     json.RawMessage `json:"plan"`
-	Model    string          `json:"model,omitempty"`
-	AIProfile string         `json:"ai_profile,omitempty"`
-	Duration string          `json:"duration"`
+	Provider  string          `json:"provider"`
+	Plan      json.RawMessage `json:"plan"`
+	Model     string          `json:"model,omitempty"`
+	AIProfile string          `json:"ai_profile,omitempty"`
+	Duration  string          `json:"duration"`
 }
 
 // handleMakerPlan generates a maker plan via the configured AI provider.

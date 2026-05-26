@@ -297,8 +297,8 @@ type ClaudeContent struct {
 
 // OpenAI types (keeping for compatibility)
 type OpenAIRequest struct {
-	Model              string                 `json:"model"`
-	Messages           []Message              `json:"messages"`
+	Model    string    `json:"model"`
+	Messages []Message `json:"messages"`
 	// ChatTemplateKwargs is a vLLM/SGLang vendor extension. The most useful
 	// case is `enable_thinking: false` for Qwen3-style reasoning models —
 	// it skips the internal "thinking" trace and emits the answer directly,

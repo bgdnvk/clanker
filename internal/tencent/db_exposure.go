@@ -19,20 +19,20 @@ import (
 // A finding is emitted when any of these is true:
 //   - CDB:        WanStatus == 1
 //   - PostgreSQL: DBKernelVersion has a public IP, or the instance's
-//                 PublicAccessSwitch is on (we approximate by looking for
-//                 a non-empty Vport/WanDomain pattern in the inventory)
+//     PublicAccessSwitch is on (we approximate by looking for
+//     a non-empty Vport/WanDomain pattern in the inventory)
 //   - Redis:      WanAddress is non-empty
 func (c *Client) DBExposureScanJSON(ctx context.Context, region string) (string, error) {
 	if strings.TrimSpace(region) != "" {
 		c = c.WithRegion(region)
 	}
 	type finding struct {
-		Engine       string `json:"engine"`
-		ID           string `json:"id"`
-		Name         string `json:"name,omitempty"`
-		Status       string `json:"status"`
-		PublicAddr   string `json:"public_addr"`
-		Reason       string `json:"reason"`
+		Engine     string `json:"engine"`
+		ID         string `json:"id"`
+		Name       string `json:"name,omitempty"`
+		Status     string `json:"status"`
+		PublicAddr string `json:"public_addr"`
+		Reason     string `json:"reason"`
 	}
 	var items []finding
 	var warnings []string

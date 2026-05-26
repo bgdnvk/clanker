@@ -14,13 +14,13 @@ import (
 // rules across the security groups attached to it. The frontend renders one
 // table row per ExposedCVM.
 type ExposedCVM struct {
-	InstanceID   string         `json:"instance_id"`
-	Name         string         `json:"name"`
-	State        string         `json:"state"`
-	PublicIP     string         `json:"public_ip"`
-	PrivateIP    string         `json:"private_ip,omitempty"`
-	SGIDs        []string       `json:"sg_ids"`
-	RiskyRules   []ExposedRule  `json:"risky_rules"`
+	InstanceID string        `json:"instance_id"`
+	Name       string        `json:"name"`
+	State      string        `json:"state"`
+	PublicIP   string        `json:"public_ip"`
+	PrivateIP  string        `json:"private_ip,omitempty"`
+	SGIDs      []string      `json:"sg_ids"`
+	RiskyRules []ExposedRule `json:"risky_rules"`
 }
 
 // ExposedRule attributes a single risky rule to a (CVM, SG) pair. Port and
