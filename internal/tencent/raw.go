@@ -23,17 +23,17 @@ import (
 //
 // Key is "service.action" lowercased. Value is a human-readable hint string.
 var knownHallucinatedActions = map[string]string{
-	"monitor.getproductmetricdata":   "Use GetMonitorData. Tencent's Monitor service has no GetProductMetricData action.",
-	"monitor.describemonitordata":    "Use GetMonitorData. Tencent's Monitor service has no DescribeMonitorData action.",
-	"monitor.getproductmetrics":      "Use GetMonitorData or DescribeBaseMetrics.",
-	"monitor.describemetricdata":     "Use GetMonitorData.",
-	"monitor.describealarmpolicies":  "Use DescribeAlarmPolicy (singular).",
-	"billing.describebillsummary":    "Use DescribeBillSummaryByProduct, DescribeBillSummaryByPayMode, or DescribeBillSummaryByRegion.",
-	"billing.describeresourcebills":  "Use DescribeBillResourceSummary or DescribeBillDetail.",
-	"cvm.describeinstancestate":      "Use DescribeInstancesStatus.",
-	"cvm.listinstances":              "Use DescribeInstances (Tencent's discovery actions are always Describe*, never List*).",
-	"vpc.listvpcs":                   "Use DescribeVpcs.",
-	"cls.describetopics":             "Use DescribeTopics — make sure your service is `cls`, not `log`.",
+	"monitor.getproductmetricdata":  "Use GetMonitorData. Tencent's Monitor service has no GetProductMetricData action.",
+	"monitor.describemonitordata":   "Use GetMonitorData. Tencent's Monitor service has no DescribeMonitorData action.",
+	"monitor.getproductmetrics":     "Use GetMonitorData or DescribeBaseMetrics.",
+	"monitor.describemetricdata":    "Use GetMonitorData.",
+	"monitor.describealarmpolicies": "Use DescribeAlarmPolicy (singular).",
+	"billing.describebillsummary":   "Use DescribeBillSummaryByProduct, DescribeBillSummaryByPayMode, or DescribeBillSummaryByRegion.",
+	"billing.describeresourcebills": "Use DescribeBillResourceSummary or DescribeBillDetail.",
+	"cvm.describeinstancestate":     "Use DescribeInstancesStatus.",
+	"cvm.listinstances":             "Use DescribeInstances (Tencent's discovery actions are always Describe*, never List*).",
+	"vpc.listvpcs":                  "Use DescribeVpcs.",
+	"cls.describetopics":            "Use DescribeTopics — make sure your service is `cls`, not `log`.",
 }
 
 // SendRaw makes a generic Tencent API call. Used by maker plan execution and

@@ -14,11 +14,11 @@ import (
 // so the cron CLI / HTTP / MCP surfaces all see the same shape.
 type ExpiryItem struct {
 	Region      string `json:"region"`
-	Type        string `json:"type"`        // cvm, lighthouse, cbs, mysql, ...
+	Type        string `json:"type"` // cvm, lighthouse, cbs, mysql, ...
 	ID          string `json:"id"`
 	Name        string `json:"name,omitempty"`
-	ExpiresAt   string `json:"expires_at"`  // RFC3339 from the SDK
-	DaysLeft    int    `json:"days_left"`   // negative when already expired
+	ExpiresAt   string `json:"expires_at"` // RFC3339 from the SDK
+	DaysLeft    int    `json:"days_left"`  // negative when already expired
 	AutoRenew   *bool  `json:"auto_renew,omitempty"`
 	BillingMode string `json:"billing_mode,omitempty"`
 	State       string `json:"state,omitempty"`
@@ -27,12 +27,12 @@ type ExpiryItem struct {
 // ExpiryReport is the cron-facing rollup. counts.expired drives exit code 2,
 // counts.flagged drives exit code 1, everything else is exit code 0.
 type ExpiryReport struct {
-	GeneratedAt    string       `json:"generated_at"`
-	ThresholdDays  int          `json:"threshold_days"`
-	ManualOnly     bool         `json:"manual_only"`
-	Regions        []string     `json:"regions"`
-	Items          []ExpiryItem `json:"items"`
-	Counts         ExpiryCounts `json:"counts"`
+	GeneratedAt   string       `json:"generated_at"`
+	ThresholdDays int          `json:"threshold_days"`
+	ManualOnly    bool         `json:"manual_only"`
+	Regions       []string     `json:"regions"`
+	Items         []ExpiryItem `json:"items"`
+	Counts        ExpiryCounts `json:"counts"`
 }
 
 // ExpiryCounts breaks the report down so callers don't have to re-scan items
