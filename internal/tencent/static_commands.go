@@ -21,10 +21,17 @@ func CreateTencentCommands() *cobra.Command {
 	tencentCmd.PersistentFlags().StringVar(&region, "region", "", "Tencent Cloud region (default from config / TENCENTCLOUD_REGION / TENCENT_REGION / ap-singapore)")
 
 	var allRegions bool
+	var listFormat string
 	listCmd := &cobra.Command{
 		Use:   "list [resource]",
 		Short: "List Tencent Cloud resources",
 		Long: `List Tencent Cloud resources of a specific type.
+
+Output formats (--format):
+  table  Human-readable tabwriter output (default).
+  json   JSON-encoded summary suitable for piping into jq, scripts, or
+         the clanker-cloud HTTP API. Single-region by default; with
+         --all-regions the output is {"regions":[{"region":"...","data":[...]}, ...]}.
 
 Supported resources:
   cvm, instances              - Cloud Virtual Machine instances
@@ -84,6 +91,19 @@ to cos, which uses a service-global endpoint).`,
 				if debug {
 					fmt.Printf("[tencent] fanning out across %d regions\n", len(regions))
 				}
+			}
+
+			// JSON output path. Uses the existing JSON* methods on Client
+			// (the same ones the HTTP API surfaces), so the wire format is
+			// shared between `clanker tencent list ... --format json` and
+			// `GET /api/v1/tencent/resources/...`. Multi-region fan-out
+			// emits an explicit envelope so consumers can correlate.
+			format := strings.ToLower(strings.TrimSpace(listFormat))
+			if format == "json" {
+				return listAsJSON(cmd.Context(), client, resourceType, regions, allRegions)
+			}
+			if format != "" && format != "table" {
+				return fmt.Errorf("unsupported --format %q (use 'table' or 'json')", listFormat)
 			}
 
 			switch resourceType {
@@ -147,6 +167,7 @@ to cos, which uses a service-global endpoint).`,
 		},
 	}
 	listCmd.Flags().BoolVar(&allRegions, "all-regions", false, "Query every available Tencent region and merge the results")
+	listCmd.Flags().StringVar(&listFormat, "format", "table", "Output format: table | json")
 
 	regionsCmd := &cobra.Command{
 		Use:   "regions",
