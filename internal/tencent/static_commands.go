@@ -253,6 +253,7 @@ externally-routable endpoint when running from outside the cluster's VPC.`,
 		Use:   "cost",
 		Short: "Tencent Cloud billing — cost commands",
 	}
+	var costByProductFormat string
 	costByProductCmd := &cobra.Command{
 		Use:   "by-product",
 		Short: "Cost breakdown by Tencent service for a given month",
@@ -265,10 +266,13 @@ externally-routable endpoint when running from outside the cluster's VPC.`,
 			if err != nil {
 				return err
 			}
-			return listBillByProduct(client, costMonth)
+			return listBillByProduct(client, costMonth, costByProductFormat)
 		},
 	}
 	costByProductCmd.Flags().StringVar(&costMonth, "month", "", "YYYY-MM (default: current month)")
+	costByProductCmd.Flags().StringVar(&costByProductFormat, "format", "table", "Output format: table | json")
+
+	var costTopFormat string
 	costTopCmd := &cobra.Command{
 		Use:   "top",
 		Short: "Top N resources by spend for a given month",
@@ -282,11 +286,12 @@ externally-routable endpoint when running from outside the cluster's VPC.`,
 				return err
 			}
 			topN, _ := cmd.Flags().GetInt("limit")
-			return listBillResourceTop(client, costMonth, topN)
+			return listBillResourceTop(client, costMonth, topN, costTopFormat)
 		},
 	}
 	costTopCmd.Flags().StringVar(&costMonth, "month", "", "YYYY-MM (default: current month)")
 	costTopCmd.Flags().Int("limit", 20, "Number of resources to return (max 200)")
+	costTopCmd.Flags().StringVar(&costTopFormat, "format", "table", "Output format: table | json")
 
 	var voucherStatus string
 	costVouchersCmd := &cobra.Command{
