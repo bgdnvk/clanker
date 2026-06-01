@@ -12,6 +12,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/gcp"
 	"github.com/bgdnvk/clanker/internal/hetzner"
 	"github.com/bgdnvk/clanker/internal/railway"
+	"github.com/bgdnvk/clanker/internal/sentry"
 	"github.com/bgdnvk/clanker/internal/tencent"
 	"github.com/bgdnvk/clanker/internal/vercel"
 	"github.com/bgdnvk/clanker/internal/verda"
@@ -107,6 +108,13 @@ func init() {
 	AddCfAskCommand(cfCmd)
 	AddCfDeployCommands(cfCmd)
 	rootCmd.AddCommand(cfCmd)
+
+	// Register Sentry static commands + ask command. Natural-language queries
+	// go through `clanker sentry ask "..."`; list/get/resolve/etc. live on
+	// the same root via internal/sentry.CreateSentryCommands().
+	sentryCmd := sentry.CreateSentryCommands()
+	AddSentryAskCommand(sentryCmd)
+	rootCmd.AddCommand(sentryCmd)
 
 	// Register Digital Ocean static commands
 	doCmd := digitalocean.CreateDigitalOceanCommands()

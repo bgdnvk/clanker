@@ -192,6 +192,18 @@ infra:
 #   org_slug: ""             # Optional org slug filter (or set FLY_ORG / FLY_ORG_SLUG).
 #                            # Empty = see resources across every org the token can access.
 
+# Sentry.io (for `clanker sentry ask ...` and `clanker sentry list issues`):
+# sentry:
+#   auth_token: ""           # Sentry User Auth Token (or set SENTRY_AUTH_TOKEN)
+#                            # Generate at https://sentry.io/settings/account/api/auth-tokens/
+#                            # Recommended scopes: org:read, project:read, event:read, event:admin,
+#                            #                     alerts:read, alerts:write, project:releases
+#   org_slug: ""             # Sentry org slug (or set SENTRY_ORG)
+#   default_project: ""      # Optional default project slug for events/releases/alerts
+#                            # (or set SENTRY_PROJECT)
+#   host: "sentry.io"        # Override for self-hosted Sentry (or set SENTRY_HOST)
+#                            # Single-tenant EU customers use "<org>.sentry.io"
+
 # Verda Cloud (for `clanker verda ...` and `clanker ask --verda ...`):
 # verda:
 #   client_id: ""            # Verda OAuth2 client ID (or set VERDA_CLIENT_ID, or run `verda auth login`)
