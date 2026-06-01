@@ -310,3 +310,47 @@ func TestParseRetryWait_PrefersLonger(t *testing.T) {
 		t.Errorf("wait should be capped at 30s, got %v", wait)
 	}
 }
+
+// TestValidateHost_BlocksSSRF exercises the SSRF guard added to NewClient.
+// Without this guard, a hostile sentry.host config or SENTRY_HOST env var
+// could make the CLI ship the auth token at internal endpoints like
+// 169.254.169.254 (cloud metadata).
+func TestValidateHost_BlocksSSRF(t *testing.T) {
+	cases := []struct {
+		host    string
+		wantErr bool
+	}{
+		// Allowed
+		{"sentry.io", false},
+		{"acme.sentry.io", false},
+		{"sentry.mycompany.com", false},
+
+		// Blocked
+		{"127.0.0.1", true},
+		{"169.254.169.254", true},
+		{"localhost", true},
+		{"app.localhost", true},
+		{"metadata.google.internal", true},
+		{"sentry.io:8080", true},
+		{"sentry.io/admin", true},
+		{"evil@sentry.io", true},
+		{"::1", true},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.host, func(t *testing.T) {
+			t.Parallel()
+			err := validateHost(c.host)
+			gotErr := err != nil
+			if gotErr != c.wantErr {
+				t.Errorf("validateHost(%q) err=%v, wantErr=%v", c.host, err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestNewClient_RejectsHostileHost(t *testing.T) {
+	if _, err := NewClient("tok", "org", "169.254.169.254", false); err == nil {
+		t.Errorf("expected error for IP host, got nil")
+	}
+}

@@ -60,6 +60,12 @@ func registerSentryMCPTools(server *mcptransport.MCPServer) {
 			"clanker_sentry_ask",
 			mcp.WithDescription("Ask a natural-language question about Sentry. Fetches relevant issues, releases, and monitors and answers via the configured AI provider."),
 			mcp.WithInputSchema[sentryAskMCPArgs](),
+			// The ask tool only reads from Sentry (ListIssues, ListReleases,
+			// ListMonitors, ListIssueAlertRules) then routes the result
+			// through the LLM. Marking it read-only lets cautious MCP
+			// clients (e.g. Claude Desktop's safe-tool list) invoke it
+			// without user confirmation.
+			mcp.WithReadOnlyHintAnnotation(true),
 		),
 		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args sentryAskMCPArgs) (*mcp.CallToolResult, error) {
 			return handleMCPSentryAsk(ctx, args)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -90,8 +91,12 @@ func NewClient(authToken, orgSlug, host string, debug bool) (*Client, error) {
 	if strings.TrimSpace(authToken) == "" {
 		return nil, errors.New("sentry auth_token is required")
 	}
-	if strings.TrimSpace(host) == "" {
+	host = strings.TrimSpace(host)
+	if host == "" {
 		host = defaultHost
+	}
+	if err := validateHost(host); err != nil {
+		return nil, err
 	}
 	return &Client{
 		host:      host,
@@ -102,6 +107,37 @@ func NewClient(authToken, orgSlug, host string, debug bool) (*Client, error) {
 		},
 		debug: debug,
 	}, nil
+}
+
+// validHostRE accepts a hostname (no scheme, no path, no port). Sentry SaaS
+// is sentry.io / *.sentry.io; self-hosted is whatever DNS name the operator
+// runs Sentry on. Characters with hostname-injection potential (`:` `/` `@`
+// `?` `#`) are rejected — those would be a clear SSRF attempt like
+// `127.0.0.1:8080` or `evil.com/?@sentry.io`.
+var validHostRE = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$`)
+
+// validateHost guards against SSRF via a hostile sentry.host config or
+// SENTRY_HOST env. Without this, a user (or a process injecting env vars)
+// could point the CLI at 169.254.169.254 to leak the Bearer token. We
+// block IP literals, raw loopback / cloud-metadata names, and anything
+// not shaped like a DNS hostname.
+func validateHost(host string) error {
+	if len(host) > 253 {
+		return errors.New("sentry host too long")
+	}
+	if !validHostRE.MatchString(host) {
+		return fmt.Errorf("sentry host contains invalid characters: %q", host)
+	}
+	if net.ParseIP(host) != nil {
+		return fmt.Errorf("sentry host must be a DNS name, not an IP: %q", host)
+	}
+	lower := strings.ToLower(host)
+	for _, bad := range []string{"localhost", "metadata.google.internal", "instance-data"} {
+		if lower == bad || strings.HasSuffix(lower, "."+bad) {
+			return fmt.Errorf("sentry host refers to an internal address: %q", host)
+		}
+	}
+	return nil
 }
 
 // SetHTTPClient lets tests swap in an httptest.Server-backed client.
