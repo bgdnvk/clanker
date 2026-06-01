@@ -59,6 +59,7 @@ Examples:
 		deepseekModel, _ := cmd.Flags().GetString("deepseek-model")
 		cohereModel, _ := cmd.Flags().GetString("cohere-model")
 		minimaxModel, _ := cmd.Flags().GetString("minimax-model")
+		githubModel, _ := cmd.Flags().GetString("github-model")
 		targetProvider, _ := cmd.Flags().GetString("provider")
 		deployTarget, _ := cmd.Flags().GetString("target")
 		sreMode, _ := cmd.Flags().GetBool("sre")
@@ -115,7 +116,7 @@ Examples:
 			apiKey = viper.GetString("ai.api_key")
 		}
 
-		maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel, "")
+		maybeOverrideProviderModel(provider, openaiModel, anthropicModel, geminiModel, deepseekModel, cohereModel, minimaxModel, githubModel)
 
 		aiClient := ai.NewClient(provider, apiKey, debug, aiProfile)
 
@@ -2185,6 +2186,7 @@ func init() {
 	deployCmd.Flags().String("deepseek-model", "", "DeepSeek model to use (overrides config)")
 	deployCmd.Flags().String("cohere-model", "", "Cohere model to use (overrides config)")
 	deployCmd.Flags().String("minimax-model", "", "MiniMax model to use (overrides config)")
+	deployCmd.Flags().String("github-model", "", "GitHub Models model to use (overrides config)")
 	deployCmd.Flags().Bool("apply", false, "Apply the plan immediately after generation")
 	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws, gcp, azure, cloudflare, digitalocean, or hetzner")
 	deployCmd.Flags().String("target", "fargate", "Deployment target: fargate (default), ec2, or eks")
