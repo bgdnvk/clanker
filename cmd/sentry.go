@@ -10,6 +10,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/sentry"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"golang.org/x/sync/errgroup"
 )
 
 var sentryAskCmd = &cobra.Command{
@@ -108,9 +109,6 @@ func runSentryAsk(cmd *cobra.Command, args []string) error {
 		fmt.Printf("[debug] gather status: %v\n", err)
 	}
 
-	// Renamed from `context` because that local was shadowing the imported
-	// context package — a foot-gun for any future edit that needs to call
-	// context.WithTimeout / context.Background below this line.
 	dataContext, err := gatherSentryContext(ctx, client, question, project, sentryAskEnvironment, debug)
 	if err != nil && debug {
 		fmt.Printf("[debug] gather context: %v\n", err)
@@ -140,14 +138,14 @@ func runSentryAsk(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// gatherSentryContext fetches Sentry data relevant to the question. Keyword
-// routing is deliberately lightweight — Sentry's search syntax is rich enough
-// that we mostly want to forward `is:unresolved`-style filters through and let
-// the LLM correlate from a focused page of issues + recent releases.
+// gatherSentryContext fetches Sentry data relevant to the question. Sections
+// are picked by keyword routing — Sentry's search syntax is rich enough that
+// we mostly forward `is:unresolved`-style filters and let the LLM correlate.
+// The matched sections run concurrently because they hit independent
+// endpoints; serial would multiply ask-command latency by 4x in the
+// worst case.
 func gatherSentryContext(ctx context.Context, client *sentry.Client, question, project, environment string, debug bool) (string, error) {
 	questionLower := strings.ToLower(question)
-
-	var sb strings.Builder
 
 	wantIssues := containsAny(questionLower, []string{"issue", "error", "crash", "exception", "problem", "fail", "bug", "what's", "whats", "blowing", "broken"})
 	wantReleases := containsAny(questionLower, []string{"release", "deploy", "version", "rollout", "regress"})
@@ -160,39 +158,50 @@ func gatherSentryContext(ctx context.Context, client *sentry.Client, question, p
 		wantIssues = true
 	}
 
+	g, gctx := errgroup.WithContext(ctx)
+	var issuesBlock, releasesBlock, monitorsBlock, alertsBlock string
+
 	if wantIssues {
-		query := "is:unresolved"
-		if strings.Contains(questionLower, "error") || strings.Contains(questionLower, "crash") {
-			query = "is:unresolved level:error"
-		}
-		issues, _, err := client.ListIssues(ctx, client.OrgSlug(), sentry.IssueListOptions{
-			Query:       query,
-			Environment: environment,
-			StatsPeriod: "24h",
-			Limit:       25,
-		})
-		if err != nil {
-			if debug {
-				fmt.Printf("[debug] list issues: %v\n", err)
+		g.Go(func() error {
+			query := "is:unresolved"
+			if strings.Contains(questionLower, "error") || strings.Contains(questionLower, "crash") {
+				query = "is:unresolved level:error"
 			}
-		} else {
-			sb.WriteString("Recent unresolved issues (last 24h):\n")
+			issues, _, err := client.ListIssues(gctx, client.OrgSlug(), sentry.IssueListOptions{
+				Query:       query,
+				Environment: environment,
+				StatsPeriod: "24h",
+				Limit:       25,
+			})
+			if err != nil {
+				if debug {
+					fmt.Printf("[debug] list issues: %v\n", err)
+				}
+				return nil
+			}
+			var b strings.Builder
+			b.WriteString("Recent unresolved issues (last 24h):\n")
 			for _, i := range issues {
-				sb.WriteString(fmt.Sprintf("  - [%s] %s — %s (count=%s, users=%d, lastSeen=%s)\n",
-					i.Level, i.ShortID, i.Title, i.Count, i.UserCount, i.LastSeen.Format(time.RFC3339)))
+				fmt.Fprintf(&b, "  - [%s] %s — %s (count=%s, users=%d, lastSeen=%s)\n",
+					i.Level, i.ShortID, i.Title, i.Count, i.UserCount, i.LastSeen.Format(time.RFC3339))
 			}
-			sb.WriteString("\n")
-		}
+			b.WriteString("\n")
+			issuesBlock = b.String()
+			return nil
+		})
 	}
 
 	if wantReleases && project != "" {
-		releases, err := client.ListReleases(ctx, client.OrgSlug(), project)
-		if err != nil {
-			if debug {
-				fmt.Printf("[debug] list releases: %v\n", err)
+		g.Go(func() error {
+			releases, err := client.ListReleases(gctx, client.OrgSlug(), project)
+			if err != nil {
+				if debug {
+					fmt.Printf("[debug] list releases: %v\n", err)
+				}
+				return nil
 			}
-		} else {
-			sb.WriteString("Recent releases:\n")
+			var b strings.Builder
+			b.WriteString("Recent releases:\n")
 			for i, r := range releases {
 				if i >= 10 {
 					break
@@ -201,41 +210,61 @@ func gatherSentryContext(ctx context.Context, client *sentry.Client, question, p
 				if r.DateReleased != nil && !r.DateReleased.IsZero() {
 					released = r.DateReleased.Format(time.RFC3339)
 				}
-				sb.WriteString(fmt.Sprintf("  - %s (newGroups=%d, released=%s)\n", r.ShortVersion, r.NewGroups, released))
+				fmt.Fprintf(&b, "  - %s (newGroups=%d, released=%s)\n", r.ShortVersion, r.NewGroups, released)
 			}
-			sb.WriteString("\n")
-		}
+			b.WriteString("\n")
+			releasesBlock = b.String()
+			return nil
+		})
 	}
 
 	if wantMonitors {
-		monitors, err := client.ListMonitors(ctx, client.OrgSlug())
-		if err != nil {
-			if debug {
-				fmt.Printf("[debug] list monitors: %v\n", err)
+		g.Go(func() error {
+			monitors, err := client.ListMonitors(gctx, client.OrgSlug())
+			if err != nil {
+				if debug {
+					fmt.Printf("[debug] list monitors: %v\n", err)
+				}
+				return nil
 			}
-		} else {
-			sb.WriteString("Sentry Crons monitors:\n")
+			var b strings.Builder
+			b.WriteString("Sentry Crons monitors:\n")
 			for _, m := range monitors {
-				sb.WriteString(fmt.Sprintf("  - %s (%s) status=%s muted=%v\n", m.Slug, m.Name, m.Status, m.IsMuted))
+				fmt.Fprintf(&b, "  - %s (%s) status=%s muted=%v\n", m.Slug, m.Name, m.Status, m.IsMuted)
 			}
-			sb.WriteString("\n")
-		}
+			b.WriteString("\n")
+			monitorsBlock = b.String()
+			return nil
+		})
 	}
 
 	if wantAlerts && project != "" {
-		rules, err := client.ListIssueAlertRules(ctx, client.OrgSlug(), project)
-		if err != nil {
-			if debug {
-				fmt.Printf("[debug] list alert rules: %v\n", err)
+		g.Go(func() error {
+			rules, err := client.ListIssueAlertRules(gctx, client.OrgSlug(), project)
+			if err != nil {
+				if debug {
+					fmt.Printf("[debug] list alert rules: %v\n", err)
+				}
+				return nil
 			}
-		} else {
-			sb.WriteString("Alert rules:\n")
+			var b strings.Builder
+			b.WriteString("Alert rules:\n")
 			for _, r := range rules {
-				sb.WriteString(fmt.Sprintf("  - %s (env=%s, frequency=%dmin)\n", r.Name, r.Environment, r.Frequency))
+				fmt.Fprintf(&b, "  - %s (env=%s, frequency=%dmin)\n", r.Name, r.Environment, r.Frequency)
 			}
-			sb.WriteString("\n")
-		}
+			b.WriteString("\n")
+			alertsBlock = b.String()
+			return nil
+		})
 	}
+
+	_ = g.Wait() // every goroutine swallows its own error
+
+	var sb strings.Builder
+	sb.WriteString(issuesBlock)
+	sb.WriteString(releasesBlock)
+	sb.WriteString(monitorsBlock)
+	sb.WriteString(alertsBlock)
 
 	if sb.Len() == 0 {
 		return "No Sentry data fetched (check token permissions and org slug).", nil

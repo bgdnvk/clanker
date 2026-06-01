@@ -106,11 +106,10 @@ func (h *ConversationHistory) GetAccountStatusContext() string {
 	)
 }
 
-// safeSlug strips anything that isn't lowercase a-z, digit, dash, or
-// underscore — Sentry org slugs follow `[a-z0-9-]+` so this matches the
-// upstream contract. Without this, an MCP caller passing
-// orgSlug="../../etc/passwd" would coerce filepath.Join into resolving
-// the `..` segments and writing outside ~/.clanker.
+// safeSlug strips anything outside [A-Za-z0-9_-] so a malicious orgSlug
+// (e.g. "../../etc/passwd") can't escape the ~/.clanker directory when
+// filepath.Join resolves the path. Matches the Sentry slug contract
+// (`[a-z0-9-]+`).
 func safeSlug(s string) string {
 	out := make([]byte, 0, len(s))
 	for i := 0; i < len(s); i++ {

@@ -90,7 +90,7 @@ func buildResolveCommand() *cobra.Command {
 		Short: "Mark one or more issues as resolved",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, org, err := mustClient(cmd)
+			client, org, err := buildClient(cmd)
 			if err != nil {
 				return err
 			}
@@ -111,7 +111,7 @@ func buildIgnoreCommand() *cobra.Command {
 		Short: "Mark one or more issues as ignored",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, org, err := mustClient(cmd)
+			client, org, err := buildClient(cmd)
 			if err != nil {
 				return err
 			}
@@ -132,7 +132,7 @@ func buildAssignCommand() *cobra.Command {
 		Short: "Assign an issue to a user",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, org, err := mustClient(cmd)
+			client, org, err := buildClient(cmd)
 			if err != nil {
 				return err
 			}
@@ -157,7 +157,7 @@ func buildMonitorCommand() *cobra.Command {
 		Short: "Mute alerts for a monitor",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, org, err := mustClient(cmd)
+			client, org, err := buildClient(cmd)
 			if err != nil {
 				return err
 			}
@@ -175,7 +175,7 @@ func buildMonitorCommand() *cobra.Command {
 		Short: "Unmute a previously-muted monitor",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, org, err := mustClient(cmd)
+			client, org, err := buildClient(cmd)
 			if err != nil {
 				return err
 			}
@@ -193,7 +193,7 @@ func buildMonitorCommand() *cobra.Command {
 		Short: "Show recent check-ins for a monitor",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, org, err := mustClient(cmd)
+			client, org, err := buildClient(cmd)
 			if err != nil {
 				return err
 			}
@@ -219,7 +219,7 @@ func buildAlertCommand() *cobra.Command {
 		Short: "Delete an issue alert rule (needs --project)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, org, err := mustClient(cmd)
+			client, org, err := buildClient(cmd)
 			if err != nil {
 				return err
 			}
@@ -243,12 +243,9 @@ func buildAlertCommand() *cobra.Command {
 }
 
 // sentryFlag reads a persistent flag from any depth in the sentry command
-// tree. Earlier revisions used `cmd.Root().PersistentFlags().GetString(...)`
-// which only finds flags registered on the *root* command — but our flags
-// are persistent on the `sentry` command, so that path silently returns ""
-// from any leaf 2+ levels deep (e.g. `clanker sentry monitor checkins X`).
-// `cmd.Flags()` merges inherited persistent flags from every ancestor, so
-// it Just Works at any depth.
+// tree. cmd.Flags() merges inherited persistent flags from every ancestor,
+// so this resolves flags registered on the `sentry` parent even when called
+// from 3-level-deep leaves like `clanker sentry monitor checkins X`.
 func sentryFlag(cmd *cobra.Command, name string) string {
 	if f := cmd.Flags().Lookup(name); f != nil {
 		return f.Value.String()
@@ -256,9 +253,9 @@ func sentryFlag(cmd *cobra.Command, name string) string {
 	return ""
 }
 
-// mustClient resolves credentials + flags into a ready Client, returning the
+// buildClient resolves credentials + flags into a ready Client, returning the
 // effective org slug separately so callers don't have to re-read flags.
-func mustClient(cmd *cobra.Command) (*Client, string, error) {
+func buildClient(cmd *cobra.Command) (*Client, string, error) {
 	authToken := sentryFlag(cmd, "auth-token")
 	if authToken == "" {
 		authToken = ResolveAuthToken()
@@ -287,7 +284,7 @@ func mustClient(cmd *cobra.Command) (*Client, string, error) {
 
 func runList(cmd *cobra.Command, args []string) error {
 	resource := strings.ToLower(args[0])
-	client, org, err := mustClient(cmd)
+	client, org, err := buildClient(cmd)
 	if err != nil {
 		return err
 	}
@@ -405,14 +402,13 @@ func runList(cmd *cobra.Command, args []string) error {
 func runGet(cmd *cobra.Command, args []string) error {
 	resource := strings.ToLower(args[0])
 	id := args[1]
-	client, org, err := mustClient(cmd)
+	client, org, err := buildClient(cmd)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	format := sentryFlag(cmd, "format")
 	project := sentryFlag(cmd, "project")
 	if project == "" {
 		project = ResolveDefaultProject()
@@ -424,7 +420,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		return renderJSON(issue, format)
+		return renderJSON(issue)
 	case "event":
 		if project == "" {
 			return fmt.Errorf("--project is required to fetch an event")
@@ -433,7 +429,7 @@ func runGet(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		return renderJSON(ev, format)
+		return renderJSON(ev)
 	case "release":
 		if project == "" {
 			return fmt.Errorf("--project is required to fetch a release")
@@ -442,19 +438,19 @@ func runGet(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		return renderJSON(rel, format)
+		return renderJSON(rel)
 	case "monitor":
 		m, err := client.GetMonitor(ctx, org, id)
 		if err != nil {
 			return err
 		}
-		return renderJSON(m, format)
+		return renderJSON(m)
 	case "org", "organization":
 		o, err := client.GetOrganization(ctx, id)
 		if err != nil {
 			return err
 		}
-		return renderJSON(o, format)
+		return renderJSON(o)
 	default:
 		return fmt.Errorf("unknown resource: %s (try issue|event|release|monitor|org)", resource)
 	}
@@ -462,13 +458,10 @@ func runGet(cmd *cobra.Command, args []string) error {
 
 // renderers -----------------------------------------------------------------
 
-// renderJSON dumps v as indented JSON. The `format` parameter is unused
-// because `get` subcommands return a single object whose shape varies
-// per-resource (Issue, Event, Release, Monitor, Organization) — building a
-// per-type table renderer for each would be overkill when the JSON form is
-// already structured and pipeable. Pass any value; format is accepted to
-// keep the call-site symmetric with renderIssues / renderProjects / etc.
-func renderJSON(v any, _ string) error {
+// renderJSON dumps v as indented JSON. Used by `get` subcommands where the
+// returned object's shape varies per-resource and JSON is the most useful
+// machine-readable form regardless of --format.
+func renderJSON(v any) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
@@ -483,7 +476,7 @@ func newTabwriter() *tabwriter.Writer {
 
 func renderOrgs(orgs []Organization, format string) error {
 	if format == "json" {
-		return renderJSON(orgs, format)
+		return renderJSON(orgs)
 	}
 	w := newTabwriter()
 	fmt.Fprintln(w, "SLUG\tNAME\tCREATED")
@@ -495,7 +488,7 @@ func renderOrgs(orgs []Organization, format string) error {
 
 func renderProjects(projects []Project, format string) error {
 	if format == "json" {
-		return renderJSON(projects, format)
+		return renderJSON(projects)
 	}
 	w := newTabwriter()
 	fmt.Fprintln(w, "SLUG\tNAME\tPLATFORM")
@@ -507,7 +500,7 @@ func renderProjects(projects []Project, format string) error {
 
 func renderIssues(issues []Issue, format string) error {
 	if format == "json" {
-		return renderJSON(issues, format)
+		return renderJSON(issues)
 	}
 	w := newTabwriter()
 	fmt.Fprintln(w, "SHORT-ID\tLEVEL\tSTATUS\tCOUNT\tUSERS\tTITLE\tLAST-SEEN")
@@ -524,7 +517,7 @@ func renderIssues(issues []Issue, format string) error {
 
 func renderEvents(events []Event, format string) error {
 	if format == "json" {
-		return renderJSON(events, format)
+		return renderJSON(events)
 	}
 	w := newTabwriter()
 	fmt.Fprintln(w, "EVENT-ID\tTITLE\tCREATED")
@@ -540,7 +533,7 @@ func renderEvents(events []Event, format string) error {
 
 func renderReleases(releases []Release, format string) error {
 	if format == "json" {
-		return renderJSON(releases, format)
+		return renderJSON(releases)
 	}
 	w := newTabwriter()
 	fmt.Fprintln(w, "VERSION\tNEW-GROUPS\tCREATED\tRELEASED")
@@ -556,7 +549,7 @@ func renderReleases(releases []Release, format string) error {
 
 func renderIssueAlertRules(rules []IssueAlertRule, format string) error {
 	if format == "json" {
-		return renderJSON(rules, format)
+		return renderJSON(rules)
 	}
 	w := newTabwriter()
 	fmt.Fprintln(w, "ID\tNAME\tENV\tFREQUENCY\tCREATED")
@@ -568,7 +561,7 @@ func renderIssueAlertRules(rules []IssueAlertRule, format string) error {
 
 func renderMetricAlertRules(rules []MetricAlertRule, format string) error {
 	if format == "json" {
-		return renderJSON(rules, format)
+		return renderJSON(rules)
 	}
 	w := newTabwriter()
 	fmt.Fprintln(w, "ID\tNAME\tQUERY\tAGGREGATE\tTHRESHOLD")
@@ -580,7 +573,7 @@ func renderMetricAlertRules(rules []MetricAlertRule, format string) error {
 
 func renderMonitors(monitors []Monitor, format string) error {
 	if format == "json" {
-		return renderJSON(monitors, format)
+		return renderJSON(monitors)
 	}
 	w := newTabwriter()
 	fmt.Fprintln(w, "SLUG\tNAME\tSTATUS\tMUTED\tTYPE")
@@ -592,7 +585,7 @@ func renderMonitors(monitors []Monitor, format string) error {
 
 func renderCheckins(checkins []MonitorCheckin, format string) error {
 	if format == "json" {
-		return renderJSON(checkins, format)
+		return renderJSON(checkins)
 	}
 	w := newTabwriter()
 	fmt.Fprintln(w, "ID\tSTATUS\tDURATION-MS\tCREATED")
@@ -608,7 +601,7 @@ func renderCheckins(checkins []MonitorCheckin, format string) error {
 
 func renderTeams(teams []Team, format string) error {
 	if format == "json" {
-		return renderJSON(teams, format)
+		return renderJSON(teams)
 	}
 	w := newTabwriter()
 	fmt.Fprintln(w, "SLUG\tNAME\tMEMBERS\tCREATED")
@@ -620,7 +613,7 @@ func renderTeams(teams []Team, format string) error {
 
 func renderMembers(members []Member, format string) error {
 	if format == "json" {
-		return renderJSON(members, format)
+		return renderJSON(members)
 	}
 	w := newTabwriter()
 	fmt.Fprintln(w, "EMAIL\tNAME\tROLE")

@@ -85,12 +85,22 @@ func (c *Client) GetIssueEvents(ctx context.Context, issueID string, limit int) 
 	return events, nil
 }
 
+// IssueStatus is the set of accepted values for IssueUpdate.Status. Defining
+// them as constants prevents typos (`"resolve"` would silently no-op against
+// Sentry) and lets callers refer to them by name.
+type IssueStatus string
+
+const (
+	IssueStatusResolved   IssueStatus = "resolved"
+	IssueStatusIgnored    IssueStatus = "ignored"
+	IssueStatusUnresolved IssueStatus = "unresolved"
+)
+
 // IssueUpdate is the payload Sentry expects on PUT /organizations/{org}/issues/.
-// Status is one of "resolved" | "unresolved" | "ignored"; AssignedTo is a
-// username string (or "" to clear).
+// AssignedTo is a username string (or "" to clear).
 type IssueUpdate struct {
-	Status     string `json:"status,omitempty"`
-	AssignedTo string `json:"assignedTo,omitempty"`
+	Status     IssueStatus `json:"status,omitempty"`
+	AssignedTo string      `json:"assignedTo,omitempty"`
 }
 
 // UpdateIssues bulk-mutates issues. IDs are passed as repeated `id=` query
@@ -117,12 +127,12 @@ func (c *Client) UpdateIssues(ctx context.Context, orgSlug string, ids []string,
 
 // ResolveIssues is a convenience wrapper.
 func (c *Client) ResolveIssues(ctx context.Context, orgSlug string, ids []string) error {
-	return c.UpdateIssues(ctx, orgSlug, ids, IssueUpdate{Status: "resolved"})
+	return c.UpdateIssues(ctx, orgSlug, ids, IssueUpdate{Status: IssueStatusResolved})
 }
 
 // IgnoreIssues marks issues as ignored.
 func (c *Client) IgnoreIssues(ctx context.Context, orgSlug string, ids []string) error {
-	return c.UpdateIssues(ctx, orgSlug, ids, IssueUpdate{Status: "ignored"})
+	return c.UpdateIssues(ctx, orgSlug, ids, IssueUpdate{Status: IssueStatusIgnored})
 }
 
 // AssignIssue assigns a single issue to a username.
