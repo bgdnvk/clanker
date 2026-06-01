@@ -357,10 +357,8 @@ func newClankerMCPServer() *mcptransport.MCPServer {
 		}),
 	)
 
-	// Tencent tools — registered out-of-line in mcp_tencent.go so the
-	// tool blocks don't bloat this file further.
+	registerSentryMCPTools(server)
 	registerTencentMCPTools(server)
-
 	registerK8sMCPTools(server)
 
 	return server
