@@ -198,6 +198,10 @@ func TestUpdateIssues_RepeatedIDQuery(t *testing.T) {
 			t.Errorf("expected PUT, got %s", r.Method)
 		}
 		// Sentry expects ?id=A&id=B (repeated keys) not ?id=A,B.
+		// http.Request.URL.Query() already URL-decodes values, so a
+		// well-escaped client should produce three distinct ids even when
+		// one of them contains characters that would otherwise inject a
+		// new query parameter.
 		ids := r.URL.Query()["id"]
 		if len(ids) != 3 {
 			t.Errorf("expected 3 ?id= params, got %d (%v)", len(ids), ids)
@@ -218,6 +222,37 @@ func TestUpdateIssues_RepeatedIDQuery(t *testing.T) {
 	c := newTestClient(t, ts)
 	if err := c.ResolveIssues(context.Background(), "", []string{"a", "b", "c"}); err != nil {
 		t.Fatalf("ResolveIssues: %v", err)
+	}
+}
+
+// TestUpdateIssues_EscapesMaliciousID confirms that an ID containing query
+// metacharacters (& = #) is properly escaped, so it can't smuggle a new
+// query parameter into the PUT — e.g. `1&status=resolved` must not arrive
+// at Sentry as two separate ids plus an injected status.
+func TestUpdateIssues_EscapesMaliciousID(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		ids := q["id"]
+		if len(ids) != 1 {
+			t.Errorf("expected exactly 1 ?id= param after escape, got %d (%v)", len(ids), ids)
+		}
+		if ids[0] != "1&status=resolved" {
+			t.Errorf("id should round-trip with escape, got %q", ids[0])
+		}
+		// And we should NOT see an injected status= in the query.
+		if got := q.Get("status"); got != "" {
+			t.Errorf("status query param should be absent (only in body), got %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{}`)
+	}))
+	defer ts.Close()
+
+	c := newTestClient(t, ts)
+	// `1&status=resolved` is the canonical attack: without escaping it
+	// would split into id=1 + status=resolved at the server.
+	if err := c.IgnoreIssues(context.Background(), "", []string{"1&status=resolved"}); err != nil {
+		t.Fatalf("IgnoreIssues: %v", err)
 	}
 }
 

@@ -108,12 +108,15 @@ func runSentryAsk(cmd *cobra.Command, args []string) error {
 		fmt.Printf("[debug] gather status: %v\n", err)
 	}
 
-	context, err := gatherSentryContext(ctx, client, question, project, sentryAskEnvironment, debug)
+	// Renamed from `context` because that local was shadowing the imported
+	// context package — a foot-gun for any future edit that needs to call
+	// context.WithTimeout / context.Background below this line.
+	dataContext, err := gatherSentryContext(ctx, client, question, project, sentryAskEnvironment, debug)
 	if err != nil && debug {
 		fmt.Printf("[debug] gather context: %v\n", err)
 	}
 
-	prompt := buildSentryPrompt(question, context, history.GetRecentContext(5), history.GetAccountStatusContext())
+	prompt := buildSentryPrompt(question, dataContext, history.GetRecentContext(5), history.GetAccountStatusContext())
 
 	aiProfile := sentryAskAIProfile
 	if aiProfile == "" {

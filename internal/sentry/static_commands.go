@@ -203,11 +203,7 @@ func buildMonitorCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			format, _ := cmd.Flags().GetString("format")
-			if format == "" {
-				format, _ = cmd.Root().PersistentFlags().GetString("format")
-			}
-			return renderCheckins(checkins, format)
+			return renderCheckins(checkins, sentryFlag(cmd, "format"))
 		},
 	})
 	return monCmd
@@ -227,7 +223,7 @@ func buildAlertCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			project, _ := cmd.Root().PersistentFlags().GetString("project")
+			project := sentryFlag(cmd, "project")
 			if project == "" {
 				project = ResolveDefaultProject()
 			}
@@ -246,10 +242,24 @@ func buildAlertCommand() *cobra.Command {
 	return alertCmd
 }
 
+// sentryFlag reads a persistent flag from any depth in the sentry command
+// tree. Earlier revisions used `cmd.Root().PersistentFlags().GetString(...)`
+// which only finds flags registered on the *root* command — but our flags
+// are persistent on the `sentry` command, so that path silently returns ""
+// from any leaf 2+ levels deep (e.g. `clanker sentry monitor checkins X`).
+// `cmd.Flags()` merges inherited persistent flags from every ancestor, so
+// it Just Works at any depth.
+func sentryFlag(cmd *cobra.Command, name string) string {
+	if f := cmd.Flags().Lookup(name); f != nil {
+		return f.Value.String()
+	}
+	return ""
+}
+
 // mustClient resolves credentials + flags into a ready Client, returning the
 // effective org slug separately so callers don't have to re-read flags.
 func mustClient(cmd *cobra.Command) (*Client, string, error) {
-	authToken, _ := cmd.Root().PersistentFlags().GetString("auth-token")
+	authToken := sentryFlag(cmd, "auth-token")
 	if authToken == "" {
 		authToken = ResolveAuthToken()
 	}
@@ -257,12 +267,12 @@ func mustClient(cmd *cobra.Command) (*Client, string, error) {
 		return nil, "", fmt.Errorf("sentry auth_token is required (set sentry.auth_token, SENTRY_AUTH_TOKEN, or --auth-token)")
 	}
 
-	org, _ := cmd.Root().PersistentFlags().GetString("org")
+	org := sentryFlag(cmd, "org")
 	if org == "" {
 		org = ResolveOrgSlug()
 	}
 
-	host, _ := cmd.Root().PersistentFlags().GetString("host")
+	host := sentryFlag(cmd, "host")
 	if host == "" {
 		host = ResolveHost()
 	}
@@ -284,8 +294,8 @@ func runList(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	format, _ := cmd.Root().PersistentFlags().GetString("format")
-	project, _ := cmd.Root().PersistentFlags().GetString("project")
+	format := sentryFlag(cmd, "format")
+	project := sentryFlag(cmd, "project")
 	if project == "" {
 		project = ResolveDefaultProject()
 	}
@@ -402,8 +412,8 @@ func runGet(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	format, _ := cmd.Root().PersistentFlags().GetString("format")
-	project, _ := cmd.Root().PersistentFlags().GetString("project")
+	format := sentryFlag(cmd, "format")
+	project := sentryFlag(cmd, "project")
 	if project == "" {
 		project = ResolveDefaultProject()
 	}
@@ -452,12 +462,13 @@ func runGet(cmd *cobra.Command, args []string) error {
 
 // renderers -----------------------------------------------------------------
 
-func renderJSON(v any, format string) error {
-	if format == "" {
-		format = "table"
-	}
-	// "get" only ever returns a single object so a JSON dump is always the
-	// most useful output regardless of `format`.
+// renderJSON dumps v as indented JSON. The `format` parameter is unused
+// because `get` subcommands return a single object whose shape varies
+// per-resource (Issue, Event, Release, Monitor, Organization) — building a
+// per-type table renderer for each would be overkill when the JSON form is
+// already structured and pipeable. Pass any value; format is accepted to
+// keep the call-site symmetric with renderIssues / renderProjects / etc.
+func renderJSON(v any, _ string) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err

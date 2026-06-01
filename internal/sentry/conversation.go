@@ -106,6 +106,29 @@ func (h *ConversationHistory) GetAccountStatusContext() string {
 	)
 }
 
+// safeSlug strips anything that isn't lowercase a-z, digit, dash, or
+// underscore — Sentry org slugs follow `[a-z0-9-]+` so this matches the
+// upstream contract. Without this, an MCP caller passing
+// orgSlug="../../etc/passwd" would coerce filepath.Join into resolving
+// the `..` segments and writing outside ~/.clanker.
+func safeSlug(s string) string {
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z',
+			c >= 'A' && c <= 'Z',
+			c >= '0' && c <= '9',
+			c == '-' || c == '_':
+			out = append(out, c)
+		}
+	}
+	if len(out) == 0 {
+		return "default"
+	}
+	return string(out)
+}
+
 func historyPath(orgSlug string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -115,11 +138,7 @@ func historyPath(orgSlug string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	slug := orgSlug
-	if slug == "" {
-		slug = "default"
-	}
-	return filepath.Join(dir, fmt.Sprintf("sentry-%s.json", slug)), nil
+	return filepath.Join(dir, fmt.Sprintf("sentry-%s.json", safeSlug(orgSlug))), nil
 }
 
 func (h *ConversationHistory) Load() error {

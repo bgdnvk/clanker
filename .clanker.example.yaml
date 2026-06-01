@@ -196,8 +196,9 @@ infra:
 # sentry:
 #   auth_token: ""           # Sentry User Auth Token (or set SENTRY_AUTH_TOKEN)
 #                            # Generate at https://sentry.io/settings/account/api/auth-tokens/
-#                            # Recommended scopes: org:read, project:read, event:read, event:admin,
-#                            #                     alerts:read, alerts:write, project:releases
+#                            # Recommended scopes: org:read, project:read, project:write,
+#                            #                     event:read, event:admin, alerts:read, alerts:write
+#                            # project:write covers release management and alert rule mutations.
 #   org_slug: ""             # Sentry org slug (or set SENTRY_ORG)
 #   default_project: ""      # Optional default project slug for events/releases/alerts
 #                            # (or set SENTRY_PROJECT)

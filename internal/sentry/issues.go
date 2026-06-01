@@ -3,7 +3,7 @@ package sentry
 import (
 	"context"
 	"fmt"
-	"strings"
+	"net/url"
 )
 
 // IssueListOptions controls /organizations/{org}/issues/. Query is Sentry's
@@ -103,18 +103,15 @@ func (c *Client) UpdateIssues(ctx context.Context, orgSlug string, ids []string,
 	if len(ids) == 0 {
 		return fmt.Errorf("at least one issue ID is required")
 	}
-	// Sentry expects ?id=A&id=B&id=C — url.Values handles repeats. We can't
-	// use BuildQuery here because that flattens to a single value per key.
-	var qb strings.Builder
-	qb.WriteByte('?')
-	for i, id := range ids {
-		if i > 0 {
-			qb.WriteByte('&')
-		}
-		qb.WriteString("id=")
-		qb.WriteString(id)
+	// Sentry expects ?id=A&id=B&id=C — repeated keys, which `url.Values`
+	// emits when you `Add` the same key multiple times. Each id is escaped
+	// so a malicious or unusual ID (containing & = # …) can't inject extra
+	// query parameters into the request.
+	v := url.Values{}
+	for _, id := range ids {
+		v.Add("id", id)
 	}
-	_, _, err := c.Do(ctx, "PUT", fmt.Sprintf("/organizations/%s/issues/%s", org, qb.String()), update)
+	_, _, err := c.Do(ctx, "PUT", fmt.Sprintf("/organizations/%s/issues/?%s", org, v.Encode()), update)
 	return err
 }
 
