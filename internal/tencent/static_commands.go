@@ -21,10 +21,17 @@ func CreateTencentCommands() *cobra.Command {
 	tencentCmd.PersistentFlags().StringVar(&region, "region", "", "Tencent Cloud region (default from config / TENCENTCLOUD_REGION / TENCENT_REGION / ap-singapore)")
 
 	var allRegions bool
+	var listFormat string
 	listCmd := &cobra.Command{
 		Use:   "list [resource]",
 		Short: "List Tencent Cloud resources",
 		Long: `List Tencent Cloud resources of a specific type.
+
+Output formats (--format):
+  table  Human-readable tabwriter output (default).
+  json   JSON-encoded summary suitable for piping into jq, scripts, or
+         the clanker-cloud HTTP API. Single-region by default; with
+         --all-regions the output is {"regions":[{"region":"...","data":[...]}, ...]}.
 
 Supported resources:
   cvm, instances              - Cloud Virtual Machine instances
@@ -84,6 +91,19 @@ to cos, which uses a service-global endpoint).`,
 				if debug {
 					fmt.Printf("[tencent] fanning out across %d regions\n", len(regions))
 				}
+			}
+
+			// JSON output path. Uses the existing JSON* methods on Client
+			// (the same ones the HTTP API surfaces), so the wire format is
+			// shared between `clanker tencent list ... --format json` and
+			// `GET /api/v1/tencent/resources/...`. Multi-region fan-out
+			// emits an explicit envelope so consumers can correlate.
+			format := strings.ToLower(strings.TrimSpace(listFormat))
+			if format == "json" {
+				return listAsJSON(cmd.Context(), client, resourceType, regions, allRegions)
+			}
+			if format != "" && format != "table" {
+				return fmt.Errorf("unsupported --format %q (use 'table' or 'json')", listFormat)
 			}
 
 			switch resourceType {
@@ -147,6 +167,7 @@ to cos, which uses a service-global endpoint).`,
 		},
 	}
 	listCmd.Flags().BoolVar(&allRegions, "all-regions", false, "Query every available Tencent region and merge the results")
+	listCmd.Flags().StringVar(&listFormat, "format", "table", "Output format: table | json")
 
 	regionsCmd := &cobra.Command{
 		Use:   "regions",
@@ -232,6 +253,7 @@ externally-routable endpoint when running from outside the cluster's VPC.`,
 		Use:   "cost",
 		Short: "Tencent Cloud billing — cost commands",
 	}
+	var costByProductFormat string
 	costByProductCmd := &cobra.Command{
 		Use:   "by-product",
 		Short: "Cost breakdown by Tencent service for a given month",
@@ -244,10 +266,13 @@ externally-routable endpoint when running from outside the cluster's VPC.`,
 			if err != nil {
 				return err
 			}
-			return listBillByProduct(client, costMonth)
+			return listBillByProduct(client, costMonth, costByProductFormat)
 		},
 	}
 	costByProductCmd.Flags().StringVar(&costMonth, "month", "", "YYYY-MM (default: current month)")
+	costByProductCmd.Flags().StringVar(&costByProductFormat, "format", "table", "Output format: table | json")
+
+	var costTopFormat string
 	costTopCmd := &cobra.Command{
 		Use:   "top",
 		Short: "Top N resources by spend for a given month",
@@ -261,11 +286,12 @@ externally-routable endpoint when running from outside the cluster's VPC.`,
 				return err
 			}
 			topN, _ := cmd.Flags().GetInt("limit")
-			return listBillResourceTop(client, costMonth, topN)
+			return listBillResourceTop(client, costMonth, topN, costTopFormat)
 		},
 	}
 	costTopCmd.Flags().StringVar(&costMonth, "month", "", "YYYY-MM (default: current month)")
 	costTopCmd.Flags().Int("limit", 20, "Number of resources to return (max 200)")
+	costTopCmd.Flags().StringVar(&costTopFormat, "format", "table", "Output format: table | json")
 
 	var voucherStatus string
 	costVouchersCmd := &cobra.Command{
@@ -323,5 +349,6 @@ voucher-status enum:
 	tencentCmd.AddCommand(kubeconfigCmd)
 	tencentCmd.AddCommand(costCmd)
 	tencentCmd.AddCommand(buildExpiryCmd(&region))
+	tencentCmd.AddCommand(buildSecurityCmd(&region))
 	return tencentCmd
 }

@@ -15,67 +15,147 @@ import (
 	"github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common"
 )
 
+// BillByProductItem is one row of the cost-by-product breakdown.
+// Mirrors the JSON shape consumed by the clanker-cloud Tencent cost
+// provider — every monetary value is a string-encoded decimal because
+// Tencent's billing API returns them that way (the SDK doesn't parse
+// them and we don't want to lose precision in a float round-trip).
+type BillByProductItem struct {
+	Product   string `json:"product"`
+	RealCost  string `json:"real_cost"`
+	Cash      string `json:"cash"`
+	Incentive string `json:"incentive"`
+	Voucher   string `json:"voucher"`
+	Pct       string `json:"pct"`
+}
+
+// BillByProductReport is the top-level JSON envelope. Total is the
+// sum of RealCost across every product, computed client-side so the
+// downstream consumer doesn't have to re-tokenise the strings.
+type BillByProductReport struct {
+	Month string              `json:"month"`
+	Items []BillByProductItem `json:"items"`
+	Total float64             `json:"total"`
+}
+
 // listBillByProduct prints a per-service cost breakdown for a given month.
 // Tencent's billing API treats month as both BeginTime and EndTime so we
 // always pass the same value.
-func listBillByProduct(c *Client, month string) error {
+//
+// Format dispatch: when format="json" the report is emitted as a JSON
+// object; otherwise the historical tabwriter table is printed.
+func listBillByProduct(c *Client, month string, format string) error {
+	report, err := buildBillByProductReport(c, month)
+	if err != nil {
+		return err
+	}
+	if strings.EqualFold(strings.TrimSpace(format), "json") {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(report)
+	}
+	return writeBillByProductTable(report)
+}
+
+func buildBillByProductReport(c *Client, month string) (BillByProductReport, error) {
 	if month == "" {
 		month = time.Now().Format("2006-01")
 	}
+	report := BillByProductReport{Month: month}
 	client, err := newBillingClient(c)
 	if err != nil {
-		return fmt.Errorf("init billing client: %w", err)
+		return report, fmt.Errorf("init billing client: %w", err)
 	}
 	req := billing.NewDescribeBillSummaryByProductRequest()
 	req.BeginTime = &month
 	req.EndTime = &month
 	resp, err := client.DescribeBillSummaryByProduct(req)
 	if err != nil {
-		return fmt.Errorf("DescribeBillSummaryByProduct: %w", friendlyError(err))
+		return report, fmt.Errorf("DescribeBillSummaryByProduct: %w", friendlyError(err))
 	}
+	if resp == nil || resp.Response == nil || resp.Response.SummaryOverview == nil {
+		return report, nil
+	}
+	for _, it := range resp.Response.SummaryOverview {
+		row := BillByProductItem{
+			Product:   derefString(it.BusinessCodeName),
+			RealCost:  derefString(it.RealTotalCost),
+			Cash:      derefString(it.CashPayAmount),
+			Incentive: derefString(it.IncentivePayAmount),
+			Voucher:   derefString(it.VoucherPayAmount),
+			Pct:       derefString(it.RealTotalCostRatio),
+		}
+		report.Items = append(report.Items, row)
+		if v, err := strconv.ParseFloat(row.RealCost, 64); err == nil {
+			report.Total += v
+		}
+	}
+	return report, nil
+}
 
-	fmt.Printf("Tencent Cloud Cost by Product — %s:\n\n", month)
-	if resp == nil || resp.Response == nil || resp.Response.SummaryOverview == nil || len(resp.Response.SummaryOverview) == 0 {
+func writeBillByProductTable(report BillByProductReport) error {
+	fmt.Printf("Tencent Cloud Cost by Product — %s:\n\n", report.Month)
+	if len(report.Items) == 0 {
 		fmt.Println("  No billing data for this month")
 		return nil
 	}
-
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "PRODUCT\tREAL_COST\tCASH\tINCENTIVE\tVOUCHER\tPCT")
-	var total float64
-	for _, it := range resp.Response.SummaryOverview {
+	for _, it := range report.Items {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s%%\n",
-			derefString(it.BusinessCodeName),
-			derefString(it.RealTotalCost),
-			derefString(it.CashPayAmount),
-			derefString(it.IncentivePayAmount),
-			derefString(it.VoucherPayAmount),
-			derefString(it.RealTotalCostRatio),
-		)
-		if it.RealTotalCost != nil {
-			if v, err := strconv.ParseFloat(*it.RealTotalCost, 64); err == nil {
-				total += v
-			}
-		}
+			it.Product, it.RealCost, it.Cash, it.Incentive, it.Voucher, it.Pct)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	fmt.Printf("\nTotal: %.4f\n", total)
+	fmt.Printf("\nTotal: %.4f\n", report.Total)
 	return nil
 }
 
-// listBillResourceTop prints the most expensive resources for the month.
-func listBillResourceTop(c *Client, month string, top int) error {
+// BillTopResource is one row of the per-resource top-N report.
+type BillTopResource struct {
+	Product    string `json:"product"`
+	ResourceID string `json:"resource_id"`
+	Name       string `json:"name"`
+	Region     string `json:"region"`
+	PayMode    string `json:"pay_mode"`
+	Action     string `json:"action"`
+	Cost       string `json:"cost"`
+}
+
+// BillTopResourceReport is the JSON envelope for `cost top --format json`.
+type BillTopResourceReport struct {
+	Month string            `json:"month"`
+	Top   int               `json:"top"`
+	Items []BillTopResource `json:"items"`
+}
+
+// listBillResourceTop prints (or emits as JSON) the most expensive
+// resources for the month.
+func listBillResourceTop(c *Client, month string, top int, format string) error {
+	report, err := buildBillTopReport(c, month, top)
+	if err != nil {
+		return err
+	}
+	if strings.EqualFold(strings.TrimSpace(format), "json") {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(report)
+	}
+	return writeBillTopTable(report)
+}
+
+func buildBillTopReport(c *Client, month string, top int) (BillTopResourceReport, error) {
 	if month == "" {
 		month = time.Now().Format("2006-01")
 	}
 	if top <= 0 {
 		top = 20
 	}
+	report := BillTopResourceReport{Month: month, Top: top}
 	client, err := newBillingClient(c)
 	if err != nil {
-		return fmt.Errorf("init billing client: %w", err)
+		return report, fmt.Errorf("init billing client: %w", err)
 	}
 	req := billing.NewDescribeBillResourceSummaryRequest()
 	var offset uint64 = 0
@@ -90,27 +170,36 @@ func listBillResourceTop(c *Client, month string, top int) error {
 	req.PeriodType = &period
 	resp, err := client.DescribeBillResourceSummary(req)
 	if err != nil {
-		return fmt.Errorf("DescribeBillResourceSummary: %w", friendlyError(err))
+		return report, fmt.Errorf("DescribeBillResourceSummary: %w", friendlyError(err))
 	}
+	if resp == nil || resp.Response == nil {
+		return report, nil
+	}
+	for _, r := range resp.Response.ResourceSummarySet {
+		report.Items = append(report.Items, BillTopResource{
+			Product:    derefString(r.BusinessCodeName),
+			ResourceID: derefString(r.ResourceId),
+			Name:       derefString(r.ResourceName),
+			Region:     derefString(r.RegionName),
+			PayMode:    derefString(r.PayModeName),
+			Action:     derefString(r.ActionTypeName),
+			Cost:       derefString(r.RealTotalCost),
+		})
+	}
+	return report, nil
+}
 
-	fmt.Printf("Top %d Resources by Cost — %s:\n\n", top, month)
-	if resp == nil || resp.Response == nil || len(resp.Response.ResourceSummarySet) == 0 {
+func writeBillTopTable(report BillTopResourceReport) error {
+	fmt.Printf("Top %d Resources by Cost — %s:\n\n", report.Top, report.Month)
+	if len(report.Items) == 0 {
 		fmt.Println("  No resource-level billing data for this month")
 		return nil
 	}
-
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "PRODUCT\tRESOURCE_ID\tNAME\tREGION\tPAY_MODE\tACTION\tCOST")
-	for _, r := range resp.Response.ResourceSummarySet {
+	for _, r := range report.Items {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			derefString(r.BusinessCodeName),
-			derefString(r.ResourceId),
-			derefString(r.ResourceName),
-			derefString(r.RegionName),
-			derefString(r.PayModeName),
-			derefString(r.ActionTypeName),
-			derefString(r.RealTotalCost),
-		)
+			r.Product, r.ResourceID, r.Name, r.Region, r.PayMode, r.Action, r.Cost)
 	}
 	return tw.Flush()
 }
