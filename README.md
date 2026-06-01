@@ -207,10 +207,11 @@ The standalone CLI MCP currently exposes these tools:
 Flags:
 
 - `--aws`: force AWS context/tooling for the question (uses the default env/profile from `~/.clanker.yaml` unless you pass `--profile`)
+- `--tencent`: force Tencent Cloud context/tooling for the question (uses `tencent.*` config or `TENCENTCLOUD_*` env vars)
 - `--profile <name>`: override the AWS CLI profile for this run
 - `--ai-profile <name>`: select an AI provider profile from `ai.providers.<name>` (overrides `ai.default_provider`)
-- `--maker`: generate an AWS CLI plan (JSON) for infrastructure changes
-- `--destroyer`: allow destructive AWS CLI operations when using `--maker`
+- `--maker`: generate a provider execution plan (JSON) for infrastructure changes
+- `--destroyer`: allow destructive cloud operations when using `--maker`
 - `--apply`: apply an approved maker plan (reads from stdin unless `--plan-file` is provided)
 - `--plan-file <path>`: optional path to maker plan JSON file for `--apply`
 - `--debug`: print diagnostics (selected tools, AWS CLI calls, prompt sizes)
@@ -240,6 +241,9 @@ clanker ask --aws --maker --apply --plan-file plan.json | cat
 
 # Allow destructive operations (only with explicit intent)
 clanker ask --aws --maker --destroyer "delete the clanka-postgres rds instance" | cat
+
+# Tencent Cloud maker uses direct Tencent API calls
+clanker ask --tencent --maker "create a VPC named clanker-demo in ap-singapore" | cat
 ```
 
 ### Security
@@ -620,6 +624,96 @@ clanker ask --apply --plan-file plan.json | cat
 
 # Allow destructive operations
 clanker ask --hetzner --maker --destroyer "delete the test server" | cat
+```
+
+## Tencent Cloud
+
+Clanker supports Tencent Cloud through direct SDK/API calls. You do not need to install a separate Tencent CLI. The `clanker tencent` command tree is useful for raw inventory, security scans, billing checks, renewal alerts, and TKE kubeconfig export; `clanker ask --tencent` adds natural-language answers on top of that inventory.
+
+### Setup
+
+Create a Tencent Cloud CAM secret ID / secret key with the permissions needed for the services you want to inspect.
+
+Set credentials with environment variables:
+
+```bash
+export TENCENTCLOUD_SECRET_ID="AKID..."
+export TENCENTCLOUD_SECRET_KEY="..."
+export TENCENTCLOUD_REGION="ap-singapore"
+```
+
+Or configure in `~/.clanker.yaml`:
+
+```yaml
+tencent:
+    secret_id: "AKID..."
+    secret_key: "..."
+    region: ap-singapore
+```
+
+Legacy env var aliases are also supported: `TENCENT_SECRET_ID`, `TENCENT_SECRET_KEY`, and `TENCENT_REGION`. If no region is set, Clanker defaults to `ap-singapore`. Static commands also accept `--region`.
+
+### Static Commands
+
+```bash
+# List resources directly (no AI)
+clanker tencent list cvm
+clanker tencent list vpc --region ap-singapore
+clanker tencent list security-groups --all-regions
+clanker tencent list tke --format json
+clanker tencent regions
+
+# Aliases
+clanker tc list cvm
+clanker tencentcloud list cos
+```
+
+Common `list` resources include `cvm`, `vpc`, `subnets`, `security-groups`, `mysql`, `postgres`, `cos`, `tke`, `clb`, `eip`, `cbs`, `ssl`, `cam`, `redis`, `mongodb`, `cynosdb`, `cdn`, `edgeone`, `waf`, `antiddos`, `nat`, `vpn`, `ccn`, `dc`, `monitor`, `cls`, and `cloudaudit`.
+
+### AI Queries
+
+```bash
+clanker ask --tencent "what CVMs are running?"
+clanker ask --tencent "which security groups expose SSH to the internet?"
+clanker ask --tencent "show me TKE clusters and their node counts"
+```
+
+### Security, Cost, and TKE Helpers
+
+```bash
+# Security group audit
+clanker tencent sg-rules sg-abc12345 --region ap-singapore
+
+# JSON security scans
+clanker tencent security public-exposure --region ap-singapore
+clanker tencent security db-exposure --region ap-singapore
+clanker tencent security all --region ap-singapore
+
+# Billing and vouchers
+clanker tencent cost by-product --month 2026-05
+clanker tencent cost top --month 2026-05 --limit 20
+clanker tencent cost vouchers --status unUsed
+
+# Renewal alerts for prepaid resources
+clanker tencent expiry --regions=ap-singapore,ap-jakarta --threshold=14 --format=json
+
+# TKE kubeconfig export
+clanker tencent kubeconfig cls-abc123 --region ap-singapore > ~/.kube/tencent
+```
+
+### Maker (Plan + Apply)
+
+Tencent maker plans use a `tencent-api` verb internally, so execution goes through signed Tencent API requests directly. Destructive API actions require `--destroyer`.
+
+```bash
+# Generate a plan
+clanker ask --tencent --maker "create a security group that allows HTTPS" | tee plan.json
+
+# Apply an approved plan
+clanker ask --apply --plan-file plan.json | cat
+
+# Allow destructive operations
+clanker ask --tencent --maker --destroyer "delete the unused test CVM" | cat
 ```
 
 ## Fly.io
