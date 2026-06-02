@@ -12,6 +12,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/gcp"
 	"github.com/bgdnvk/clanker/internal/hetzner"
 	"github.com/bgdnvk/clanker/internal/linear"
+	"github.com/bgdnvk/clanker/internal/notion"
 	"github.com/bgdnvk/clanker/internal/railway"
 	"github.com/bgdnvk/clanker/internal/sentry"
 	"github.com/bgdnvk/clanker/internal/tencent"
@@ -123,6 +124,13 @@ func init() {
 	linearCmd := linear.CreateLinearCommands()
 	AddLinearAskCommand(linearCmd)
 	rootCmd.AddCommand(linearCmd)
+
+	// Register Notion static commands + ask command. `clanker notion ask "..."`
+	// for natural language; list/get/search/page/db on the same root via
+	// internal/notion.CreateNotionCommands().
+	notionCmd := notion.CreateNotionCommands()
+	AddNotionAskCommand(notionCmd)
+	rootCmd.AddCommand(notionCmd)
 
 	// Register Digital Ocean static commands
 	doCmd := digitalocean.CreateDigitalOceanCommands()
