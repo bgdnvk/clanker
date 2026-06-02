@@ -11,6 +11,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/flyio"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	"github.com/bgdnvk/clanker/internal/hetzner"
+	"github.com/bgdnvk/clanker/internal/linear"
 	"github.com/bgdnvk/clanker/internal/railway"
 	"github.com/bgdnvk/clanker/internal/sentry"
 	"github.com/bgdnvk/clanker/internal/tencent"
@@ -115,6 +116,13 @@ func init() {
 	sentryCmd := sentry.CreateSentryCommands()
 	AddSentryAskCommand(sentryCmd)
 	rootCmd.AddCommand(sentryCmd)
+
+	// Register Linear static commands + ask command. `clanker linear ask "..."`
+	// for natural language; list/get/create/update/resolve/comment/assign on
+	// the same root via internal/linear.CreateLinearCommands().
+	linearCmd := linear.CreateLinearCommands()
+	AddLinearAskCommand(linearCmd)
+	rootCmd.AddCommand(linearCmd)
 
 	// Register Digital Ocean static commands
 	doCmd := digitalocean.CreateDigitalOceanCommands()

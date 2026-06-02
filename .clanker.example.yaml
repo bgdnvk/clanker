@@ -205,6 +205,18 @@ infra:
 #   host: "sentry.io"        # Override for self-hosted Sentry (or set SENTRY_HOST)
 #                            # Single-tenant EU customers use "<org>.sentry.io"
 
+# Linear (for `clanker linear ask ...` and `clanker linear list issues`):
+# linear:
+#   api_key: ""            # Linear Personal API Key (or set LINEAR_API_KEY)
+#                          # Generate at https://linear.app/settings/account/api
+#                          # IMPORTANT: the Authorization header is the raw key —
+#                          # do NOT add a "Bearer " prefix (Linear's #1 footgun).
+#   workspace_id: ""       # Workspace UUID (or set LINEAR_WORKSPACE_ID)
+#                          # Optional — only needed to scope conversation history;
+#                          # the API key already implies a single workspace.
+#   default_team: ""       # Default team key e.g. "ENG" (or set LINEAR_TEAM)
+#                          # Used by `clanker linear ask` to scope cycles + filters.
+
 # Verda Cloud (for `clanker verda ...` and `clanker ask --verda ...`):
 # verda:
 #   client_id: ""            # Verda OAuth2 client ID (or set VERDA_CLIENT_ID, or run `verda auth login`)
