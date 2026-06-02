@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -12,6 +13,19 @@ import (
 	"github.com/spf13/viper"
 	"golang.org/x/sync/errgroup"
 )
+
+// containsWord matches needles as whole words inside s. Plain substring
+// match (containsAny) trips on "my" inside "company" / "summary" / "myql"
+// — wrong for keyword routing where the words are conceptually nouns.
+func containsWord(s string, needles []string) bool {
+	for _, n := range needles {
+		re := regexp.MustCompile(`(^|\W)` + regexp.QuoteMeta(n) + `($|\W)`)
+		if re.MatchString(s) {
+			return true
+		}
+	}
+	return false
+}
 
 var linearAskCmd = &cobra.Command{
 	Use:   "ask [question]",
@@ -31,18 +45,17 @@ Examples:
 	RunE: runLinearAsk,
 }
 
+// Local-only flags for the ask subcommand. --api-key / --workspace / --team
+// are persistent on the parent `linear` command (see static_commands.go)
+// and reach this handler via linear.linearFlag() / linear.Resolve*() —
+// declaring them here too would silently shadow the parent's persistent
+// flag, so we deliberately do NOT.
 var (
-	linearAskAPIKey      string
-	linearAskWorkspaceID string
-	linearAskTeam        string
-	linearAskAIProfile   string
-	linearAskDebug       bool
+	linearAskAIProfile string
+	linearAskDebug     bool
 )
 
 func init() {
-	linearAskCmd.Flags().StringVar(&linearAskAPIKey, "api-key", "", "Linear Personal API Key")
-	linearAskCmd.Flags().StringVar(&linearAskWorkspaceID, "workspace", "", "Workspace ID")
-	linearAskCmd.Flags().StringVar(&linearAskTeam, "team", "", "Default team key (e.g. ENG)")
 	linearAskCmd.Flags().StringVar(&linearAskAIProfile, "ai-profile", "", "AI profile to use for LLM queries")
 	linearAskCmd.Flags().BoolVar(&linearAskDebug, "debug", false, "Enable debug output")
 }
@@ -60,7 +73,17 @@ func runLinearAsk(cmd *cobra.Command, args []string) error {
 
 	debug := linearAskDebug || viper.GetBool("debug")
 
-	apiKey := linearAskAPIKey
+	// Persistent flags on the `linear` parent (--api-key / --workspace /
+	// --team) reach us via inherited flag-set merging. cmd.Flags().Lookup
+	// returns the parent's value; falling back to viper config + env.
+	flag := func(name string) string {
+		if f := cmd.Flags().Lookup(name); f != nil {
+			return f.Value.String()
+		}
+		return ""
+	}
+
+	apiKey := flag("api-key")
 	if apiKey == "" {
 		apiKey = linear.ResolveAPIKey()
 	}
@@ -68,12 +91,12 @@ func runLinearAsk(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("linear api_key is required (set --api-key, LINEAR_API_KEY, or linear.api_key in config)")
 	}
 
-	workspaceID := linearAskWorkspaceID
+	workspaceID := flag("workspace")
 	if workspaceID == "" {
 		workspaceID = linear.ResolveWorkspaceID()
 	}
 
-	team := linearAskTeam
+	team := flag("team")
 	if team == "" {
 		team = linear.ResolveDefaultTeam()
 	}
@@ -118,8 +141,8 @@ func runLinearAsk(cmd *cobra.Command, args []string) error {
 	if aiProfile == "" {
 		aiProfile = viper.GetString("ai.default_provider")
 	}
-	apiKey2 := resolveAIKeyForProfile(aiProfile)
-	aiClient := ai.NewClient(aiProfile, apiKey2, debug)
+	aiKey := resolveAIKeyForProfile(aiProfile)
+	aiClient := ai.NewClient(aiProfile, aiKey, debug)
 
 	answer, err := aiClient.AskPrompt(ctx, prompt)
 	if err != nil {
@@ -142,11 +165,12 @@ func runLinearAsk(cmd *cobra.Command, args []string) error {
 func gatherLinearContext(ctx context.Context, client *linear.Client, question, team string, debug bool) (string, error) {
 	q := strings.ToLower(question)
 
-	wantIssues := containsAny(q, []string{"issue", "bug", "task", "ticket", "blocker", "work", "plate", "mine", "my", "assigned"})
-	wantProjects := containsAny(q, []string{"project", "initiative", "delivery", "milestone"})
-	wantCycles := containsAny(q, []string{"cycle", "sprint", "iteration"})
-	wantTeams := containsAny(q, []string{"team", "squad"})
-	wantLabels := containsAny(q, []string{"label", "tag"})
+	// Match whole words so "my" doesn't trigger on "myql"/"company"/"summary".
+	wantIssues := containsWord(q, []string{"issue", "issues", "bug", "bugs", "task", "tasks", "ticket", "tickets", "blocker", "blockers", "work", "plate", "mine", "my", "assigned"})
+	wantProjects := containsWord(q, []string{"project", "projects", "initiative", "initiatives", "delivery", "milestone", "milestones"})
+	wantCycles := containsWord(q, []string{"cycle", "cycles", "sprint", "sprints", "iteration", "iterations"})
+	wantTeams := containsWord(q, []string{"team", "teams", "squad", "squads"})
+	wantLabels := containsWord(q, []string{"label", "labels", "tag", "tags"})
 
 	if !wantIssues && !wantProjects && !wantCycles && !wantTeams && !wantLabels {
 		// Default: "what's on my plate" — open issues + active projects + current cycle.

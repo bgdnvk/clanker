@@ -153,7 +153,11 @@ func buildAssignCommand() *cobra.Command {
 			if user == nil {
 				return fmt.Errorf("no user matched %q", args[1])
 			}
-			issue, err := client.UpdateIssue(ctx, args[0], UpdateIssueInput{AssigneeID: &user.ID})
+			id, err := client.ResolveIssueID(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			issue, err := client.UpdateIssue(ctx, id, UpdateIssueInput{AssigneeID: &user.ID})
 			if err != nil {
 				return err
 			}
@@ -175,7 +179,11 @@ func buildCommentCommand() *cobra.Command {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			c, err := client.AddComment(ctx, args[0], args[1])
+			id, err := client.ResolveIssueID(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			c, err := client.AddComment(ctx, id, args[1])
 			if err != nil {
 				return err
 			}
@@ -343,7 +351,11 @@ func buildUpdateCommand() *cobra.Command {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			issue, err := client.UpdateIssue(ctx, args[0], input)
+			id, err := client.ResolveIssueID(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			issue, err := client.UpdateIssue(ctx, id, input)
 			if err != nil {
 				return err
 			}
@@ -368,7 +380,7 @@ func buildLabelCommand() *cobra.Command {
 		Use:   "label",
 		Short: "Manage issue labels",
 	}
-	lc.AddCommand(&cobra.Command{
+	createCmd := &cobra.Command{
 		Use:   "create <name> <team-id>",
 		Short: "Create a label on a team. Useful for the infra:<type>:<id> annotation convention.",
 		Args:  cobra.ExactArgs(2),
@@ -387,10 +399,9 @@ func buildLabelCommand() *cobra.Command {
 			fmt.Printf("Created label %s (%s)\n", lbl.Name, lbl.ID)
 			return nil
 		},
-	})
-	if create := lc.Commands()[0]; create != nil {
-		create.Flags().String("color", "", "Hex color e.g. #5e6ad2 (optional)")
 	}
+	createCmd.Flags().String("color", "", "Hex color e.g. #5e6ad2 (optional)")
+	lc.AddCommand(createCmd)
 	return lc
 }
 
@@ -402,32 +413,38 @@ func updateIssuesToStateType(cmd *cobra.Command, ids []string, targetType string
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Linear doesn't have a built-in "set state to first 'completed' state
-	// on this issue's team" — we have to look it up. To keep it simple we
-	// fetch each issue, ask its team for states, pick the matching one.
-	for _, id := range ids {
-		issue, err := client.GetIssue(ctx, id)
+	// Linear has no native "set to first 'completed'-type state on this
+	// issue's team" — we resolve target states per team. Cache by team ID
+	// so a batch like `resolve ENG-1 ENG-2 ENG-3` makes one GetTeam call,
+	// not three. ID input may be UUID or identifier — GetIssue accepts both
+	// but the mutation requires the UUID, so we use issue.ID below.
+	teamStates := make(map[string]string) // teamID → target stateID
+	for _, idOrIdent := range ids {
+		issue, err := client.GetIssue(ctx, idOrIdent)
 		if err != nil {
-			return fmt.Errorf("get %s: %w", id, err)
+			return fmt.Errorf("get %s: %w", idOrIdent, err)
 		}
 		if issue.Team == nil {
 			return fmt.Errorf("%s has no team — cannot pick target state", issue.Identifier)
 		}
-		_, states, err := client.GetTeam(ctx, issue.Team.ID)
-		if err != nil {
-			return fmt.Errorf("get team for %s: %w", issue.Identifier, err)
-		}
-		var stateID string
-		for _, s := range states {
-			if s.Type == targetType {
-				stateID = s.ID
-				break
+		stateID, ok := teamStates[issue.Team.ID]
+		if !ok {
+			_, states, err := client.GetTeam(ctx, issue.Team.ID)
+			if err != nil {
+				return fmt.Errorf("get team for %s: %w", issue.Identifier, err)
 			}
+			for _, s := range states {
+				if s.Type == targetType {
+					stateID = s.ID
+					break
+				}
+			}
+			if stateID == "" {
+				return fmt.Errorf("no %q-type state found on team %s", targetType, issue.Team.Key)
+			}
+			teamStates[issue.Team.ID] = stateID
 		}
-		if stateID == "" {
-			return fmt.Errorf("no %q-type state found on team %s", targetType, issue.Team.Key)
-		}
-		if _, err := client.UpdateIssue(ctx, id, UpdateIssueInput{StateID: &stateID}); err != nil {
+		if _, err := client.UpdateIssue(ctx, issue.ID, UpdateIssueInput{StateID: &stateID}); err != nil {
 			return fmt.Errorf("update %s: %w", issue.Identifier, err)
 		}
 		fmt.Printf("Moved %s → %s\n", issue.Identifier, targetType)

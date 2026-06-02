@@ -134,6 +134,7 @@ func registerLinearMCPTools(server *mcptransport.MCPServer) {
 			mcp.WithString("assigneeId", mcp.Description("Assignee user UUID")),
 			mcp.WithNumber("priority", mcp.Description("1 (urgent) | 2 (high) | 3 (medium) | 4 (low); 0 omitted")),
 			mcp.WithString("apiKey", mcp.Description("Linear API key")),
+			mcp.WithDestructiveHintAnnotation(true),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return handleMCPLinearCreateIssue(ctx, req)
@@ -153,6 +154,7 @@ func registerLinearMCPTools(server *mcptransport.MCPServer) {
 			mcp.WithString("cycleId", mcp.Description("Move to this cycle (UUID)")),
 			mcp.WithNumber("priority", mcp.Description("1|2|3|4")),
 			mcp.WithString("apiKey", mcp.Description("Linear API key")),
+			mcp.WithDestructiveHintAnnotation(true),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return handleMCPLinearUpdateIssue(ctx, req)
@@ -166,6 +168,7 @@ func registerLinearMCPTools(server *mcptransport.MCPServer) {
 			mcp.WithString("issueId", mcp.Required(), mcp.Description("Issue UUID")),
 			mcp.WithString("body", mcp.Required(), mcp.Description("Markdown body")),
 			mcp.WithString("apiKey", mcp.Description("Linear API key")),
+			mcp.WithDestructiveHintAnnotation(true),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return handleMCPLinearCommentIssue(ctx, req)
@@ -182,6 +185,7 @@ func registerLinearMCPTools(server *mcptransport.MCPServer) {
 			mcp.WithString("leadId", mcp.Description("Lead user UUID")),
 			mcp.WithString("state", mcp.Description("backlog|planned|started|paused|completed|canceled")),
 			mcp.WithString("apiKey", mcp.Description("Linear API key")),
+			mcp.WithDestructiveHintAnnotation(true),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return handleMCPLinearCreateProject(ctx, req)
@@ -200,6 +204,7 @@ func registerLinearMCPTools(server *mcptransport.MCPServer) {
 			mcp.WithString("startDate", mcp.Description("YYYY-MM-DD")),
 			mcp.WithString("targetDate", mcp.Description("YYYY-MM-DD")),
 			mcp.WithString("apiKey", mcp.Description("Linear API key")),
+			mcp.WithDestructiveHintAnnotation(true),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return handleMCPLinearUpdateProject(ctx, req)
@@ -388,11 +393,17 @@ func handleMCPLinearCreateIssue(ctx context.Context, req mcp.CallToolRequest) (*
 }
 
 func handleMCPLinearUpdateIssue(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id := strParam(req, "issueId")
-	if id == "" {
+	idIn := strParam(req, "issueId")
+	if idIn == "" {
 		return mcp.NewToolResultError("issueId is required"), nil
 	}
 	client, _, err := mcpLinearClient(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	// Agents will pass either ENG-42 or a UUID. issueUpdate only accepts
+	// the UUID, so resolve first.
+	id, err := client.ResolveIssueID(ctx, idIn)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -426,12 +437,16 @@ func handleMCPLinearUpdateIssue(ctx context.Context, req mcp.CallToolRequest) (*
 }
 
 func handleMCPLinearCommentIssue(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id := strParam(req, "issueId")
+	idIn := strParam(req, "issueId")
 	body := strParam(req, "body")
-	if id == "" || body == "" {
+	if idIn == "" || body == "" {
 		return mcp.NewToolResultError("issueId and body are required"), nil
 	}
 	client, _, err := mcpLinearClient(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	id, err := client.ResolveIssueID(ctx, idIn)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}

@@ -3,7 +3,31 @@ package linear
 import (
 	"context"
 	"fmt"
+	"regexp"
 )
+
+// identifierPattern matches Linear's human identifier like "ENG-42". Linear
+// slugs are 2-5 uppercase letters; we allow longer for safety against future
+// changes but disallow the lowercase that would shadow a UUID's 8-4-4-4-12 form.
+var identifierPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]*-\d+$`)
+
+// ResolveIssueID accepts either a UUID or a human identifier (ENG-42) and
+// returns the UUID. Linear's `issue(id:)` query accepts either form so this
+// is cheap; we make it explicit because mutation endpoints (`issueUpdate`,
+// `commentCreate`) only accept the UUID and silently 4xx on identifiers.
+func (c *Client) ResolveIssueID(ctx context.Context, idOrIdentifier string) (string, error) {
+	if idOrIdentifier == "" {
+		return "", fmt.Errorf("issue id required")
+	}
+	if !identifierPattern.MatchString(idOrIdentifier) {
+		return idOrIdentifier, nil // assume already a UUID
+	}
+	issue, err := c.GetIssue(ctx, idOrIdentifier)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s to UUID: %w", idOrIdentifier, err)
+	}
+	return issue.ID, nil
+}
 
 // IssueFilter mirrors a subset of Linear's GraphQL IssueFilter input.
 // Empty fields are omitted from the marshalled GraphQL variables. The
@@ -15,8 +39,8 @@ type IssueFilter struct {
 	TeamKey         string // e.g. "ENG" — convenience for the CLI
 	ProjectID       string
 	CycleID         string
-	AssigneeID      string   // UUID; or use AssigneeMe
-	AssigneeMe      bool     // shortcut: filter to issues assigned to viewer
+	AssigneeID      string   // UUID
+	AssigneeIsMe    bool     // filter to issues assigned to the API key's viewer
 	LabelName       string   // exact label name (used by annotation lookup)
 	LabelIDs        []string // multi-label match
 	Priority        int      // 0..4; 0 means "any"
@@ -43,6 +67,8 @@ func (f IssueFilter) toGraphQL() map[string]any {
 	}
 	if f.AssigneeID != "" {
 		out["assignee"] = map[string]any{"id": map[string]any{"eq": f.AssigneeID}}
+	} else if f.AssigneeIsMe {
+		out["assignee"] = map[string]any{"isMe": map[string]any{"eq": true}}
 	}
 	if f.LabelName != "" {
 		out["labels"] = map[string]any{"name": map[string]any{"eq": f.LabelName}}
@@ -152,7 +178,9 @@ func (c *Client) GetIssue(ctx context.Context, id string) (*Issue, error) {
 	return out.Issue, nil
 }
 
-// GetIssueComments returns top-level comments for an issue, newest first.
+// GetIssueComments returns top-level comments for an issue in creation order
+// (oldest first — matches Linear's GraphQL `orderBy: createdAt` ascending
+// default and lets the prompt builder render the thread linearly).
 func (c *Client) GetIssueComments(ctx context.Context, issueID string, limit int) ([]Comment, error) {
 	if limit <= 0 {
 		limit = 50

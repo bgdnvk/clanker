@@ -247,7 +247,13 @@ func parseAPIError(resp *http.Response, body []byte) error {
 		Errors []GraphQLError `json:"errors"`
 	}
 	_ = json.Unmarshal(body, &env)
-	return &APIError{Status: resp.StatusCode, Body: string(body), Errors: env.Errors}
+	// Cap the raw body in the APIError so a WAF/CDN HTML response (10KB+
+	// of marketing) doesn't bloat every log line that prints err.Error().
+	preview := string(body)
+	if len(preview) > 512 {
+		preview = preview[:512] + "..."
+	}
+	return &APIError{Status: resp.StatusCode, Body: preview, Errors: env.Errors}
 }
 
 func parseRetryWait(resp *http.Response) time.Duration {

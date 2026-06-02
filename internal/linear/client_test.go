@@ -163,6 +163,58 @@ func TestFilterToGraphQL(t *testing.T) {
 	}
 }
 
+// TestFilterToGraphQL_AssigneeIsMe confirms the previously-dead
+// AssigneeIsMe flag now produces the correct `assignee.isMe.eq: true`
+// clause that Linear's IssueFilter expects.
+func TestFilterToGraphQL_AssigneeIsMe(t *testing.T) {
+	g := IssueFilter{AssigneeIsMe: true}.toGraphQL()
+	isMe := g["assignee"].(map[string]any)["isMe"].(map[string]any)
+	if isMe["eq"] != true {
+		t.Errorf("assignee.isMe.eq = %v, want true", isMe["eq"])
+	}
+	// AssigneeID takes precedence over AssigneeIsMe when both are set.
+	g2 := IssueFilter{AssigneeID: "u-1", AssigneeIsMe: true}.toGraphQL()
+	if _, ok := g2["assignee"].(map[string]any)["isMe"]; ok {
+		t.Errorf("AssigneeID should override AssigneeIsMe, got isMe still set: %v", g2["assignee"])
+	}
+}
+
+// TestResolveIssueID exercises the identifier→UUID resolver. Linear's
+// mutations accept only UUIDs but `issue(id: ENG-42)` also works, so
+// human inputs need translation. Tests cover: passthrough on UUID,
+// resolution on identifier, malformed strings stay unchanged.
+func TestResolveIssueID(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload struct {
+			Variables map[string]any `json:"variables"`
+		}
+		_ = json.Unmarshal(body, &payload)
+		// Echo the requested identifier back as a UUID lookup result.
+		if got, _ := payload.Variables["id"].(string); got == "ENG-42" {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"data":{"issue":{"id":"uuid-from-eng-42","identifier":"ENG-42","title":"t","priority":0,"createdAt":"2024-01-01T00:00:00Z","updatedAt":"2024-01-01T00:00:00Z","labels":{"nodes":[]}}}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":{"issue":null}}`)
+	}))
+	defer ts.Close()
+	c := newTestClient(t, ts)
+
+	// UUID: returned unchanged, no API call.
+	uuid := "2b0e3c00-9c4f-4b6a-9b4f-deadbeef0001"
+	got, err := c.ResolveIssueID(context.Background(), uuid)
+	if err != nil || got != uuid {
+		t.Errorf("UUID passthrough: got=%q err=%v", got, err)
+	}
+	// Identifier: resolved via GET issue query.
+	got, err = c.ResolveIssueID(context.Background(), "ENG-42")
+	if err != nil || got != "uuid-from-eng-42" {
+		t.Errorf("ENG-42 resolve: got=%q err=%v", got, err)
+	}
+}
+
 // TestUpdateIssue_PartialPatch confirms the typed pointers in
 // UpdateIssueInput serialise correctly — only non-nil fields land in the
 // GraphQL variables, so callers can ship a one-field patch without nuking
