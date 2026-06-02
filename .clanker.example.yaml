@@ -205,6 +205,28 @@ infra:
 #   host: "sentry.io"        # Override for self-hosted Sentry (or set SENTRY_HOST)
 #                            # Single-tenant EU customers use "<org>.sentry.io"
 
+# Linear (for `clanker linear ask ...` and `clanker linear list issues`):
+# linear:
+#   api_key: ""            # Linear Personal API Key (or set LINEAR_API_KEY)
+#                          # Generate at https://linear.app/settings/account/api
+#                          # IMPORTANT: the Authorization header is the raw key —
+#                          # do NOT add a "Bearer " prefix (Linear's #1 footgun).
+#   workspace_id: ""       # Workspace UUID (or set LINEAR_WORKSPACE_ID)
+#                          # Optional — only needed to scope conversation history;
+#                          # the API key already implies a single workspace.
+#   default_team: ""       # Default team key e.g. "ENG" (or set LINEAR_TEAM)
+#                          # Used by `clanker linear ask` to scope cycles + filters.
+#
+# Infra-resource annotation convention:
+#   Tag Linear issues that reference a cloud resource with a label of the
+#   form `infra:<type>:<id>` (e.g. `infra:lambda:arn:aws:lambda:us-east-1:123:foo`).
+#   The desktop app's resource drawer queries `/api/linear/issues/by-label/...`
+#   to surface linked work on a resource — without the label there's nothing
+#   to link. Create via `clanker linear label create infra:lambda:arn:... <team-id>`.
+#
+# Conversation history: ~/.clanker/linear-{workspaceID}.json (or {team} when
+# workspace_id is empty). Delete to start fresh.
+
 # Verda Cloud (for `clanker verda ...` and `clanker ask --verda ...`):
 # verda:
 #   client_id: ""            # Verda OAuth2 client ID (or set VERDA_CLIENT_ID, or run `verda auth login`)
