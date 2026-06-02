@@ -227,6 +227,29 @@ infra:
 # Conversation history: ~/.clanker/linear-{workspaceID}.json (or {team} when
 # workspace_id is empty). Delete to start fresh.
 
+# Notion (for `clanker notion ask ...` and `clanker notion search ...`):
+# notion:
+#   integration_token: ""    # Internal Integration token (or set NOTION_API_KEY)
+#                            # Create at https://www.notion.so/profile/integrations
+#                            # IMPORTANT: tokens start with ZERO access. You must
+#                            # explicitly share each page/database with the
+#                            # integration via "..." → "Connections" in Notion.
+#                            # This is Notion's #1 UX papercut — surface it when
+#                            # search returns empty.
+#                            # Auth header IS "Authorization: Bearer <token>"
+#                            # (opposite of Linear — Notion does use the prefix).
+#   default_database_id: ""  # Optional default database UUID (or set NOTION_DATABASE_ID)
+#                            # Used by `clanker notion db row create --db <id>`
+#                            # so you don't have to retype the id every time.
+#
+# Conversation history: ~/.clanker/notion-{workspaceName}.json. The workspace
+# name comes from `GET /v1/users/me` → `bot.workspace_name`. Delete to start
+# fresh.
+#
+# Rate limit: Notion enforces ~3 req/sec average per integration — tighter
+# than Linear's. The client backs off exponentially on 429 with the
+# Retry-After header, so heavy parallel ask flows degrade gracefully.
+
 # Verda Cloud (for `clanker verda ...` and `clanker ask --verda ...`):
 # verda:
 #   client_id: ""            # Verda OAuth2 client ID (or set VERDA_CLIENT_ID, or run `verda auth login`)
