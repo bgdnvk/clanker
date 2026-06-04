@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bgdnvk/clanker/internal/secfile"
 )
 
 // ConversationEntry represents a single Q&A exchange
@@ -146,7 +148,7 @@ func (h *ConversationHistory) Save() error {
 		return err
 	}
 
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := secfile.EnsurePrivateDir(dir); err != nil {
 		return fmt.Errorf("failed to create conversation directory: %w", err)
 	}
 
@@ -156,7 +158,7 @@ func (h *ConversationHistory) Save() error {
 		return fmt.Errorf("failed to marshal conversation history: %w", err)
 	}
 
-	if err := os.WriteFile(filename, data, 0644); err != nil {
+	if err := secfile.WritePrivate(filename, data); err != nil {
 		return fmt.Errorf("failed to write conversation file: %w", err)
 	}
 
@@ -174,7 +176,7 @@ func (h *ConversationHistory) Load() error {
 	}
 
 	filename := filepath.Join(dir, fmt.Sprintf("iam_%s.json", sanitizeFilename(h.AccountID)))
-	data, err := os.ReadFile(filename)
+	data, err := secfile.ReadPrivate(filename)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// No history yet, that is fine

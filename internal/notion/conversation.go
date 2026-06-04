@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bgdnvk/clanker/internal/secfile"
 )
 
 const (
@@ -128,7 +130,7 @@ func historyPath(workspaceName string) (string, error) {
 		return "", err
 	}
 	dir := filepath.Join(home, ".clanker")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := secfile.EnsurePrivateDir(dir); err != nil {
 		return "", err
 	}
 	return filepath.Join(dir, fmt.Sprintf("notion-%s.json", safeSlug(workspaceName))), nil
@@ -139,7 +141,7 @@ func (h *ConversationHistory) Load() error {
 	if err != nil {
 		return err
 	}
-	data, err := os.ReadFile(path)
+	data, err := secfile.ReadPrivate(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -162,5 +164,5 @@ func (h *ConversationHistory) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+	return secfile.WritePrivate(path, data)
 }

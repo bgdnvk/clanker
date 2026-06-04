@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bgdnvk/clanker/internal/secfile"
 )
 
 // ConversationEntry represents a single Q&A exchange.
@@ -99,7 +101,7 @@ func (h *ConversationHistory) Save() error {
 		return err
 	}
 
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := secfile.EnsurePrivateDir(dir); err != nil {
 		return fmt.Errorf("failed to create conversation directory: %w", err)
 	}
 
@@ -118,7 +120,7 @@ func (h *ConversationHistory) Save() error {
 	}
 
 	tmp := filename + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+	if err := secfile.WritePrivate(tmp, data); err != nil {
 		return fmt.Errorf("failed to write temp conversation file: %w", err)
 	}
 	if err := os.Rename(tmp, filename); err != nil {
@@ -138,7 +140,7 @@ func (h *ConversationHistory) Load() error {
 	if err != nil {
 		return err
 	}
-	data, err := os.ReadFile(path)
+	data, err := secfile.ReadPrivate(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
