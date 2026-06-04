@@ -3,6 +3,7 @@ package flyio
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -58,8 +59,24 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 
 	// File should land at ~/.clanker/conversations/flyio_acme.json.
 	want := filepath.Join(dir, ".clanker", "conversations", "flyio_acme.json")
-	if _, err := os.Stat(want); err != nil {
+	info, err := os.Stat(want)
+	if err != nil {
 		t.Fatalf("expected file %s: %v", want, err)
+	}
+	if runtime.GOOS != "windows" {
+		// Saved files must not be world-readable — they contain raw
+		// operator Q&A (account IDs, ARNs, policy fragments). Drift
+		// guard for #22.
+		if mode := info.Mode().Perm(); mode != 0o600 {
+			t.Errorf("file mode = %04o, want 0600", mode)
+		}
+		convDir, err := os.Stat(filepath.Dir(want))
+		if err != nil {
+			t.Fatalf("stat conv dir: %v", err)
+		}
+		if mode := convDir.Mode().Perm(); mode != 0o700 {
+			t.Errorf("conversations dir mode = %04o, want 0700", mode)
+		}
 	}
 
 	loaded := NewConversationHistory("acme")
