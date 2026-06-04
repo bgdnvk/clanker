@@ -102,29 +102,6 @@ func (h *ConversationHistory) GetAccountStatusContext() string {
 	)
 }
 
-// safeSlug strips anything outside [A-Za-z0-9_-] so a malicious workspaceID
-// (e.g. "../../etc/passwd") can't escape the ~/.clanker directory when
-// filepath.Join resolves the path. Linear workspace IDs are UUIDs so this
-// is paranoia for the env-var/header case where an operator could pass
-// an arbitrary string.
-func safeSlug(s string) string {
-	out := make([]byte, 0, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c >= 'a' && c <= 'z',
-			c >= 'A' && c <= 'Z',
-			c >= '0' && c <= '9',
-			c == '-' || c == '_':
-			out = append(out, c)
-		}
-	}
-	if len(out) == 0 {
-		return "default"
-	}
-	return string(out)
-}
-
 func historyPath(workspaceID string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -134,7 +111,7 @@ func historyPath(workspaceID string) (string, error) {
 	if err := secfile.EnsurePrivateDir(dir); err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, fmt.Sprintf("linear-%s.json", safeSlug(workspaceID))), nil
+	return filepath.Join(dir, fmt.Sprintf("linear-%s.json", secfile.SafeSlug(workspaceID))), nil
 }
 
 func (h *ConversationHistory) Load() error {

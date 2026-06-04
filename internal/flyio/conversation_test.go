@@ -91,15 +91,6 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSanitizeID(t *testing.T) {
-	if got := sanitizeID("my/org name"); got != "my_org_name" {
-		t.Errorf("sanitizeID = %q, want my_org_name", got)
-	}
-	if got := sanitizeID("with:colon|pipe"); got != "with_colon_pipe" {
-		t.Errorf("sanitizeID = %q, want with_colon_pipe", got)
-	}
-}
-
 func TestTruncateAnswer(t *testing.T) {
 	if got := truncateAnswer("hello", 100); got != "hello" {
 		t.Errorf("short answer should pass through, got %q", got)

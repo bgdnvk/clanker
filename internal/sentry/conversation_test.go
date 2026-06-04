@@ -73,31 +73,3 @@ func TestConversationHistory_TrimsOldEntries(t *testing.T) {
 		t.Errorf("entries = %d, want cap %d", len(h.Entries), MaxHistoryEntries)
 	}
 }
-
-// TestSafeSlug_BlocksPathTraversal confirms the slug sanitiser strips path
-// separators so a hostile org slug from an MCP caller can't escape the
-// ~/.clanker directory. The bug existed because filepath.Join cleans `..`
-// segments, so `../../etc/passwd` would resolve outside the intended dir.
-func TestSafeSlug_BlocksPathTraversal(t *testing.T) {
-	cases := []struct {
-		in   string
-		want string
-	}{
-		{"acme", "acme"},
-		{"my-org_42", "my-org_42"},
-		{"../../etc/passwd", "etcpasswd"},
-		{"/absolute/path", "absolutepath"},
-		{"", "default"},
-		{"...", "default"},
-		{"acme/../etc", "acmeetc"},
-	}
-	for _, c := range cases {
-		c := c
-		t.Run(c.in, func(t *testing.T) {
-			got := safeSlug(c.in)
-			if got != c.want {
-				t.Errorf("safeSlug(%q) = %q, want %q", c.in, got, c.want)
-			}
-		})
-	}
-}

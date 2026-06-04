@@ -72,3 +72,55 @@ func ReadPrivate(path string) ([]byte, error) {
 
 	return io.ReadAll(f)
 }
+
+// maxSlugLen bounds slugs so a malicious or merely verbose identifier
+// can't produce a filename longer than common filesystem limits
+// (ext4: 255, HFS+: 255, NTFS: 255). 64 is well under that and covers
+// every real-world ID we sanitize — AWS account IDs (12 digits),
+// Cloudflare account IDs (32 hex), kubectl context names (typically
+// under 63 per DNS label limit).
+const maxSlugLen = 64
+
+// SafeSlug strips every byte outside [A-Za-z0-9_-] from s so that
+// caller-supplied identifiers (cluster names, account IDs, org slugs)
+// cannot escape ~/.clanker via path traversal. Inputs like
+// "../../etc/passwd" collapse to "etcpasswd"; "my.cluster" → "mycluster".
+//
+// We iterate as bytes rather than runes intentionally: multi-byte
+// UTF-8 codepoints all fall outside the ASCII allowlist, so they
+// would be dropped byte-by-byte either way. Operating on bytes keeps
+// the function predictable and ~5x cheaper, and matches the historic
+// pattern in the three providers that got this right (sentry, linear,
+// notion).
+//
+// The result is bounded to 64 bytes (see maxSlugLen). An empty result
+// returns "default" so the caller never produces a hidden file
+// (".json") or an empty filename.
+//
+// Note on collisions: distinct identifiers that differ only in
+// stripped characters (e.g. "acme/prod" and "acme-prod") will produce
+// the same slug. In practice the inputs are constrained (UUIDs, hex
+// IDs, 12-digit AWS account numbers) so collisions are exceedingly
+// rare. The cross-tenant "default" fallback collision (two unset
+// identifiers both writing to the same history file) is tracked in
+// #25 and deliberately out of scope here.
+func SafeSlug(s string) string {
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z',
+			c >= 'A' && c <= 'Z',
+			c >= '0' && c <= '9',
+			c == '-', c == '_':
+			out = append(out, c)
+		}
+	}
+	if len(out) > maxSlugLen {
+		out = out[:maxSlugLen]
+	}
+	if len(out) == 0 {
+		return "default"
+	}
+	return string(out)
+}

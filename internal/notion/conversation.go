@@ -103,27 +103,6 @@ func (h *ConversationHistory) GetAccountStatusContext() string {
 	)
 }
 
-// safeSlug strips anything outside [A-Za-z0-9_-] so a malicious workspace
-// name (e.g. "../../etc/passwd") cannot escape the ~/.clanker directory
-// when filepath.Join resolves the path.
-func safeSlug(s string) string {
-	out := make([]byte, 0, len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c >= 'a' && c <= 'z',
-			c >= 'A' && c <= 'Z',
-			c >= '0' && c <= '9',
-			c == '-' || c == '_':
-			out = append(out, c)
-		}
-	}
-	if len(out) == 0 {
-		return "default"
-	}
-	return string(out)
-}
-
 func historyPath(workspaceName string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -133,7 +112,7 @@ func historyPath(workspaceName string) (string, error) {
 	if err := secfile.EnsurePrivateDir(dir); err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, fmt.Sprintf("notion-%s.json", safeSlug(workspaceName))), nil
+	return filepath.Join(dir, fmt.Sprintf("notion-%s.json", secfile.SafeSlug(workspaceName))), nil
 }
 
 func (h *ConversationHistory) Load() error {
