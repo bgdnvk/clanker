@@ -59,23 +59,6 @@ func TestConversationHistory_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestSafeSlug_PathTraversalDefense(t *testing.T) {
-	cases := map[string]string{
-		"normal-workspace": "normal-workspace",
-		"My Workspace":     "MyWorkspace",
-		"../../etc/passwd": "etcpasswd",
-		"with/slashes":     "withslashes",
-		"!!!":              "default",
-		"":                 "default",
-		"abc123_DEF":       "abc123_DEF",
-	}
-	for in, want := range cases {
-		if got := safeSlug(in); got != want {
-			t.Errorf("safeSlug(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 func TestConversationHistory_TrimsToMaxEntries(t *testing.T) {
 	h := NewConversationHistory("ws")
 	for range MaxHistoryEntries + 5 {

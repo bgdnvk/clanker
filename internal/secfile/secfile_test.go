@@ -116,3 +116,67 @@ func TestReadPrivate_MissingFile(t *testing.T) {
 		t.Errorf("expected IsNotExist, got: %v", err)
 	}
 }
+
+func TestSafeSlug(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		// Path-traversal payloads — must collapse to something safe.
+		{"..", "default"},
+		{"../../etc/passwd", "etcpasswd"},
+		{"./../etc", "etc"},
+		{"./../../../../etc/passwd", "etcpasswd"},
+
+		// Dot-bearing real-world identifiers — preserved by the old
+		// blocklist sanitizer; intentionally stripped now.
+		{"my.cluster", "mycluster"},
+		{"my-cluster.dev", "my-clusterdev"},
+
+		// Real-world IDs we must preserve byte-for-byte.
+		{"123456789012", "123456789012"},                                         // AWS account ID
+		{"deadbeefcafebabe1234567890abcdef", "deadbeefcafebabe1234567890abcdef"}, // CF hex
+		{"my-cluster_prod", "my-cluster_prod"},
+		{"acme-prod", "acme-prod"},
+
+		// Empty / all-stripped inputs must yield "default", never "".
+		{"", "default"},
+		{"...", "default"},
+		{"中文", "default"},
+		{"\x00\x00\x00", "default"},
+		{"!@#$%^&*()", "default"},
+
+		// Null byte and control characters are dropped (defense in depth).
+		{"a\x00b", "ab"},
+		{"a\nb\tc", "abc"},
+
+		// 64-byte cap — anything past gets truncated so we don't blow
+		// past filesystem limits with a 10,000-char payload.
+		{string(make([]byte, 0, 200)) + repeatChar('a', 200), repeatChar('a', 64)},
+
+		// Filesystem separators on Windows must also be stripped.
+		{`C:\Users\admin`, "CUsersadmin"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got := SafeSlug(tc.in)
+			if got != tc.want {
+				t.Errorf("SafeSlug(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if len(got) > maxSlugLen {
+				t.Errorf("SafeSlug(%q) returned %d bytes — exceeds %d-byte cap", tc.in, len(got), maxSlugLen)
+			}
+			if got == "" {
+				t.Errorf("SafeSlug(%q) returned empty string — must fall back to %q", tc.in, "default")
+			}
+		})
+	}
+}
+
+func repeatChar(c byte, n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = c
+	}
+	return string(b)
+}

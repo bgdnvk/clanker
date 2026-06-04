@@ -171,7 +171,7 @@ func (h *ConversationHistory) filePath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, fmt.Sprintf("flyio_%s.json", sanitizeID(h.OrgSlug))), nil
+	return filepath.Join(dir, fmt.Sprintf("flyio_%s.json", secfile.SafeSlug(h.OrgSlug))), nil
 }
 
 // conversationDir returns ~/.clanker/conversations.
@@ -181,23 +181,6 @@ func conversationDir() (string, error) {
 		return "", fmt.Errorf("failed to get home directory: %w", err)
 	}
 	return filepath.Join(home, ".clanker", "conversations"), nil
-}
-
-// sanitizeID replaces characters that are invalid in filenames.
-func sanitizeID(s string) string {
-	replacer := strings.NewReplacer(
-		"/", "_",
-		"\\", "_",
-		":", "_",
-		"*", "_",
-		"?", "_",
-		"\"", "_",
-		"<", "_",
-		">", "_",
-		"|", "_",
-		" ", "_",
-	)
-	return replacer.Replace(s)
 }
 
 // truncateAnswer truncates text to maxLen characters, adding ellipsis if truncated.

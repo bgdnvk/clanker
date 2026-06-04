@@ -44,25 +44,6 @@ func TestConversationHistory_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestSafeSlug_BlocksPathTraversal(t *testing.T) {
-	cases := []struct {
-		in, want string
-	}{
-		{"acme", "acme"},
-		{"my-workspace_42", "my-workspace_42"},
-		{"../../etc/passwd", "etcpasswd"},
-		{"/absolute/path", "absolutepath"},
-		{"", "default"},
-	}
-	for _, c := range cases {
-		t.Run(c.in, func(t *testing.T) {
-			if got := safeSlug(c.in); got != c.want {
-				t.Errorf("safeSlug(%q) = %q, want %q", c.in, got, c.want)
-			}
-		})
-	}
-}
-
 func TestConversationHistory_TruncateAnswer(t *testing.T) {
 	h := NewConversationHistory("ws-abc")
 	long := strings.Repeat("x", MaxAnswerLengthInContext*2)

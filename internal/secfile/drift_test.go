@@ -51,23 +51,41 @@ func TestConversationFilesDoNotWriteWorldReadable(t *testing.T) {
 			}
 
 			ast.Inspect(file, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
+				if call, ok := n.(*ast.CallExpr); ok {
+					if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+						if pkg, ok := sel.X.(*ast.Ident); ok {
+							switch pkg.Name {
+							case "os":
+								switch sel.Sel.Name {
+								case "WriteFile", "ReadFile":
+									t.Errorf("%s uses os.%s directly — must go through secfile.WritePrivate/ReadPrivate (drift guard for #22)", fset.Position(call.Pos()), sel.Sel.Name)
+								case "MkdirAll":
+									t.Errorf("%s uses os.MkdirAll directly — must go through secfile.EnsurePrivateDir (drift guard for #22)", fset.Position(call.Pos()))
+								}
+							case "strings":
+								// NewReplacer in conversation.go is the
+								// blocklist anti-pattern that produced #23.
+								// History-file sanitization must go through
+								// secfile.SafeSlug, not a hand-rolled
+								// replacer. Other strings.* helpers are
+								// fine.
+								if sel.Sel.Name == "NewReplacer" {
+									t.Errorf("%s uses strings.NewReplacer — history-file identifier sanitization must go through secfile.SafeSlug (drift guard for #23)", fset.Position(call.Pos()))
+								}
+							}
+						}
+					}
 				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				pkg, ok := sel.X.(*ast.Ident)
-				if !ok || pkg.Name != "os" {
-					return true
-				}
-				switch sel.Sel.Name {
-				case "WriteFile", "ReadFile":
-					t.Errorf("%s uses os.%s directly — must go through secfile.WritePrivate/ReadPrivate (drift guard for #22)", fset.Position(call.Pos()), sel.Sel.Name)
-				case "MkdirAll":
-					t.Errorf("%s uses os.MkdirAll directly — must go through secfile.EnsurePrivateDir (drift guard for #22)", fset.Position(call.Pos()))
+				// Catch top-level sanitiser function declarations — the
+				// other shape #23 might come back as is a new local
+				// helper that bypasses secfile.SafeSlug. Any FuncDecl
+				// named sanitize*/safeSlug inside conversation.go
+				// should fail the build.
+				if fn, ok := n.(*ast.FuncDecl); ok && fn.Recv == nil {
+					name := fn.Name.Name
+					if strings.HasPrefix(name, "sanitize") || name == "safeSlug" {
+						t.Errorf("%s declares local sanitiser %s — must call secfile.SafeSlug instead (drift guard for #23)", fset.Position(fn.Pos()), name)
+					}
 				}
 				return true
 			})
