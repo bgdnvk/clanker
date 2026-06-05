@@ -1,6 +1,8 @@
-FROM golang:1.25-alpine AS build
+FROM golang:1.25-bookworm AS build
 
-RUN apk add --no-cache ca-certificates git
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 
 COPY go.mod go.sum ./
@@ -9,10 +11,17 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/clanker ./main.go
 
-FROM alpine:3.22
+FROM debian:bookworm-slim
 
-RUN apk add --no-cache ca-certificates curl git openssh-client
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl git gnupg openssh-client awscli \
+    && install -d -m 0755 /usr/share/keyrings \
+    && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" > /etc/apt/sources.list.d/google-cloud-sdk.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends google-cloud-cli google-cloud-cli-gke-gcloud-auth-plugin \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/clanker /usr/local/bin/clanker
 
 ENTRYPOINT ["clanker"]
-CMD ["sre", "run", "--sre", "--target", "docker"]
+CMD ["sre", "run", "--sre"]

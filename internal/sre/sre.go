@@ -22,7 +22,7 @@ const (
 	DefaultImage          = "ghcr.io/bgdnvk/clanker:latest"
 	DefaultAgentName      = "clanker-sre"
 	DefaultIngestTokenEnv = "CLANKER_CEREBRO_INGEST_TOKEN"
-	DefaultInterval       = 60 * time.Second
+	DefaultInterval       = 10 * time.Second
 )
 
 type ToolStatus struct {
@@ -182,6 +182,10 @@ func BuildPlan(discovery Discovery, opts PlanOptions) InstallPlan {
 
 	plan := InstallPlan{Target: target, Discovery: discovery}
 	switch target {
+	case "aws":
+		plan = awsCloudVMPlan(discovery, image, name, backendURL, tokenEnv, provider, deployID, interval)
+	case "gcp":
+		plan = gcpCloudVMPlan(discovery, image, name, backendURL, tokenEnv, provider, deployID, interval)
 	case "docker":
 		plan = dockerPlan(discovery, image, name, backendURL, tokenEnv, provider, deployID, interval)
 	case "local":
@@ -249,7 +253,7 @@ func Run(ctx context.Context, opts RunOptions) error {
 	if interval <= 0 {
 		interval = DefaultInterval
 	}
-	agentID := strings.TrimSpace(opts.AgentID)
+	agentID := strings.TrimSpace(firstNonEmpty(opts.AgentID, os.Getenv("CLANKER_SRE_AGENT_ID")))
 	deployID := strings.TrimSpace(firstNonEmpty(opts.DeployID, viper.GetString("sre.deploy_id"), os.Getenv("CLANKER_SRE_DEPLOY_ID")))
 	if agentID == "" {
 		agentID = firstNonEmpty(deployID, defaultAgentID())
@@ -1094,10 +1098,179 @@ func cloudVMPlan(discovery Discovery, image string, name string, backendURL stri
 packages:
   - docker.io
 runcmd:
-  - docker pull %s
-	- docker run -d --name %s --restart unless-stopped %s %s %s
-`, image, name, sreDockerEnvArgs(backendURL, tokenEnv, provider, deployID), image, sreRunShell("cloud-vm", interval, provider, deployID))
+  - [ sh, -lc, 'docker pull %s' ]
+  - [ sh, -lc, 'docker rm -f %s 2>/dev/null || true' ]
+  - [ sh, -lc, 'docker run -d --name %s --restart unless-stopped %s %s %s' ]
+`, image, name, name, sreDockerEnvArgs(backendURL, tokenEnv, provider, deployID), image, sreRunShell("cloud-vm", interval, provider, deployID))
 	return InstallPlan{Target: "cloud-vm", Summary: "Run Clanker SRE on a minimal VM in a user-owned provider", Available: true, Warnings: []string{"cloud-vm target generates bootstrap assets only; provision the VM with your chosen provider"}, Commands: []string{"use clanker-sre-cloud-init.yaml as cloud-init user data on a small VM"}, Files: []InstallFile{{Path: "clanker-sre-cloud-init.yaml", Mode: "0644", Content: cloudInit}}, NextSteps: []string{"create the smallest suitable VM", "attach cloud-init user data", "verify heartbeat in Cerebro"}, Discovery: discovery}
+}
+
+func awsCloudVMPlan(discovery Discovery, image string, name string, backendURL string, tokenEnv string, provider string, deployID string, interval time.Duration) InstallPlan {
+	if strings.TrimSpace(provider) == "" {
+		provider = "aws"
+	}
+	warnings := []string{}
+	if backendURL == "" {
+		warnings = append(warnings, "no public Cerebro URL configured; AWS SRE needs the backend-managed relay URL or another public ingest URL")
+	}
+	policy := `{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ClankerSREReadOnlyInventory",
+      "Effect": "Allow",
+      "Action": [
+        "apigateway:GET",
+        "cloudtrail:LookupEvents",
+        "cloudwatch:Describe*",
+        "cloudwatch:Get*",
+        "cloudwatch:List*",
+        "dynamodb:Describe*",
+        "dynamodb:List*",
+        "ec2:Describe*",
+        "ecs:Describe*",
+        "ecs:List*",
+        "eks:Describe*",
+        "eks:List*",
+        "elasticache:Describe*",
+        "elasticache:List*",
+        "iam:GenerateCredentialReport",
+        "iam:Get*",
+        "iam:List*",
+        "lambda:Get*",
+        "lambda:List*",
+        "logs:Describe*",
+        "logs:FilterLogEvents",
+        "logs:Get*",
+        "logs:List*",
+        "rds:Describe*",
+        "rds:ListTagsForResource",
+        "resourcegroupstaggingapi:GetResources",
+        "route53:Get*",
+        "route53:List*",
+        "s3:GetBucketLocation",
+        "s3:GetBucketTagging",
+        "s3:ListAllMyBuckets",
+        "s3:ListBucket",
+        "sqs:Get*",
+        "sqs:List*",
+        "states:Describe*",
+        "states:List*",
+        "sts:GetCallerIdentity",
+        "tag:GetResources"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+`
+	userData := fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+
+export AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
+export AWS_DEFAULT_REGION="$AWS_REGION"
+export CLANKER_CEREBRO_URL=%q
+export %s="${%s:?set %s before rendering this user-data}"
+export CLANKER_SRE_PROVIDER=%q
+export CLANKER_SRE_DEPLOY_ID=%q
+
+install -d -m 0755 /opt/clanker-sre
+cat >/opt/clanker-sre/env <<EOF
+AWS_REGION=$AWS_REGION
+AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION
+CLANKER_CEREBRO_URL=$CLANKER_CEREBRO_URL
+%s=${%s}
+CLANKER_SRE_PROVIDER=$CLANKER_SRE_PROVIDER
+CLANKER_SRE_DEPLOY_ID=$CLANKER_SRE_DEPLOY_ID
+EOF
+chmod 0600 /opt/clanker-sre/env
+
+if command -v dnf >/dev/null 2>&1; then
+  dnf install -y docker
+  systemctl enable --now docker
+elif command -v apt-get >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y docker.io
+  systemctl enable --now docker
+else
+  echo "install docker manually on this image" >&2
+  exit 1
+fi
+
+docker pull %s
+docker rm -f %s 2>/dev/null || true
+docker run -d --name %s --restart unless-stopped --env-file /opt/clanker-sre/env %s %s
+`, backendURL, tokenEnv, tokenEnv, tokenEnv, "aws", deployID, tokenEnv, tokenEnv, image, name, name, image, sreRunShell("cloud-vm", interval, provider, deployID))
+	commands := []string{
+		"attach arn:aws:iam::aws:policy/ReadOnlyAccess to the clanker-sre-observer runtime role for broad AWS read coverage",
+		"aws iam create-policy --policy-name clanker-sre-observer-collector-extras --policy-document file://aws-sre-readonly-policy.json || true",
+		"create or reuse an EC2 instance profile/role, attach ReadOnlyAccess plus the collector extras policy, then launch a small VM with aws-sre-user-data.sh rendered with env vars",
+	}
+	return InstallPlan{Target: "aws", Summary: "Deploy Clanker SRE to AWS on a read-only EC2 observer VM", Available: true, Warnings: warnings, Commands: commands, Files: []InstallFile{{Path: "aws-sre-readonly-policy.json", Mode: "0644", Content: policy}, {Path: "aws-sre-user-data.sh", Mode: "0755", Content: userData}}, NextSteps: []string{"ensure CLANKER_CEREBRO_URL points at the backend-managed AWS relay or another public ingest URL", "attach AWS managed ReadOnlyAccess and the collector extras policy to the VM instance profile", "launch the VM with rendered aws-sre-user-data.sh", "confirm a heartbeat for the deploy ID in Cerebro"}, Discovery: discovery}
+}
+
+func gcpCloudVMPlan(discovery Discovery, image string, name string, backendURL string, tokenEnv string, provider string, deployID string, interval time.Duration) InstallPlan {
+	if strings.TrimSpace(provider) == "" {
+		provider = "gcp"
+	}
+	warnings := []string{}
+	if backendURL == "" {
+		warnings = append(warnings, "no public Cerebro URL configured; GCP SRE needs the backend-managed relay URL or another public ingest URL")
+	}
+	startup := fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_ID="${GOOGLE_CLOUD_PROJECT:-${GCLOUD_PROJECT:-}}"
+if [ -z "$PROJECT_ID" ]; then
+  PROJECT_ID="$(curl -fsS -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/project/project-id || true)"
+fi
+if [ -z "$PROJECT_ID" ]; then
+  echo "GOOGLE_CLOUD_PROJECT is required" >&2
+  exit 1
+fi
+
+export GOOGLE_CLOUD_PROJECT="$PROJECT_ID"
+export GCLOUD_PROJECT="$PROJECT_ID"
+export CLOUDSDK_CORE_PROJECT="$PROJECT_ID"
+export CLANKER_CEREBRO_URL=%q
+export %s="${%s:?set %s before rendering this startup script}"
+export CLANKER_SRE_PROVIDER=%q
+export CLANKER_SRE_DEPLOY_ID=%q
+
+install -d -m 0755 /opt/clanker-sre
+cat >/opt/clanker-sre/env <<EOF
+GOOGLE_CLOUD_PROJECT=$GOOGLE_CLOUD_PROJECT
+GCLOUD_PROJECT=$GCLOUD_PROJECT
+CLOUDSDK_CORE_PROJECT=$CLOUDSDK_CORE_PROJECT
+CLANKER_CEREBRO_URL=$CLANKER_CEREBRO_URL
+%s=${%s}
+CLANKER_SRE_PROVIDER=$CLANKER_SRE_PROVIDER
+CLANKER_SRE_DEPLOY_ID=$CLANKER_SRE_DEPLOY_ID
+EOF
+chmod 0600 /opt/clanker-sre/env
+
+apt-get update
+apt-get install -y docker.io
+systemctl enable --now docker
+
+docker pull %s
+docker rm -f %s 2>/dev/null || true
+docker run -d --name %s --restart unless-stopped --env-file /opt/clanker-sre/env %s %s
+`, backendURL, tokenEnv, tokenEnv, tokenEnv, "gcp", deployID, tokenEnv, tokenEnv, image, name, name, image, sreRunShell("cloud-vm", interval, provider, deployID))
+	iam := `roles/viewer
+roles/monitoring.viewer
+roles/logging.viewer
+roles/errorreporting.viewer
+roles/cloudasset.viewer
+roles/bigquery.metadataViewer
+roles/browser
+`
+	commands := []string{
+		"gcloud iam service-accounts create clanker-sre-observer --display-name='Clanker SRE Observer' || true",
+		"grant the roles listed in gcp-sre-project-roles.txt to the service account at project scope",
+		"create a small Compute Engine VM with that service account and gcp-sre-startup.sh as metadata startup-script",
+	}
+	return InstallPlan{Target: "gcp", Summary: "Deploy Clanker SRE to GCP on a read-only Compute Engine observer VM", Available: true, Warnings: warnings, Commands: commands, Files: []InstallFile{{Path: "gcp-sre-project-roles.txt", Mode: "0644", Content: iam}, {Path: "gcp-sre-startup.sh", Mode: "0755", Content: startup}}, NextSteps: []string{"ensure CLANKER_CEREBRO_URL points at the backend-managed GCP relay or another public ingest URL", "grant the listed read-only roles to the VM service account", "launch the VM with rendered gcp-sre-startup.sh", "confirm a heartbeat for the deploy ID in Cerebro"}, Discovery: discovery}
 }
 
 func normalizeTarget(value string) string {

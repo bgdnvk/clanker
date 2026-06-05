@@ -15,12 +15,21 @@ import (
 
 var codexResponsesURL = "https://chatgpt.com/backend-api/codex/responses"
 
+const defaultCodexInstructions = "You are Clanker, an infrastructure and software engineering assistant. Follow the user's prompt exactly. When the prompt requests JSON, return only valid JSON with no markdown."
+
 // CodexRequest is the Responses API request format.
 type CodexRequest struct {
 	Model        string    `json:"model"`
 	Instructions string    `json:"instructions,omitempty"`
 	Input        []Message `json:"input"`
 	Stream       bool      `json:"stream"`
+}
+
+func codexInstructions(systemPrompt string) string {
+	if trimmed := strings.TrimSpace(systemPrompt); trimmed != "" {
+		return sanitizeASCII(trimmed)
+	}
+	return defaultCodexInstructions
 }
 
 // AskCodex sends a non-streaming request to the Codex Responses API
@@ -46,9 +55,10 @@ func (c *Client) AskCodex(ctx context.Context, prompt string) (string, error) {
 
 func askCodexWithToken(ctx context.Context, oauthToken, model, prompt string) (string, error) {
 	codexReq := CodexRequest{
-		Model:  model,
-		Input:  []Message{{Role: "user", Content: sanitizeASCII(prompt)}},
-		Stream: false,
+		Model:        model,
+		Instructions: codexInstructions(""),
+		Input:        []Message{{Role: "user", Content: sanitizeASCII(prompt)}},
+		Stream:       false,
 	}
 
 	body, err := json.Marshal(codexReq)
@@ -127,9 +137,10 @@ func AskCodexStream(ctx context.Context, oauthToken, model, prompt string) (<-ch
 		defer close(errCh)
 
 		codexReq := CodexRequest{
-			Model:  model,
-			Input:  []Message{{Role: "user", Content: prompt}},
-			Stream: true,
+			Model:        model,
+			Instructions: codexInstructions(""),
+			Input:        []Message{{Role: "user", Content: sanitizeASCII(prompt)}},
+			Stream:       true,
 		}
 
 		body, err := json.Marshal(codexReq)
@@ -224,11 +235,9 @@ func (c *Client) askCodexWithHistory(ctx context.Context, conv *ConversationCont
 	}
 
 	codexReq := CodexRequest{
-		Model:  model,
-		Stream: false,
-	}
-	if conv.SystemPrompt != "" {
-		codexReq.Instructions = conv.SystemPrompt
+		Model:        model,
+		Instructions: codexInstructions(conv.SystemPrompt),
+		Stream:       false,
 	}
 	codexReq.Input = make([]Message, len(conv.Messages))
 	for i, m := range conv.Messages {
