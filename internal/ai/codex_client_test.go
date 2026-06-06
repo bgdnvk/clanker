@@ -3,12 +3,49 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+func decodeCodexRequest(t *testing.T, r *http.Request) CodexRequest {
+	t.Helper()
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Fatalf("read request body: %v", err)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("decode raw request body: %v", err)
+	}
+	rawStore, ok := raw["store"]
+	if !ok {
+		t.Fatal("expected codex request to include store=false")
+	}
+	store, ok := rawStore.(bool)
+	if !ok || store {
+		t.Fatalf("expected store=false, got %#v", rawStore)
+	}
+	rawStream, ok := raw["stream"]
+	if !ok {
+		t.Fatal("expected codex request to include stream=true")
+	}
+	stream, ok := rawStream.(bool)
+	if !ok || !stream {
+		t.Fatalf("expected stream=true, got %#v", rawStream)
+	}
+
+	var codexReq CodexRequest
+	if err := json.Unmarshal(body, &codexReq); err != nil {
+		t.Fatalf("decode request body: %v", err)
+	}
+	return codexReq
+}
 
 func TestIsOpenAIOAuthActive_EnvVar(t *testing.T) {
 	// Point HOME to a temp dir so no real token file is found.
@@ -36,10 +73,7 @@ func TestAskCodexWithToken(t *testing.T) {
 		if auth != "Bearer test_token" {
 			t.Errorf("unexpected Authorization header: %q", auth)
 		}
-		var codexReq CodexRequest
-		if err := json.NewDecoder(r.Body).Decode(&codexReq); err != nil {
-			t.Errorf("decode request body: %v", err)
-		}
+		codexReq := decodeCodexRequest(t, r)
 		if strings.TrimSpace(codexReq.Instructions) == "" {
 			t.Error("expected codex instructions to be populated")
 		}
@@ -47,21 +81,10 @@ func TestAskCodexWithToken(t *testing.T) {
 			t.Errorf("unexpected instructions: %q", codexReq.Instructions)
 		}
 
-		resp := map[string]interface{}{
-			"output": []map[string]interface{}{
-				{
-					"type": "message",
-					"content": []map[string]interface{}{
-						{
-							"type": "output_text",
-							"text": "hello world",
-						},
-					},
-				},
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello \"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"world\"}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer mockServer.Close()
 
@@ -84,10 +107,7 @@ func TestAskCodexStreamSendsInstructions(t *testing.T) {
 		if auth := r.Header.Get("Authorization"); auth != "Bearer stream_token" {
 			t.Errorf("unexpected Authorization header: %q", auth)
 		}
-		var codexReq CodexRequest
-		if err := json.NewDecoder(r.Body).Decode(&codexReq); err != nil {
-			t.Errorf("decode request body: %v", err)
-		}
+		codexReq := decodeCodexRequest(t, r)
 		if strings.TrimSpace(codexReq.Instructions) == "" {
 			t.Error("expected codex stream instructions to be populated")
 		}
@@ -114,6 +134,47 @@ func TestAskCodexStreamSendsInstructions(t *testing.T) {
 	}
 	if result.String() != "hello" {
 		t.Fatalf("expected streamed text %q, got %q", "hello", result.String())
+	}
+}
+
+func TestAskCodexWithHistorySendsStoreFalseAndStreams(t *testing.T) {
+	t.Setenv("OPENAI_OAUTH_TOKEN", "history_token")
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth != "Bearer history_token" {
+			t.Errorf("unexpected Authorization header: %q", auth)
+		}
+		codexReq := decodeCodexRequest(t, r)
+		if codexReq.Instructions != "Be precise." {
+			t.Errorf("unexpected instructions: %q", codexReq.Instructions)
+		}
+		if len(codexReq.Input) != 1 || codexReq.Input[0].Content != "say hello" {
+			t.Fatalf("unexpected input: %#v", codexReq.Input)
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"history \"}\n\n"))
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer mockServer.Close()
+
+	origURL := codexResponsesURL
+	codexResponsesURL = mockServer.URL
+	t.Cleanup(func() { codexResponsesURL = origURL })
+
+	client := &Client{aiProfile: "openai"}
+	result, err := client.askCodexWithHistory(context.Background(), &ConversationContext{
+		SystemPrompt: "  Be precise.  ",
+		Messages: []Message{
+			{Role: "user", Content: "say hello"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("askCodexWithHistory failed: %v", err)
+	}
+	if result != "history hello" {
+		t.Errorf("expected %q, got %q", "history hello", result)
 	}
 }
 

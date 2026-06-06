@@ -351,12 +351,19 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		}
 	}
 
+	sreObserverPlan := isSREObserverPlan(plan)
+
 	// Import user-provided env vars (from deploy UI) into bindings via CLANKER_USER_ENV_NAMES manifest
 	importUserProvidedEnvVars(bindings)
 
-	// Import secret-like env vars into bindings so EC2 user-data injection can pass them
-	// into `docker run` via ENV_*. (clanker-cloud passes user-provided env vars to the CLI process.)
-	importSecretLikeEnvVarsIntoBindings(bindings)
+	if sreObserverPlan {
+		importSREEnvVarsIntoBindings(bindings)
+		pruneNonSREEnvBindings(bindings)
+	} else {
+		// Import secret-like env vars into bindings so EC2 user-data injection can pass them
+		// into `docker run` via ENV_*. (clanker-cloud passes user-provided env vars to the CLI process.)
+		importSecretLikeEnvVarsIntoBindings(bindings)
+	}
 
 	if !opts.DisableDurableCheckpoint {
 		persisted, loadErr := loadDurableCheckpoint(plan, opts)
@@ -919,8 +926,143 @@ func importSecretLikeEnvVarsIntoBindings(bindings map[string]string) {
 	}
 }
 
+var sreRuntimeEnvNames = map[string]bool{
+	"CLANKER_CEREBRO_URL":                    true,
+	"CLANKER_CEREBRO_INGEST_TOKEN":           true,
+	"CLANKER_SRE_DEPLOY_ID":                  true,
+	"CLANKER_SRE_AGENT_ID":                   true,
+	"CLANKER_SRE_PROVIDER":                   true,
+	"CLANKER_SRE_RUNTIME_TARGET":             true,
+	"CLANKER_SRE_INTERVAL":                   true,
+	"CLANKER_SRE_INTERVAL_SECONDS":           true,
+	"CLANKER_SRE_EXPECT_HEARTBEAT":           true,
+	"CLANKER_SRE_OBSERVER_IDENTITY_REQUIRED": true,
+	"CLANKER_SRE_PERMISSION_MODE":            true,
+	"CLANKER_SRE_SECRET_STORE":               true,
+}
+
+func importSREEnvVarsIntoBindings(bindings map[string]string) {
+	if bindings == nil {
+		return
+	}
+	for name := range sreRuntimeEnvNames {
+		val := strings.TrimSpace(os.Getenv(name))
+		if val == "" {
+			continue
+		}
+		if strings.TrimSpace(bindings[name]) == "" {
+			bindings[name] = val
+		}
+		envKey := "ENV_" + name
+		if strings.TrimSpace(bindings[envKey]) == "" {
+			bindings[envKey] = val
+		}
+	}
+}
+
+func pruneNonSREEnvBindings(bindings map[string]string) {
+	if bindings == nil {
+		return
+	}
+	for key := range bindings {
+		upper := strings.ToUpper(strings.TrimSpace(key))
+		if upper == "" {
+			continue
+		}
+		if strings.HasPrefix(upper, "ENV_") && !isSRERuntimeEnvName(upper) {
+			delete(bindings, key)
+			continue
+		}
+		if isSensitiveEnvName(upper) && !isSRERuntimeEnvName(upper) {
+			delete(bindings, key)
+		}
+	}
+}
+
+func isSRERuntimeEnvName(name string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(name))
+	upper = strings.TrimPrefix(upper, "ENV_")
+	return sreRuntimeEnvNames[upper]
+}
+
+func isSensitiveEnvName(name string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(name))
+	upper = strings.TrimPrefix(upper, "ENV_")
+	if upper == "" {
+		return false
+	}
+	return strings.Contains(upper, "TOKEN") ||
+		strings.Contains(upper, "KEY") ||
+		strings.Contains(upper, "SECRET") ||
+		strings.Contains(upper, "PASSWORD") ||
+		strings.Contains(upper, "CREDENTIAL") ||
+		strings.Contains(upper, "PRIVATE")
+}
+
+func isSREObserverPlan(plan *Plan) bool {
+	if plan == nil {
+		return false
+	}
+	if containsSREObserverSignal(plan.Question) || containsSREObserverSignal(plan.Summary) || containsSREObserverSignal(strings.Join(plan.Notes, " ")) {
+		return true
+	}
+	for _, cmd := range plan.Commands {
+		if containsSREObserverSignal(cmd.Reason) || containsSREObserverSignal(strings.Join(cmd.Args, " ")) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSREObserverSignal(s string) bool {
+	lower := strings.ToLower(strings.TrimSpace(s))
+	if lower == "" {
+		return false
+	}
+	return strings.Contains(lower, "clanker sre run") ||
+		strings.Contains(lower, "one-click sre deploy") ||
+		strings.Contains(lower, "clanker_sre_") ||
+		strings.Contains(lower, "clanker-sre") ||
+		strings.Contains(lower, "clanker sre observer")
+}
+
+func bindingsIndicateSREObserver(bindings map[string]string) bool {
+	if bindings == nil {
+		return false
+	}
+	for _, key := range []string{"CLANKER_SRE_DEPLOY_ID", "ENV_CLANKER_SRE_DEPLOY_ID", "CLANKER_CEREBRO_INGEST_TOKEN", "ENV_CLANKER_CEREBRO_INGEST_TOKEN"} {
+		if strings.TrimSpace(bindings[key]) != "" {
+			return true
+		}
+	}
+	return containsSREObserverSignal(bindings["PLAN_QUESTION"])
+}
+
+func questionOrBindingsIndicateSREObserver(question string, bindings map[string]string) bool {
+	return containsSREObserverSignal(question) || bindingsIndicateSREObserver(bindings)
+}
+
+func argsIndicateSREObserver(args []string) bool {
+	return containsSREObserverSignal(strings.Join(args, " "))
+}
+
+func sreDeployIDFromBindings(bindings map[string]string) string {
+	if bindings == nil {
+		return ""
+	}
+	for _, key := range []string{"CLANKER_SRE_DEPLOY_ID", "ENV_CLANKER_SRE_DEPLOY_ID"} {
+		if v := strings.TrimSpace(bindings[key]); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 func shouldAutoPrepareImage(args []string, question string, bindings map[string]string, opts ExecOptions) bool {
 	if len(args) < 2 || args[0] != "ec2" || args[1] != "run-instances" {
+		return false
+	}
+	if questionOrBindingsIndicateSREObserver(question, bindings) || argsIndicateSREObserver(args) {
 		return false
 	}
 	forceImageDeploy := false
@@ -2849,6 +2991,23 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 		}
 	}
 
+	if bindingsIndicateSREObserver(bindings) || argsIndicateSREObserver(args) {
+		trimmed := strings.TrimSpace(checkUserData)
+		if !userDataWasBase64 && looksLikeUserDataScript(trimmed) {
+			mimeWrapped := wrapUserDataInMIME(trimmed)
+			encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
+			newArgs := make([]string, len(args))
+			copy(newArgs, args)
+			if userDataIdx >= 0 {
+				newArgs[userDataIdx] = encoded
+			} else {
+				newArgs[userDataInlineIdx] = "--user-data=" + encoded
+			}
+			return newArgs
+		}
+		return args
+	}
+
 	isPlaceholder := strings.Contains(checkUserData, "<USER_DATA>") ||
 		strings.Contains(checkUserData, "$USER_DATA") ||
 		strings.Contains(checkUserData, "<user_data>") ||
@@ -3434,22 +3593,24 @@ func injectEnvVarsAsInstanceTags(args []string, bindings map[string]string) []st
 	// Collect ENV_ bindings that fit in tags (max 256 chars)
 	var envTags []map[string]string
 
-	// Add ImageUri tag if we have an image reference
-	if imageURI := strings.TrimSpace(bindings["IMAGE_URI"]); imageURI != "" && len(imageURI) <= 256 {
+	sreObserver := bindingsIndicateSREObserver(bindings) || argsIndicateSREObserver(args)
+
+	// Add ImageUri tag if we have an app image reference.
+	if imageURI := strings.TrimSpace(bindings["IMAGE_URI"]); !sreObserver && imageURI != "" && len(imageURI) <= 256 {
 		envTags = append(envTags, map[string]string{"Key": "ImageUri", "Value": imageURI})
 	}
 
 	// Add AppPort tag
-	if appPort := strings.TrimSpace(bindings["APP_PORT"]); appPort != "" {
+	if appPort := strings.TrimSpace(bindings["APP_PORT"]); !sreObserver && appPort != "" {
 		envTags = append(envTags, map[string]string{"Key": "AppPort", "Value": appPort})
-	} else if port := strings.TrimSpace(bindings["ENV_PORT"]); port != "" {
+	} else if port := strings.TrimSpace(bindings["ENV_PORT"]); !sreObserver && port != "" {
 		envTags = append(envTags, map[string]string{"Key": "AppPort", "Value": port})
 	}
 
 	// Add AppName tag from various sources
-	if appName := strings.TrimSpace(bindings["APP_NAME"]); appName != "" {
+	if appName := strings.TrimSpace(bindings["APP_NAME"]); !sreObserver && appName != "" {
 		envTags = append(envTags, map[string]string{"Key": "AppName", "Value": appName})
-	} else if ecrRepo := strings.TrimSpace(bindings["ECR_REPO"]); ecrRepo != "" {
+	} else if ecrRepo := strings.TrimSpace(bindings["ECR_REPO"]); !sreObserver && ecrRepo != "" {
 		envTags = append(envTags, map[string]string{"Key": "AppName", "Value": ecrRepo})
 	}
 
@@ -3461,12 +3622,17 @@ func injectEnvVarsAsInstanceTags(args []string, bindings map[string]string) []st
 		if strings.TrimSpace(value) == "" {
 			continue
 		}
+		envName := strings.TrimPrefix(key, "ENV_")
+		if isSensitiveEnvName(envName) {
+			continue
+		}
+		if sreObserver && strings.HasPrefix(strings.ToUpper(envName), "CLANKER_") {
+			continue
+		}
 		// Tag value limit is 256 chars
 		if len(value) > 256 {
 			continue
 		}
-		// With SSM as the primary encrypted channel for env vars, tags serve as a
-		// best-effort fallback. No longer filter out secret-patterned names here.
 		envTags = append(envTags, map[string]string{"Key": key, "Value": value})
 	}
 
@@ -3579,18 +3745,28 @@ func injectEnvVarsAsInstanceTags(args []string, bindings map[string]string) []st
 	return args
 }
 
-// storeEnvVarsInSSM stores all ENV_ bindings as SSM SecureString parameters
-// under /clanker/<appName>/ so the bootstrap and remediation scripts can read them.
-// This supplements instance tags (which have a 256-char value limit).
+// storeEnvVarsInSSM stores ENV_ bindings as SSM SecureString parameters.
+// App plans use /clanker/<appName>/; SRE observer plans use /clanker/sre/<deployID>/.
+// This is the encrypted channel for secret runtime config.
 func storeEnvVarsInSSM(ctx context.Context, bindings map[string]string, opts ExecOptions) {
-	appName := strings.TrimSpace(bindings["APP_NAME"])
-	if appName == "" {
-		appName = strings.TrimSpace(bindings["ECR_REPO"])
+	sreObserver := bindingsIndicateSREObserver(bindings)
+	ssmPath := ""
+	if sreObserver {
+		deployID := sanitizeSSMPathSegment(sreDeployIDFromBindings(bindings))
+		if deployID == "" {
+			deployID = "observer"
+		}
+		ssmPath = "/clanker/sre/" + deployID + "/"
+	} else {
+		appName := strings.TrimSpace(bindings["APP_NAME"])
+		if appName == "" {
+			appName = strings.TrimSpace(bindings["ECR_REPO"])
+		}
+		if appName == "" {
+			appName = "app"
+		}
+		ssmPath = "/clanker/" + sanitizeSSMPathSegment(appName) + "/"
 	}
-	if appName == "" {
-		appName = "app"
-	}
-	ssmPath := "/clanker/" + appName + "/"
 
 	for key, val := range bindings {
 		if !strings.HasPrefix(key, "ENV_") {
@@ -3600,6 +3776,9 @@ func storeEnvVarsInSSM(ctx context.Context, bindings map[string]string, opts Exe
 			continue
 		}
 		envName := strings.TrimPrefix(key, "ENV_")
+		if sreObserver && !isSRERuntimeEnvName(envName) {
+			continue
+		}
 		paramName := ssmPath + envName
 
 		args := []string{
@@ -3618,6 +3797,29 @@ func storeEnvVarsInSSM(ctx context.Context, bindings map[string]string, opts Exe
 			_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to store env var %s in SSM: %v\n", envName, err)
 		}
 	}
+}
+
+func sanitizeSSMPathSegment(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range v {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return strings.Trim(b.String(), "-._")
 }
 
 func isUserDataPlaceholderValue(v string) bool {
