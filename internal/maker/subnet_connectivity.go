@@ -164,6 +164,7 @@ func ValidateArgsNoConsecutiveFlags(args []string) error {
 		"--image-id":              true,
 		"--instance-type":         true,
 		"--key-name":              true,
+		"--metadata-options":      true,
 		"--block-device-mappings": true,
 		"--tag-specifications":    true,
 	}

@@ -511,6 +511,8 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 			}
 		}
 
+		args = normalizeRunInstancesSubnetFlag(args)
+
 		// Handle EC2 user-data generation for run-instances
 		args = maybeGenerateEC2UserData(args, bindings, opts)
 
@@ -520,6 +522,7 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		// For EC2 run-instances, store env vars in SSM and check SSM connectivity
 		if len(args) >= 2 && args[0] == "ec2" && args[1] == "run-instances" {
 			storeEnvVarsInSSM(ctx, bindings, opts)
+			ensureSREObserverRuntimeSSMReadPolicy(ctx, args, bindings, opts)
 			args, _ = RemediateRunInstancesForSSM(ctx, opts, args, opts.Writer)
 		}
 
@@ -528,8 +531,38 @@ func ExecutePlan(ctx context.Context, plan *Plan, opts ExecOptions) error {
 		}
 
 		args = sanitizeCommandArgsForExecution(args, bindings)
+		if len(args) >= 2 && args[0] == "ec2" && args[1] == "run-instances" {
+			if err := ValidateArgsNoConsecutiveFlags(args); err != nil {
+				return fmt.Errorf("command %d prepare failed: %w", idx+1, err)
+			}
+		}
 
-		if unresolved := findUnresolvedExecutionTokens(args); len(unresolved) > 0 {
+		unresolved := findUnresolvedExecutionTokens(args)
+		if shouldSkipUnresolvedOptionalCleanupCommand(args, unresolved) {
+			target := strings.Join(unresolved, ", ")
+			if strings.TrimSpace(target) == "" {
+				target = strings.TrimSpace(flagValue(args, "--uuid"))
+			}
+			if strings.TrimSpace(target) == "" {
+				target = "--uuid"
+			}
+			reason := fmt.Sprintf("optional cleanup target could not be resolved (%s)", target)
+			_, _ = fmt.Fprintf(opts.Writer, "[maker] skipping %d/%d: %s\n", idx+1, len(plan.Commands), reason)
+			bindings["CHECKPOINT_LAST_SUCCESS_INDEX"] = strconv.Itoa(idx + 1)
+			bindings["CHECKPOINT_LAST_FAILURE_INDEX"] = ""
+			if planLogger != nil {
+				planLogger.RecordCommandSkipped(idx, args0(args), args1(args), reason)
+				planLogger.UpdateBindings(bindings)
+			}
+			if !opts.DisableDurableCheckpoint {
+				if persistErr := persistDurableCheckpoint(plan, opts, bindings); persistErr != nil {
+					_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] warning: failed to persist durable checkpoint: %v\n", persistErr)
+				}
+			}
+			_, _ = fmt.Fprintf(opts.Writer, "[maker][checkpoint] success command %d/%d\n", idx+1, len(plan.Commands))
+			continue
+		}
+		if len(unresolved) > 0 {
 			_ = maybeSwarmDiagnose(ctx, opts, "preflight: unresolved placeholders", args, strings.Join(unresolved, ", "), bindings)
 			return fmt.Errorf("command %d has unresolved placeholders: %s", idx+1, strings.Join(unresolved, ", "))
 		}
@@ -1519,7 +1552,9 @@ func learnPlanBindingsFromProduces(produces map[string]string, output string, bi
 			}
 			// If path is $.Output or similar simple path, use raw output
 			if path == "$.Output" || path == "$" || path == "." {
-				bindings[key] = output
+				if value := compatiblePlainTextBindingValue(key, output); value != "" {
+					bindings[key] = value
+				}
 			}
 			// Handle AMI_ID from plain text SSM output
 			if key == "AMI_ID" && strings.HasPrefix(output, "ami-") {
@@ -1543,6 +1578,46 @@ func learnPlanBindingsFromProduces(produces map[string]string, output string, bi
 			bindings[key] = v
 		}
 	}
+}
+
+func compatiblePlainTextBindingValue(key, output string) string {
+	key = strings.TrimSpace(key)
+	output = strings.TrimSpace(output)
+	if key == "" || output == "" {
+		return ""
+	}
+	fields := strings.Fields(output)
+	candidates := make([]string, 0, len(fields)+1)
+	if !plainTextBindingPrefersSingleToken(key) {
+		candidates = append(candidates, output)
+	}
+	for _, field := range fields {
+		field = strings.Trim(field, "\"'`")
+		if field != "" {
+			candidates = append(candidates, field)
+		}
+	}
+	if len(candidates) == 0 {
+		candidates = append(candidates, output)
+	}
+	for _, candidate := range candidates {
+		if bindingLooksCompatible(key, candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func plainTextBindingPrefersSingleToken(key string) bool {
+	key = strings.ToUpper(strings.TrimSpace(key))
+	return key == "AMI_ID" ||
+		key == "INSTANCE_ID" ||
+		strings.HasSuffix(key, "_INSTANCE_ID") ||
+		key == "SG_ID" ||
+		(strings.Contains(key, "SG") && strings.HasSuffix(key, "_ID")) ||
+		(strings.Contains(key, "SUBNET") && strings.HasSuffix(key, "_ID")) ||
+		(strings.Contains(key, "VPC") && strings.HasSuffix(key, "_ID")) ||
+		strings.HasSuffix(key, "_ARN")
 }
 
 func jsonPathString(obj any, path string) (string, bool) {
@@ -1874,6 +1949,12 @@ func learnPlanBindings(args []string, output string, bindings map[string]string,
 		// SSM with --output text returns just the value, e.g. "ami-0532be01f26a3de55"
 		if strings.HasPrefix(output, "ami-") && !strings.Contains(output, "{") {
 			bindings["AMI_ID"] = output
+			return
+		}
+	}
+	if service == "ec2" && op == "run-instances" && !strings.Contains(output, "{") {
+		if instanceID := compatiblePlainTextBindingValue("INSTANCE_ID", output); instanceID != "" {
+			bindings["INSTANCE_ID"] = instanceID
 			return
 		}
 	}
@@ -2880,6 +2961,228 @@ exit 1
 	return script
 }
 
+type ec2UserDataArg struct {
+	hasFlag        bool
+	hasUsableValue bool
+	flagIdx        int
+	valueIdx       int
+	inlineIdx      int
+	value          string
+}
+
+func findEC2UserDataArg(args []string) ec2UserDataArg {
+	out := ec2UserDataArg{flagIdx: -1, valueIdx: -1, inlineIdx: -1}
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		if arg == "--user-data" {
+			out.hasFlag = true
+			out.flagIdx = i
+			if i+1 >= len(args) {
+				return out
+			}
+			next := args[i+1]
+			trimmedNext := strings.TrimSpace(next)
+			if strings.HasPrefix(trimmedNext, "--") {
+				return out
+			}
+			out.valueIdx = i + 1
+			out.value = next
+			out.hasUsableValue = trimmedNext != ""
+			return out
+		}
+		if strings.HasPrefix(arg, "--user-data=") {
+			out.hasFlag = true
+			out.inlineIdx = i
+			out.value = strings.TrimPrefix(arg, "--user-data=")
+			trimmed := strings.TrimSpace(out.value)
+			out.hasUsableValue = trimmed != "" && !strings.HasPrefix(trimmed, "--")
+			return out
+		}
+	}
+	return out
+}
+
+func setEC2UserDataArg(args []string, loc ec2UserDataArg, encoded string) []string {
+	if loc.inlineIdx >= 0 {
+		newArgs := make([]string, len(args))
+		copy(newArgs, args)
+		newArgs[loc.inlineIdx] = "--user-data=" + encoded
+		return newArgs
+	}
+	if loc.valueIdx >= 0 {
+		newArgs := make([]string, len(args))
+		copy(newArgs, args)
+		newArgs[loc.valueIdx] = encoded
+		return newArgs
+	}
+	insertIdx := len(args)
+	if loc.flagIdx >= 0 {
+		insertIdx = loc.flagIdx + 1
+	} else {
+		for i, arg := range args {
+			switch strings.TrimSpace(arg) {
+			case "--metadata-options", "--instance-initiated-shutdown-behavior", "--tag-specifications", "--query", "--output", "--profile", "--region", "--no-cli-pager":
+				insertIdx = i
+				break
+			}
+			if insertIdx == i {
+				break
+			}
+		}
+	}
+	newArgs := make([]string, 0, len(args)+2)
+	if loc.flagIdx >= 0 {
+		newArgs = append(newArgs, args[:insertIdx]...)
+		newArgs = append(newArgs, encoded)
+		newArgs = append(newArgs, args[insertIdx:]...)
+		return newArgs
+	}
+	newArgs = append(newArgs, args[:insertIdx]...)
+	newArgs = append(newArgs, "--user-data", encoded)
+	newArgs = append(newArgs, args[insertIdx:]...)
+	return newArgs
+}
+
+func generateSREObserverEC2UserDataScript(bindings map[string]string, opts ExecOptions) string {
+	region := strings.TrimSpace(opts.Region)
+	if region == "" {
+		region = strings.TrimSpace(bindings["REGION"])
+	}
+	if region == "" {
+		region = strings.TrimSpace(bindings["AWS_REGION"])
+	}
+	deployID := strings.TrimSpace(sreDeployIDFromBindings(bindings))
+	if deployID == "" {
+		deployID = "observer"
+	}
+	provider := strings.TrimSpace(bindings["CLANKER_SRE_PROVIDER"])
+	if provider == "" {
+		provider = strings.TrimSpace(bindings["ENV_CLANKER_SRE_PROVIDER"])
+	}
+	if provider == "" {
+		provider = "aws"
+	}
+	target := strings.TrimSpace(bindings["CLANKER_SRE_RUNTIME_TARGET"])
+	if target == "" {
+		target = strings.TrimSpace(bindings["ENV_CLANKER_SRE_RUNTIME_TARGET"])
+	}
+	if target == "" {
+		target = "cloud-vm"
+	}
+	interval := strings.TrimSpace(bindings["CLANKER_SRE_INTERVAL"])
+	if interval == "" {
+		interval = strings.TrimSpace(bindings["ENV_CLANKER_SRE_INTERVAL"])
+	}
+	if interval == "" {
+		interval = "60s"
+	}
+	ssmPath := "/clanker/sre/" + sanitizeSSMPathSegment(deployID) + "/"
+	keys := []string{
+		"CLANKER_CEREBRO_URL",
+		"CLANKER_CEREBRO_INGEST_TOKEN",
+		"CLANKER_SRE_DEPLOY_ID",
+		"CLANKER_SRE_AGENT_ID",
+		"CLANKER_SRE_PROVIDER",
+		"CLANKER_SRE_RUNTIME_TARGET",
+		"CLANKER_SRE_INTERVAL",
+		"CLANKER_SRE_EXPECT_HEARTBEAT",
+		"CLANKER_SRE_OBSERVER_IDENTITY_REQUIRED",
+		"CLANKER_SRE_PERMISSION_MODE",
+		"CLANKER_SRE_SECRET_STORE",
+	}
+
+	var keyLines strings.Builder
+	for _, key := range keys {
+		keyLines.WriteString("\tfetch_ssm_env " + shellSingleQuote(key) + "\n")
+	}
+
+	return fmt.Sprintf(`#!/bin/bash
+set -e
+exec > /var/log/clanker-sre-user-data.log 2>&1
+
+REGION=%s
+DEPLOY_ID=%s
+PROVIDER=%s
+TARGET=%s
+INTERVAL=%s
+SSM_PATH=%s
+ENV_FILE=/opt/clanker-sre/env
+IMAGE=ghcr.io/bgdnvk/clanker:latest
+NAME=clanker-sre
+
+echo "[clanker-sre] preparing observer host"
+. /etc/os-release || true
+
+if [ -z "$REGION" ]; then
+	IMDS_TOKEN="$(curl -fsS -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 300' 2>/dev/null || true)"
+	if [ -n "$IMDS_TOKEN" ]; then
+		REGION="$(curl -fsS -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" 'http://169.254.169.254/latest/meta-data/placement/region' 2>/dev/null || true)"
+	fi
+fi
+
+if ! command -v aws >/dev/null 2>&1; then
+	if [ "${ID:-}" = "amzn" ]; then
+		if command -v dnf >/dev/null 2>&1; then dnf install -y awscli; else yum install -y awscli; fi
+	elif command -v apt-get >/dev/null 2>&1; then
+		apt-get update -y && apt-get install -y awscli
+	fi
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+	if [ "${ID:-}" = "amzn" ]; then
+		if command -v dnf >/dev/null 2>&1; then dnf install -y docker; else yum install -y docker; fi
+	elif command -v apt-get >/dev/null 2>&1; then
+		apt-get update -y && apt-get install -y docker.io
+	fi
+fi
+
+systemctl enable docker || true
+systemctl start docker || true
+
+install -d -m 0755 /opt/clanker-sre
+: > "$ENV_FILE"
+chmod 0600 "$ENV_FILE"
+
+write_env() {
+	name="$1"
+	value="$2"
+	if [ -z "$name" ] || [ -z "$value" ]; then return 0; fi
+	value="$(printf '%%s' "$value" | tr '\n' ' ')"
+	printf '%%s=%%s\n' "$name" "$value" >> "$ENV_FILE"
+}
+
+fetch_ssm_env() {
+	name="$1"
+	if [ -z "$REGION" ]; then return 0; fi
+	value="$(aws ssm get-parameter --region "$REGION" --name "${SSM_PATH}${name}" --with-decryption --query Parameter.Value --output text 2>/dev/null || true)"
+	if [ -n "$value" ] && [ "$value" != "None" ]; then
+		write_env "$name" "$value"
+	fi
+}
+
+write_env CLANKER_SRE_DEPLOY_ID "$DEPLOY_ID"
+write_env CLANKER_SRE_PROVIDER "$PROVIDER"
+write_env CLANKER_SRE_RUNTIME_TARGET "$TARGET"
+write_env CLANKER_SRE_INTERVAL "$INTERVAL"
+write_env CLANKER_SRE_SECRET_STORE "ssm"
+
+if command -v aws >/dev/null 2>&1; then
+%s
+fi
+
+echo "[clanker-sre] starting observer container"
+docker pull "$IMAGE"
+docker rm -f "$NAME" 2>/dev/null || true
+docker run -d --name "$NAME" --restart unless-stopped --env-file "$ENV_FILE" "$IMAGE" sre run --sre --target "$TARGET" --provider "$PROVIDER" --deploy-id "$DEPLOY_ID" --interval "$INTERVAL"
+
+echo "[clanker-sre] observer started"
+`, shellSingleQuote(region), shellSingleQuote(deployID), shellSingleQuote(provider), shellSingleQuote(target), shellSingleQuote(interval), shellSingleQuote(ssmPath), keyLines.String())
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
+
 // maybeGenerateEC2UserData handles user-data generation for EC2 run-instances commands.
 // If the user-data argument contains a placeholder (like <USER_DATA> or $USER_DATA),
 // it generates a proper startup script based on the available bindings.
@@ -2889,29 +3192,13 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 		return args
 	}
 
-	// Find the --user-data argument (supports both "--user-data <v>" and "--user-data=<v>")
-	userDataIdx := -1
-	userDataInlineIdx := -1
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--user-data" && i+1 < len(args) {
-			userDataIdx = i + 1
-			break
-		}
-		if strings.HasPrefix(strings.TrimSpace(args[i]), "--user-data=") {
-			userDataInlineIdx = i
-			break
-		}
-	}
-	if userDataIdx < 0 && userDataInlineIdx < 0 {
+	userDataArg := findEC2UserDataArg(args)
+	sreObserver := bindingsIndicateSREObserver(bindings) || argsIndicateSREObserver(args)
+	if !userDataArg.hasFlag && !sreObserver {
 		return args
 	}
 
-	currentUserData := ""
-	if userDataIdx >= 0 {
-		currentUserData = args[userDataIdx]
-	} else {
-		currentUserData = strings.TrimPrefix(strings.TrimSpace(args[userDataInlineIdx]), "--user-data=")
-	}
+	currentUserData := userDataArg.value
 
 	decodeForInspection := func(s string) (string, bool) {
 		s = strings.TrimSpace(s)
@@ -2991,19 +3278,20 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 		}
 	}
 
-	if bindingsIndicateSREObserver(bindings) || argsIndicateSREObserver(args) {
+	if sreObserver {
 		trimmed := strings.TrimSpace(checkUserData)
+		lowerTrimmed := strings.ToLower(trimmed)
+		missingSREStart := !strings.Contains(lowerTrimmed, "docker run") && !strings.Contains(lowerTrimmed, "sre run")
+		if trimmed == "" || isUserDataPlaceholderValue(trimmed) || !userDataArg.hasUsableValue || missingSREStart {
+			script := generateSREObserverEC2UserDataScript(bindings, opts)
+			mimeWrapped := wrapUserDataInMIME(script)
+			encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
+			return setEC2UserDataArg(args, userDataArg, encoded)
+		}
 		if !userDataWasBase64 && looksLikeUserDataScript(trimmed) {
 			mimeWrapped := wrapUserDataInMIME(trimmed)
 			encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
-			newArgs := make([]string, len(args))
-			copy(newArgs, args)
-			if userDataIdx >= 0 {
-				newArgs[userDataIdx] = encoded
-			} else {
-				newArgs[userDataInlineIdx] = "--user-data=" + encoded
-			}
-			return newArgs
+			return setEC2UserDataArg(args, userDataArg, encoded)
 		}
 		return args
 	}
@@ -3021,14 +3309,7 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 		script := generateWordPressOneClickUserData(bindings)
 		mimeWrapped := wrapUserDataInMIME(script)
 		encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
-		newArgs := make([]string, len(args))
-		copy(newArgs, args)
-		if userDataIdx >= 0 {
-			newArgs[userDataIdx] = encoded
-		} else {
-			newArgs[userDataInlineIdx] = "--user-data=" + encoded
-		}
-		return newArgs
+		return setEC2UserDataArg(args, userDataArg, encoded)
 	}
 
 	trimmedUserData := strings.TrimSpace(checkUserData)
@@ -3064,14 +3345,7 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 	if !userDataWasBase64 && looksLikeScript && !needsInjection {
 		mimeWrapped := wrapUserDataInMIME(checkUserData)
 		encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
-		newArgs := make([]string, len(args))
-		copy(newArgs, args)
-		if userDataIdx >= 0 {
-			newArgs[userDataIdx] = encoded
-		} else {
-			newArgs[userDataInlineIdx] = "--user-data=" + encoded
-		}
-		return newArgs
+		return setEC2UserDataArg(args, userDataArg, encoded)
 	}
 
 	if !isPlaceholder && !needsInjection {
@@ -3086,10 +3360,7 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 		if script := bindings["NODEJS_USER_DATA"]; script != "" {
 			mimeWrapped := wrapUserDataInMIME(script)
 			encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
-			newArgs := make([]string, len(args))
-			copy(newArgs, args)
-			newArgs[userDataIdx] = encoded
-			return newArgs
+			return setEC2UserDataArg(args, userDataArg, encoded)
 		}
 	}
 
@@ -3140,14 +3411,7 @@ func maybeGenerateEC2UserData(args []string, bindings map[string]string, opts Ex
 			fallbackScript := generateFallbackDockerUserData(bindings, opts.Region)
 			mimeWrapped := wrapUserDataInMIME(fallbackScript)
 			encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
-			newArgs := make([]string, len(args))
-			copy(newArgs, args)
-			if userDataIdx >= 0 {
-				newArgs[userDataIdx] = encoded
-			} else if userDataInlineIdx >= 0 {
-				newArgs[userDataInlineIdx] = "--user-data=" + encoded
-			}
-			return newArgs
+			return setEC2UserDataArg(args, userDataArg, encoded)
 		}
 		return args
 	}
@@ -3424,15 +3688,7 @@ echo 'Deployment complete!'
 	encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 
 	// Replace the user-data argument
-	newArgs := make([]string, len(args))
-	copy(newArgs, args)
-	if userDataIdx >= 0 {
-		newArgs[userDataIdx] = encoded
-	} else {
-		newArgs[userDataInlineIdx] = "--user-data=" + encoded
-	}
-
-	return newArgs
+	return setEC2UserDataArg(args, userDataArg, encoded)
 }
 
 func sanitizeCommandArgsForExecution(args []string, bindings map[string]string) []string {
@@ -3442,33 +3698,18 @@ func sanitizeCommandArgsForExecution(args []string, bindings map[string]string) 
 
 	newArgs := make([]string, len(args))
 	copy(newArgs, args)
+	newArgs = normalizeRunInstancesSubnetFlag(newArgs)
 	newArgs = sanitizeRunInstancesBlockDeviceMappings(newArgs)
 
-	valueIdx := -1
-	inlineIdx := -1
-	for i := 0; i < len(newArgs); i++ {
-		if newArgs[i] == "--user-data" && i+1 < len(newArgs) {
-			valueIdx = i + 1
-			break
-		}
-		if strings.HasPrefix(newArgs[i], "--user-data=") {
-			inlineIdx = i
-			break
-		}
+	userDataArg := findEC2UserDataArg(newArgs)
+	if !userDataArg.hasFlag {
+		return newArgs
 	}
-
-	if valueIdx < 0 && inlineIdx < 0 {
+	if !userDataArg.hasUsableValue {
 		return newArgs
 	}
 
-	value := ""
-	if valueIdx >= 0 {
-		value = newArgs[valueIdx]
-	} else {
-		value = strings.TrimPrefix(newArgs[inlineIdx], "--user-data=")
-	}
-
-	trimmed := strings.TrimSpace(value)
+	trimmed := strings.TrimSpace(userDataArg.value)
 	if isUserDataPlaceholderValue(trimmed) {
 		if v := strings.TrimSpace(bindings["USER_DATA"]); v != "" {
 			trimmed = v
@@ -3481,11 +3722,7 @@ func sanitizeCommandArgsForExecution(args []string, bindings map[string]string) 
 	// (decoding can accidentally leak secrets into logs).
 	if _, ok := decodeLikelyBase64UserData(trimmed); ok {
 		// Already looks like base64 user-data.
-		if valueIdx >= 0 {
-			newArgs[valueIdx] = strings.TrimSpace(value)
-		} else {
-			newArgs[inlineIdx] = "--user-data=" + strings.TrimSpace(value)
-		}
+		newArgs = setEC2UserDataArg(newArgs, userDataArg, strings.TrimSpace(userDataArg.value))
 		return newArgs
 	}
 
@@ -3495,13 +3732,24 @@ func sanitizeCommandArgsForExecution(args []string, bindings map[string]string) 
 		trimmed = base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 	}
 
-	if valueIdx >= 0 {
-		newArgs[valueIdx] = trimmed
-	} else {
-		newArgs[inlineIdx] = "--user-data=" + trimmed
-	}
+	return setEC2UserDataArg(newArgs, userDataArg, trimmed)
+}
 
-	return newArgs
+func normalizeRunInstancesSubnetFlag(args []string) []string {
+	if len(args) < 2 || args[0] != "ec2" || args[1] != "run-instances" {
+		return args
+	}
+	for i := 2; i < len(args)-1; i++ {
+		flag := strings.TrimSpace(args[i])
+		next := strings.TrimSpace(args[i+1])
+		if flag == "--subnet-id" || strings.HasPrefix(flag, "--subnet-id=") {
+			continue
+		}
+		if flag == "--<SUBNET_ID>" || flag == "--$SUBNET_ID" || (strings.HasPrefix(flag, "--subnet-") && strings.HasPrefix(next, "subnet-")) {
+			args[i] = "--subnet-id"
+		}
+	}
+	return args
 }
 
 func sanitizeRunInstancesBlockDeviceMappings(args []string) []string {
@@ -3799,6 +4047,122 @@ func storeEnvVarsInSSM(ctx context.Context, bindings map[string]string, opts Exe
 	}
 }
 
+func ensureSREObserverRuntimeSSMReadPolicy(ctx context.Context, runInstancesArgs []string, bindings map[string]string, opts ExecOptions) {
+	if !bindingsIndicateSREObserver(bindings) && !argsIndicateSREObserver(runInstancesArgs) {
+		return
+	}
+	profileName := instanceProfileNameFromRunInstances(runInstancesArgs)
+	if profileName == "" {
+		return
+	}
+	deployID := sanitizeSSMPathSegment(sreDeployIDFromBindings(bindings))
+	if deployID == "" {
+		deployID = "observer"
+	}
+	roleName := resolveInstanceProfileRoleName(ctx, profileName, opts)
+	if roleName == "" {
+		return
+	}
+	region := strings.TrimSpace(opts.Region)
+	if region == "" {
+		region = strings.TrimSpace(bindings["REGION"])
+	}
+	if region == "" {
+		region = strings.TrimSpace(bindings["AWS_REGION"])
+	}
+	if region == "" {
+		region = "*"
+	}
+	accountID := strings.TrimSpace(bindings["ACCOUNT_ID"])
+	if accountID == "" {
+		accountID = strings.TrimSpace(bindings["AWS_ACCOUNT_ID"])
+	}
+	if accountID == "" {
+		accountID = "*"
+	}
+	paramPrefix := "clanker/sre/" + deployID + "/"
+	resource := fmt.Sprintf("arn:aws:ssm:%s:%s:parameter/%s*", region, accountID, paramPrefix)
+	policyDoc := map[string]any{
+		"Version": "2012-10-17",
+		"Statement": []map[string]any{
+			{
+				"Sid":      "ClankerSreRuntimeConfigRead",
+				"Effect":   "Allow",
+				"Action":   []string{"ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"},
+				"Resource": resource,
+			},
+		},
+	}
+	body, err := json.Marshal(policyDoc)
+	if err != nil {
+		return
+	}
+	args := []string{
+		"iam", "put-role-policy",
+		"--role-name", roleName,
+		"--policy-name", "clanker-sre-runtime-ssm-read",
+		"--policy-document", string(body),
+	}
+	awsArgs := buildAWSExecArgs(args, opts, opts.Writer)
+	if _, err := runAWSCommandStreaming(ctx, awsArgs, nil, io.Discard); err != nil {
+		_, _ = fmt.Fprintf(opts.Writer, "[maker] warning: failed to grant SRE runtime SSM read policy on role %s: %v\n", roleName, err)
+		return
+	}
+	_, _ = fmt.Fprintf(opts.Writer, "[maker] granted SRE runtime SSM read policy on role %s\n", roleName)
+}
+
+func instanceProfileNameFromRunInstances(args []string) string {
+	value := strings.TrimSpace(flagValue(args, "--iam-instance-profile"))
+	if value == "" {
+		return ""
+	}
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "Name=") {
+			return strings.TrimSpace(strings.TrimPrefix(part, "Name="))
+		}
+		if strings.HasPrefix(part, "Arn=") {
+			arn := strings.TrimSpace(strings.TrimPrefix(part, "Arn="))
+			if idx := strings.LastIndex(arn, "/"); idx >= 0 && idx+1 < len(arn) {
+				return arn[idx+1:]
+			}
+			return arn
+		}
+	}
+	if strings.HasPrefix(value, "arn:") {
+		if idx := strings.LastIndex(value, "/"); idx >= 0 && idx+1 < len(value) {
+			return value[idx+1:]
+		}
+	}
+	return value
+}
+
+func resolveInstanceProfileRoleName(ctx context.Context, profileName string, opts ExecOptions) string {
+	profileName = strings.TrimSpace(profileName)
+	if profileName == "" {
+		return ""
+	}
+	args := []string{"iam", "get-instance-profile", "--instance-profile-name", profileName, "--output", "json"}
+	out, err := runAWSCommandStreaming(ctx, buildAWSExecArgs(args, opts, opts.Writer), nil, io.Discard)
+	if err != nil {
+		return profileName
+	}
+	var resp struct {
+		InstanceProfile struct {
+			Roles []struct {
+				RoleName string `json:"RoleName"`
+			} `json:"Roles"`
+		} `json:"InstanceProfile"`
+	}
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		return profileName
+	}
+	if len(resp.InstanceProfile.Roles) == 0 || strings.TrimSpace(resp.InstanceProfile.Roles[0].RoleName) == "" {
+		return profileName
+	}
+	return strings.TrimSpace(resp.InstanceProfile.Roles[0].RoleName)
+}
+
 func sanitizeSSMPathSegment(v string) string {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -4054,6 +4418,25 @@ func findUnresolvedExecutionTokens(args []string) []string {
 	}
 
 	return result
+}
+
+func shouldSkipUnresolvedOptionalCleanupCommand(args []string, unresolved []string) bool {
+	if len(args) < 2 {
+		return false
+	}
+
+	service := strings.ToLower(strings.TrimSpace(args[0]))
+	operation := strings.ToLower(strings.TrimSpace(args[1]))
+	if service != "lambda" || operation != "delete-event-source-mapping" {
+		return false
+	}
+
+	uuid := strings.TrimSpace(flagValue(args, "--uuid"))
+	if uuid == "" || isPlaceholderSentinelValue(uuid) || planPlaceholderTokenRe.MatchString(uuid) {
+		return true
+	}
+
+	return false
 }
 
 func maybeInjectLambdaZipBytes(args []string, w io.Writer) ([]byte, []string, error) {

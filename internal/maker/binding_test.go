@@ -184,3 +184,67 @@ func TestLearnPlanBindings_SGFillOrder(t *testing.T) {
 		}
 	})
 }
+
+func TestBindingLooksCompatibleRejectsPlaceholderSentinels(t *testing.T) {
+	tests := []struct {
+		key   string
+		value string
+	}{
+		{key: "ESM_UUID", value: "UNKNOWN"},
+		{key: "ESM_UUID", value: "not-a-uuid"},
+		{key: "INSTANCE_ID", value: "i-00000000000000000"},
+		{key: "INSTANCE_ID", value: "i-not-real"},
+		{key: "QUEUE_URL", value: "N/A"},
+		{key: "ROLE_NAME", value: "<REPLACE_ME>"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.key+"_"+tt.value, func(t *testing.T) {
+			if bindingLooksCompatible(tt.key, tt.value) {
+				t.Fatalf("bindingLooksCompatible(%q, %q) = true, want false", tt.key, tt.value)
+			}
+		})
+	}
+}
+
+func TestBindingLooksCompatibleAcceptsUUIDBindings(t *testing.T) {
+	if !bindingLooksCompatible("ESM_UUID", "123e4567-e89b-12d3-a456-426614174000") {
+		t.Fatal("valid UUID binding was rejected")
+	}
+}
+
+func TestBindingLooksCompatibleAcceptsEC2InstanceID(t *testing.T) {
+	if !bindingLooksCompatible("INSTANCE_ID", "i-063c4bd0092250469") {
+		t.Fatal("valid EC2 instance ID binding was rejected")
+	}
+}
+
+func TestShouldSkipUnresolvedOptionalCleanupCommand(t *testing.T) {
+	if !shouldSkipUnresolvedOptionalCleanupCommand(
+		[]string{"lambda", "delete-event-source-mapping", "--uuid", "<ESM_UUID>"},
+		[]string{"<ESM_UUID>"},
+	) {
+		t.Fatal("unresolved lambda event source mapping cleanup should be skipped")
+	}
+
+	if !shouldSkipUnresolvedOptionalCleanupCommand(
+		[]string{"lambda", "delete-event-source-mapping", "--uuid", "UNKNOWN"},
+		[]string{"UNKNOWN"},
+	) {
+		t.Fatal("sentinel lambda event source mapping cleanup should be skipped")
+	}
+
+	if shouldSkipUnresolvedOptionalCleanupCommand(
+		[]string{"iam", "delete-role", "--role-name", "<ROLE_NAME>"},
+		[]string{"<ROLE_NAME>"},
+	) {
+		t.Fatal("required IAM delete command should not be skipped")
+	}
+
+	if shouldSkipUnresolvedOptionalCleanupCommand(
+		[]string{"lambda", "delete-event-source-mapping", "--uuid", "123e4567-e89b-12d3-a456-426614174000"},
+		[]string{"<ESM_UUID>"},
+	) {
+		t.Fatal("resolved lambda event source mapping cleanup should not be skipped")
+	}
+}

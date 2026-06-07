@@ -270,13 +270,20 @@ func GenerateMissingUserData(plan *maker.Plan, logf func(string, ...any)) *maker
 		}
 
 		// Find user-data argument
+		userDataFlagIdx := -1
 		userDataIdx := -1
 		userDataVal := ""
 		for ai := 0; ai < len(cmd.Args); ai++ {
 			arg := strings.TrimSpace(cmd.Args[ai])
-			if arg == "--user-data" && ai+1 < len(cmd.Args) {
-				userDataIdx = ai + 1
-				userDataVal = cmd.Args[ai+1]
+			if arg == "--user-data" {
+				userDataFlagIdx = ai
+				if ai+1 < len(cmd.Args) {
+					next := strings.TrimSpace(cmd.Args[ai+1])
+					if next != "" && !strings.HasPrefix(next, "--") {
+						userDataIdx = ai + 1
+						userDataVal = cmd.Args[ai+1]
+					}
+				}
 				break
 			}
 			if strings.HasPrefix(arg, "--user-data=") {
@@ -308,7 +315,14 @@ func GenerateMissingUserData(plan *maker.Plan, logf func(string, ...any)) *maker
 		mimeWrapped := wrapUserDataInMIME(script)
 		encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 
-		if userDataIdx < 0 {
+		if userDataIdx < 0 && userDataFlagIdx >= 0 {
+			insertIdx := userDataFlagIdx + 1
+			newArgs := make([]string, 0, len(cmd.Args)+1)
+			newArgs = append(newArgs, cmd.Args[:insertIdx]...)
+			newArgs = append(newArgs, encoded)
+			newArgs = append(newArgs, cmd.Args[insertIdx:]...)
+			cmd.Args = newArgs
+		} else if userDataIdx < 0 {
 			// Insert --user-data before --profile (or at end)
 			insertIdx := len(cmd.Args)
 			for ai, arg := range cmd.Args {
@@ -376,13 +390,20 @@ func GenerateMissingSREObserverUserData(plan *maker.Plan, logf func(string, ...a
 			continue
 		}
 
+		userDataFlagIdx := -1
 		userDataIdx := -1
 		userDataVal := ""
 		for ai := 0; ai < len(cmd.Args); ai++ {
 			arg := strings.TrimSpace(cmd.Args[ai])
-			if arg == "--user-data" && ai+1 < len(cmd.Args) {
-				userDataIdx = ai + 1
-				userDataVal = cmd.Args[ai+1]
+			if arg == "--user-data" {
+				userDataFlagIdx = ai
+				if ai+1 < len(cmd.Args) {
+					next := strings.TrimSpace(cmd.Args[ai+1])
+					if next != "" && !strings.HasPrefix(next, "--") {
+						userDataIdx = ai + 1
+						userDataVal = cmd.Args[ai+1]
+					}
+				}
 				break
 			}
 			if strings.HasPrefix(arg, "--user-data=") {
@@ -407,7 +428,14 @@ func GenerateMissingSREObserverUserData(plan *maker.Plan, logf func(string, ...a
 
 		mimeWrapped := wrapUserDataInMIME(generateSREObserverBootstrapScript())
 		encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
-		if userDataIdx < 0 {
+		if userDataIdx < 0 && userDataFlagIdx >= 0 {
+			insertIdx := userDataFlagIdx + 1
+			newArgs := make([]string, 0, len(cmd.Args)+1)
+			newArgs = append(newArgs, cmd.Args[:insertIdx]...)
+			newArgs = append(newArgs, encoded)
+			newArgs = append(newArgs, cmd.Args[insertIdx:]...)
+			cmd.Args = newArgs
+		} else if userDataIdx < 0 {
 			insertIdx := len(cmd.Args)
 			for ai, arg := range cmd.Args {
 				if arg == "--profile" {

@@ -1,6 +1,7 @@
 package maker
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -70,5 +71,91 @@ func TestInjectEnvVarsAsInstanceTagsSkipsSREConfigAndAppTags(t *testing.T) {
 func TestSRESSMPathUsesDeployID(t *testing.T) {
 	if got := sanitizeSSMPathSegment("sre/aws test:1"); got != "sre-aws-test-1" {
 		t.Fatalf("unexpected sanitized SSM segment: %q", got)
+	}
+}
+
+func TestMaybeGenerateEC2UserDataGeneratesSREWhenFlagFollowedByFlag(t *testing.T) {
+	args := []string{
+		"ec2", "run-instances",
+		"--image-id", "resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64",
+		"--instance-type", "t4g.nano",
+		"--iam-instance-profile", "Name=clanker-sre-observer",
+		"--subnet-id", "subnet-0e871857b30184b52",
+		"--security-group-ids", "sg-0dd1c8d59ccce43c0",
+		"--user-data",
+		"--metadata-options", "HttpTokens=required,HttpEndpoint=enabled",
+		"--query", "Instances[0].InstanceId",
+		"--output", "text",
+	}
+	bindings := map[string]string{
+		"CLANKER_SRE_DEPLOY_ID": "sre-aws-test",
+		"CLANKER_SRE_PROVIDER":  "aws",
+	}
+
+	out := maybeGenerateEC2UserData(args, bindings, ExecOptions{Region: "us-east-2"})
+	loc := findEC2UserDataArg(out)
+	if !loc.hasUsableValue {
+		t.Fatalf("expected generated user-data value, got args: %v", out)
+	}
+	if strings.HasPrefix(strings.TrimSpace(loc.value), "--") {
+		t.Fatalf("user-data still points at another flag: %v", out)
+	}
+	if got := flagValue(out, "--metadata-options"); got != "HttpTokens=required,HttpEndpoint=enabled" {
+		t.Fatalf("metadata options not preserved, got %q in %v", got, out)
+	}
+	decoded, ok := decodeLikelyBase64UserData(loc.value)
+	if !ok {
+		raw, err := base64.StdEncoding.DecodeString(loc.value)
+		if err != nil {
+			t.Fatalf("generated user-data is not base64: %v", err)
+		}
+		decoded = string(raw)
+	}
+	for _, want := range []string{"docker run", "sre run --sre", "/clanker/sre/sre-aws-test/"} {
+		if !strings.Contains(decoded, want) {
+			t.Fatalf("generated SRE user-data missing %q:\n%s", want, decoded)
+		}
+	}
+	if err := ValidateArgsNoConsecutiveFlags(out); err != nil {
+		t.Fatalf("generated args failed validation: %v\n%v", err, out)
+	}
+}
+
+func TestSanitizeRunInstancesNormalizesPlaceholderSubnetFlag(t *testing.T) {
+	args := []string{
+		"ec2", "run-instances",
+		"--image-id", "ami-123",
+		"--instance-type", "t4g.nano",
+		"--subnet-0e871857b30184b52", "subnet-0e871857b30184b52",
+	}
+
+	out := sanitizeCommandArgsForExecution(args, map[string]string{})
+	if got := flagValue(out, "--subnet-id"); got != "subnet-0e871857b30184b52" {
+		t.Fatalf("subnet flag was not normalized, got %q args=%v", got, out)
+	}
+	if strings.Contains(strings.Join(out, " "), "--subnet-0e871857b30184b52") {
+		t.Fatalf("malformed subnet flag still present: %v", out)
+	}
+}
+
+func TestLearnPlanBindingsRunInstancesTextOutput(t *testing.T) {
+	bindings := map[string]string{}
+	args := []string{
+		"ec2", "run-instances",
+		"--query", "Instances[0].InstanceId",
+		"--output", "text",
+	}
+
+	learnPlanBindings(args, "i-063c4bd0092250469\n", bindings, 10)
+	if got := bindings["INSTANCE_ID"]; got != "i-063c4bd0092250469" {
+		t.Fatalf("INSTANCE_ID = %q, want real run-instances text output", got)
+	}
+}
+
+func TestLearnPlanBindingsFromProducesTextChoosesCompatibleToken(t *testing.T) {
+	bindings := map[string]string{}
+	learnPlanBindingsFromProduces(map[string]string{"INSTANCE_ID": "$"}, "i-0ba0559e0f90bee9c\ti-063c4bd0092250469", bindings)
+	if got := bindings["INSTANCE_ID"]; got != "i-0ba0559e0f90bee9c" {
+		t.Fatalf("INSTANCE_ID = %q, want first compatible EC2 id", got)
 	}
 }

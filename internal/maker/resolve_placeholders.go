@@ -319,6 +319,12 @@ func executeSubagentToolPlan(ctx context.Context, opts ExecOptions, plan *placeh
 		if strings.TrimSpace(bindings[key]) != "" {
 			continue
 		}
+		if !bindingLooksCompatible(key, val) {
+			if opts.Writer != nil {
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] subagent incompatible binding ignored: %s = %s\n", key, val)
+			}
+			continue
+		}
 		bindings[key] = val
 		changed = true
 		if opts.Writer != nil {
@@ -392,6 +398,12 @@ func executeSubagentToolPlan(ctx context.Context, opts ExecOptions, plan *placeh
 				if s == "" {
 					continue
 				}
+				if !bindingLooksCompatible(kk, s) {
+					if opts.Writer != nil {
+						_, _ = fmt.Fprintf(opts.Writer, "[maker] subagent incompatible binding ignored: %s = %s\n", kk, s)
+					}
+					continue
+				}
 				bindings[kk] = s
 				changed = true
 				if opts.Writer != nil {
@@ -402,6 +414,12 @@ func executeSubagentToolPlan(ctx context.Context, opts ExecOptions, plan *placeh
 		}
 
 		if parsed != "" {
+			if !bindingLooksCompatible(bindName, parsed) {
+				if opts.Writer != nil {
+					_, _ = fmt.Fprintf(opts.Writer, "[maker] subagent incompatible binding ignored: %s = %s\n", bindName, parsed)
+				}
+				continue
+			}
 			bindings[bindName] = parsed
 			changed = true
 			if opts.Writer != nil {
@@ -700,6 +718,12 @@ func autoResolvePlaceholdersWithTools(ctx context.Context, opts ExecOptions, unr
 			continue
 		}
 		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+			if !bindingLooksCompatible(name, v) {
+				if opts.Writer != nil {
+					_, _ = fmt.Fprintf(opts.Writer, "[maker] placeholder tool incompatible env binding ignored: %s\n", name)
+				}
+				continue
+			}
 			bindings[name] = v
 			changed = true
 			if opts.Writer != nil {

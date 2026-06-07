@@ -71,6 +71,32 @@ func TestGenerateMissingUserDataAddsSREObserverBootstrapOnly(t *testing.T) {
 	}
 }
 
+func TestGenerateMissingUserDataAddsSREObserverBootstrapBeforeNextFlag(t *testing.T) {
+	plan := &maker.Plan{
+		Provider: "aws",
+		Question: "[one-click SRE deploy objective] deploy Clanker SRE observer",
+		Commands: []maker.Command{
+			{Args: []string{
+				"ec2", "run-instances",
+				"--image-id", "ami-123",
+				"--instance-type", "t4g.nano",
+				"--user-data",
+				"--metadata-options", "HttpTokens=required,HttpEndpoint=enabled",
+			}},
+		},
+	}
+
+	patched := GenerateMissingUserData(plan, nil)
+	args := patched.Commands[0].Args
+	userData := userDataValue(args)
+	if strings.TrimSpace(userData) == "" || strings.HasPrefix(strings.TrimSpace(userData), "--") {
+		t.Fatalf("expected generated user-data before metadata flag, args=%#v", args)
+	}
+	if got := valueAfter(args, "--metadata-options"); got != "HttpTokens=required,HttpEndpoint=enabled" {
+		t.Fatalf("metadata options not preserved, got %q args=%#v", got, args)
+	}
+}
+
 func hasUserDataFlag(args []string) bool {
 	return strings.TrimSpace(userDataValue(args)) != ""
 }
@@ -83,6 +109,15 @@ func userDataValue(args []string) string {
 		}
 		if strings.HasPrefix(arg, "--user-data=") {
 			return strings.TrimPrefix(arg, "--user-data=")
+		}
+	}
+	return ""
+}
+
+func valueAfter(args []string, flag string) string {
+	for i, arg := range args {
+		if strings.TrimSpace(arg) == flag && i+1 < len(args) {
+			return args[i+1]
 		}
 	}
 	return ""

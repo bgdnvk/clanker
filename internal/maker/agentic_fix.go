@@ -182,6 +182,22 @@ func maybeAgenticFix(
 
 		// Re-apply bindings (in case we got new ones)
 		retryArgs = applyPlanBindings(retryArgs, bindings)
+		retryArgs = normalizeRunInstancesSubnetFlag(retryArgs)
+		retryArgs = maybeGenerateEC2UserData(retryArgs, bindings, opts)
+		retryArgs = injectEnvVarsAsInstanceTags(retryArgs, bindings)
+		if len(retryArgs) >= 2 && retryArgs[0] == "ec2" && retryArgs[1] == "run-instances" {
+			storeEnvVarsInSSM(ctx, bindings, opts)
+			ensureSREObserverRuntimeSSMReadPolicy(ctx, retryArgs, bindings, opts)
+			retryArgs, _ = RemediateRunInstancesForSSM(ctx, opts, retryArgs, opts.Writer)
+		}
+		retryArgs = sanitizeCommandArgsForExecution(retryArgs, bindings)
+		if len(retryArgs) >= 2 && retryArgs[0] == "ec2" && retryArgs[1] == "run-instances" {
+			if err := ValidateArgsNoConsecutiveFlags(retryArgs); err != nil {
+				lastErr = err
+				_, _ = fmt.Fprintf(opts.Writer, "[maker] AI retry rejected before AWS CLI: %v\n", err)
+				continue
+			}
+		}
 
 		// Build final AWS args
 		finalArgs := buildAWSExecArgs(retryArgs, opts, opts.Writer)
