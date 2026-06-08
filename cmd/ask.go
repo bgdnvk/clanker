@@ -3585,6 +3585,7 @@ func determineDatabaseRouteMode(questionLower string) string {
 }
 
 func determineRoutingDecisionDetailsWithContext(question string, dbConnection string) routingDecisionDetails {
+	question = routeOnlyUserQuestion(question)
 	questionLower := strings.ToLower(question)
 	if isClankerCloudQuestion(questionLower) {
 		return routingDecisionDetails{Agent: "clanker-cloud", Reason: "Explicit Clanker Cloud app request detected"}
@@ -3738,6 +3739,30 @@ func determineRoutingDecisionDetailsWithContext(question string, dbConnection st
 
 	// Default to CLI for general queries
 	return routingDecisionDetails{Agent: "cli", Reason: "General infrastructure query or analysis"}
+}
+
+func routeOnlyUserQuestion(question string) string {
+	trimmed := strings.TrimSpace(question)
+	if trimmed == "" {
+		return ""
+	}
+	lower := strings.ToLower(trimmed)
+	cut := len(trimmed)
+	for _, marker := range []string{
+		"\n\ncurrent infrastructure context",
+		"\ncurrent infrastructure context",
+		"\n\ninfra_summary",
+		"\ninfra_summary",
+		"\n\ndatabase_estate_resources",
+		"\ndatabase_estate_resources",
+		"\n\nrecent conversation history",
+		"\nrecent conversation history",
+	} {
+		if idx := strings.Index(lower, marker); idx >= 0 && idx < cut {
+			cut = idx
+		}
+	}
+	return strings.TrimSpace(trimmed[:cut])
 }
 
 func isClankerCloudQuestion(questionLower string) bool {

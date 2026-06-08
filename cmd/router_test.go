@@ -119,3 +119,18 @@ func TestDetermineRoutingDecision_PostFixRegressions(t *testing.T) {
 		}
 	}
 }
+
+func TestDetermineRoutingDecision_IgnoresAppendedContextForRouteOnly(t *testing.T) {
+	const appendedContext = `Current infrastructure context (compact)
+INFRA_SUMMARY total=3 topTypes=lambda:1,database:1
+INFRA_INDEX id|type|region|name
+lambdatron-db-connector|lambda|us-east-1|lambdatron-db-connector
+
+DATABASE_ESTATE_RESOURCES
+managed database inventory present`
+
+	decision := determineRoutingDecisionDetailsWithContext("how many lambdas do i have?\n\n"+appendedContext, "")
+	if decision.Agent != "cli" {
+		t.Fatalf("lambda inventory question with appended context should route to cli, got %q reason=%q", decision.Agent, decision.Reason)
+	}
+}
