@@ -50,6 +50,7 @@ func (c *Client) AskCodex(ctx context.Context, prompt string) (string, error) {
 	if model == "" {
 		model = "gpt-5.4"
 	}
+	emitProgressTrace("provider", fmt.Sprintf("Calling Codex Responses API with model %s.", model))
 
 	return askCodexWithToken(ctx, oauthToken, model, prompt)
 }
@@ -286,6 +287,7 @@ func (c *Client) askCodexWithHistory(ctx context.Context, conv *ConversationCont
 	if model == "" {
 		model = "gpt-5.4"
 	}
+	emitProgressTrace("provider", fmt.Sprintf("Calling Codex Responses API with model %s.", model))
 
 	input := make([]Message, len(conv.Messages))
 	for i, m := range conv.Messages {

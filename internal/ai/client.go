@@ -99,12 +99,56 @@ type contextPromptBudget struct {
 }
 
 const (
-	aiRetryMaxAttempts   = 5
-	aiRetryBaseDelay     = 1 * time.Second
-	aiRetryMaxDelay      = 16 * time.Second
-	aiHTTPClientTimeout  = 120 * time.Second
-	defaultOpenAIBaseURL = "https://api.openai.com/v1"
+	defaultAIRetryMaxAttempts  = 5
+	defaultAIRetryBaseDelay    = 1 * time.Second
+	defaultAIRetryMaxDelay     = 16 * time.Second
+	defaultAIHTTPClientTimeout = 120 * time.Second
+	defaultOpenAIBaseURL       = "https://api.openai.com/v1"
 )
+
+var (
+	aiRetryMaxAttempts  = envInt("CLANKER_AI_RETRY_MAX_ATTEMPTS", defaultAIRetryMaxAttempts, 1, 8)
+	aiRetryBaseDelay    = envDuration("CLANKER_AI_RETRY_BASE_DELAY_MS", defaultAIRetryBaseDelay, 100*time.Millisecond, 30*time.Second)
+	aiRetryMaxDelay     = envDuration("CLANKER_AI_RETRY_MAX_DELAY_MS", defaultAIRetryMaxDelay, 250*time.Millisecond, 60*time.Second)
+	aiHTTPClientTimeout = envDuration("CLANKER_AI_HTTP_TIMEOUT_MS", defaultAIHTTPClientTimeout, 5*time.Second, 10*time.Minute)
+)
+
+func envInt(key string, fallback, min, max int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
+func envDuration(key string, fallback, min, max time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	millis, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	value := time.Duration(millis) * time.Millisecond
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
 
 func aiRetryDelay(retryIndex int) time.Duration {
 	if retryIndex < 0 {
@@ -597,6 +641,7 @@ func (c *Client) AskWithTools(ctx context.Context, question, awsContext, codeCon
 
 // askWithDynamicAnalysis implements the three-stage dynamic analysis approach for all AI providers
 func (c *Client) askWithDynamicAnalysis(ctx context.Context, question, awsContext, codeContext, profileInfraAnalysis string, githubContext ...string) (string, error) {
+	emitProgressTrace("analysis", "Analyzing the request and selecting the live data to gather.")
 	if c.debug {
 		fmt.Printf("🔍 Stage 1: Analyzing query with dynamic tool selection...\n")
 	}
@@ -672,6 +717,7 @@ func (c *Client) askWithDynamicAnalysis(ctx context.Context, question, awsContex
 	if c.debug {
 		fmt.Printf("🔧 Stage 2: Executing AWS operations...\n")
 	}
+	emitProgressTrace("context", "Gathering live infrastructure context for the selected provider.")
 	var awsResults string
 	if c.awsClient != nil && len(analysis.Operations) > 0 {
 		if c.debug {
@@ -713,6 +759,7 @@ func (c *Client) askWithDynamicAnalysis(ctx context.Context, question, awsContex
 	if c.debug {
 		fmt.Printf("📝 Stage 3: Building final context and getting response...\n")
 	}
+	emitProgressTrace("context", "Condensing gathered context before the final model call.")
 	var finalContext strings.Builder
 
 	if awsContext != "" {
@@ -776,6 +823,7 @@ Please provide a comprehensive answer based on the live data above.`, question, 
 		fmt.Printf("🚀 Sending final request to AI provider (%s)...\n", c.provider)
 		fmt.Printf("📤 Query to LLM: %s\n", question)
 	}
+	emitProgressTrace("provider", fmt.Sprintf("Sending the final request to %s.", c.provider))
 
 	// Use the same provider switching logic as in the analysis phase
 	switch c.provider {
@@ -952,6 +1000,7 @@ func (c *Client) askBedrock(ctx context.Context, prompt string) (string, error) 
 	// Call AWS CLI with LLM profile from config (for Bedrock API access)
 	// Use fileb:// to read body from file as binary blob to avoid command line length limits
 	cmd := newBedrockInvokeCommand(ctx, profileLLMCall.Model, bodyFilePath, profileLLMCall.AWSProfile, profileLLMCall.Region, tmpFilePath)
+	emitProgressTrace("provider", fmt.Sprintf("Calling AWS Bedrock with model %s.", profileLLMCall.Model))
 
 	var output []byte
 	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
@@ -1000,6 +1049,7 @@ func (c *Client) askGemini(ctx context.Context, prompt string) (string, error) {
 
 	// Create content from text
 	content := genai.NewContentFromText(sanitizeASCII(prompt), genai.RoleUser)
+	emitProgressTrace("provider", fmt.Sprintf("Calling Gemini with model %s.", profileLLMCall.Model))
 
 	// Generate content using the configured model
 	var resp *genai.GenerateContentResponse
@@ -1092,6 +1142,7 @@ func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
 		c.baseURL = localModelInferenceURL
 	}
 	if shouldUseOpenAIOAuth(c.apiKey, c.baseURL) {
+		emitProgressTrace("provider", "Calling OpenAI through the saved ChatGPT OAuth session.")
 		return c.AskCodex(ctx, prompt)
 	}
 
@@ -1118,6 +1169,7 @@ func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
 	}
 
 	endpoint := strings.TrimRight(c.baseURL, "/") + "/chat/completions"
+	emitProgressTrace("provider", fmt.Sprintf("Calling OpenAI-compatible chat completions with model %s.", request.Model))
 
 	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(jsonData))
 	if err != nil {
@@ -1216,6 +1268,7 @@ func (c *Client) askGitHubModels(ctx context.Context, prompt string) (string, er
 	if model == "" {
 		model = "openai/gpt-5.4"
 	}
+	emitProgressTrace("provider", fmt.Sprintf("Calling GitHub Models with model %s.", model))
 
 	reqBody := OpenAIRequest{
 		Model: model,
@@ -1304,6 +1357,7 @@ func (c *Client) askCohere(ctx context.Context, prompt string) (string, error) {
 	if model == "" {
 		model = "command-a-03-2025"
 	}
+	emitProgressTrace("provider", fmt.Sprintf("Calling Cohere with model %s.", model))
 
 	reqBody := cohereChatRequest{
 		Model: model,
@@ -1409,6 +1463,7 @@ func (c *Client) askAnthropic(ctx context.Context, prompt string) (string, error
 		}
 		model = latest
 	}
+	emitProgressTrace("provider", fmt.Sprintf("Calling Anthropic with model %s.", model))
 
 	// Anthropic API is strict about ASCII in some client setups; keep consistent with other providers.
 	prompt = sanitizeASCII(prompt)
@@ -1518,6 +1573,7 @@ func (c *Client) askMiniMax(ctx context.Context, prompt string) (string, error) 
 	if model == "" {
 		model = "MiniMax-M2.5"
 	}
+	emitProgressTrace("provider", fmt.Sprintf("Calling MiniMax with model %s.", model))
 
 	reqBody := anthropicRequest{
 		Model:       model,
@@ -1923,6 +1979,7 @@ func (c *Client) askBedrockWithHistory(ctx context.Context, conv *ConversationCo
 	defer os.Remove(tmpFilePath)
 
 	cmd := newBedrockInvokeCommand(ctx, profileLLMCall.Model, bodyFilePath, profileLLMCall.AWSProfile, profileLLMCall.Region, tmpFilePath)
+	emitProgressTrace("provider", fmt.Sprintf("Calling AWS Bedrock with model %s.", profileLLMCall.Model))
 
 	var output []byte
 	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
@@ -2006,6 +2063,7 @@ func (c *Client) askAnthropicWithHistory(ctx context.Context, conv *Conversation
 		Temperature: 0.1,
 		Messages:    messages,
 	}
+	emitProgressTrace("provider", fmt.Sprintf("Calling Anthropic with model %s.", model))
 
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
@@ -2114,6 +2172,7 @@ func (c *Client) askMiniMaxWithHistory(ctx context.Context, conv *ConversationCo
 		Temperature: 0.1,
 		Messages:    messages,
 	}
+	emitProgressTrace("provider", fmt.Sprintf("Calling MiniMax with model %s.", model))
 
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
@@ -2216,6 +2275,7 @@ func (c *Client) askOpenAIWithHistory(ctx context.Context, conv *ConversationCon
 		c.baseURL = localModelInferenceURL
 	}
 	if shouldUseOpenAIOAuth(c.apiKey, c.baseURL) {
+		emitProgressTrace("provider", "Calling OpenAI through the saved ChatGPT OAuth session.")
 		return c.askCodexWithHistory(ctx, conv)
 	}
 	if strings.TrimSpace(c.apiKey) == "" && !isLocalModelInferenceEndpoint(c.baseURL) {
@@ -2231,6 +2291,7 @@ func (c *Client) askOpenAIWithHistory(ctx context.Context, conv *ConversationCon
 		Model:    model,
 		Messages: messages,
 	}
+	emitProgressTrace("provider", fmt.Sprintf("Calling OpenAI-compatible chat completions with model %s.", model))
 	if v := viper.GetStringMap("ai.providers.openai.chat_template_kwargs"); len(v) > 0 {
 		reqBody.ChatTemplateKwargs = v
 	}
@@ -2313,6 +2374,7 @@ func (c *Client) askGitHubModelsWithHistory(ctx context.Context, conv *Conversat
 	if model == "" {
 		model = "openai/gpt-5.4"
 	}
+	emitProgressTrace("provider", fmt.Sprintf("Calling GitHub Models with model %s.", model))
 
 	token := c.resolveGitHubModelsToken(ctx)
 	if token == "" {
@@ -2418,6 +2480,7 @@ func (c *Client) askGeminiWithHistory(ctx context.Context, conv *ConversationCon
 	if model == "" {
 		model = "gemini-2.0-flash"
 	}
+	emitProgressTrace("provider", fmt.Sprintf("Calling Gemini with model %s.", model))
 
 	var result *genai.GenerateContentResponse
 	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
@@ -2467,6 +2530,7 @@ func (c *Client) askCohereWithHistory(ctx context.Context, conv *ConversationCon
 	if model == "" {
 		model = "command-a-03-2025"
 	}
+	emitProgressTrace("provider", fmt.Sprintf("Calling Cohere with model %s.", model))
 
 	messages := make([]cohereChatMessage, 0, len(conv.Messages)+1)
 	if conv.SystemPrompt != "" {
