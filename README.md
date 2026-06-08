@@ -1,5 +1,9 @@
 # Clanker CLI
 
+<p>
+  <img src="assets/clanker-logo.png" alt="Clanker logo" width="96" height="96">
+</p>
+
 Agent swarm powering [Clanker Cloud](https://clankercloud.ai), the first AI DevOps IDE for agents and humans.
 
 Docs available at [docs.clankercloud.ai](https://docs.clankercloud.ai/)
