@@ -15,17 +15,27 @@ import (
 
 var codexResponsesURL = "https://chatgpt.com/backend-api/codex/responses"
 
+const defaultCodexInstructions = "You are Clanker, an infrastructure and software engineering assistant. Follow the user's prompt exactly. When the prompt requests JSON, return only valid JSON with no markdown."
+
 // CodexRequest is the Responses API request format.
 type CodexRequest struct {
 	Model        string    `json:"model"`
 	Instructions string    `json:"instructions,omitempty"`
 	Input        []Message `json:"input"`
+	Store        bool      `json:"store"`
 	Stream       bool      `json:"stream"`
 }
 
-// AskCodex sends a non-streaming request to the Codex Responses API
-// and returns the full text response. This is used when the OpenAI auth
-// method is OAuth rather than API key.
+func codexInstructions(systemPrompt string) string {
+	if trimmed := strings.TrimSpace(systemPrompt); trimmed != "" {
+		return sanitizeASCII(trimmed)
+	}
+	return defaultCodexInstructions
+}
+
+// AskCodex sends a streaming request to the Codex Responses API and aggregates
+// the text response. The ChatGPT Codex endpoint requires stream=true even for
+// callers that want a synchronous string result.
 func (c *Client) AskCodex(ctx context.Context, prompt string) (string, error) {
 	oauthToken, err := GetValidOAuthToken()
 	if err != nil {
@@ -45,75 +55,7 @@ func (c *Client) AskCodex(ctx context.Context, prompt string) (string, error) {
 }
 
 func askCodexWithToken(ctx context.Context, oauthToken, model, prompt string) (string, error) {
-	codexReq := CodexRequest{
-		Model:  model,
-		Input:  []Message{{Role: "user", Content: sanitizeASCII(prompt)}},
-		Stream: false,
-	}
-
-	body, err := json.Marshal(codexReq)
-	if err != nil {
-		return "", fmt.Errorf("marshal codex request: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, codexResponsesURL, bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("create codex request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+oauthToken)
-
-	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("codex request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read codex response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("codex returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var result struct {
-		Output []struct {
-			Type    string `json:"type"`
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"output"`
-		Error *struct {
-			Message string `json:"message"`
-			Code    string `json:"code"`
-		} `json:"error,omitempty"`
-	}
-
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", fmt.Errorf("decode codex response: %w", err)
-	}
-
-	if result.Error != nil {
-		return "", fmt.Errorf("codex api error (%s): %s", result.Error.Code, result.Error.Message)
-	}
-
-	var sb strings.Builder
-	for _, item := range result.Output {
-		if item.Type != "message" {
-			continue
-		}
-		for _, part := range item.Content {
-			if part.Type == "output_text" || part.Type == "text" {
-				sb.WriteString(part.Text)
-			}
-		}
-	}
-
-	return sb.String(), nil
+	return askCodexStreaming(ctx, oauthToken, model, codexInstructions(""), []Message{{Role: "user", Content: sanitizeASCII(prompt)}})
 }
 
 // AskCodexStream sends a streaming request to the Codex Responses API
@@ -126,31 +68,13 @@ func AskCodexStream(ctx context.Context, oauthToken, model, prompt string) (<-ch
 		defer close(textCh)
 		defer close(errCh)
 
-		codexReq := CodexRequest{
-			Model:  model,
-			Input:  []Message{{Role: "user", Content: prompt}},
-			Stream: true,
-		}
-
-		body, err := json.Marshal(codexReq)
+		resp, err := doCodexStreamingRequest(ctx, oauthToken, CodexRequest{
+			Model:        model,
+			Instructions: codexInstructions(""),
+			Input:        []Message{{Role: "user", Content: sanitizeASCII(prompt)}},
+		})
 		if err != nil {
-			errCh <- fmt.Errorf("marshal codex request: %w", err)
-			return
-		}
-
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, codexResponsesURL, bytes.NewReader(body))
-		if err != nil {
-			errCh <- fmt.Errorf("create codex request: %w", err)
-			return
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Authorization", "Bearer "+oauthToken)
-		httpReq.Header.Set("Accept", "text/event-stream")
-
-		client := &http.Client{Timeout: 120 * time.Second}
-		resp, err := client.Do(httpReq)
-		if err != nil {
-			errCh <- fmt.Errorf("codex request failed: %w", err)
+			errCh <- err
 			return
 		}
 		defer resp.Body.Close()
@@ -174,10 +98,7 @@ func AskCodexStream(ctx context.Context, oauthToken, model, prompt string) (<-ch
 				return
 			}
 
-			var event struct {
-				Type  string `json:"type"`
-				Delta string `json:"delta"`
-			}
+			var event codexStreamEvent
 			if err := json.Unmarshal([]byte(data), &event); err != nil {
 				continue
 			}
@@ -205,6 +126,149 @@ func AskCodexStream(ctx context.Context, oauthToken, model, prompt string) (<-ch
 	return textCh, errCh
 }
 
+type codexStreamEvent struct {
+	Type     string `json:"type"`
+	Delta    string `json:"delta"`
+	Response *struct {
+		Output []struct {
+			Type    string `json:"type"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+		Error *struct {
+			Message string `json:"message"`
+			Code    string `json:"code"`
+		} `json:"error,omitempty"`
+	} `json:"response,omitempty"`
+	Error *struct {
+		Message string `json:"message"`
+		Code    string `json:"code"`
+	} `json:"error,omitempty"`
+}
+
+func doCodexStreamingRequest(ctx context.Context, oauthToken string, codexReq CodexRequest) (*http.Response, error) {
+	codexReq.Store = false
+	codexReq.Stream = true
+	if codexReq.Input == nil {
+		codexReq.Input = []Message{}
+	}
+
+	body, err := json.Marshal(codexReq)
+	if err != nil {
+		return nil, fmt.Errorf("marshal codex request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, codexResponsesURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create codex request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+oauthToken)
+	httpReq.Header.Set("Accept", "text/event-stream")
+
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("codex request failed: %w", err)
+	}
+	return resp, nil
+}
+
+func askCodexStreaming(ctx context.Context, oauthToken, model, instructions string, input []Message) (string, error) {
+	resp, err := doCodexStreamingRequest(ctx, oauthToken, CodexRequest{
+		Model:        model,
+		Instructions: instructions,
+		Input:        input,
+	})
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("codex returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	text, err := readCodexStreamText(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return text, nil
+}
+
+func readCodexStreamText(r io.Reader) (string, error) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var sb strings.Builder
+	var completedText string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var event codexStreamEvent
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			continue
+		}
+		if event.Error != nil {
+			return "", fmt.Errorf("codex api error (%s): %s", event.Error.Code, event.Error.Message)
+		}
+
+		switch event.Type {
+		case "response.output_text.delta":
+			sb.WriteString(event.Delta)
+		case "response.completed", "response.done":
+			if event.Response != nil {
+				if event.Response.Error != nil {
+					return "", fmt.Errorf("codex api error (%s): %s", event.Response.Error.Code, event.Response.Error.Message)
+				}
+				completedText = codexResponseText(event.Response.Output)
+			}
+		case "error":
+			if event.Error != nil {
+				return "", fmt.Errorf("codex api error (%s): %s", event.Error.Code, event.Error.Message)
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("reading codex stream: %w", err)
+	}
+	if sb.Len() > 0 {
+		return sb.String(), nil
+	}
+	return completedText, nil
+}
+
+func codexResponseText(output []struct {
+	Type    string `json:"type"`
+	Content []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+}) string {
+	var sb strings.Builder
+	for _, item := range output {
+		if item.Type != "message" {
+			continue
+		}
+		for _, part := range item.Content {
+			if part.Type == "output_text" || part.Type == "text" {
+				sb.WriteString(part.Text)
+			}
+		}
+	}
+	return sb.String()
+}
+
 // askCodexWithHistory sends a multi-turn conversation to the Codex Responses API
 // using structured message roles (system prompt becomes instructions, messages
 // become the input array).
@@ -223,81 +287,11 @@ func (c *Client) askCodexWithHistory(ctx context.Context, conv *ConversationCont
 		model = "gpt-5.4"
 	}
 
-	codexReq := CodexRequest{
-		Model:  model,
-		Stream: false,
-	}
-	if conv.SystemPrompt != "" {
-		codexReq.Instructions = conv.SystemPrompt
-	}
-	codexReq.Input = make([]Message, len(conv.Messages))
+	input := make([]Message, len(conv.Messages))
 	for i, m := range conv.Messages {
-		codexReq.Input[i] = Message{Role: m.Role, Content: sanitizeASCII(m.Content)}
+		input[i] = Message{Role: m.Role, Content: sanitizeASCII(m.Content)}
 	}
-	if codexReq.Input == nil {
-		codexReq.Input = []Message{}
-	}
-
-	body, err := json.Marshal(codexReq)
-	if err != nil {
-		return "", fmt.Errorf("marshal codex request: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, codexResponsesURL, bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("create codex request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+oauthToken)
-
-	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("codex request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read codex response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("codex returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var result struct {
-		Output []struct {
-			Type    string `json:"type"`
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"output"`
-		Error *struct {
-			Message string `json:"message"`
-			Code    string `json:"code"`
-		} `json:"error,omitempty"`
-	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", fmt.Errorf("decode codex response: %w", err)
-	}
-	if result.Error != nil {
-		return "", fmt.Errorf("codex api error (%s): %s", result.Error.Code, result.Error.Message)
-	}
-
-	var sb strings.Builder
-	for _, item := range result.Output {
-		if item.Type != "message" {
-			continue
-		}
-		for _, part := range item.Content {
-			if part.Type == "output_text" || part.Type == "text" {
-				sb.WriteString(part.Text)
-			}
-		}
-	}
-	return sb.String(), nil
+	return askCodexStreaming(ctx, oauthToken, model, codexInstructions(conv.SystemPrompt), input)
 }
 
 // IsOpenAIOAuthActive returns true if the user has a saved OAuth token

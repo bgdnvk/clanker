@@ -148,6 +148,7 @@ type DeployOptions struct {
 	DeployID     string // run-specific id for unique resource naming
 	DOToken      string // DigitalOcean API token for infra scan
 	HetznerToken string // Hetzner Cloud API token for infra scan
+	SREOnly      bool   // deploy only the Clanker SRE observer, not the app
 }
 
 // shouldUseAPIGateway determines whether to use API Gateway or ALB based on app characteristics.
@@ -271,6 +272,9 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 	}
 	if opts.Target == "" {
 		opts.Target = "fargate"
+	}
+	if opts.SREOnly {
+		return buildSREOnlyIntelligence(profile, targetProvider, opts, logf), nil
 	}
 	result := &IntelligenceResult{}
 
@@ -449,6 +453,113 @@ func RunIntelligence(ctx context.Context, profile *RepoProfile, ask AskFunc, cle
 	result.EnrichedPrompt = buildIntelligentPrompt(profile, deep, result.Docker, arch, strat, infraSnap, cfInfraSnap, doInfraSnap, hetznerInfraSnap, opts)
 
 	return result, nil
+}
+
+func buildSREOnlyIntelligence(profile *RepoProfile, targetProvider string, opts *DeployOptions, logf func(string, ...any)) *IntelligenceResult {
+	if logf != nil {
+		logf("[intelligence] sre-only mode: skipping repo LLM exploration, deep app analysis, architecture selection, and live infra scan")
+	}
+	provider := strings.ToLower(strings.TrimSpace(targetProvider))
+	if provider == "" {
+		provider = "aws"
+	}
+	deep := &DeepAnalysis{
+		AppDescription: "Clanker SRE observer deployment only; the application repository is not being deployed.",
+		Services:       []string{"clanker-sre-observer"},
+		ExternalDeps:   []string{"Clanker Cloud Cerebro ingest endpoint", provider + " read-only inventory APIs"},
+		BuildPipeline:  "Use the published ghcr.io/bgdnvk/clanker:latest image; no application build is required.",
+		RunLocally:     "clanker sre run --sre --target cloud-vm --provider " + provider + " --interval 60s",
+		Complexity:     "simple",
+		Concerns: []string{
+			"Do not deploy the analyzed application.",
+			"Keep the runtime read-only and provider-native.",
+			"Use a low-cost runtime and avoid ALB, NAT gateway, managed databases, EKS, or other always-on extras.",
+		},
+		ExposesHTTP:  false,
+		PreferDocker: true,
+	}
+	arch := &ArchitectDecision{
+		Provider:  provider,
+		Method:    "cloud-vm",
+		Reasoning: "SRE-only deploy needs one tiny long-running observer with provider read permissions and Cerebro egress, not application infrastructure.",
+		BuildSteps: []string{
+			"Create or reuse a read-only observer identity.",
+			"Launch the smallest practical VM/container runtime.",
+			"Run ghcr.io/bgdnvk/clanker:latest with clanker sre run --sre --interval 60s.",
+		},
+		RunCmd:     deep.RunLocally,
+		Notes:      []string{"Use Clanker Cloud injected Cerebro URL/token/deploy ID env vars; never print token values."},
+		CpuMemory:  "tiny VM/container; AWS t4g.nano or t3.nano class when available",
+		EstMonthly: "$3-5 for a tiny VM; avoid load balancers/NAT gateways/managed databases",
+		CostBreakdown: []string{
+			"tiny observer runtime only",
+			"no app workload",
+			"no ALB/NAT/EKS/RDS",
+		},
+	}
+	docker := AnalyzeDockerAgent(profile)
+	preflight := &PreflightReport{
+		Warnings: []string{"sre-only deploy uses existing Clanker Cloud inventory and runtime env; app preflight checks are intentionally skipped"},
+	}
+	result := &IntelligenceResult{
+		Exploration: &ExplorationResult{
+			FilesRead: map[string]string{},
+			Analysis:  deep.AppDescription,
+		},
+		DeepAnalysis:   deep,
+		Docker:         docker,
+		Preflight:      preflight,
+		Architecture:   arch,
+		EnrichedPrompt: buildSREOnlyPrompt(profile, provider, arch, opts),
+	}
+	return result
+}
+
+func buildSREOnlyPrompt(profile *RepoProfile, provider string, arch *ArchitectDecision, opts *DeployOptions) string {
+	var b strings.Builder
+	repoURL := ""
+	if profile != nil {
+		repoURL = strings.TrimSpace(profile.RepoURL)
+	}
+	deployID := ""
+	if opts != nil {
+		deployID = strings.TrimSpace(opts.DeployID)
+	}
+	if deployID == "" {
+		deployID = "$CLANKER_SRE_DEPLOY_ID"
+	}
+
+	b.WriteString("Deploy only the Clanker SRE observer. Do not deploy, build, run, or migrate the analyzed application.\n\n")
+	if repoURL != "" {
+		b.WriteString(fmt.Sprintf("Repository %s is an identifier/source context only; do not create application infrastructure for it.\n\n", repoURL))
+	}
+	b.WriteString("## Existing Context\n")
+	b.WriteString("- Clanker Cloud already scanned and stores provider inventory; do not add a separate pre-planning infra scan.\n")
+	b.WriteString("- Runtime secrets are injected by Clanker Cloud via CLANKER_CEREBRO_URL, CLANKER_CEREBRO_INGEST_TOKEN, CLANKER_SRE_DEPLOY_ID, and CLANKER_SRE_AGENT_ID.\n")
+	b.WriteString("- Provider credentials are available to the deployment runner; the runtime identity must be provider-native and read-only.\n\n")
+
+	b.WriteString("## SRE Runtime Requirements\n")
+	b.WriteString(fmt.Sprintf("- Provider: %s\n", provider))
+	b.WriteString(fmt.Sprintf("- Deploy ID: %s\n", deployID))
+	b.WriteString("- Image: ghcr.io/bgdnvk/clanker:latest\n")
+	b.WriteString(fmt.Sprintf("- Command: clanker sre run --sre --target cloud-vm --provider %s --deploy-id %s --interval 60s\n", provider, deployID))
+	b.WriteString("- Use exactly one tiny always-on observer runtime unless the provider has a cheaper equivalent.\n")
+	b.WriteString("- Avoid NAT gateways, load balancers, managed databases, Kubernetes control planes, and application build/deploy steps.\n")
+	b.WriteString("- Tag/label every created resource with clanker-sre=true and clanker-sre-deploy-id=" + deployID + ".\n")
+	b.WriteString("- Include a final non-secret verification command that checks the observer process/container is running and can identify itself.\n\n")
+
+	if arch != nil {
+		b.WriteString("## Architecture Decision\n")
+		b.WriteString(fmt.Sprintf("Method: %s\n", arch.Method))
+		b.WriteString(fmt.Sprintf("Reasoning: %s\n", arch.Reasoning))
+		if arch.CpuMemory != "" {
+			b.WriteString(fmt.Sprintf("Sizing: %s\n", arch.CpuMemory))
+		}
+		if arch.EstMonthly != "" {
+			b.WriteString(fmt.Sprintf("Estimated monthly cost: %s\n", arch.EstMonthly))
+		}
+	}
+	return b.String()
 }
 
 // ValidatePlan runs the LLM validation phase on a generated plan.

@@ -233,6 +233,9 @@ func GenerateMissingUserData(plan *maker.Plan, logf func(string, ...any)) *maker
 	if plan == nil || len(plan.Commands) == 0 {
 		return plan
 	}
+	if IsSREObserverPlan(plan) {
+		return GenerateMissingSREObserverUserData(plan, logf)
+	}
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -241,8 +244,7 @@ func GenerateMissingUserData(plan *maker.Plan, logf func(string, ...any)) *maker
 	hasECR := false
 	region := "us-east-1"
 	for _, cmd := range plan.Commands {
-		argsJoined := strings.ToLower(strings.Join(cmd.Args, " "))
-		if strings.Contains(argsJoined, "ecr") {
+		if commandUsesECR(cmd.Args) {
 			hasECR = true
 		}
 		// Extract region from any command
@@ -268,13 +270,20 @@ func GenerateMissingUserData(plan *maker.Plan, logf func(string, ...any)) *maker
 		}
 
 		// Find user-data argument
+		userDataFlagIdx := -1
 		userDataIdx := -1
 		userDataVal := ""
 		for ai := 0; ai < len(cmd.Args); ai++ {
 			arg := strings.TrimSpace(cmd.Args[ai])
-			if arg == "--user-data" && ai+1 < len(cmd.Args) {
-				userDataIdx = ai + 1
-				userDataVal = cmd.Args[ai+1]
+			if arg == "--user-data" {
+				userDataFlagIdx = ai
+				if ai+1 < len(cmd.Args) {
+					next := strings.TrimSpace(cmd.Args[ai+1])
+					if next != "" && !strings.HasPrefix(next, "--") {
+						userDataIdx = ai + 1
+						userDataVal = cmd.Args[ai+1]
+					}
+				}
 				break
 			}
 			if strings.HasPrefix(arg, "--user-data=") {
@@ -306,7 +315,14 @@ func GenerateMissingUserData(plan *maker.Plan, logf func(string, ...any)) *maker
 		mimeWrapped := wrapUserDataInMIME(script)
 		encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
 
-		if userDataIdx < 0 {
+		if userDataIdx < 0 && userDataFlagIdx >= 0 {
+			insertIdx := userDataFlagIdx + 1
+			newArgs := make([]string, 0, len(cmd.Args)+1)
+			newArgs = append(newArgs, cmd.Args[:insertIdx]...)
+			newArgs = append(newArgs, encoded)
+			newArgs = append(newArgs, cmd.Args[insertIdx:]...)
+			cmd.Args = newArgs
+		} else if userDataIdx < 0 {
 			// Insert --user-data before --profile (or at end)
 			insertIdx := len(cmd.Args)
 			for ai, arg := range cmd.Args {
@@ -332,6 +348,147 @@ func GenerateMissingUserData(plan *maker.Plan, logf func(string, ...any)) *maker
 		logf("[deploy] user-data autofix: generated Docker bootstrap script for %d run-instances command(s)", generated)
 	}
 	return plan
+}
+
+func commandUsesECR(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(args[0]), "ecr") {
+		return true
+	}
+	for _, arg := range args {
+		lower := strings.ToLower(strings.TrimSpace(arg))
+		if lower == "" {
+			continue
+		}
+		if strings.Contains(lower, ".dkr.ecr.") || strings.Contains(lower, "aws ecr ") || strings.Contains(lower, " ecr ") {
+			return true
+		}
+		if strings.Contains(lower, "<ecr_") || strings.Contains(lower, "${ecr_") || strings.Contains(lower, "$ecr_") {
+			return true
+		}
+	}
+	return false
+}
+
+func GenerateMissingSREObserverUserData(plan *maker.Plan, logf func(string, ...any)) *maker.Plan {
+	if plan == nil || len(plan.Commands) == 0 {
+		return plan
+	}
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+
+	generated := 0
+	for ci := range plan.Commands {
+		cmd := &plan.Commands[ci]
+		if len(cmd.Args) < 2 {
+			continue
+		}
+		if strings.TrimSpace(cmd.Args[0]) != "ec2" || strings.TrimSpace(cmd.Args[1]) != "run-instances" {
+			continue
+		}
+
+		userDataFlagIdx := -1
+		userDataIdx := -1
+		userDataVal := ""
+		for ai := 0; ai < len(cmd.Args); ai++ {
+			arg := strings.TrimSpace(cmd.Args[ai])
+			if arg == "--user-data" {
+				userDataFlagIdx = ai
+				if ai+1 < len(cmd.Args) {
+					next := strings.TrimSpace(cmd.Args[ai+1])
+					if next != "" && !strings.HasPrefix(next, "--") {
+						userDataIdx = ai + 1
+						userDataVal = cmd.Args[ai+1]
+					}
+				}
+				break
+			}
+			if strings.HasPrefix(arg, "--user-data=") {
+				userDataIdx = ai
+				userDataVal = strings.TrimPrefix(arg, "--user-data=")
+				break
+			}
+		}
+
+		needsGeneration := userDataIdx < 0
+		if !needsGeneration {
+			decoded, ok := tryDecodeBase64UserData(userDataVal)
+			if !ok {
+				decoded = userDataVal
+			}
+			trimmed := strings.TrimSpace(decoded)
+			needsGeneration = trimmed == "" || isUserDataPlaceholder(trimmed) || isUserDataPlaceholder(userDataVal)
+		}
+		if !needsGeneration {
+			continue
+		}
+
+		mimeWrapped := wrapUserDataInMIME(generateSREObserverBootstrapScript())
+		encoded := base64.StdEncoding.EncodeToString([]byte(mimeWrapped))
+		if userDataIdx < 0 && userDataFlagIdx >= 0 {
+			insertIdx := userDataFlagIdx + 1
+			newArgs := make([]string, 0, len(cmd.Args)+1)
+			newArgs = append(newArgs, cmd.Args[:insertIdx]...)
+			newArgs = append(newArgs, encoded)
+			newArgs = append(newArgs, cmd.Args[insertIdx:]...)
+			cmd.Args = newArgs
+		} else if userDataIdx < 0 {
+			insertIdx := len(cmd.Args)
+			for ai, arg := range cmd.Args {
+				if arg == "--profile" {
+					insertIdx = ai
+					break
+				}
+			}
+			newArgs := make([]string, 0, len(cmd.Args)+2)
+			newArgs = append(newArgs, cmd.Args[:insertIdx]...)
+			newArgs = append(newArgs, "--user-data", encoded)
+			newArgs = append(newArgs, cmd.Args[insertIdx:]...)
+			cmd.Args = newArgs
+		} else if strings.HasPrefix(cmd.Args[userDataIdx], "--user-data=") {
+			cmd.Args[userDataIdx] = "--user-data=" + encoded
+		} else {
+			cmd.Args[userDataIdx] = encoded
+		}
+		generated++
+	}
+	if generated > 0 {
+		logf("[deploy] sre autofix: generated low-cost observer bootstrap for %d run-instances command(s)", generated)
+	}
+	return plan
+}
+
+func generateSREObserverBootstrapScript() string {
+	return `#!/bin/bash
+exec > /var/log/clanker-sre-user-data.log 2>&1
+set -e
+
+echo "[clanker-sre] preparing observer host"
+. /etc/os-release || true
+
+if ! command -v aws >/dev/null 2>&1; then
+    if [ "${ID:-}" = "amzn" ]; then
+        if command -v dnf >/dev/null 2>&1; then dnf install -y awscli; else yum install -y awscli; fi
+    elif command -v apt-get >/dev/null 2>&1; then
+        apt-get update -y && apt-get install -y awscli
+    fi
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+    if [ "${ID:-}" = "amzn" ]; then
+        if command -v dnf >/dev/null 2>&1; then dnf install -y docker; else yum install -y docker; fi
+    elif command -v apt-get >/dev/null 2>&1; then
+        apt-get update -y && apt-get install -y docker.io
+    fi
+fi
+
+systemctl enable docker || true
+systemctl start docker || true
+echo "[clanker-sre] observer host ready"
+`
 }
 
 func isUserDataPlaceholder(s string) bool {

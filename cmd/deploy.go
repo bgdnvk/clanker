@@ -140,9 +140,15 @@ Examples:
 			Target:       deployTarget,
 			InstanceType: instanceType,
 			NewVPC:       newVPC,
+			SREOnly:      sreMode,
 		}
 		// Run-specific id so resource names get a fresh short-hash suffix each deploy.
 		deployOpts.DeployID = time.Now().UTC().Format(time.RFC3339Nano)
+		if sreMode {
+			if sreDeployID := strings.TrimSpace(os.Getenv("CLANKER_SRE_DEPLOY_ID")); sreDeployID != "" {
+				deployOpts.DeployID = sreDeployID
+			}
+		}
 
 		// Pass DO token for infra scan if targeting DigitalOcean
 		if strings.EqualFold(strings.TrimSpace(targetProvider), "digitalocean") {
@@ -229,10 +235,12 @@ Examples:
 			userConfig = deploy.DefaultUserConfig(intel.DeepAnalysis, rp)
 		}
 
-		// Non-interactive mode (plan-only from cloud backend): scan process env
-		// for secret-like vars the backend injected (DISCORD_BOT_TOKEN, etc.)
-		// so they appear in the planning prompt and get Secrets Manager entries.
-		if !applyMode || len(userConfig.EnvVars) == 0 {
+		if sreMode {
+			seedSREEnvVarsFromProcess(userConfig.EnvVars)
+		} else if !applyMode || len(userConfig.EnvVars) == 0 {
+			// Non-interactive mode (plan-only from cloud backend): scan process env
+			// for secret-like vars the backend injected (DISCORD_BOT_TOKEN, etc.)
+			// so they appear in the planning prompt and get Secrets Manager entries.
 			for _, kv := range os.Environ() {
 				k, v, ok := strings.Cut(kv, "=")
 				if !ok {
@@ -1245,31 +1253,42 @@ Examples:
 
 		// Inject user config into output bindings for native Node.js deployment
 		if userConfig != nil {
-			for name, value := range userConfig.EnvVars {
-				outputBindings["ENV_"+name] = value
-				outputBindings[name] = value
-			}
-			outputBindings["APP_PORT"] = fmt.Sprintf("%d", userConfig.AppPort)
-			// Also pass PORT as env var so the container knows which port to listen on
-			outputBindings["ENV_PORT"] = fmt.Sprintf("%d", userConfig.AppPort)
-			outputBindings["DEPLOY_MODE"] = userConfig.DeployMode
-
-			// Pass start command with port for containers that need --port flag
-			if intel.DeepAnalysis != nil && intel.DeepAnalysis.StartCommand != "" && userConfig.AppPort > 0 {
-				// Build start command with correct port (e.g., "node app.js --port 18789")
-				startCmd := intel.DeepAnalysis.StartCommand
-				// Replace common port placeholders or append port flag
-				if !strings.Contains(startCmd, fmt.Sprintf("%d", userConfig.AppPort)) {
-					// If the command doesn't already include the correct port, append it
-					startCmd = fmt.Sprintf("%s --port %d", startCmd, userConfig.AppPort)
+			if sreMode {
+				for name, value := range userConfig.EnvVars {
+					name = strings.TrimSpace(name)
+					if name == "" {
+						continue
+					}
+					outputBindings["ENV_"+name] = value
+					outputBindings[name] = value
 				}
-				outputBindings["START_COMMAND"] = startCmd
-			}
+			} else {
+				for name, value := range userConfig.EnvVars {
+					outputBindings["ENV_"+name] = value
+					outputBindings[name] = value
+				}
+				outputBindings["APP_PORT"] = fmt.Sprintf("%d", userConfig.AppPort)
+				// Also pass PORT as env var so the container knows which port to listen on
+				outputBindings["ENV_PORT"] = fmt.Sprintf("%d", userConfig.AppPort)
+				outputBindings["DEPLOY_MODE"] = userConfig.DeployMode
 
-			// Generate native Node.js user-data if not using Docker
-			if userConfig.DeployMode == "native" {
-				outputBindings["NODEJS_USER_DATA"] = deploy.GenerateNodeJSUserData(rp.RepoURL, intel.DeepAnalysis, userConfig)
-				fmt.Fprintf(os.Stderr, "[deploy] using native Node.js deployment (PM2)\n")
+				// Pass start command with port for containers that need --port flag
+				if intel.DeepAnalysis != nil && intel.DeepAnalysis.StartCommand != "" && userConfig.AppPort > 0 {
+					// Build start command with correct port (e.g., "node app.js --port 18789")
+					startCmd := intel.DeepAnalysis.StartCommand
+					// Replace common port placeholders or append port flag
+					if !strings.Contains(startCmd, fmt.Sprintf("%d", userConfig.AppPort)) {
+						// If the command doesn't already include the correct port, append it
+						startCmd = fmt.Sprintf("%s --port %d", startCmd, userConfig.AppPort)
+					}
+					outputBindings["START_COMMAND"] = startCmd
+				}
+
+				// Generate native Node.js user-data if not using Docker
+				if userConfig.DeployMode == "native" {
+					outputBindings["NODEJS_USER_DATA"] = deploy.GenerateNodeJSUserData(rp.RepoURL, intel.DeepAnalysis, userConfig)
+					fmt.Fprintf(os.Stderr, "[deploy] using native Node.js deployment (PM2)\n")
+				}
 			}
 		}
 		if isOpenClawDeploy {
@@ -1798,7 +1817,7 @@ func buildOneClickDeployObjective(provider, method string, enforceImageDeploy bo
 		if deployID == "" {
 			deployID = "$CLANKER_SRE_DEPLOY_ID"
 		}
-		return fmt.Sprintf("[one-click SRE deploy objective]\nGenerate command plan steps that deploy only the long-running Clanker SRE agent, not the analyzed app. Use provider=%s and the smallest practical always-on runtime for that provider. Prefer ghcr.io/bgdnvk/clanker:latest and run: clanker sre run --sre --target cloud-vm --provider %s --deploy-id %s. The runtime MUST set CLANKER_CEREBRO_URL, CLANKER_CEREBRO_INGEST_TOKEN, CLANKER_SRE_DEPLOY_ID, and CLANKER_SRE_PROVIDER. Tag or label every created resource with clanker-sre=true and clanker-sre-deploy-id=%s. Keep commands idempotent, preserve created resource IDs, and include a final non-secret health/verification command that checks the service/container is still running. Never print token values.\n\n%s", prov, prov, deployID, deployID, sreObserverPermissionContract(prov, deployID))
+		return fmt.Sprintf("[one-click SRE deploy objective]\nGenerate command plan steps that deploy only the long-running Clanker SRE agent, not the analyzed app. Use provider=%s and the smallest practical always-on runtime for that provider. Prefer ghcr.io/bgdnvk/clanker:latest and run: clanker sre run --sre --target cloud-vm --provider %s --deploy-id %s --interval 60s. The runtime MUST set CLANKER_CEREBRO_URL, CLANKER_CEREBRO_INGEST_TOKEN, CLANKER_SRE_DEPLOY_ID, and CLANKER_SRE_PROVIDER from backend-provided env/secret values. Tag or label every created resource with clanker-sre=true and clanker-sre-deploy-id=%s. Keep commands idempotent, preserve created resource IDs, and include a final non-secret health/verification command that checks the service/container is still running. Cost guardrail: create one tiny observer only; avoid NAT gateways, ALBs, managed databases, Kubernetes control planes, app build/deploy resources, and polling intervals below 60s. Never print token values.\n\n%s", prov, prov, deployID, deployID, sreObserverPermissionContract(prov, deployID))
 	}
 	m := strings.ToLower(strings.TrimSpace(method))
 	if m == "" {
@@ -2190,7 +2209,7 @@ func init() {
 	deployCmd.Flags().Bool("apply", false, "Apply the plan immediately after generation")
 	deployCmd.Flags().String("provider", "aws", "Cloud provider: aws, gcp, azure, cloudflare, digitalocean, or hetzner")
 	deployCmd.Flags().String("target", "fargate", "Deployment target: fargate (default), ec2, or eks")
-	deployCmd.Flags().Bool("sre", false, "Include Clanker SRE install guidance for the deployed app")
+	deployCmd.Flags().Bool("sre", false, "Deploy only a low-cost Clanker SRE observer agent")
 	deployCmd.Flags().String("instance-type", "t3.small", "EC2 instance type (only used with --target ec2)")
 	deployCmd.Flags().Bool("new-vpc", false, "Create a new VPC instead of using default")
 	deployCmd.Flags().Bool("enforce-image-deploy", false, "Force ECR image-based deploy path (avoid docker build-on-EC2 user-data)")
@@ -2198,6 +2217,36 @@ func init() {
 	deployCmd.Flags().String("azure-subscription", "", "Azure subscription ID (required for --provider azure apply)")
 	deployCmd.Flags().String("do-token", "", "DigitalOcean access token (or set DIGITALOCEAN_ACCESS_TOKEN)")
 	deployCmd.Flags().String("hetzner-token", "", "Hetzner Cloud API token (or set HCLOUD_TOKEN)")
+}
+
+var sreDeployRuntimeEnvNames = []string{
+	"CLANKER_CEREBRO_URL",
+	"CLANKER_CEREBRO_INGEST_TOKEN",
+	"CLANKER_SRE_DEPLOY_ID",
+	"CLANKER_SRE_AGENT_ID",
+	"CLANKER_SRE_PROVIDER",
+	"CLANKER_SRE_RUNTIME_TARGET",
+	"CLANKER_SRE_INTERVAL",
+	"CLANKER_SRE_INTERVAL_SECONDS",
+	"CLANKER_SRE_EXPECT_HEARTBEAT",
+	"CLANKER_SRE_OBSERVER_IDENTITY_REQUIRED",
+	"CLANKER_SRE_PERMISSION_MODE",
+	"CLANKER_SRE_SECRET_STORE",
+}
+
+func seedSREEnvVarsFromProcess(envVars map[string]string) {
+	if envVars == nil {
+		return
+	}
+	for _, name := range sreDeployRuntimeEnvNames {
+		val := strings.TrimSpace(os.Getenv(name))
+		if val == "" {
+			continue
+		}
+		if strings.TrimSpace(envVars[name]) == "" {
+			envVars[name] = val
+		}
+	}
 }
 
 // splitPlanAtDockerBuild separates infrastructure setup from app deployment.

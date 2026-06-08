@@ -1082,11 +1082,6 @@ func (c *Client) resolveLocalModelInferenceURL(profile *awsclient.AIProfile) str
 }
 
 func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
-	// If no API key is configured but OAuth is available, use the Codex Responses API.
-	if strings.TrimSpace(c.apiKey) == "" && IsOpenAIOAuthActive() {
-		return c.AskCodex(ctx, prompt)
-	}
-
 	// Get the AI profile configuration (this is the profileLLMCall for OpenAI API access)
 	profileLLMCall, err := c.getAIProfile(c.aiProfile)
 	if err != nil {
@@ -1095,6 +1090,9 @@ func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
 	c.baseURL = defaultOpenAIBaseURL
 	if localModelInferenceURL := c.resolveLocalModelInferenceURL(profileLLMCall); localModelInferenceURL != "" {
 		c.baseURL = localModelInferenceURL
+	}
+	if shouldUseOpenAIOAuth(c.apiKey, c.baseURL) {
+		return c.AskCodex(ctx, prompt)
 	}
 
 	if strings.TrimSpace(c.apiKey) == "" && !isLocalModelInferenceEndpoint(c.baseURL) {
@@ -2181,13 +2179,21 @@ func (c *Client) askMiniMaxWithHistory(ctx context.Context, conv *ConversationCo
 	return "", fmt.Errorf("no response content from MiniMax")
 }
 
+func shouldUseOpenAIOAuth(apiKey, baseURL string) bool {
+	if !IsOpenAIOAuthActive() {
+		return false
+	}
+	if strings.TrimSpace(os.Getenv("OPENAI_OAUTH_TOKEN")) != "" {
+		return true
+	}
+	if isLocalModelInferenceEndpoint(baseURL) {
+		return false
+	}
+	return strings.TrimSpace(apiKey) == ""
+}
+
 // askOpenAIWithHistory sends a multi-turn request to OpenAI API
 func (c *Client) askOpenAIWithHistory(ctx context.Context, conv *ConversationContext) (string, error) {
-	// If no API key but OAuth is available, use the Codex Responses API.
-	if strings.TrimSpace(c.apiKey) == "" && IsOpenAIOAuthActive() {
-		return c.askCodexWithHistory(ctx, conv)
-	}
-
 	// Build messages array
 	messages := make([]Message, 0, len(conv.Messages)+1)
 
@@ -2208,6 +2214,9 @@ func (c *Client) askOpenAIWithHistory(ctx context.Context, conv *ConversationCon
 	c.baseURL = defaultOpenAIBaseURL
 	if localModelInferenceURL := c.resolveLocalModelInferenceURL(profileLLMCall); localModelInferenceURL != "" {
 		c.baseURL = localModelInferenceURL
+	}
+	if shouldUseOpenAIOAuth(c.apiKey, c.baseURL) {
+		return c.askCodexWithHistory(ctx, conv)
 	}
 	if strings.TrimSpace(c.apiKey) == "" && !isLocalModelInferenceEndpoint(c.baseURL) {
 		return "", fmt.Errorf("OpenAI API key not configured (or run 'clanker auth login' for OAuth)")

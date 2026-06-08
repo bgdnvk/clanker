@@ -20,7 +20,7 @@ var sreCmd = &cobra.Command{
 	Short: "Run the Clanker SRE bot",
 	Long: `Run the Clanker SRE bot for adaptive, read-only infrastructure visibility.
 
-Docker is the default runtime. Use --target local, launchd, systemd, k8s, or cloud-vm when you want another install path.`,
+Docker is the default runtime. Use --target local, launchd, systemd, k8s, cloud-vm, aws, or gcp when you want another install path.`,
 }
 
 var sreDiscoverCmd = &cobra.Command{
@@ -181,27 +181,44 @@ func init() {
 }
 
 func addSREPlanFlags(cmd *cobra.Command) {
-	cmd.Flags().String("target", "docker", "Install target: docker, auto, local, launchd, systemd, k8s, or cloud-vm")
+	cmd.Flags().String("target", defaultSRETargetFlag(), "Install target: docker, auto, local, launchd, systemd, k8s, cloud-vm, aws, or gcp")
 	cmd.Flags().String("image", sre.DefaultImage, "Container image for docker, k8s, and cloud-vm targets")
 	cmd.Flags().String("name", sre.DefaultAgentName, "SRE bot name/container/service name")
 	cmd.Flags().String("cerebro-url", "", "Cerebro API base URL, e.g. http://127.0.0.1:8080/api")
 	cmd.Flags().String("ingest-token-env", sre.DefaultIngestTokenEnv, "Environment variable name that holds the Cerebro ingest token")
-	cmd.Flags().String("provider", "", "Cloud provider name for heartbeat identification (aws, gcp, azure, etc.)")
-	cmd.Flags().String("deploy-id", "", "Stable SRE deployment ID for heartbeat verification")
-	cmd.Flags().String("interval", sre.DefaultInterval.String(), "Heartbeat/discovery interval")
+	cmd.Flags().String("provider", os.Getenv("CLANKER_SRE_PROVIDER"), "Cloud provider name for heartbeat identification (aws, gcp, azure, etc.)")
+	cmd.Flags().String("deploy-id", os.Getenv("CLANKER_SRE_DEPLOY_ID"), "Stable SRE deployment ID for heartbeat verification")
+	cmd.Flags().String("interval", defaultSREIntervalFlag(), "Heartbeat/discovery interval")
 	cmd.Flags().String("format", "text", "Output format: text or json")
 }
 
 func addSRERunFlags(cmd *cobra.Command) {
-	cmd.Flags().String("target", "docker", "Runtime target label: docker, local, launchd, systemd, k8s, or cloud-vm")
-	cmd.Flags().String("agent-id", "", "Stable SRE agent ID (default derived from hostname)")
+	cmd.Flags().String("target", defaultSRETargetFlag(), "Runtime target label: docker, local, launchd, systemd, k8s, cloud-vm, aws, or gcp")
+	cmd.Flags().String("agent-id", os.Getenv("CLANKER_SRE_AGENT_ID"), "Stable SRE agent ID (default derived from hostname)")
 	cmd.Flags().String("name", sre.DefaultAgentName, "SRE bot name")
 	cmd.Flags().String("cerebro-url", "", "Cerebro API base URL, e.g. http://127.0.0.1:8080/api")
 	cmd.Flags().String("ingest-token", "", "Cerebro ingest token (or set CLANKER_CEREBRO_INGEST_TOKEN)")
-	cmd.Flags().String("provider", "", "Cloud provider name for heartbeat identification (aws, gcp, azure, etc.)")
-	cmd.Flags().String("deploy-id", "", "Stable SRE deployment ID for heartbeat verification")
-	cmd.Flags().String("interval", sre.DefaultInterval.String(), "Heartbeat/discovery interval")
+	cmd.Flags().String("provider", os.Getenv("CLANKER_SRE_PROVIDER"), "Cloud provider name for heartbeat identification (aws, gcp, azure, etc.)")
+	cmd.Flags().String("deploy-id", os.Getenv("CLANKER_SRE_DEPLOY_ID"), "Stable SRE deployment ID for heartbeat verification")
+	cmd.Flags().String("interval", defaultSREIntervalFlag(), "Heartbeat/discovery interval")
 	cmd.Flags().Bool("once", false, "Send one heartbeat and exit")
+}
+
+func defaultSRETargetFlag() string {
+	if target := strings.TrimSpace(os.Getenv("CLANKER_SRE_RUNTIME_TARGET")); target != "" {
+		return target
+	}
+	return "docker"
+}
+
+func defaultSREIntervalFlag() string {
+	if value := strings.TrimSpace(os.Getenv("CLANKER_SRE_INTERVAL")); value != "" {
+		return value
+	}
+	if seconds := strings.TrimSpace(os.Getenv("CLANKER_SRE_INTERVAL_SECONDS")); seconds != "" {
+		return seconds + "s"
+	}
+	return sre.DefaultInterval.String()
 }
 
 func buildSREPlan(cmd *cobra.Command) (sre.InstallPlan, error) {
