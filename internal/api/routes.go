@@ -83,6 +83,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/maker/apply", s.handleMakerApply)
 	s.mux.HandleFunc("GET /api/v1/maker/history", s.handleMakerHistory)
 	s.mux.HandleFunc("POST /api/v1/maker/plan", s.handleMakerPlan)
+
+	// Code view
+	s.mux.HandleFunc("POST /api/v1/code/analyze", s.handleCodeAnalyze)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
