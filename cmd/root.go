@@ -30,11 +30,16 @@ var Version = "dev"
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use:     "clanker",
-	Short:   "AI-powered terminal for Cloud queries",
+	Short:   "Cloud operations from your terminal",
 	Version: Version,
-	Long: `Clanker is an AI-powered CLI tool that helps you query your cloud infrastructure
-using natural language. Ask questions about your systems,
-get insights, and perform operations through an intelligent interface.`,
+	Long: `Clanker is the command-line companion to Clanker Cloud.
+
+Use it to inspect cloud resources, ask operational questions, scan for waste,
+and run reviewed infrastructure workflows from the terminal.`,
+	Example: `  clanker ask "what changed in prod?"
+  clanker scan --quick
+  clanker cost summary
+  clanker k8s health`,
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.

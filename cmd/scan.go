@@ -30,8 +30,8 @@ var (
 	scanLocal      bool
 )
 
-// scanCmd is the new top-level "scan everything for cost waste"
-// command. By design it is *richer* than `clanker cost savings`:
+// scanCmd is the top-level "scan everything for cost waste" command.
+// By design it is richer than `clanker cost savings`:
 //
 //   - When the clanker-cloud desktop backend is running on
 //     localhost:8080..8084, the CLI calls /api/cost/scan and gets the
@@ -42,14 +42,14 @@ var (
 //     AWS Cost Explorer commitment-recommendation surface — a degraded
 //     but still useful receipt focused on Savings Plans + RIs.
 //
-// The output is a coloured terminal "receipt" with category rollup,
+// The output is a terminal summary with category rollup,
 // sorted findings, and per-row actions. --export and --fix turn the
-// receipt into a Markdown/JSON file or a maker plan JSON respectively.
+// summary into a Markdown/JSON file or a maker plan JSON respectively.
 var scanCmd = &cobra.Command{
 	Use:   "scan",
-	Short: "Scan every configured cloud for cost waste, produce a receipt",
+	Short: "Scan configured clouds for cost waste",
 	Long: `Scan every configured cloud account for actionable cost-savings opportunities
-and print a colour-coded receipt summarising the waste found.
+and print a clear summary of the waste found.
 
 Sources composed (when available):
 
@@ -69,7 +69,7 @@ Modes:
 
 Output formats:
 
-  --format terminal   Coloured receipt (default).
+  --format terminal   Terminal summary (default).
   --format json       Machine-readable JSON.
   --format markdown   Markdown export.
 
@@ -81,7 +81,7 @@ Actions:
 
 Examples:
 
-  clanker scan                                    # full scan, coloured terminal
+  clanker scan                                    # full scan, terminal summary
   clanker scan --quick                            # fast scan, detectors only
   clanker scan --format json                      # JSON to stdout
   clanker scan --export receipt.md --format markdown
