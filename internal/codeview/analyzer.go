@@ -24,6 +24,7 @@ const (
 	maxEvidencePerPattern  = 8
 	maxPatternFiles        = 80
 	maxGraphFileNodes      = 140
+	maxPatternExampleEdges = 360
 	maxImportEdges         = 180
 	maxCorrelations        = 220
 	maxCorrelationFiles    = 20
@@ -1040,6 +1041,7 @@ func buildGraph(repoURL string, files []scannedFile, languages []LanguageStat, p
 	}
 
 	topFiles := topGraphFiles(files)
+	exampleEdges := 0
 	for _, file := range topFiles {
 		fileID := "file:" + file.path
 		addNode(GraphNode{
@@ -1057,8 +1059,12 @@ func buildGraph(repoURL string, files []scannedFile, languages []LanguageStat, p
 		if file.language != "" {
 			addEdge(GraphEdge{ID: stableID("lang:" + file.language + ":" + file.path), Source: "language:" + file.language, Target: fileID, Type: "language-file", Label: "file"})
 		}
-		for patternID := range file.patterns {
+		for _, patternID := range sortedPatternIDs(file.patterns) {
+			if exampleEdges >= maxPatternExampleEdges {
+				break
+			}
 			addEdge(GraphEdge{ID: stableID("pattern:" + patternID + ":" + file.path), Source: "pattern:" + patternID, Target: fileID, Type: "example", Label: "example"})
+			exampleEdges++
 		}
 	}
 
@@ -1067,8 +1073,8 @@ func buildGraph(repoURL string, files []scannedFile, languages []LanguageStat, p
 		fileNodeSet[file.path] = true
 	}
 	importEdges := resolveImportEdges(files, fileNodeSet)
-	for _, edge := range importEdges {
-		if len(edges) >= maxImportEdges+len(patterns)*2+len(languages)+1 {
+	for i, edge := range importEdges {
+		if i >= maxImportEdges {
 			break
 		}
 		addEdge(edge)
