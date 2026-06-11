@@ -33,7 +33,11 @@ Supported resources:
   primary-ips          - Primary IPs
   ssh-keys             - SSH keys
   images               - Images and snapshots
-  certificates         - TLS certificates`,
+  certificates         - TLS certificates
+  placement-groups     - Placement groups
+  server-types         - Server type catalog
+  locations            - Location catalog
+  datacenters          - Datacenter catalog`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resourceType := strings.ToLower(strings.TrimSpace(args[0]))
@@ -81,6 +85,18 @@ Supported resources:
 
 			case "certificates", "certificate", "cert", "certs":
 				return listCertificates(ctx, client)
+
+			case "placement-groups", "placement-group":
+				return listPlacementGroups(ctx, client)
+
+			case "server-types", "server-type", "types":
+				return listServerTypes(ctx, client)
+
+			case "locations", "location":
+				return listLocations(ctx, client)
+
+			case "datacenters", "datacenter", "dcs":
+				return listDatacenters(ctx, client)
 
 			default:
 				return fmt.Errorf("unknown resource type: %s", resourceType)
@@ -257,6 +273,70 @@ func listCertificates(ctx context.Context, client *Client) error {
 	fmt.Println()
 	if strings.TrimSpace(result) == "" {
 		fmt.Println("  No certificates found")
+	} else {
+		fmt.Println(result)
+	}
+	return nil
+}
+
+func listPlacementGroups(ctx context.Context, client *Client) error {
+	result, err := client.RunHcloud(ctx, "placement-group", "list")
+	if err != nil {
+		return fmt.Errorf("failed to list placement groups: %w", err)
+	}
+
+	fmt.Println("Hetzner Cloud Placement Groups:")
+	fmt.Println()
+	if strings.TrimSpace(result) == "" {
+		fmt.Println("  No placement groups found")
+	} else {
+		fmt.Println(result)
+	}
+	return nil
+}
+
+func listServerTypes(ctx context.Context, client *Client) error {
+	result, err := client.RunHcloud(ctx, "server-type", "list")
+	if err != nil {
+		return fmt.Errorf("failed to list server types: %w", err)
+	}
+
+	fmt.Println("Hetzner Cloud Server Types:")
+	fmt.Println()
+	if strings.TrimSpace(result) == "" {
+		fmt.Println("  No server types found")
+	} else {
+		fmt.Println(result)
+	}
+	return nil
+}
+
+func listLocations(ctx context.Context, client *Client) error {
+	result, err := client.RunHcloud(ctx, "location", "list")
+	if err != nil {
+		return fmt.Errorf("failed to list locations: %w", err)
+	}
+
+	fmt.Println("Hetzner Cloud Locations:")
+	fmt.Println()
+	if strings.TrimSpace(result) == "" {
+		fmt.Println("  No locations found")
+	} else {
+		fmt.Println(result)
+	}
+	return nil
+}
+
+func listDatacenters(ctx context.Context, client *Client) error {
+	result, err := client.RunHcloud(ctx, "datacenter", "list")
+	if err != nil {
+		return fmt.Errorf("failed to list datacenters: %w", err)
+	}
+
+	fmt.Println("Hetzner Cloud Datacenters:")
+	fmt.Println()
+	if strings.TrimSpace(result) == "" {
+		fmt.Println("  No datacenters found")
 	} else {
 		fmt.Println(result)
 	}

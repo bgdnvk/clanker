@@ -1850,6 +1850,10 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		services, _ := c.execAWSCLI(ctx, serviceArgs, profile)
 		return fmt.Sprintf("Clusters:\n%s\n\nServices:\n%s", clusters, services), nil
 
+	case "list_apprunner_services":
+		args := []string{"apprunner", "list-services", "--output", "table"}
+		return c.execAWSCLI(ctx, args, profile)
+
 	case "analyze_ecs_service_logs":
 		serviceName, ok := input["service_name"].(string)
 		if !ok {
@@ -2291,6 +2295,14 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		args := []string{"events", "list-event-buses", "--output", "table"}
 		return c.execAWSCLI(ctx, args, profile)
 
+	case "list_eventbridge_schedules":
+		args := []string{"scheduler", "list-schedules", "--output", "table"}
+		return c.execAWSCLI(ctx, args, profile)
+
+	case "list_eventbridge_pipes":
+		args := []string{"pipes", "list-pipes", "--output", "table"}
+		return c.execAWSCLI(ctx, args, profile)
+
 	// AUTO SCALING & OPTIMIZATION operations
 	case "list_auto_scaling_groups":
 		args := []string{"autoscaling", "describe-auto-scaling-groups", "--output", "table", "--query", "AutoScalingGroups[*].{Name:AutoScalingGroupName,Instances:Instances|length,Min:MinSize,Max:MaxSize,Desired:DesiredCapacity}"}
@@ -2374,6 +2386,14 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		globalWAF, _ := c.execAWSCLI(ctx, globalArgs, profile)
 
 		return fmt.Sprintf("Regional WAF ACLs:\n%s\n\nCloudFront WAF ACLs:\n%s", regionalWAF, globalWAF), nil
+
+	case "list_verifiedpermissions_policy_stores":
+		args := []string{"verifiedpermissions", "list-policy-stores", "--output", "table"}
+		return c.execAWSCLI(ctx, args, profile)
+
+	case "list_securitylake_data_lakes":
+		args := []string{"securitylake", "list-data-lakes", "--output", "table"}
+		return c.execAWSCLI(ctx, args, profile)
 
 	// DEVOPS & CI/CD operations
 	case "list_codebuild_projects":
@@ -2522,6 +2542,14 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 
 	case "list_bedrock_guardrails":
 		args := []string{"bedrock", "list-guardrails", "--output", "table", "--query", "guardrails[*].{GuardrailId:id,Name:name,Status:status,Version:version}"}
+		return c.execAWSCLI(ctx, args, profile)
+
+	case "list_qbusiness_applications":
+		args := []string{"qbusiness", "list-applications", "--output", "table"}
+		return c.execAWSCLI(ctx, args, profile)
+
+	case "list_datazone_domains":
+		args := []string{"datazone", "list-domains", "--output", "table"}
 		return c.execAWSCLI(ctx, args, profile)
 
 	case "list_comprehend_jobs":

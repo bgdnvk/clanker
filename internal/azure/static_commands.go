@@ -27,12 +27,30 @@ Supported resources:
   groups, rg           - Resource groups
   resources            - ARM resources (top 200)
   vms                  - Virtual machines
+  containers, aci      - Container Instances
   aks                  - AKS clusters
+  containerapps        - Azure Container Apps
   webapps              - App Services (webapps)
   functionapps         - Function Apps
+  static-webapps       - Static Web Apps
+  acr                  - Azure Container Registries
   storage              - Storage accounts
   keyvaults            - Key Vaults
   cosmosdb             - Cosmos DB accounts
+  sql-servers          - Azure SQL servers
+  sql-databases        - Azure SQL databases
+  postgres             - Azure PostgreSQL Flexible Servers
+  mysql                - Azure MySQL Flexible Servers
+  redis                - Azure Cache for Redis
+  ai-services          - Azure AI Services / Azure OpenAI resources
+  ai-search            - Azure AI Search services
+  servicebus           - Service Bus namespaces
+  eventhubs            - Event Hubs namespaces
+  eventgrid            - Event Grid topics
+  apim                 - API Management services
+  log-analytics        - Log Analytics workspaces
+  app-insights         - Application Insights components
+  front-door           - Front Door / CDN profiles
   vnets                - Virtual networks
   nsgs                 - Network security groups
   public-ips           - Public IP addresses
@@ -90,6 +108,18 @@ Supported resources:
 					return err
 				}
 				fmt.Print(result)
+			case "containers", "container", "aci":
+				result, err := exec("container", "list", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "containerapps", "containerapp", "aca":
+				result, err := exec("containerapp", "list", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
 			case "webapps", "webapp", "appservice", "appservices":
 				result, err := exec("webapp", "list", "--output", "table")
 				if err != nil {
@@ -98,6 +128,18 @@ Supported resources:
 				fmt.Print(result)
 			case "functionapps", "functionapp", "functions":
 				result, err := exec("functionapp", "list", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "static-webapps", "staticwebapps", "staticwebapp":
+				result, err := exec("staticwebapp", "list", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "acr", "registries", "container-registries":
+				result, err := exec("acr", "list", "--output", "table")
 				if err != nil {
 					return err
 				}
@@ -116,6 +158,90 @@ Supported resources:
 				fmt.Print(result)
 			case "cosmosdb", "cosmos":
 				result, err := exec("cosmosdb", "list", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "sql-servers":
+				result, err := exec("resource", "list", "--resource-type", "Microsoft.Sql/servers", "--query", "[:200].{name:name,location:location,resourceGroup:resourceGroup}", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "sql-databases":
+				result, err := exec("resource", "list", "--resource-type", "Microsoft.Sql/servers/databases", "--query", "[:200].{name:name,location:location,resourceGroup:resourceGroup}", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "postgres", "postgresql":
+				result, err := exec("resource", "list", "--resource-type", "Microsoft.DBforPostgreSQL/flexibleServers", "--query", "[:200].{name:name,location:location,resourceGroup:resourceGroup}", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "mysql":
+				result, err := exec("resource", "list", "--resource-type", "Microsoft.DBforMySQL/flexibleServers", "--query", "[:200].{name:name,location:location,resourceGroup:resourceGroup}", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "redis", "cache":
+				result, err := exec("resource", "list", "--resource-type", "Microsoft.Cache/Redis", "--query", "[:200].{name:name,location:location,resourceGroup:resourceGroup}", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "ai-services", "cognitive-services", "azure-openai":
+				result, err := exec("resource", "list", "--resource-type", "Microsoft.CognitiveServices/accounts", "--query", "[:200].{name:name,kind:kind,location:location,resourceGroup:resourceGroup}", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "ai-search", "search", "cognitive-search":
+				result, err := exec("resource", "list", "--resource-type", "Microsoft.Search/searchServices", "--query", "[:200].{name:name,location:location,resourceGroup:resourceGroup}", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "servicebus", "service-bus":
+				result, err := exec("servicebus", "namespace", "list", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "eventhubs", "event-hubs":
+				result, err := exec("eventhubs", "namespace", "list", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "eventgrid", "event-grid":
+				result, err := exec("eventgrid", "topic", "list", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "apim", "api-management":
+				result, err := exec("apim", "list", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "log-analytics", "workspaces":
+				result, err := exec("monitor", "log-analytics", "workspace", "list", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "app-insights", "application-insights":
+				result, err := exec("resource", "list", "--resource-type", "microsoft.insights/components", "--query", "[:200].{name:name,location:location,resourceGroup:resourceGroup}", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "front-door", "frontdoor", "cdn":
+				result, err := exec("resource", "list", "--resource-type", "Microsoft.Cdn/profiles", "--query", "[:200].{name:name,kind:kind,location:location,resourceGroup:resourceGroup}", "--output", "table")
 				if err != nil {
 					return err
 				}

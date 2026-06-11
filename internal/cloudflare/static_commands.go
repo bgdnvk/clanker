@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -28,9 +29,19 @@ Supported resources:
   zones                - DNS zones (domains)
   records              - DNS records (requires --zone)
   workers              - Cloudflare Workers (requires wrangler)
+  pages                - Pages projects
   kv-namespaces        - Workers KV namespaces (requires wrangler)
   d1-databases         - D1 databases (requires wrangler)
   r2-buckets           - R2 storage buckets (requires wrangler)
+  queues               - Queues
+  vectorize            - Vectorize indexes
+  hyperdrive           - Hyperdrive configs
+  ai-gateways          - AI Gateway gateways
+  ai-gateway-routes    - AI Gateway dynamic routes (requires --gateway-id)
+  ai-search            - AI Search instances
+  durable-objects      - Durable Object namespaces
+  turnstile            - Turnstile widgets
+  workflows            - Workflows (requires wrangler)
   tunnels              - Cloudflare Tunnels (requires cloudflared)
   firewall-rules       - Firewall rules (requires --zone)
   page-rules           - Page rules (requires --zone)`,
@@ -39,6 +50,7 @@ Supported resources:
 			resourceType := strings.ToLower(args[0])
 			zoneID, _ := cmd.Flags().GetString("zone")
 			zoneName, _ := cmd.Flags().GetString("zone-name")
+			gatewayID, _ := cmd.Flags().GetString("gateway-id")
 
 			accountID := ResolveAccountID()
 			apiToken := ResolveAPIToken()
@@ -76,6 +88,9 @@ Supported resources:
 			case "workers", "worker":
 				return listWorkers(ctx, client)
 
+			case "pages", "page", "pages-projects":
+				return listAccountAPIResource(ctx, client, "Cloudflare Pages Projects", accountID, "/accounts/%s/pages/projects")
+
 			case "kv", "kv-namespaces":
 				return listKVNamespaces(ctx, client)
 
@@ -84,6 +99,36 @@ Supported resources:
 
 			case "r2", "r2-buckets":
 				return listR2Buckets(ctx, client)
+
+			case "queues", "queue":
+				return listAccountAPIResource(ctx, client, "Cloudflare Queues", accountID, "/accounts/%s/queues")
+
+			case "vectorize", "vectorize-indexes", "vectors":
+				return listAccountAPIResource(ctx, client, "Cloudflare Vectorize Indexes", accountID, "/accounts/%s/vectorize/v2/indexes")
+
+			case "hyperdrive", "hyperdrives":
+				return listAccountAPIResource(ctx, client, "Cloudflare Hyperdrive Configs", accountID, "/accounts/%s/hyperdrive/configs")
+
+			case "ai-gateways", "ai-gateway":
+				return listAccountAPIResource(ctx, client, "Cloudflare AI Gateways", accountID, "/accounts/%s/ai-gateway/gateways")
+
+			case "ai-gateway-routes", "ai-routes", "gateway-routes":
+				if gatewayID == "" {
+					return fmt.Errorf("--gateway-id is required to list AI Gateway routes")
+				}
+				return listAccountAPIResource(ctx, client, "Cloudflare AI Gateway Routes", accountID, "/accounts/%s/ai-gateway/gateways/"+url.PathEscape(gatewayID)+"/routes")
+
+			case "ai-search", "ai-search-instances":
+				return listAccountAPIResource(ctx, client, "Cloudflare AI Search Instances", accountID, "/accounts/%s/ai-search/instances")
+
+			case "durable-objects", "durable-object-namespaces":
+				return listAccountAPIResource(ctx, client, "Cloudflare Durable Object Namespaces", accountID, "/accounts/%s/workers/durable_objects/namespaces")
+
+			case "turnstile", "turnstile-widgets":
+				return listAccountAPIResource(ctx, client, "Cloudflare Turnstile Widgets", accountID, "/accounts/%s/challenges/widgets")
+
+			case "workflows", "workflow":
+				return listWorkflows(ctx, client)
 
 			case "tunnels", "tunnel":
 				return listTunnels(ctx, client)
@@ -108,10 +153,24 @@ Supported resources:
 
 	cfListCmd.Flags().String("zone", "", "Zone ID for zone-specific resources")
 	cfListCmd.Flags().String("zone-name", "", "Zone name (domain) to look up zone ID")
+	cfListCmd.Flags().String("gateway-id", "", "AI Gateway ID for gateway-scoped resources")
 
 	cfCmd.AddCommand(cfListCmd)
 
 	return cfCmd
+}
+
+func listAccountAPIResource(ctx context.Context, client *Client, title, accountID, endpointTemplate string) error {
+	if strings.TrimSpace(accountID) == "" {
+		return fmt.Errorf("cloudflare account_id is required (set cloudflare.account_id, CLOUDFLARE_ACCOUNT_ID, or CF_ACCOUNT_ID)")
+	}
+	result, err := client.RunAPIWithContext(ctx, "GET", fmt.Sprintf(endpointTemplate, accountID), "")
+	if err != nil {
+		return err
+	}
+	fmt.Println(title + ":")
+	fmt.Println(result)
+	return nil
 }
 
 // lookupZoneID looks up a zone ID by name
@@ -285,6 +344,19 @@ func listR2Buckets(ctx context.Context, client *Client) error {
 	}
 
 	fmt.Println("R2 Buckets:")
+	fmt.Println(result)
+	return nil
+}
+
+// listWorkflows lists Workflows via Wrangler. Workflows are defined in the
+// deployed Worker bundle, so Wrangler is the most reliable discovery surface.
+func listWorkflows(ctx context.Context, client *Client) error {
+	result, err := client.RunWranglerWithContext(ctx, "workflows", "list")
+	if err != nil {
+		return fmt.Errorf("failed to list Workflows: %w", err)
+	}
+
+	fmt.Println("Cloudflare Workflows:")
 	fmt.Println(result)
 	return nil
 }

@@ -26,6 +26,7 @@ Supported resources:
     ec2, instances       - EC2 instances
     ecs, clusters        - ECS clusters and services
     batch                - AWS Batch jobs
+    app-runner           - App Runner services
     asg                  - Auto Scaling Groups
     
   SERVERLESS:
@@ -57,6 +58,8 @@ Supported resources:
     sqs, queues          - SQS queues
     sns, topics          - SNS topics
     eventbridge, events  - EventBridge rules
+    eventbridge-schedules - EventBridge Scheduler schedules
+    eventbridge-pipes    - EventBridge Pipes
     
   MONITORING:
     logs, cloudwatch     - CloudWatch log groups
@@ -64,11 +67,13 @@ Supported resources:
     
   SECURITY:
     iam-roles            - IAM roles
-		iam-groups           - IAM groups
+    iam-groups           - IAM groups
     iam-users            - IAM users
     kms, keys            - KMS keys
     certificates, acm    - ACM certificates
     secrets              - Secrets Manager secrets
+    verified-permissions - Verified Permissions policy stores
+    security-lake        - Security Lake data lakes
     
   DEVOPS:
     codebuild            - CodeBuild projects
@@ -81,6 +86,8 @@ Supported resources:
     bedrock-agents       - Bedrock agents
     bedrock-kb, knowledge-bases - Bedrock knowledge bases
     bedrock-guardrails   - Bedrock guardrails
+    qbusiness            - Amazon Q Business applications
+    datazone             - Amazon DataZone domains
     sagemaker-endpoints  - SageMaker endpoints
     sagemaker-models     - SageMaker models
     sagemaker-jobs       - SageMaker training jobs
@@ -197,6 +204,12 @@ Supported resources:
 				fmt.Print(info)
 			case "batch":
 				result, err := executeOp("list_batch_jobs")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "app-runner", "apprunner":
+				result, err := executeOp("list_apprunner_services")
 				if err != nil {
 					return err
 				}
@@ -327,6 +340,18 @@ Supported resources:
 					return err
 				}
 				fmt.Print(result)
+			case "eventbridge-schedules", "scheduler", "schedules":
+				result, err := executeOp("list_eventbridge_schedules")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "eventbridge-pipes", "pipes":
+				result, err := executeOp("list_eventbridge_pipes")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
 
 			// MONITORING
 			case "logs", "cloudwatch":
@@ -379,6 +404,18 @@ Supported resources:
 					return err
 				}
 				fmt.Print(result)
+			case "verified-permissions", "verifiedpermissions":
+				result, err := executeOp("list_verifiedpermissions_policy_stores")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "security-lake", "securitylake":
+				result, err := executeOp("list_securitylake_data_lakes")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
 
 			// DEVOPS
 			case "codebuild":
@@ -427,6 +464,18 @@ Supported resources:
 				fmt.Print(result)
 			case "bedrock-guardrails":
 				result, err := executeOp("list_bedrock_guardrails")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "qbusiness", "q-business", "amazon-q":
+				result, err := executeOp("list_qbusiness_applications")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "datazone":
+				result, err := executeOp("list_datazone_domains")
 				if err != nil {
 					return err
 				}

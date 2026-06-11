@@ -29,15 +29,23 @@ Supported resources:
   databases, dbs       - Managed databases
   spaces               - Spaces (object storage)
   apps                 - App Platform apps
+  functions            - Serverless Functions
+  function-namespaces  - Serverless Functions namespaces
+  gradient-agents      - Gradient AI agents
+  gradient-models      - Gradient AI models
+  gradient-regions     - Gradient AI regions
+  gradient-knowledge-bases - Gradient AI knowledge bases
   load-balancers, lbs  - Load balancers
   volumes              - Block storage volumes
   vpcs                 - Virtual private clouds
   domains              - DNS domains
   firewalls            - Cloud firewalls
+  projects             - Projects
   registries, registry - Container registries`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resourceType := strings.ToLower(strings.TrimSpace(args[0]))
+			region, _ := cmd.Flags().GetString("region")
 
 			apiToken := ResolveAPIToken()
 			if apiToken == "" {
@@ -68,6 +76,24 @@ Supported resources:
 			case "apps", "app":
 				return listApps(ctx, client)
 
+			case "functions", "function", "serverless-functions":
+				return listFunctions(ctx, client)
+
+			case "function-namespaces", "functions-namespaces", "serverless-namespaces":
+				return listFunctionNamespaces(ctx, client)
+
+			case "gradient-agents", "gradient-agent", "ai-agents":
+				return listGradientAgents(ctx, client, region)
+
+			case "gradient-models", "gradient-model", "ai-models":
+				return listGradientModels(ctx, client)
+
+			case "gradient-regions":
+				return listGradientRegions(ctx, client)
+
+			case "gradient-knowledge-bases", "gradient-knowledge-base", "knowledge-bases":
+				return listGradientKnowledgeBases(ctx, client)
+
 			case "load-balancers", "lbs", "lb":
 				return listLoadBalancers(ctx, client)
 
@@ -83,6 +109,9 @@ Supported resources:
 			case "firewalls", "firewall":
 				return listFirewalls(ctx, client)
 
+			case "projects", "project":
+				return listProjects(ctx, client)
+
 			case "registries", "registry":
 				return listRegistries(ctx, client)
 
@@ -92,6 +121,7 @@ Supported resources:
 		},
 	}
 
+	doListCmd.Flags().String("region", "", "DigitalOcean region for region-scoped resources such as Gradient AI agents")
 	doCmd.AddCommand(doListCmd)
 
 	return doCmd
@@ -190,6 +220,107 @@ func listApps(ctx context.Context, client *Client) error {
 	return nil
 }
 
+func listFunctions(ctx context.Context, client *Client) error {
+	result, err := client.RunDoctl(ctx, "serverless", "functions", "list", "--format", "Update,Version,Runtime,Function", "--no-header")
+	if err != nil {
+		return fmt.Errorf("failed to list functions: %w", err)
+	}
+
+	fmt.Println("Digital Ocean Serverless Functions:")
+	fmt.Println()
+	if strings.TrimSpace(result) == "" {
+		fmt.Println("  No functions found")
+	} else {
+		fmt.Println(result)
+	}
+	return nil
+}
+
+func listFunctionNamespaces(ctx context.Context, client *Client) error {
+	result, err := client.RunDoctl(ctx, "serverless", "namespaces", "list")
+	if err != nil {
+		return fmt.Errorf("failed to list functions namespaces: %w", err)
+	}
+
+	fmt.Println("Digital Ocean Serverless Function Namespaces:")
+	fmt.Println()
+	if strings.TrimSpace(result) == "" {
+		fmt.Println("  No function namespaces found")
+	} else {
+		fmt.Println(result)
+	}
+	return nil
+}
+
+func listGradientAgents(ctx context.Context, client *Client, region string) error {
+	args := []string{"gradient", "agent", "list"}
+	if strings.TrimSpace(region) != "" {
+		args = append(args, "--region", strings.TrimSpace(region))
+	}
+	args = append(args, "--format", "Id,Name,Region,ModelId,ProjectId,CreatedAt", "--no-header")
+	result, err := client.RunDoctl(ctx, args...)
+	if err != nil {
+		return fmt.Errorf("failed to list Gradient AI agents: %w", err)
+	}
+
+	fmt.Println("Digital Ocean Gradient AI Agents:")
+	fmt.Println()
+	if strings.TrimSpace(result) == "" {
+		fmt.Println("  No Gradient AI agents found")
+	} else {
+		fmt.Println(result)
+	}
+	return nil
+}
+
+func listGradientModels(ctx context.Context, client *Client) error {
+	result, err := client.RunDoctl(ctx, "gradient", "list-models", "--format", "Id,Name,Agreement,CreatedAt,isFoundational", "--no-header")
+	if err != nil {
+		return fmt.Errorf("failed to list Gradient AI models: %w", err)
+	}
+
+	fmt.Println("Digital Ocean Gradient AI Models:")
+	fmt.Println()
+	if strings.TrimSpace(result) == "" {
+		fmt.Println("  No Gradient AI models found")
+	} else {
+		fmt.Println(result)
+	}
+	return nil
+}
+
+func listGradientRegions(ctx context.Context, client *Client) error {
+	result, err := client.RunDoctl(ctx, "gradient", "list-regions", "--format", "Region,InferenceUrl,ServesInference,ServesBatch", "--no-header")
+	if err != nil {
+		return fmt.Errorf("failed to list Gradient AI regions: %w", err)
+	}
+
+	fmt.Println("Digital Ocean Gradient AI Regions:")
+	fmt.Println()
+	if strings.TrimSpace(result) == "" {
+		fmt.Println("  No Gradient AI regions found")
+	} else {
+		fmt.Println(result)
+	}
+	return nil
+}
+
+func listGradientKnowledgeBases(ctx context.Context, client *Client) error {
+	result, err := client.RunDoctl(ctx, "gradient", "knowledge-base", "list", "--format", "UUID,Name,Region,ProjectId,CreatedAt,UpdatedAt", "--no-header")
+	if err != nil {
+		return fmt.Errorf("failed to list Gradient AI knowledge bases: %w", err)
+	}
+
+	fmt.Println("Digital Ocean Gradient AI Knowledge Bases:")
+	fmt.Println()
+	if strings.TrimSpace(result) == "" {
+		fmt.Println("  No Gradient AI knowledge bases found")
+	} else {
+		fmt.Println(result)
+	}
+	return nil
+}
+
 // listLoadBalancers lists all load balancers
 func listLoadBalancers(ctx context.Context, client *Client) error {
 	result, err := client.RunDoctl(ctx, "compute", "load-balancer", "list", "--format",
@@ -280,12 +411,28 @@ func listFirewalls(ctx context.Context, client *Client) error {
 	return nil
 }
 
+func listProjects(ctx context.Context, client *Client) error {
+	result, err := client.RunDoctl(ctx, "projects", "list", "--format", "ID,Name,Purpose,Environment,IsDefault,CreatedAt", "--no-header")
+	if err != nil {
+		return fmt.Errorf("failed to list projects: %w", err)
+	}
+
+	fmt.Println("Digital Ocean Projects:")
+	fmt.Println()
+	if strings.TrimSpace(result) == "" {
+		fmt.Println("  No projects found")
+	} else {
+		fmt.Println(result)
+	}
+	return nil
+}
+
 // listRegistries lists container registries
 func listRegistries(ctx context.Context, client *Client) error {
-	result, err := client.RunDoctl(ctx, "registry", "get", "--format",
+	result, err := client.RunDoctl(ctx, "registries", "list", "--format",
 		"Name,Endpoint,Region,StorageUsageBytes,CreatedAt", "--no-header")
 	if err != nil {
-		return fmt.Errorf("failed to get registry: %w", err)
+		return fmt.Errorf("failed to list registries: %w", err)
 	}
 
 	fmt.Println("Digital Ocean Container Registry:")

@@ -234,25 +234,54 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 	questionLower := strings.ToLower(strings.TrimSpace(question))
 
 	type section struct {
-		name     string
-		endpoint string
-		keys     []string
+		name           string
+		endpoint       string
+		keys           []string
+		requiresAcctID bool
 	}
 
 	sections := []section{
 		{name: "Zones", endpoint: "/zones", keys: []string{"zone", "domain", "dns", "site"}},
-		{name: "Account Details", endpoint: fmt.Sprintf("/accounts/%s", c.accountID), keys: []string{"account", "plan", "billing"}},
+		{name: "Account Details", endpoint: fmt.Sprintf("/accounts/%s", c.accountID), keys: []string{"account", "plan", "billing"}, requiresAcctID: true},
+		{name: "Workers Scripts", endpoint: fmt.Sprintf("/accounts/%s/workers/scripts", c.accountID), keys: []string{"worker", "workers", "script", "serverless", "edge compute"}, requiresAcctID: true},
+		{name: "Pages Projects", endpoint: fmt.Sprintf("/accounts/%s/pages/projects", c.accountID), keys: []string{"pages", "page", "static site", "frontend"}, requiresAcctID: true},
+		{name: "Workers KV Namespaces", endpoint: fmt.Sprintf("/accounts/%s/storage/kv/namespaces", c.accountID), keys: []string{"kv", "key value", "key-value", "namespace", "namespaces"}, requiresAcctID: true},
+		{name: "D1 Databases", endpoint: fmt.Sprintf("/accounts/%s/d1/database", c.accountID), keys: []string{"d1", "sqlite", "database", "databases"}, requiresAcctID: true},
+		{name: "R2 Buckets", endpoint: fmt.Sprintf("/accounts/%s/r2/buckets", c.accountID), keys: []string{"r2", "bucket", "buckets", "object storage", "storage"}, requiresAcctID: true},
+		{name: "Queues", endpoint: fmt.Sprintf("/accounts/%s/queues", c.accountID), keys: []string{"queue", "queues", "message", "event driven", "event-driven"}, requiresAcctID: true},
+		{name: "Vectorize Indexes", endpoint: fmt.Sprintf("/accounts/%s/vectorize/v2/indexes", c.accountID), keys: []string{"vectorize", "vector", "vectors", "embedding", "embeddings", "semantic search"}, requiresAcctID: true},
+		{name: "Hyperdrive Configs", endpoint: fmt.Sprintf("/accounts/%s/hyperdrive/configs", c.accountID), keys: []string{"hyperdrive", "postgres", "mysql", "database acceleration", "connection pooling"}, requiresAcctID: true},
+		{name: "AI Gateway", endpoint: fmt.Sprintf("/accounts/%s/ai-gateway/gateways", c.accountID), keys: []string{"ai gateway", "gateway", "llm gateway", "model gateway", "ai"}, requiresAcctID: true},
+		{name: "AI Search Instances", endpoint: fmt.Sprintf("/accounts/%s/ai-search/instances", c.accountID), keys: []string{"ai search", "search", "rag", "retrieval"}, requiresAcctID: true},
+		{name: "Durable Object Namespaces", endpoint: fmt.Sprintf("/accounts/%s/workers/durable_objects/namespaces", c.accountID), keys: []string{"durable object", "durable objects", "stateful", "actor"}, requiresAcctID: true},
+		{name: "Turnstile Widgets", endpoint: fmt.Sprintf("/accounts/%s/challenges/widgets", c.accountID), keys: []string{"turnstile", "captcha", "challenge"}, requiresAcctID: true},
+		{name: "Zero Trust Tunnels", endpoint: fmt.Sprintf("/accounts/%s/cfd_tunnel", c.accountID), keys: []string{"tunnel", "tunnels", "zero trust", "cloudflared"}, requiresAcctID: true},
 	}
 
 	// Default sections to include
 	defaultSections := map[string]bool{
-		"Zones": true,
+		"Zones":           true,
+		"Workers Scripts": c.accountID != "",
+		"D1 Databases":    c.accountID != "",
+		"R2 Buckets":      c.accountID != "",
 	}
 
 	var out strings.Builder
 	var warnings []string
 
 	for _, s := range sections {
+		if s.requiresAcctID && strings.TrimSpace(c.accountID) == "" {
+			if questionLower != "" {
+				for _, key := range s.keys {
+					if strings.Contains(questionLower, key) {
+						warnings = append(warnings, fmt.Sprintf("%s: Cloudflare account ID is required (set CLOUDFLARE_ACCOUNT_ID or cloudflare.account_id)", s.name))
+						break
+					}
+				}
+			}
+			continue
+		}
+
 		// Check if this section is relevant to the question
 		if questionLower != "" && len(s.keys) > 0 {
 			matched := false

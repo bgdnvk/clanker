@@ -104,6 +104,9 @@ func InferContext(question string) ServiceContext {
 		"sqs", "sns", "dynamodb", "elasticache", "elb", "alb", "nlb", "route53",
 		"cloudfront", "api-gateway", "cognito", "iam", "vpc", "subnet",
 		"security-group", "nacl", "nat", "igw", "vpn", "direct-connect",
+		"app runner", "apprunner", "eventbridge scheduler", "eventbridge pipe",
+		"eventbridge pipes", "verified permissions", "security lake", "datazone",
+		"q business", "amazon q", "bedrock", "bedrock agent", "knowledge base",
 		// AWS-specific terms
 		"bucket", "aws", "ami", "ebs", "efs", "fsx",
 		// ML/GPU
@@ -193,6 +196,7 @@ func InferContext(question string) ServiceContext {
 		"pubsub", "pub/sub", "cloud functions", "cloud function", "compute engine", "gce", "iam service account",
 		"workload identity", "artifact registry", "secret manager", "bigquery", "spanner", "bigtable",
 		"cloud build", "cloud deploy", "cloud dns", "cloud armor", "cloud load balancing", "api gateway",
+		"workflows", "cloud workflows", "cloud batch", "vertex ai", "alloydb", "cloud composer", "eventarc",
 	}
 
 	azureKeywords := []string{
@@ -208,6 +212,18 @@ func InferContext(question string) ServiceContext {
 		"azure policy",
 		"azure sql",
 		"azure container registry",
+		"azure container apps",
+		"azure static web apps",
+		"azure ai search",
+		"azure openai",
+		"azure ai services",
+		"azure service bus",
+		"azure event hubs",
+		"azure event grid",
+		"azure api management",
+		"azure front door",
+		"application insights",
+		"log analytics",
 		// Azure-unique product names
 		"cosmos db",
 		"entra id",
@@ -234,6 +250,21 @@ func InferContext(question string) ServiceContext {
 		// Cloudflare-specific CLI tools (unique to Cloudflare)
 		"wrangler",
 		"cloudflared",
+		"workers ai",
+		"cloudflare workers",
+		"ai gateway",
+		"ai search",
+		"autorag",
+		"browser run",
+		"cloudflare agents",
+		"vectorize",
+		"hyperdrive",
+		"durable objects",
+		"turnstile",
+		"cloudflare tunnel",
+		"r2 bucket",
+		"d1 database",
+		"workers kv",
 	}
 
 	digitalOceanKeywords := []string{
@@ -245,6 +276,12 @@ func InferContext(question string) ServiceContext {
 		"doks",
 		"spaces bucket",
 		"app platform",
+		"digitalocean functions",
+		"digitalocean serverless",
+		"digitalocean gradient",
+		"gradient agent",
+		"gradient knowledge base",
+		"do registry",
 	}
 
 	hetznerKeywords := []string{
@@ -256,6 +293,9 @@ func InferContext(question string) ServiceContext {
 		"hetzner firewall",
 		"hetzner network",
 		"hetzner load balancer",
+		"hetzner placement group",
+		"hetzner server type",
+		"hetzner datacenter",
 	}
 
 	vercelKeywords := []string{
