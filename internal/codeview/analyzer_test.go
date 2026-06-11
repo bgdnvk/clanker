@@ -9,6 +9,22 @@ import (
 func TestAnalyzeMapsCommonPatterns(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "package.json", `{"dependencies":{"express":"latest","pg":"latest","jsonwebtoken":"latest","zod":"latest","@opentelemetry/api":"latest"}}`)
+	writeFile(t, dir, "pom.xml", `
+<project>
+  <dependencies>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>2.17.0</version>
+    </dependency>
+  </dependencies>
+</project>
+`)
+	writeFile(t, dir, "build.gradle.kts", `
+dependencies {
+  implementation("org.jetbrains.kotlin:kotlin-stdlib:2.0.0")
+}
+`)
 	writeFile(t, dir, "src/server.ts", `
 import express from "express"
 import { userRouter } from "./routes/users"
@@ -64,6 +80,42 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: users-api
+  labels:
+    app.kubernetes.io/name: users-api
+    app.kubernetes.io/part-of: acme-platform
+`)
+	writeFile(t, dir, "catalog-info.yaml", `
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: users-api
+spec:
+  owner: platform-team
+  system: acme-platform
+`)
+	writeFile(t, dir, "docs/work.md", `
+Jira: https://acme.atlassian.net/browse/ACME-123
+Linear: https://linear.app/acme/issue/ACME-124/users-api
+GitHub: https://github.com/acme/users-api/issues/42
+`)
+	writeFile(t, dir, "src/main/kotlin/App.kt", `
+fun main() {
+  println("users")
+}
+`)
+	writeFile(t, dir, "Sources/App.swift", `
+@main
+struct App {
+  static func main() {}
+}
+`)
+	writeFile(t, dir, "lib/main.dart", `
+void main() {}
+`)
+	writeFile(t, dir, "src/main/scala/App.scala", `
+object App {
+  def main(args: Array[String]): Unit = println("users")
+}
 `)
 
 	analysis, err := Analyze(dir, "https://github.com/acme/app")
@@ -88,6 +140,21 @@ metadata:
 	for _, kind := range []string{"work_item", "service", "infra_resource", "deployment", "dependency"} {
 		if !hasCorrelation(analysis, kind) {
 			t.Fatalf("expected correlation kind %q in %#v", kind, analysis.Correlations)
+		}
+	}
+	for _, kind := range []string{"catalog_entity", "owner", "system"} {
+		if !hasCorrelation(analysis, kind) {
+			t.Fatalf("expected workspace correlation kind %q in %#v", kind, analysis.Correlations)
+		}
+	}
+	for _, source := range []string{"jira-url", "linear-url", "github-issue-url", "backstage-catalog", "app.kubernetes.io/name", "build.gradle.kts", "pom.xml"} {
+		if !hasCorrelationSource(analysis, source) {
+			t.Fatalf("expected correlation source %q in %#v", source, analysis.Correlations)
+		}
+	}
+	for _, language := range []string{"kotlin", "swift", "dart", "scala"} {
+		if !supportsLanguage(analysis, language) {
+			t.Fatalf("expected supported language %q in %#v", language, analysis.SupportedLanguages)
 		}
 	}
 	if analysis.Summary.CorrelationCount == 0 {
@@ -116,9 +183,27 @@ func hasCorrelation(analysis *Analysis, kind string) bool {
 	return false
 }
 
+func hasCorrelationSource(analysis *Analysis, source string) bool {
+	for _, corr := range analysis.Correlations {
+		if corr.Source == source {
+			return true
+		}
+	}
+	return false
+}
+
 func hasGraphNodeType(analysis *Analysis, typ string) bool {
 	for _, node := range analysis.Graph.Nodes {
 		if node.Type == typ {
+			return true
+		}
+	}
+	return false
+}
+
+func supportsLanguage(analysis *Analysis, id string) bool {
+	for _, language := range analysis.SupportedLanguages {
+		if language.ID == id {
 			return true
 		}
 	}

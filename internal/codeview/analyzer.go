@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"os"
@@ -184,6 +185,10 @@ var languageDefs = []languageDef{
 	{id: "csharp", label: "C#", extensions: []string{".cs"}},
 	{id: "cpp", label: "C++", extensions: []string{".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"}},
 	{id: "c", label: "C", extensions: []string{".c", ".h"}},
+	{id: "kotlin", label: "Kotlin", extensions: []string{".kt", ".kts"}},
+	{id: "swift", label: "Swift", extensions: []string{".swift"}},
+	{id: "dart", label: "Dart", extensions: []string{".dart"}},
+	{id: "scala", label: "Scala", extensions: []string{".scala", ".sc"}},
 	{id: "php", label: "PHP", extensions: []string{".php"}},
 	{id: "ruby", label: "Ruby", extensions: []string{".rb"}},
 	{id: "sql", label: "SQL", extensions: []string{".sql"}},
@@ -201,7 +206,7 @@ var patternDefs = []patternDef{
 		description: "Application bootstrap, CLI startup, or server startup code.",
 		pathHints:   []string{"cmd/", "src/main", "main.", "server.", "app.", "index."},
 		nameHints:   []string{"main.go", "main.ts", "main.js", "main.py", "server.ts", "server.js", "app.py", "index.ts", "index.js"},
-		tokens:      []string{"func main(", "if __name__ == \"__main__\"", "app.listen(", "server.listen(", "SpringApplication.run", "public static void main", "tokio::main", "asyncio.run("},
+		tokens:      []string{"func main(", "fun main(", "void main()", "if __name__ == \"__main__\"", "app.listen(", "server.listen(", "SpringApplication.run", "public static void main", "tokio::main", "asyncio.run(", "@main"},
 	},
 	{
 		id: "config", label: "Config", category: "Cross-Cutting",
@@ -387,6 +392,10 @@ var terraformResourceRE = regexp.MustCompile(`^\s*resource\s+"([^"]+)"\s+"([^"]+
 var goModRequireRE = regexp.MustCompile(`^\s*([A-Za-z0-9_.-]+/[^\s]+)\s+v[0-9][^\s]*`)
 var requirementRE = regexp.MustCompile(`^\s*([A-Za-z0-9_.-]+)\s*(?:==|>=|<=|~=|>|<|=).*$`)
 var cargoDependencyRE = regexp.MustCompile(`^\s*([A-Za-z0-9_-]+)\s*=\s*`)
+var gradleDependencyRE = regexp.MustCompile(`\b(?:api|implementation|compileOnly|runtimeOnly|testImplementation|classpath)\s*\(?\s*["']([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+):[^"']+["']`)
+var githubWorkURLRE = regexp.MustCompile(`https?://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/(issues|pull)/(\d+)`)
+var jiraURLRE = regexp.MustCompile(`https?://[A-Za-z0-9_.-]+\.atlassian\.net/browse/([A-Z][A-Z0-9]{1,9}-\d+)`)
+var kubeAppLabelRE = regexp.MustCompile(`^\s*(app\.kubernetes\.io/(?:name|part-of|component|managed-by|version))\s*:\s*["']?([^"',#]+)`)
 
 func CloneAndAnalyze(ctx context.Context, repoURL string, opts AnalyzeOptions) (*Analysis, func(), error) {
 	repoURL = strings.TrimSpace(repoURL)
@@ -712,6 +721,16 @@ type correlationAccumulator struct {
 
 type addCorrelationFunc func(correlationType, label, value, source string, ev Evidence)
 
+type mavenProject struct {
+	Dependencies []mavenDependency `xml:"dependencies>dependency"`
+}
+
+type mavenDependency struct {
+	GroupID    string `xml:"groupId"`
+	ArtifactID string `xml:"artifactId"`
+	Version    string `xml:"version"`
+}
+
 func buildCorrelations(files []scannedFile) []Correlation {
 	byKey := make(map[string]*correlationAccumulator)
 
@@ -784,6 +803,12 @@ func detectManifestCorrelations(file scannedFile, add addCorrelationFunc) {
 		detectRequirementsCorrelations(file, add)
 	case "Cargo.toml":
 		detectCargoCorrelations(file, add)
+	case "pom.xml":
+		detectMavenCorrelations(file, add)
+	case "build.gradle", "build.gradle.kts":
+		detectGradleCorrelations(file, add)
+	case "catalog-info.yaml", "catalog-info.yml":
+		detectCatalogInfoCorrelations(file, add)
 	case "Dockerfile":
 		add("deployment", "Container build", "Dockerfile", "dockerfile", Evidence{File: file.path, Line: 1, Snippet: base, Reason: "container build descriptor"})
 	}
@@ -857,15 +882,109 @@ func detectCargoCorrelations(file scannedFile, add addCorrelationFunc) {
 	})
 }
 
+func detectMavenCorrelations(file scannedFile, add addCorrelationFunc) {
+	var project mavenProject
+	if err := xml.Unmarshal([]byte(file.content), &project); err != nil {
+		return
+	}
+	for _, dep := range project.Dependencies {
+		groupID := strings.TrimSpace(dep.GroupID)
+		artifactID := strings.TrimSpace(dep.ArtifactID)
+		if artifactID == "" {
+			continue
+		}
+		value := artifactID
+		if groupID != "" {
+			value = groupID + ":" + artifactID
+		}
+		add("dependency", artifactID, value, "pom.xml", Evidence{File: file.path, Line: 1, Snippet: value + " " + strings.TrimSpace(dep.Version), Reason: "Maven dependency"})
+	}
+}
+
+func detectGradleCorrelations(file scannedFile, add addCorrelationFunc) {
+	scanLines(file, func(lineNo int, line string) {
+		match := gradleDependencyRE.FindStringSubmatch(line)
+		if len(match) < 3 {
+			return
+		}
+		value := match[1] + ":" + match[2]
+		add("dependency", match[2], value, filepath.Base(file.path), Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Gradle dependency"})
+	})
+}
+
+func detectCatalogInfoCorrelations(file scannedFile, add addCorrelationFunc) {
+	var kind, name, owner, system string
+	evidence := map[string]Evidence{}
+	scanLines(file, func(lineNo int, line string) {
+		trimmed := strings.TrimSpace(line)
+		key, value, ok := splitYAMLScalar(trimmed)
+		if !ok {
+			return
+		}
+		switch key {
+		case "kind":
+			kind = value
+			evidence["kind"] = Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Backstage catalog kind"}
+		case "name":
+			if name == "" {
+				name = value
+				evidence["name"] = Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Backstage catalog entity name"}
+			}
+		case "owner":
+			owner = value
+			evidence["owner"] = Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Backstage catalog owner"}
+		case "system":
+			system = value
+			evidence["system"] = Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Backstage catalog system"}
+		}
+	})
+	if kind != "" && name != "" {
+		add("catalog_entity", kind+" "+name, strings.ToLower(kind)+":"+name, "backstage-catalog", firstEvidence(evidence["name"], evidence["kind"]))
+	}
+	if owner != "" {
+		add("owner", owner, owner, "backstage-catalog", evidence["owner"])
+	}
+	if system != "" {
+		add("system", system, system, "backstage-catalog", evidence["system"])
+	}
+}
+
 func detectLineCorrelations(file scannedFile, add addCorrelationFunc) {
 	scanLines(file, func(lineNo int, line string) {
 		trimmed := strings.TrimSpace(line)
 		for _, match := range issueKeyRE.FindAllString(trimmed, -1) {
 			add("work_item", match, match, "issue-key", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Jira/Linear-style issue key"})
 		}
+		for _, match := range jiraURLRE.FindAllStringSubmatch(trimmed, -1) {
+			if len(match) > 1 {
+				add("work_item", match[1], match[1], "jira-url", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Jira issue URL"})
+			}
+		}
+		if strings.Contains(strings.ToLower(trimmed), "linear.app/") {
+			for _, match := range issueKeyRE.FindAllString(trimmed, -1) {
+				add("work_item", match, match, "linear-url", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Linear issue URL"})
+			}
+		}
+		for _, match := range githubWorkURLRE.FindAllStringSubmatch(trimmed, -1) {
+			if len(match) < 5 {
+				continue
+			}
+			label := match[1] + "/" + match[2] + "#" + match[4]
+			source := "github-issue-url"
+			if match[3] == "pull" {
+				source = "github-pr-url"
+			}
+			add("work_item", label, label, source, Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "GitHub development link"})
+		}
 		if match := otelServiceNameRE.FindStringSubmatch(trimmed); len(match) > 1 {
 			service := strings.Trim(match[1], `"' ,`)
 			add("service", service, service, "opentelemetry", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "service name convention"})
+		}
+		if match := kubeAppLabelRE.FindStringSubmatch(trimmed); len(match) > 2 && strings.Contains(file.content, "apiVersion:") {
+			value := strings.Trim(match[2], `"' `)
+			if value != "" {
+				add("service", value, value, match[1], Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Kubernetes recommended app label"})
+			}
 		}
 		if match := terraformResourceRE.FindStringSubmatch(trimmed); len(match) > 2 {
 			value := match[1] + "." + match[2]
@@ -908,6 +1027,32 @@ func detectEnvironmentReference(file scannedFile, lineNo int, line string, add a
 	}
 }
 
+func splitYAMLScalar(line string) (string, string, bool) {
+	if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "-") {
+		return "", "", false
+	}
+	parts := strings.SplitN(line, ":", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	key := strings.TrimSpace(parts[0])
+	value := strings.TrimSpace(parts[1])
+	value = strings.Trim(value, `"'`)
+	if key == "" || value == "" || strings.Contains(value, "{") || strings.Contains(value, "[") {
+		return "", "", false
+	}
+	return key, value, true
+}
+
+func firstEvidence(candidates ...Evidence) Evidence {
+	for _, candidate := range candidates {
+		if candidate.File != "" {
+			return candidate
+		}
+	}
+	return Evidence{}
+}
+
 func scanLines(file scannedFile, visit func(lineNo int, line string)) {
 	scanner := bufio.NewScanner(strings.NewReader(file.content))
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -922,16 +1067,22 @@ func correlationOrder(kind string) int {
 	switch kind {
 	case "work_item":
 		return 0
-	case "service":
+	case "catalog_entity":
 		return 1
-	case "infra_resource":
+	case "owner":
 		return 2
-	case "infra_reference":
+	case "system":
 		return 3
-	case "deployment":
+	case "service":
 		return 4
-	case "dependency":
+	case "infra_resource":
 		return 5
+	case "infra_reference":
+		return 6
+	case "deployment":
+		return 7
+	case "dependency":
+		return 8
 	default:
 		return 99
 	}
@@ -1160,7 +1311,7 @@ func resolveRelativeImport(fromPath, imp string, byPath map[string]scannedFile) 
 	baseDir := filepath.Dir(fromPath)
 	candidate := filepath.Clean(filepath.Join(baseDir, imp))
 	candidate = filepath.ToSlash(candidate)
-	for _, suffix := range []string{"", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".java", "/index.ts", "/index.tsx", "/index.js", "/index.jsx", "/__init__.py"} {
+	for _, suffix := range []string{"", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".rs", ".java", ".kt", ".kts", ".swift", ".dart", ".scala", "/index.ts", "/index.tsx", "/index.js", "/index.jsx", "/__init__.py"} {
 		path := candidate + suffix
 		if _, ok := byPath[path]; ok {
 			return path
@@ -1192,6 +1343,8 @@ func correlationGroup(kind string) string {
 	switch kind {
 	case "work_item":
 		return "Work Items"
+	case "catalog_entity", "owner", "system":
+		return "Workspace Links"
 	case "service":
 		return "Runtime"
 	case "infra_resource", "infra_reference", "deployment":
@@ -1212,6 +1365,8 @@ func patternForCorrelation(kind string) string {
 	case "service":
 		return "logging"
 	case "work_item":
+		return "documentation"
+	case "catalog_entity", "owner", "system":
 		return "documentation"
 	default:
 		return ""
@@ -1419,10 +1574,8 @@ func buildLanguageIndex() map[string]string {
 }
 
 func supportedLanguageSpecs() []LanguageSpec {
-	primary := []string{"javascript", "typescript", "python", "java", "go", "rust", "csharp", "cpp", "c", "php"}
-	out := make([]LanguageSpec, 0, len(primary))
-	for _, id := range primary {
-		def := languageDefByID(id)
+	out := make([]LanguageSpec, 0, len(languageDefs))
+	for _, def := range languageDefs {
 		out = append(out, LanguageSpec{ID: def.id, Label: def.label, Extensions: def.extensions})
 	}
 	return out
