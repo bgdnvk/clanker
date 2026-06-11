@@ -28,37 +28,37 @@ var cloudProviderMCPConfigs = []cloudProviderMCPConfig{
 		Key:          "aws",
 		DisplayName:  "AWS",
 		Command:      "aws",
-		ResourceHelp: "ec2, ecs, batch, app-runner, lambda, layers, ecr, eks, s3, ebs, efs, rds, rds-clusters, dynamodb, vpcs, subnets, security-groups, load-balancers, route-tables, sqs, sns, eventbridge, eventbridge-schedules, eventbridge-pipes, logs, alarms, iam-roles, iam-groups, iam-users, kms, certificates, secrets, verified-permissions, security-lake, codebuild, codepipeline, codecommit, bedrock-models, bedrock-custom, bedrock-agents, bedrock-kb, bedrock-guardrails, qbusiness, datazone, sagemaker-endpoints, sagemaker-models, sagemaker-jobs, sagemaker-notebooks, comprehend-jobs, textract-jobs, rekognition-collections, api-gateways, cloudfront, route53",
+		ResourceHelp: "all-services, resources, tagged-resources, ec2, ecs, batch, app-runner, asg, launch-templates, lambda, layers, step-functions, ecr, eks, s3, ebs, efs, rds, rds-clusters, dynamodb, elasticache, vpcs, subnets, security-groups, load-balancers, route-tables, sqs, sns, eventbridge, eventbridge-buses, eventbridge-schedules, eventbridge-pipes, kinesis, logs, alarms, iam-roles, iam-groups, iam-users, kms, certificates, secrets, ssm-parameters, waf-webacls, verified-permissions, security-lake, codebuild, codepipeline, codecommit, cloudformation, glue-jobs, glue-databases, emr-clusters, bedrock-models, bedrock-custom, bedrock-agents, bedrock-kb, bedrock-guardrails, qbusiness, datazone, sagemaker-endpoints, sagemaker-models, sagemaker-jobs, sagemaker-notebooks, comprehend-jobs, textract-jobs, rekognition-collections, budgets, api-gateways, cloudfront, route53",
 	},
 	{
 		Key:          "gcp",
 		DisplayName:  "Google Cloud",
 		Command:      "gcp",
-		ResourceHelp: "iam, iam-roles, cloudrun, run-jobs, workflows, batch-jobs, vertex-endpoints, vertex-indexes, firestore, firebase-apps, compute, instance-groups, networks, subnets, firewall, load-balancers, armor, dns, gke, cloudsql, alloydb, bigquery, spanner, bigtable, redis, memcache, composer, gcs, artifacts, functions, functions-gen2, pubsub, subscriptions, tasks, scheduler, eventarc-triggers, secrets, kms, build-triggers, deploy-pipelines, logging-sinks, alert-policies, api-gateway",
+		ResourceHelp: "services, available-services, resources, iam, iam-roles, cloudrun, run-jobs, run-revisions, run-worker-pools, run-domain-mappings, run-multi-region, workflows, batch-jobs, vertex-endpoints, vertex-indexes, firestore, firebase-apps, compute, instance-groups, networks, subnets, firewall, load-balancers, armor, dns, gke, cloudsql, alloydb, bigquery, spanner, bigtable, redis, memcache, composer, gcs, artifacts, functions, functions-gen2, pubsub, subscriptions, tasks, scheduler, eventarc-triggers, secrets, kms, build-triggers, deploy-pipelines, logging-sinks, alert-policies, api-gateway",
 	},
 	{
 		Key:          "azure",
 		DisplayName:  "Azure",
 		Command:      "azure",
-		ResourceHelp: "account, groups, resources, vms, containers, aks, containerapps, webapps, functionapps, static-webapps, acr, storage, keyvaults, cosmosdb, sql-servers, sql-databases, postgres, mysql, redis, ai-services, ai-search, servicebus, eventhubs, eventgrid, apim, log-analytics, app-insights, front-door, vnets, nsgs, public-ips, load-balancers",
+		ResourceHelp: "account, groups, resources, resource-graph, vms, managed-disks, snapshots, containers, aks, containerapps, webapps, functionapps, static-webapps, acr, storage, keyvaults, cosmosdb, sql-servers, sql-databases, postgres, mysql, redis, ai-services, ai-search, servicebus, eventhubs, eventgrid, apim, log-analytics, app-insights, front-door, vnets, private-endpoints, nsgs, route-tables, app-gateways, waf-policies, dns-zones, private-dns-zones, public-ips, load-balancers, logic-apps, data-factories, ml-workspaces",
 	},
 	{
 		Key:          "cloudflare",
 		DisplayName:  "Cloudflare",
 		Command:      "cf",
-		ResourceHelp: "zones, records, workers, pages, kv-namespaces, d1-databases, r2-buckets, queues, vectorize, hyperdrive, ai-gateways, ai-gateway-routes, ai-search, durable-objects, turnstile, tunnels, workflows, firewall-rules, page-rules",
+		ResourceHelp: "zones, records, workers, pages, kv-namespaces, d1-databases, r2-buckets, queues, vectorize, hyperdrive, ai-gateways, ai-gateway-logs, ai-gateway-datasets, ai-gateway-evals, ai-gateway-providers, ai-gateway-routes, ai-search, ai-search-instances, durable-objects, browser-sessions, images, stream, secrets-stores, pipelines, pipeline-sinks, pipeline-streams, turnstile, tunnels, workflows, logpush-jobs, rules-lists, account-roles, account-members, firewall-rules, page-rules",
 	},
 	{
 		Key:          "digitalocean",
 		DisplayName:  "DigitalOcean",
 		Command:      "do",
-		ResourceHelp: "droplets, kubernetes, databases, spaces, apps, functions, function-namespaces, gradient-agents, gradient-models, gradient-regions, gradient-knowledge-bases, load-balancers, volumes, vpcs, domains, firewalls, projects, registries",
+		ResourceHelp: "account, actions, droplets, droplet-autoscale, kubernetes, databases, spaces, spaces-keys, apps, functions, function-namespaces, serverless-inference-models, dedicated-inference, dedicated-inference-sizes, gradient-agents, gradient-models, gradient-regions, gradient-knowledge-bases, gradient-openai-keys, load-balancers, cdns, volumes, nfs, nfs-snapshots, vpcs, vpc-peerings, vpc-nat-gateways, domains, firewalls, reserved-ips, reserved-ipv6, certificates, images, snapshots, sizes, regions, ssh-keys, tags, one-clicks, monitoring-alerts, uptime-checks, uptime-alerts, network-attachments, byoip-prefixes, security-scans, projects, project-resources, registries",
 	},
 	{
 		Key:          "hetzner",
 		DisplayName:  "Hetzner Cloud",
 		Command:      "hetzner",
-		ResourceHelp: "servers, load-balancers, volumes, networks, firewalls, floating-ips, primary-ips, ssh-keys, images, certificates, placement-groups, server-types, locations, datacenters",
+		ResourceHelp: "servers, load-balancers, volumes, networks, firewalls, floating-ips, primary-ips, ssh-keys, images, isos, certificates, placement-groups, server-types, locations, datacenters",
 	},
 }
 
@@ -89,6 +89,15 @@ func registerCloudMCPCatalogTool(server *mcptransport.MCPServer) {
 				},
 				"official_remote_mcps": []map[string]string{
 					{"provider": "Cloudflare", "name": "Cloudflare API MCP server", "transport": "streamable-http", "endpoint": "https://mcp.cloudflare.com/mcp", "docs": "https://developers.cloudflare.com/agents/model-context-protocol/cloudflare/servers-for-cloudflare/"},
+					{"provider": "Cloudflare", "name": "Cloudflare Docs MCP server", "transport": "streamable-http", "endpoint": "https://docs.mcp.cloudflare.com/mcp", "docs": "https://developers.cloudflare.com/agents/model-context-protocol/cloudflare/servers-for-cloudflare/"},
+					{"provider": "Cloudflare", "name": "Cloudflare Workers Bindings MCP server", "transport": "streamable-http", "endpoint": "https://bindings.mcp.cloudflare.com/mcp", "docs": "https://developers.cloudflare.com/agents/model-context-protocol/cloudflare/servers-for-cloudflare/"},
+					{"provider": "Cloudflare", "name": "Cloudflare Workers Builds MCP server", "transport": "streamable-http", "endpoint": "https://builds.mcp.cloudflare.com/mcp", "docs": "https://developers.cloudflare.com/agents/model-context-protocol/cloudflare/servers-for-cloudflare/"},
+					{"provider": "Cloudflare", "name": "Cloudflare Observability MCP server", "transport": "streamable-http", "endpoint": "https://observability.mcp.cloudflare.com/mcp", "docs": "https://developers.cloudflare.com/agents/model-context-protocol/cloudflare/servers-for-cloudflare/"},
+					{"provider": "Cloudflare", "name": "Cloudflare Radar MCP server", "transport": "streamable-http", "endpoint": "https://radar.mcp.cloudflare.com/mcp", "docs": "https://developers.cloudflare.com/agents/model-context-protocol/cloudflare/servers-for-cloudflare/"},
+					{"provider": "Cloudflare", "name": "Cloudflare Browser Run MCP server", "transport": "streamable-http", "endpoint": "https://browser.mcp.cloudflare.com/mcp", "docs": "https://developers.cloudflare.com/agents/model-context-protocol/cloudflare/servers-for-cloudflare/"},
+					{"provider": "Cloudflare", "name": "Cloudflare AI Gateway MCP server", "transport": "streamable-http", "endpoint": "https://ai-gateway.mcp.cloudflare.com/mcp", "docs": "https://developers.cloudflare.com/agents/model-context-protocol/cloudflare/servers-for-cloudflare/"},
+					{"provider": "Cloudflare", "name": "Cloudflare AI Search MCP server", "transport": "streamable-http", "endpoint": "https://autorag.mcp.cloudflare.com/mcp", "docs": "https://developers.cloudflare.com/agents/model-context-protocol/cloudflare/servers-for-cloudflare/"},
+					{"provider": "Cloudflare", "name": "Cloudflare GraphQL MCP server", "transport": "streamable-http", "endpoint": "https://graphql.mcp.cloudflare.com/mcp", "docs": "https://developers.cloudflare.com/agents/model-context-protocol/cloudflare/servers-for-cloudflare/"},
 					{"provider": "AWS", "name": "AWS MCP Servers", "transport": "varies by server", "endpoint": "https://awslabs.github.io/mcp/", "docs": "https://awslabs.github.io/mcp/"},
 					{"provider": "Azure", "name": "Azure MCP Server", "transport": "stdio/local server", "endpoint": "https://learn.microsoft.com/en-us/azure/developer/azure-mcp-server/", "docs": "https://learn.microsoft.com/en-us/azure/developer/azure-mcp-server/"},
 					{"provider": "Google Cloud", "name": "Google Cloud remote MCP servers", "transport": "streamable-http", "endpoint": "https://docs.cloud.google.com/mcp", "docs": "https://docs.cloud.google.com/mcp"},
@@ -134,8 +143,10 @@ func registerCloudProviderListTool(server *mcptransport.MCPServer, cfg cloudProv
 			mcp.WithString("subscription", mcp.Description("Azure subscription ID.")),
 			mcp.WithString("zone", mcp.Description("Cloudflare zone ID for zone-scoped resources.")),
 			mcp.WithString("zone_name", mcp.Description("Cloudflare zone name to resolve for zone-scoped resources.")),
-			mcp.WithString("gateway_id", mcp.Description("Cloudflare AI Gateway ID for gateway-scoped route resources.")),
+			mcp.WithString("gateway_id", mcp.Description("Cloudflare AI Gateway ID for gateway-scoped resources.")),
+			mcp.WithString("namespace", mcp.Description("Cloudflare AI Search namespace for namespace-scoped resources.")),
 			mcp.WithString("region", mcp.Description("DigitalOcean Gradient region for region-scoped resources.")),
+			mcp.WithString("project_id", mcp.Description("DigitalOcean project ID for project-scoped resources.")),
 			mcp.WithReadOnlyHintAnnotation(true),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -242,12 +253,12 @@ func collectMCPCloudProviderContext(ctx context.Context, req mcp.CallToolRequest
 func mcpCloudProviderContextQuestion(provider, question string) string {
 	base := strings.TrimSpace(question)
 	hints := map[string]string{
-		"aws":          "ec2 lambda rds s3 ecs ecr eks app runner sqs sns eventbridge scheduler pipes dynamodb bedrock qbusiness datazone verified permissions security lake cloudwatch logs alarms iam kms secrets route53 cloudfront api gateway",
-		"gcp":          "cloud run workflows batch vertex ai firestore firebase compute gke cloud sql alloydb bigquery spanner bigtable memorystore storage artifact registry functions pubsub eventarc cloud build cloud deploy api gateway",
-		"azure":        "resource groups vms container apps static web apps app service functions storage key vault cosmos db azure sql postgres mysql redis azure ai search cognitive services service bus event hubs event grid api management log analytics application insights front door vnet nsg aks",
-		"cloudflare":   "zones workers pages kv d1 r2 queues vectorize hyperdrive ai gateway ai search durable objects turnstile tunnels workflows dns waf firewall rules page rules",
-		"digitalocean": "droplets kubernetes databases spaces app platform serverless functions registries gradient agents gradient models gradient knowledge bases load balancers volumes vpcs domains firewalls projects",
-		"hetzner":      "servers load balancers volumes networks firewalls floating ips primary ips ssh keys images certificates placement groups server types locations datacenters",
+		"aws":          "resource explorer tagged resources all services ec2 lambda layers step functions rds s3 ecs ecr eks app runner cloudformation glue emr sqs sns eventbridge scheduler pipes kinesis dynamodb elasticache bedrock qbusiness datazone verified permissions security lake cloudwatch logs alarms iam kms secrets ssm waf route53 cloudfront api gateway",
+		"gcp":          "services cloud asset inventory cloud run revisions worker pools multi region workflows batch vertex ai firestore firebase compute gke cloud sql alloydb bigquery spanner bigtable memorystore storage artifact registry functions pubsub eventarc cloud build cloud deploy api gateway",
+		"azure":        "resource groups resource graph vms managed disks snapshots container apps static web apps app service functions storage key vault cosmos db azure sql postgres mysql redis azure ai search cognitive services service bus event hubs event grid api management log analytics application insights front door private endpoints dns zones logic apps data factory ml workspaces vnet nsg aks",
+		"cloudflare":   "zones workers pages kv d1 r2 queues vectorize hyperdrive ai gateway logs datasets evaluations provider configs ai search namespaces browser rendering images stream secrets store pipelines durable objects turnstile tunnels workflows logpush dns waf firewall rules page rules account roles members",
+		"digitalocean": "droplets autoscale kubernetes databases spaces app platform serverless functions serverless inference dedicated inference registries gradient agents gradient models gradient knowledge bases load balancers cdns volumes nfs vpcs vpc peerings nat gateways domains firewalls reserved ips certificates images snapshots sizes regions ssh keys tags monitoring uptime security scans projects",
+		"hetzner":      "servers load balancers volumes networks firewalls floating ips primary ips ssh keys images isos certificates placement groups server types locations datacenters",
 	}
 	if base == "" {
 		return hints[provider]
@@ -294,8 +305,10 @@ func handleMCPCloudProviderList(ctx context.Context, req mcp.CallToolRequest, cf
 		args = mcpAppendIf(args, "--zone", strParam(req, "zone"))
 		args = mcpAppendIf(args, "--zone-name", strParam(req, "zone_name"))
 		args = mcpAppendIf(args, "--gateway-id", strParam(req, "gateway_id"))
+		args = mcpAppendIf(args, "--namespace", strParam(req, "namespace"))
 	case "digitalocean":
 		args = mcpAppendIf(args, "--region", strParam(req, "region"))
+		args = mcpAppendIf(args, "--project-id", strParam(req, "project_id"))
 	}
 
 	result, err := runClankerCommand(ctx, commandArgs{Args: args})

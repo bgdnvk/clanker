@@ -24,10 +24,17 @@ func CreateGCPCommands() *cobra.Command {
 		Long: `List GCP resources of a specific type.
 
 Supported resources:
+  services, enabled-services - Enabled Google Cloud services/APIs
+  available-services    - Services/APIs available to enable
+  resources             - Cloud Asset inventory resources (top 200)
   iam, service-accounts - IAM service accounts
   iam-roles             - IAM roles
   cloudrun, run         - Cloud Run services
   run-jobs              - Cloud Run jobs
+  run-revisions         - Cloud Run revisions
+  run-worker-pools      - Cloud Run worker pools
+  run-domain-mappings   - Cloud Run domain mappings
+  run-multi-region      - Cloud Run multi-region services
   workflows             - Workflows
   batch-jobs            - Cloud Batch jobs
   vertex-endpoints      - Vertex AI endpoints
@@ -113,6 +120,24 @@ Supported resources:
 			}
 
 			switch resourceType {
+			case "services", "enabled-services", "enabled-apis":
+				result, err := exec("services", "list", "--enabled", "--format", "table(config.name,state)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "available-services", "available-apis":
+				result, err := exec("services", "list", "--available", "--format", "table(config.name,title)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "resources", "asset-resources", "asset-inventory", "cloud-asset":
+				result, err := exec("asset", "search-all-resources", "--scope", "projects/"+projectID, "--limit", "200", "--format", "table(name,assetType,location,project)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
 			case "iam", "service-accounts":
 				result, err := exec("iam", "service-accounts", "list", "--format", "table(email,displayName,disabled)")
 				if err != nil {
@@ -133,6 +158,30 @@ Supported resources:
 				fmt.Print(result)
 			case "run-jobs":
 				result, err := exec("run", "jobs", "list", "--platform", "managed", "--format", "table(name,region,createTime)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "run-revisions":
+				result, err := exec("run", "revisions", "list", "--platform", "managed", "--format", "table(service,revision,region,active)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "run-worker-pools", "worker-pools":
+				result, err := exec("run", "worker-pools", "list", "--format", "table(name,region,createTime)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "run-domain-mappings", "domain-mappings":
+				result, err := exec("run", "domain-mappings", "list", "--platform", "managed", "--format", "table(name,region,routeName)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "run-multi-region", "run-multi-region-services", "multi-region-services":
+				result, err := exec("run", "multi-region-services", "list", "--format", "table(name,regions)")
 				if err != nil {
 					return err
 				}

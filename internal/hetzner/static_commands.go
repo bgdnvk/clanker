@@ -33,6 +33,7 @@ Supported resources:
   primary-ips          - Primary IPs
   ssh-keys             - SSH keys
   images               - Images and snapshots
+  isos                 - ISO catalog
   certificates         - TLS certificates
   placement-groups     - Placement groups
   server-types         - Server type catalog
@@ -83,6 +84,9 @@ Supported resources:
 			case "images", "image":
 				return listImages(ctx, client)
 
+			case "isos", "iso":
+				return listISOs(ctx, client)
+
 			case "certificates", "certificate", "cert", "certs":
 				return listCertificates(ctx, client)
 
@@ -107,6 +111,22 @@ Supported resources:
 	hetznerCmd.AddCommand(hetznerListCmd)
 
 	return hetznerCmd
+}
+
+func listISOs(ctx context.Context, client *Client) error {
+	result, err := client.RunHcloud(ctx, "iso", "list")
+	if err != nil {
+		return fmt.Errorf("failed to list ISOs: %w", err)
+	}
+
+	fmt.Println("Hetzner Cloud ISOs:")
+	fmt.Println()
+	if strings.TrimSpace(result) == "" {
+		fmt.Println("  No ISOs found")
+	} else {
+		fmt.Println(result)
+	}
+	return nil
 }
 
 // listServers lists all servers

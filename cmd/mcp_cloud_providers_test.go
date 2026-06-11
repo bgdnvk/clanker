@@ -31,14 +31,38 @@ func TestMCPCloudProviderTools_ConfigCoverage(t *testing.T) {
 	}
 }
 
+func TestMCPCloudProviderTools_ResourceHelpIncludesScopedCoverage(t *testing.T) {
+	tests := map[string][]string{
+		"cloudflare":   {"ai-search-instances", "ai-gateway-logs", "browser-sessions", "secrets-stores"},
+		"digitalocean": {"project-resources", "nfs", "dedicated-inference", "serverless-inference-models"},
+	}
+
+	byProvider := map[string]string{}
+	for _, cfg := range cloudProviderMCPConfigs {
+		byProvider[cfg.Key] = cfg.ResourceHelp
+	}
+
+	for provider, expected := range tests {
+		help := byProvider[provider]
+		if help == "" {
+			t.Fatalf("missing provider MCP config for %s", provider)
+		}
+		for _, want := range expected {
+			if !strings.Contains(help, want) {
+				t.Errorf("%s resource help missing %q in %q", provider, want, help)
+			}
+		}
+	}
+}
+
 func TestMCPCloudProviderContextQuestion_IncludesLatestCoverageHints(t *testing.T) {
 	tests := map[string][]string{
-		"cloudflare":   {"ai gateway", "vectorize", "hyperdrive", "durable objects"},
-		"digitalocean": {"gradient agents", "serverless functions", "registries"},
-		"aws":          {"bedrock", "qbusiness", "verified permissions"},
-		"gcp":          {"vertex ai", "alloydb", "workflows"},
-		"azure":        {"container apps", "azure ai search", "service bus"},
-		"hetzner":      {"placement groups", "server types", "datacenters"},
+		"cloudflare":   {"ai gateway", "browser rendering", "secrets store", "pipelines"},
+		"digitalocean": {"gradient agents", "serverless inference", "dedicated inference", "nfs"},
+		"aws":          {"resource explorer", "bedrock", "step functions", "verified permissions"},
+		"gcp":          {"cloud asset inventory", "vertex ai", "alloydb", "workflows"},
+		"azure":        {"resource graph", "container apps", "azure ai search", "private endpoints"},
+		"hetzner":      {"placement groups", "server types", "isos"},
 	}
 
 	for provider, expected := range tests {

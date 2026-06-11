@@ -252,10 +252,21 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 		{name: "Vectorize Indexes", endpoint: fmt.Sprintf("/accounts/%s/vectorize/v2/indexes", c.accountID), keys: []string{"vectorize", "vector", "vectors", "embedding", "embeddings", "semantic search"}, requiresAcctID: true},
 		{name: "Hyperdrive Configs", endpoint: fmt.Sprintf("/accounts/%s/hyperdrive/configs", c.accountID), keys: []string{"hyperdrive", "postgres", "mysql", "database acceleration", "connection pooling"}, requiresAcctID: true},
 		{name: "AI Gateway", endpoint: fmt.Sprintf("/accounts/%s/ai-gateway/gateways", c.accountID), keys: []string{"ai gateway", "gateway", "llm gateway", "model gateway", "ai"}, requiresAcctID: true},
-		{name: "AI Search Instances", endpoint: fmt.Sprintf("/accounts/%s/ai-search/instances", c.accountID), keys: []string{"ai search", "search", "rag", "retrieval"}, requiresAcctID: true},
+		{name: "AI Search Namespaces", endpoint: fmt.Sprintf("/accounts/%s/ai-search/namespaces", c.accountID), keys: []string{"ai search", "search", "rag", "retrieval", "autorag"}, requiresAcctID: true},
 		{name: "Durable Object Namespaces", endpoint: fmt.Sprintf("/accounts/%s/workers/durable_objects/namespaces", c.accountID), keys: []string{"durable object", "durable objects", "stateful", "actor"}, requiresAcctID: true},
+		{name: "Browser Rendering Sessions", endpoint: fmt.Sprintf("/accounts/%s/browser-rendering/devtools/session", c.accountID), keys: []string{"browser rendering", "browser run", "browser session", "headless browser"}, requiresAcctID: true},
+		{name: "Cloudflare Images", endpoint: fmt.Sprintf("/accounts/%s/images/v2", c.accountID), keys: []string{"cloudflare images", "image", "images", "media"}, requiresAcctID: true},
+		{name: "Cloudflare Stream", endpoint: fmt.Sprintf("/accounts/%s/stream", c.accountID), keys: []string{"stream", "video", "videos", "media"}, requiresAcctID: true},
+		{name: "Secrets Store", endpoint: fmt.Sprintf("/accounts/%s/secrets_store/stores", c.accountID), keys: []string{"secrets store", "secret store", "account secrets"}, requiresAcctID: true},
+		{name: "Pipelines", endpoint: fmt.Sprintf("/accounts/%s/pipelines/v1/pipelines", c.accountID), keys: []string{"pipeline", "pipelines", "etl", "data pipeline"}, requiresAcctID: true},
+		{name: "Pipeline Sinks", endpoint: fmt.Sprintf("/accounts/%s/pipelines/v1/sinks", c.accountID), keys: []string{"pipeline sink", "pipeline sinks", "data sink"}, requiresAcctID: true},
+		{name: "Pipeline Streams", endpoint: fmt.Sprintf("/accounts/%s/pipelines/v1/streams", c.accountID), keys: []string{"pipeline stream", "pipeline streams", "data stream"}, requiresAcctID: true},
 		{name: "Turnstile Widgets", endpoint: fmt.Sprintf("/accounts/%s/challenges/widgets", c.accountID), keys: []string{"turnstile", "captcha", "challenge"}, requiresAcctID: true},
 		{name: "Zero Trust Tunnels", endpoint: fmt.Sprintf("/accounts/%s/cfd_tunnel", c.accountID), keys: []string{"tunnel", "tunnels", "zero trust", "cloudflared"}, requiresAcctID: true},
+		{name: "Logpush Jobs", endpoint: fmt.Sprintf("/accounts/%s/logpush/jobs", c.accountID), keys: []string{"logpush", "logs", "observability"}, requiresAcctID: true},
+		{name: "Rules Lists", endpoint: fmt.Sprintf("/accounts/%s/rules/lists", c.accountID), keys: []string{"rules list", "rules lists", "ip list"}, requiresAcctID: true},
+		{name: "Account Roles", endpoint: fmt.Sprintf("/accounts/%s/roles", c.accountID), keys: []string{"account role", "roles", "iam"}, requiresAcctID: true},
+		{name: "Account Members", endpoint: fmt.Sprintf("/accounts/%s/members", c.accountID), keys: []string{"member", "members", "users"}, requiresAcctID: true},
 	}
 
 	// Default sections to include

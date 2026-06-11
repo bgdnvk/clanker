@@ -26,7 +26,10 @@ Supported resources:
   account              - Current account context
   groups, rg           - Resource groups
   resources            - ARM resources (top 200)
+  resource-graph       - Azure Resource Graph inventory (top 200)
   vms                  - Virtual machines
+  managed-disks        - Managed disks
+  snapshots            - Disk snapshots
   containers, aci      - Container Instances
   aks                  - AKS clusters
   containerapps        - Azure Container Apps
@@ -52,9 +55,18 @@ Supported resources:
   app-insights         - Application Insights components
   front-door           - Front Door / CDN profiles
   vnets                - Virtual networks
+  private-endpoints    - Private endpoints
   nsgs                 - Network security groups
+  route-tables         - Route tables
+  app-gateways         - Application gateways
+  waf-policies         - Application Gateway WAF policies
+  dns-zones            - DNS zones
+  private-dns-zones    - Private DNS zones
   public-ips           - Public IP addresses
-  load-balancers, lbs  - Load balancers`,
+  load-balancers, lbs  - Load balancers
+  logic-apps           - Logic Apps workflows
+  data-factories       - Data Factory instances
+  ml-workspaces        - Azure Machine Learning workspaces`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resourceType := strings.ToLower(strings.TrimSpace(args[0]))
@@ -96,8 +108,26 @@ Supported resources:
 					return err
 				}
 				fmt.Print(result)
+			case "resource-graph", "graph", "inventory":
+				result, err := exec("graph", "query", "-q", "Resources | project name, type, location, resourceGroup | limit 200", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
 			case "vms", "vm":
 				result, err := exec("vm", "list", "-d", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "managed-disks", "disks":
+				result, err := exec("disk", "list", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "snapshots", "disk-snapshots":
+				result, err := exec("snapshot", "list", "--output", "table")
 				if err != nil {
 					return err
 				}
@@ -252,8 +282,44 @@ Supported resources:
 					return err
 				}
 				fmt.Print(result)
+			case "private-endpoints", "privateendpoint":
+				result, err := exec("network", "private-endpoint", "list", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
 			case "nsgs", "nsg":
 				result, err := exec("network", "nsg", "list", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "route-tables", "route-table", "routes":
+				result, err := exec("network", "route-table", "list", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "app-gateways", "application-gateways":
+				result, err := exec("network", "application-gateway", "list", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "waf-policies", "waf":
+				result, err := exec("resource", "list", "--resource-type", "Microsoft.Network/ApplicationGatewayWebApplicationFirewallPolicies", "--query", "[:200].{name:name,location:location,resourceGroup:resourceGroup}", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "dns-zones", "dns":
+				result, err := exec("network", "dns", "zone", "list", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "private-dns-zones", "private-dns":
+				result, err := exec("network", "private-dns", "zone", "list", "--output", "table")
 				if err != nil {
 					return err
 				}
@@ -266,6 +332,24 @@ Supported resources:
 				fmt.Print(result)
 			case "load-balancers", "lbs", "loadbalancers":
 				result, err := exec("network", "lb", "list", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "logic-apps", "logicapps":
+				result, err := exec("resource", "list", "--resource-type", "Microsoft.Logic/workflows", "--query", "[:200].{name:name,location:location,resourceGroup:resourceGroup}", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "data-factories", "datafactory":
+				result, err := exec("resource", "list", "--resource-type", "Microsoft.DataFactory/factories", "--query", "[:200].{name:name,location:location,resourceGroup:resourceGroup}", "--output", "table")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "ml-workspaces", "machine-learning", "azure-ml":
+				result, err := exec("resource", "list", "--resource-type", "Microsoft.MachineLearningServices/workspaces", "--query", "[:200].{name:name,location:location,resourceGroup:resourceGroup}", "--output", "table")
 				if err != nil {
 					return err
 				}

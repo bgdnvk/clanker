@@ -37,12 +37,28 @@ Supported resources:
   vectorize            - Vectorize indexes
   hyperdrive           - Hyperdrive configs
   ai-gateways          - AI Gateway gateways
+  ai-gateway-logs      - AI Gateway logs
+  ai-gateway-datasets  - AI Gateway datasets
+  ai-gateway-evals     - AI Gateway evaluations
+  ai-gateway-providers - AI Gateway provider configs
   ai-gateway-routes    - AI Gateway dynamic routes (requires --gateway-id)
-  ai-search            - AI Search instances
+  ai-search            - AI Search namespaces
+  ai-search-instances  - AI Search instances (requires --namespace)
   durable-objects      - Durable Object namespaces
+  browser-sessions     - Browser Rendering active sessions
+  images               - Cloudflare Images
+  stream               - Cloudflare Stream videos
+  secrets-stores       - Secrets Store stores
+  pipelines            - Pipelines
+  pipeline-sinks       - Pipelines sinks
+  pipeline-streams     - Pipelines streams
   turnstile            - Turnstile widgets
   workflows            - Workflows (requires wrangler)
   tunnels              - Cloudflare Tunnels (requires cloudflared)
+  logpush-jobs         - Logpush jobs
+  rules-lists          - Account rules lists
+  account-roles        - Account roles
+  account-members      - Account members
   firewall-rules       - Firewall rules (requires --zone)
   page-rules           - Page rules (requires --zone)`,
 		Args: cobra.ExactArgs(1),
@@ -51,6 +67,7 @@ Supported resources:
 			zoneID, _ := cmd.Flags().GetString("zone")
 			zoneName, _ := cmd.Flags().GetString("zone-name")
 			gatewayID, _ := cmd.Flags().GetString("gateway-id")
+			namespace, _ := cmd.Flags().GetString("namespace")
 
 			accountID := ResolveAccountID()
 			apiToken := ResolveAPIToken()
@@ -112,17 +129,68 @@ Supported resources:
 			case "ai-gateways", "ai-gateway":
 				return listAccountAPIResource(ctx, client, "Cloudflare AI Gateways", accountID, "/accounts/%s/ai-gateway/gateways")
 
+			case "ai-gateway-logs", "ai-logs", "gateway-logs":
+				if gatewayID == "" {
+					return fmt.Errorf("--gateway-id is required to list AI Gateway logs")
+				}
+				return listAccountAPIResource(ctx, client, "Cloudflare AI Gateway Logs", accountID, "/accounts/%s/ai-gateway/gateways/"+url.PathEscape(gatewayID)+"/logs")
+
+			case "ai-gateway-datasets", "ai-datasets", "gateway-datasets":
+				if gatewayID == "" {
+					return fmt.Errorf("--gateway-id is required to list AI Gateway datasets")
+				}
+				return listAccountAPIResource(ctx, client, "Cloudflare AI Gateway Datasets", accountID, "/accounts/%s/ai-gateway/gateways/"+url.PathEscape(gatewayID)+"/datasets")
+
+			case "ai-gateway-evals", "ai-gateway-evaluations", "gateway-evaluations":
+				if gatewayID == "" {
+					return fmt.Errorf("--gateway-id is required to list AI Gateway evaluations")
+				}
+				return listAccountAPIResource(ctx, client, "Cloudflare AI Gateway Evaluations", accountID, "/accounts/%s/ai-gateway/gateways/"+url.PathEscape(gatewayID)+"/evaluations")
+
+			case "ai-gateway-providers", "ai-gateway-provider-configs", "gateway-providers":
+				if gatewayID == "" {
+					return fmt.Errorf("--gateway-id is required to list AI Gateway provider configs")
+				}
+				return listAccountAPIResource(ctx, client, "Cloudflare AI Gateway Provider Configs", accountID, "/accounts/%s/ai-gateway/gateways/"+url.PathEscape(gatewayID)+"/provider_configs")
+
 			case "ai-gateway-routes", "ai-routes", "gateway-routes":
 				if gatewayID == "" {
 					return fmt.Errorf("--gateway-id is required to list AI Gateway routes")
 				}
 				return listAccountAPIResource(ctx, client, "Cloudflare AI Gateway Routes", accountID, "/accounts/%s/ai-gateway/gateways/"+url.PathEscape(gatewayID)+"/routes")
 
-			case "ai-search", "ai-search-instances":
-				return listAccountAPIResource(ctx, client, "Cloudflare AI Search Instances", accountID, "/accounts/%s/ai-search/instances")
+			case "ai-search", "ai-search-namespaces", "ai-search-ns":
+				return listAccountAPIResource(ctx, client, "Cloudflare AI Search Namespaces", accountID, "/accounts/%s/ai-search/namespaces")
+
+			case "ai-search-instances":
+				if namespace == "" {
+					return fmt.Errorf("--namespace is required to list AI Search instances")
+				}
+				return listAccountAPIResource(ctx, client, "Cloudflare AI Search Instances", accountID, "/accounts/%s/ai-search/namespaces/"+url.PathEscape(namespace)+"/instances")
 
 			case "durable-objects", "durable-object-namespaces":
 				return listAccountAPIResource(ctx, client, "Cloudflare Durable Object Namespaces", accountID, "/accounts/%s/workers/durable_objects/namespaces")
+
+			case "browser-sessions", "browser-rendering-sessions", "browser-run-sessions":
+				return listAccountAPIResource(ctx, client, "Cloudflare Browser Rendering Sessions", accountID, "/accounts/%s/browser-rendering/devtools/session")
+
+			case "images", "cloudflare-images":
+				return listAccountAPIResource(ctx, client, "Cloudflare Images", accountID, "/accounts/%s/images/v2")
+
+			case "stream", "stream-videos", "videos":
+				return listAccountAPIResource(ctx, client, "Cloudflare Stream Videos", accountID, "/accounts/%s/stream")
+
+			case "secrets-stores", "secrets-store", "secret-stores":
+				return listAccountAPIResource(ctx, client, "Cloudflare Secrets Store Stores", accountID, "/accounts/%s/secrets_store/stores")
+
+			case "pipelines", "pipeline":
+				return listAccountAPIResource(ctx, client, "Cloudflare Pipelines", accountID, "/accounts/%s/pipelines/v1/pipelines")
+
+			case "pipeline-sinks", "pipelines-sinks":
+				return listAccountAPIResource(ctx, client, "Cloudflare Pipeline Sinks", accountID, "/accounts/%s/pipelines/v1/sinks")
+
+			case "pipeline-streams", "pipelines-streams":
+				return listAccountAPIResource(ctx, client, "Cloudflare Pipeline Streams", accountID, "/accounts/%s/pipelines/v1/streams")
 
 			case "turnstile", "turnstile-widgets":
 				return listAccountAPIResource(ctx, client, "Cloudflare Turnstile Widgets", accountID, "/accounts/%s/challenges/widgets")
@@ -132,6 +200,18 @@ Supported resources:
 
 			case "tunnels", "tunnel":
 				return listTunnels(ctx, client)
+
+			case "logpush-jobs", "logpush":
+				return listAccountAPIResource(ctx, client, "Cloudflare Logpush Jobs", accountID, "/accounts/%s/logpush/jobs")
+
+			case "rules-lists", "lists":
+				return listAccountAPIResource(ctx, client, "Cloudflare Rules Lists", accountID, "/accounts/%s/rules/lists")
+
+			case "account-roles", "roles":
+				return listAccountAPIResource(ctx, client, "Cloudflare Account Roles", accountID, "/accounts/%s/roles")
+
+			case "account-members", "members":
+				return listAccountAPIResource(ctx, client, "Cloudflare Account Members", accountID, "/accounts/%s/members")
 
 			case "firewall", "firewall-rules":
 				if zoneID == "" {
@@ -154,6 +234,7 @@ Supported resources:
 	cfListCmd.Flags().String("zone", "", "Zone ID for zone-specific resources")
 	cfListCmd.Flags().String("zone-name", "", "Zone name (domain) to look up zone ID")
 	cfListCmd.Flags().String("gateway-id", "", "AI Gateway ID for gateway-scoped resources")
+	cfListCmd.Flags().String("namespace", "", "AI Search namespace for namespace-scoped resources")
 
 	cfCmd.AddCommand(cfListCmd)
 

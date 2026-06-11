@@ -213,10 +213,16 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 	}
 
 	sections := []section{
+		{name: "Enabled Services", args: []string{"services", "list", "--enabled", "--format", "table(config.name,state)"}, keys: []string{"enabled services", "enabled apis", "service usage", "apis"}},
+		{name: "Cloud Asset Resources", args: []string{"asset", "search-all-resources", "--scope", "projects/" + c.projectID, "--limit", "200", "--format", "table(name,assetType,location,project)"}, keys: []string{"asset", "assets", "resources", "inventory", "list all"}},
 		{name: "IAM Service Accounts", args: []string{"iam", "service-accounts", "list", "--format", "table(email,displayName,disabled)"}, keys: []string{"iam service account", "service account", "service accounts"}},
 		{name: "IAM Roles", args: []string{"iam", "roles", "list", "--format", "table(name,title,stage)"}, keys: []string{"iam role", "iam roles"}},
 		{name: "Cloud Run Services", args: []string{"run", "services", "list", "--platform", "managed", "--format", "table(name,region,url)"}, keys: []string{"cloud run", "cloudrun", "run service", "run services"}},
 		{name: "Cloud Run Jobs", args: []string{"run", "jobs", "list", "--platform", "managed", "--format", "table(name,region,createTime)"}, keys: []string{"cloud run job", "run job", "run jobs"}},
+		{name: "Cloud Run Revisions", args: []string{"run", "revisions", "list", "--platform", "managed", "--format", "table(service,revision,region,active)"}, keys: []string{"cloud run revision", "run revision", "revisions"}},
+		{name: "Cloud Run Worker Pools", args: []string{"run", "worker-pools", "list", "--format", "table(name,region,createTime)"}, keys: []string{"cloud run worker", "worker pool", "worker pools"}},
+		{name: "Cloud Run Domain Mappings", args: []string{"run", "domain-mappings", "list", "--platform", "managed", "--format", "table(name,region,routeName)"}, keys: []string{"domain mapping", "domain mappings"}},
+		{name: "Cloud Run Multi-Region Services", args: []string{"run", "multi-region-services", "list", "--format", "table(name,regions)"}, keys: []string{"multi-region service", "multi-region services"}},
 		{name: "Workflows", args: []string{"workflows", "list", "--location", "us-central1", "--format", "table(name,state,revisionId,updateTime)"}, keys: []string{"workflow", "workflows"}},
 		{name: "Cloud Batch Jobs", args: []string{"batch", "jobs", "list", "--location", "us-central1", "--format", "table(name,state,createTime)"}, keys: []string{"cloud batch", "batch job", "batch jobs"}},
 		{name: "Vertex AI Endpoints", args: []string{"ai", "endpoints", "list", "--region", "us-central1", "--format", "table(name,displayName,createTime)"}, keys: []string{"vertex", "vertex ai", "ai endpoint", "ai endpoints", "model endpoint"}},

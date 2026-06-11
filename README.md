@@ -126,6 +126,35 @@ Override for a single command:
 clanker ask --aws --profile clankercloud-tekbog "what lambdas do we have?" | cat
 ```
 
+### Cloud Provider Inventory Examples
+
+Use static `list` commands for read-only inventory without AI interpretation:
+
+```bash
+clanker aws list resources
+clanker aws list all-services
+clanker aws list bedrock-kb
+clanker gcp list services
+clanker gcp list resources
+clanker gcp list run-worker-pools
+clanker azure list resource-graph
+clanker azure list private-endpoints
+clanker azure list ai-search
+clanker cf list ai-search
+clanker cf list browser-sessions
+clanker cf list secrets-stores
+clanker cf list pipelines
+```
+
+Each provider exposes the full supported resource list through its help:
+
+```bash
+clanker aws list --help
+clanker gcp list --help
+clanker azure list --help
+clanker cf list --help
+```
+
 ## Usage
 
 ### MCP
@@ -528,17 +557,33 @@ digitalocean:
 
 ```bash
 # List resources directly (no AI)
+clanker do list account
 clanker do list droplets
+clanker do list droplet-autoscale
 clanker do list kubernetes
 clanker do list databases
 clanker do list apps
+clanker do list functions
+clanker do list serverless-inference-models
+clanker do list dedicated-inference
+clanker do list gradient-agents --region tor1
 clanker do list load-balancers
+clanker do list cdns
 clanker do list volumes
+clanker do list nfs --region nyc3
 clanker do list vpcs
+clanker do list vpc-peerings
+clanker do list vpc-nat-gateways
 clanker do list domains
 clanker do list firewalls
+clanker do list reserved-ips
+clanker do list certificates
+clanker do list monitoring-alerts
 clanker do list registries
 clanker do list spaces
+
+# See the full current doctl-backed coverage list
+clanker do list --help
 ```
 
 ### AI Queries
@@ -605,7 +650,15 @@ clanker hetzner list floating-ips
 clanker hetzner list primary-ips
 clanker hetzner list ssh-keys
 clanker hetzner list images
+clanker hetzner list isos
 clanker hetzner list certificates
+clanker hetzner list placement-groups
+clanker hetzner list server-types
+clanker hetzner list locations
+clanker hetzner list datacenters
+
+# See the full hcloud-backed coverage list
+clanker hetzner list --help
 ```
 
 ### AI Queries

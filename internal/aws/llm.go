@@ -1854,6 +1854,15 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		args := []string{"apprunner", "list-services", "--output", "table"}
 		return c.execAWSCLI(ctx, args, profile)
 
+	case "list_batch_jobs":
+		queueArgs := []string{"batch", "describe-job-queues", "--output", "table", "--query", "jobQueues[*].{Name:jobQueueName,State:state,Status:status,Priority:priority}"}
+		queues, _ := c.execAWSCLI(ctx, queueArgs, profile)
+
+		envArgs := []string{"batch", "describe-compute-environments", "--output", "table", "--query", "computeEnvironments[*].{Name:computeEnvironmentName,State:state,Status:status,Type:type}"}
+		environments, _ := c.execAWSCLI(ctx, envArgs, profile)
+
+		return fmt.Sprintf("AWS Batch Job Queues:\n%s\n\nAWS Batch Compute Environments:\n%s", queues, environments), nil
+
 	case "analyze_ecs_service_logs":
 		serviceName, ok := input["service_name"].(string)
 		if !ok {
@@ -1934,6 +1943,10 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 	// SERVERLESS operations
 	case "list_lambda_functions":
 		args := []string{"lambda", "list-functions", "--output", "table", "--query", "Functions[*].{Name:FunctionName,Runtime:Runtime,LastModified:LastModified}"}
+		return c.execAWSCLI(ctx, args, profile)
+
+	case "list_lambda_layers":
+		args := []string{"lambda", "list-layers", "--output", "table", "--query", "Layers[*].{Name:LayerName,Arn:LayerArn,LatestVersion:LatestMatchingVersion.Version,Created:LatestMatchingVersion.CreatedDate}"}
 		return c.execAWSCLI(ctx, args, profile)
 
 	case "describe_lambda_function":
@@ -2424,6 +2437,10 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		args := []string{"codecommit", "list-repositories", "--output", "table"}
 		return c.execAWSCLI(ctx, args, profile)
 
+	case "list_cloudformation_stacks":
+		args := []string{"cloudformation", "list-stacks", "--stack-status-filter", "CREATE_COMPLETE", "UPDATE_COMPLETE", "UPDATE_ROLLBACK_COMPLETE", "IMPORT_COMPLETE", "IMPORT_ROLLBACK_COMPLETE", "--output", "table", "--query", "StackSummaries[*].{Name:StackName,Status:StackStatus,Updated:LastUpdatedTime}"}
+		return c.execAWSCLI(ctx, args, profile)
+
 	// ANALYTICS & BIG DATA operations
 	case "list_kinesis_streams":
 		args := []string{"kinesis", "list-streams", "--output", "table"}
@@ -2515,6 +2532,14 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 
 	case "check_all_services_parallel":
 		return c.checkAllServicesParallel(ctx, profile)
+
+	case "search_resource_explorer":
+		args := []string{"resource-explorer-2", "search", "--query-string", "*", "--max-results", "50", "--output", "table", "--query", "Resources[*].{Arn:Arn,Service:OwningService,Region:Region,Type:ResourceType}"}
+		return c.execAWSCLI(ctx, args, profile)
+
+	case "list_tagged_resources":
+		args := []string{"resourcegroupstaggingapi", "get-resources", "--resources-per-page", "50", "--output", "table", "--query", "ResourceTagMappingList[*].{ARN:ResourceARN,Tags:Tags}"}
+		return c.execAWSCLI(ctx, args, profile)
 
 	// TERRAFORM INTEGRATION operations
 	case "get_terraform_outputs":
