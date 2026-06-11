@@ -8,11 +8,12 @@ import (
 
 func TestAnalyzeMapsCommonPatterns(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, dir, "package.json", `{"dependencies":{"express":"latest","pg":"latest","jsonwebtoken":"latest","zod":"latest"}}`)
+	writeFile(t, dir, "package.json", `{"dependencies":{"express":"latest","pg":"latest","jsonwebtoken":"latest","zod":"latest","@opentelemetry/api":"latest"}}`)
 	writeFile(t, dir, "src/server.ts", `
 import express from "express"
 import { userRouter } from "./routes/users"
 const app = express()
+process.env.OTEL_SERVICE_NAME = "users-api"
 app.use("/users", userRouter)
 app.listen(process.env.PORT || 3000)
 `)
@@ -23,6 +24,7 @@ import { UserSchema } from "../schemas/user"
 import { userService } from "../services/userService"
 export const userRouter = Router()
 userRouter.post("/", requireAuth, (req, res) => {
+  // ACME-123 tracks this onboarding route.
   const input = UserSchema.parse(req.body)
   return res.json(userService.create(input))
 })
@@ -47,6 +49,22 @@ export const userRepository = { create(input) { return pg.query("INSERT INTO use
 import { z } from "zod"
 export const UserSchema = z.object({ email: z.string().email() })
 `)
+	writeFile(t, dir, "Dockerfile", `
+FROM node:22-alpine
+`)
+	writeFile(t, dir, ".github/workflows/deploy.yml", `
+name: deploy
+on: [push]
+`)
+	writeFile(t, dir, "infra/main.tf", `
+resource "aws_s3_bucket" "uploads" {}
+`)
+	writeFile(t, dir, "k8s/deployment.yaml", `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: users-api
+`)
 
 	analysis, err := Analyze(dir, "https://github.com/acme/app")
 	if err != nil {
@@ -67,11 +85,40 @@ export const UserSchema = z.object({ email: z.string().email() })
 	if len(analysis.Graph.Nodes) == 0 || len(analysis.Graph.Edges) == 0 {
 		t.Fatalf("expected graph nodes and edges, got nodes=%d edges=%d", len(analysis.Graph.Nodes), len(analysis.Graph.Edges))
 	}
+	for _, kind := range []string{"work_item", "service", "infra_resource", "deployment", "dependency"} {
+		if !hasCorrelation(analysis, kind) {
+			t.Fatalf("expected correlation kind %q in %#v", kind, analysis.Correlations)
+		}
+	}
+	if analysis.Summary.CorrelationCount == 0 {
+		t.Fatalf("expected correlation count in summary")
+	}
+	if !hasGraphNodeType(analysis, "correlation") {
+		t.Fatalf("expected correlation graph nodes in %#v", analysis.Graph.Nodes)
+	}
 }
 
 func hasPattern(analysis *Analysis, id string) bool {
 	for _, pattern := range analysis.Patterns {
 		if pattern.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCorrelation(analysis *Analysis, kind string) bool {
+	for _, corr := range analysis.Correlations {
+		if corr.Type == kind {
+			return true
+		}
+	}
+	return false
+}
+
+func hasGraphNodeType(analysis *Analysis, typ string) bool {
+	for _, node := range analysis.Graph.Nodes {
+		if node.Type == typ {
 			return true
 		}
 	}

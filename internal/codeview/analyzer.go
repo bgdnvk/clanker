@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -17,13 +18,17 @@ import (
 )
 
 const (
-	maxFilesScanned       = 5000
-	maxFileBytes          = 512 * 1024
-	maxEvidencePerFile    = 2
-	maxEvidencePerPattern = 8
-	maxPatternFiles       = 80
-	maxGraphFileNodes     = 140
-	maxImportEdges        = 180
+	maxFilesScanned        = 5000
+	maxFileBytes           = 512 * 1024
+	maxEvidencePerFile     = 2
+	maxEvidencePerPattern  = 8
+	maxPatternFiles        = 80
+	maxGraphFileNodes      = 140
+	maxImportEdges         = 180
+	maxCorrelations        = 220
+	maxCorrelationFiles    = 20
+	maxCorrelationEvidence = 4
+	maxCorrelationNodes    = 80
 )
 
 type AnalyzeOptions struct {
@@ -39,24 +44,26 @@ type Analysis struct {
 	Languages          []LanguageStat `json:"languages"`
 	Files              []CodeFile     `json:"files"`
 	Patterns           []CodePattern  `json:"patterns"`
+	Correlations       []Correlation  `json:"correlations"`
 	Graph              CodeGraph      `json:"graph"`
 	Subagents          []SubagentRun  `json:"subagents"`
 	Warnings           []string       `json:"warnings,omitempty"`
 }
 
 type Summary struct {
-	PrimaryLanguage string `json:"primaryLanguage"`
-	TotalFiles      int    `json:"totalFiles"`
-	SourceFiles     int    `json:"sourceFiles"`
-	TotalLines      int    `json:"totalLines"`
-	PatternCount    int    `json:"patternCount"`
-	ConnectionCount int    `json:"connectionCount"`
-	EntryPoint      string `json:"entryPoint,omitempty"`
-	Framework       string `json:"framework,omitempty"`
-	HasAuth         bool   `json:"hasAuth"`
-	HasDatabase     bool   `json:"hasDatabase"`
-	HasMiddleware   bool   `json:"hasMiddleware"`
-	HasTests        bool   `json:"hasTests"`
+	PrimaryLanguage  string `json:"primaryLanguage"`
+	TotalFiles       int    `json:"totalFiles"`
+	SourceFiles      int    `json:"sourceFiles"`
+	TotalLines       int    `json:"totalLines"`
+	PatternCount     int    `json:"patternCount"`
+	CorrelationCount int    `json:"correlationCount"`
+	ConnectionCount  int    `json:"connectionCount"`
+	EntryPoint       string `json:"entryPoint,omitempty"`
+	Framework        string `json:"framework,omitempty"`
+	HasAuth          bool   `json:"hasAuth"`
+	HasDatabase      bool   `json:"hasDatabase"`
+	HasMiddleware    bool   `json:"hasMiddleware"`
+	HasTests         bool   `json:"hasTests"`
 }
 
 type LanguageSpec struct {
@@ -98,6 +105,16 @@ type Evidence struct {
 	Line    int    `json:"line"`
 	Snippet string `json:"snippet"`
 	Reason  string `json:"reason"`
+}
+
+type Correlation struct {
+	ID       string     `json:"id"`
+	Type     string     `json:"type"`
+	Label    string     `json:"label"`
+	Value    string     `json:"value"`
+	Source   string     `json:"source"`
+	Files    []string   `json:"files"`
+	Evidence []Evidence `json:"evidence,omitempty"`
 }
 
 type CodeGraph struct {
@@ -363,6 +380,12 @@ var importantPatternOrder = []string{
 
 var relativeImportRE = regexp.MustCompile(`(?m)(?:import\s+(?:[^'"]+\s+from\s+)?|require\()\s*['"](\.{1,2}/[^'"]+)['"]`)
 var pythonImportRE = regexp.MustCompile(`(?m)^\s*from\s+(\.{1,2}[A-Za-z0-9_./]*)\s+import\s+`)
+var issueKeyRE = regexp.MustCompile(`\b[A-Z][A-Z0-9]{1,9}-\d+\b`)
+var otelServiceNameRE = regexp.MustCompile(`(?i)(?:OTEL_SERVICE_NAME|service[._-]?name)\s*[:=]\s*["']?([A-Za-z0-9._/-]+)`)
+var terraformResourceRE = regexp.MustCompile(`^\s*resource\s+"([^"]+)"\s+"([^"]+)"`)
+var goModRequireRE = regexp.MustCompile(`^\s*([A-Za-z0-9_.-]+/[^\s]+)\s+v[0-9][^\s]*`)
+var requirementRE = regexp.MustCompile(`^\s*([A-Za-z0-9_.-]+)\s*(?:==|>=|<=|~=|>|<|=).*$`)
+var cargoDependencyRE = regexp.MustCompile(`^\s*([A-Za-z0-9_-]+)\s*=\s*`)
 
 func CloneAndAnalyze(ctx context.Context, repoURL string, opts AnalyzeOptions) (*Analysis, func(), error) {
 	repoURL = strings.TrimSpace(repoURL)
@@ -417,15 +440,20 @@ func Analyze(dir string, repoURL string) (*Analysis, error) {
 	patterns := buildPatterns(files)
 	patternDuration := time.Since(patternStarted).Round(time.Millisecond).String()
 
+	correlationStarted := time.Now()
+	correlations := buildCorrelations(files)
+	correlationDuration := time.Since(correlationStarted).Round(time.Millisecond).String()
+
 	graphStarted := time.Now()
-	graph := buildGraph(repoURL, files, languages, patterns)
+	graph := buildGraph(repoURL, files, languages, patterns, correlations)
 	graphDuration := time.Since(graphStarted).Round(time.Millisecond).String()
 
 	summaryStarted := time.Now()
-	summary := buildSummary(files, languages, patterns, graph)
+	summary := buildSummary(files, languages, patterns, correlations, graph)
 	subagents := []SubagentRun{
 		{ID: "language-profiler", Label: "Language Profiler", Status: "done", Summary: fmt.Sprintf("%d source files across %d languages", summary.SourceFiles, len(languages)), Findings: languageFindings, Duration: languageDuration},
 		{ID: "pattern-cartographer", Label: "Pattern Cartographer", Status: "done", Summary: fmt.Sprintf("%d codebase patterns mapped", len(patterns)), Findings: topPatternFindings(patterns), Duration: patternDuration},
+		{ID: "workspace-correlator", Label: "Workspace Correlator", Status: "done", Summary: fmt.Sprintf("%d workspace correlation hints found", len(correlations)), Findings: correlationFindings(correlations), Duration: correlationDuration},
 		{ID: "dependency-mapper", Label: "Dependency Mapper", Status: "done", Summary: fmt.Sprintf("%d graph connections generated", len(graph.Edges)), Findings: dependencyFindings(graph), Duration: graphDuration},
 		{ID: "surface-reviewer", Label: "Auth / DB / Middleware Reviewer", Status: "done", Summary: surfaceSummary(summary), Findings: surfaceFindings(patterns), Duration: time.Since(summaryStarted).Round(time.Millisecond).String()},
 	}
@@ -461,6 +489,7 @@ func Analyze(dir string, repoURL string) (*Analysis, error) {
 		Languages:          languages,
 		Files:              analysisFiles,
 		Patterns:           patterns,
+		Correlations:       correlations,
 		Graph:              graph,
 		Subagents:          subagents,
 		Warnings:           warnings,
@@ -675,6 +704,238 @@ func buildPatterns(files []scannedFile) []CodePattern {
 	return out
 }
 
+type correlationAccumulator struct {
+	item    Correlation
+	fileSet map[string]bool
+}
+
+type addCorrelationFunc func(correlationType, label, value, source string, ev Evidence)
+
+func buildCorrelations(files []scannedFile) []Correlation {
+	byKey := make(map[string]*correlationAccumulator)
+
+	add := func(correlationType, label, value, source string, ev Evidence) {
+		correlationType = strings.TrimSpace(correlationType)
+		label = strings.TrimSpace(label)
+		value = strings.TrimSpace(value)
+		source = strings.TrimSpace(source)
+		if correlationType == "" || label == "" || value == "" || source == "" {
+			return
+		}
+		key := strings.ToLower(correlationType + ":" + source + ":" + value)
+		acc := byKey[key]
+		if acc == nil {
+			acc = &correlationAccumulator{
+				item: Correlation{
+					ID:     "correlation:" + stableID(key),
+					Type:   correlationType,
+					Label:  label,
+					Value:  value,
+					Source: source,
+					Files:  []string{},
+				},
+				fileSet: map[string]bool{},
+			}
+			byKey[key] = acc
+		}
+		if ev.File != "" && !acc.fileSet[ev.File] && len(acc.item.Files) < maxCorrelationFiles {
+			acc.item.Files = append(acc.item.Files, ev.File)
+			acc.fileSet[ev.File] = true
+		}
+		acc.item.Evidence = appendLimitedEvidence(acc.item.Evidence, ev, maxCorrelationEvidence)
+	}
+
+	for _, file := range files {
+		detectManifestCorrelations(file, add)
+		detectLineCorrelations(file, add)
+	}
+
+	out := make([]Correlation, 0, len(byKey))
+	for _, acc := range byKey {
+		sort.Strings(acc.item.Files)
+		out = append(out, acc.item)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		oi := correlationOrder(out[i].Type)
+		oj := correlationOrder(out[j].Type)
+		if oi != oj {
+			return oi < oj
+		}
+		if len(out[i].Files) != len(out[j].Files) {
+			return len(out[i].Files) > len(out[j].Files)
+		}
+		return out[i].Label < out[j].Label
+	})
+	if len(out) > maxCorrelations {
+		return out[:maxCorrelations]
+	}
+	return out
+}
+
+func detectManifestCorrelations(file scannedFile, add addCorrelationFunc) {
+	base := filepath.Base(file.path)
+	switch base {
+	case "package.json":
+		detectPackageJSONCorrelations(file, add)
+	case "go.mod":
+		detectGoModCorrelations(file, add)
+	case "requirements.txt":
+		detectRequirementsCorrelations(file, add)
+	case "Cargo.toml":
+		detectCargoCorrelations(file, add)
+	case "Dockerfile":
+		add("deployment", "Container build", "Dockerfile", "dockerfile", Evidence{File: file.path, Line: 1, Snippet: base, Reason: "container build descriptor"})
+	}
+	if strings.HasPrefix(file.path, ".github/workflows/") {
+		add("deployment", filepath.Base(file.path), file.path, "github-actions", Evidence{File: file.path, Line: 1, Snippet: file.path, Reason: "GitHub Actions workflow"})
+	}
+}
+
+func detectPackageJSONCorrelations(file scannedFile, add addCorrelationFunc) {
+	var pkg struct {
+		Dependencies         map[string]string `json:"dependencies"`
+		DevDependencies      map[string]string `json:"devDependencies"`
+		PeerDependencies     map[string]string `json:"peerDependencies"`
+		OptionalDependencies map[string]string `json:"optionalDependencies"`
+	}
+	if err := json.Unmarshal([]byte(file.content), &pkg); err != nil {
+		return
+	}
+	groups := []struct {
+		name string
+		deps map[string]string
+	}{
+		{"dependency", pkg.Dependencies},
+		{"devDependency", pkg.DevDependencies},
+		{"peerDependency", pkg.PeerDependencies},
+		{"optionalDependency", pkg.OptionalDependencies},
+	}
+	for _, group := range groups {
+		for name, version := range group.deps {
+			add("dependency", name, name, "package.json", Evidence{File: file.path, Line: 1, Snippet: name + " " + version, Reason: group.name})
+		}
+	}
+}
+
+func detectGoModCorrelations(file scannedFile, add addCorrelationFunc) {
+	scanLines(file, func(lineNo int, line string) {
+		match := goModRequireRE.FindStringSubmatch(line)
+		if len(match) < 2 {
+			return
+		}
+		add("dependency", match[1], match[1], "go.mod", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Go module dependency"})
+	})
+}
+
+func detectRequirementsCorrelations(file scannedFile, add addCorrelationFunc) {
+	scanLines(file, func(lineNo int, line string) {
+		match := requirementRE.FindStringSubmatch(line)
+		if len(match) < 2 {
+			return
+		}
+		add("dependency", match[1], match[1], "requirements.txt", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Python dependency"})
+	})
+}
+
+func detectCargoCorrelations(file scannedFile, add addCorrelationFunc) {
+	inDependencies := false
+	scanLines(file, func(lineNo int, line string) {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			inDependencies = trimmed == "[dependencies]" || trimmed == "[dev-dependencies]" || strings.HasPrefix(trimmed, "[target.") && strings.Contains(trimmed, ".dependencies]")
+			return
+		}
+		if !inDependencies || strings.HasPrefix(trimmed, "#") {
+			return
+		}
+		match := cargoDependencyRE.FindStringSubmatch(trimmed)
+		if len(match) < 2 {
+			return
+		}
+		add("dependency", match[1], match[1], "Cargo.toml", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Rust crate dependency"})
+	})
+}
+
+func detectLineCorrelations(file scannedFile, add addCorrelationFunc) {
+	scanLines(file, func(lineNo int, line string) {
+		trimmed := strings.TrimSpace(line)
+		for _, match := range issueKeyRE.FindAllString(trimmed, -1) {
+			add("work_item", match, match, "issue-key", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Jira/Linear-style issue key"})
+		}
+		if match := otelServiceNameRE.FindStringSubmatch(trimmed); len(match) > 1 {
+			service := strings.Trim(match[1], `"' ,`)
+			add("service", service, service, "opentelemetry", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "service name convention"})
+		}
+		if match := terraformResourceRE.FindStringSubmatch(trimmed); len(match) > 2 {
+			value := match[1] + "." + match[2]
+			add("infra_resource", value, value, "terraform", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Terraform resource"})
+		}
+		if strings.HasPrefix(trimmed, "kind:") && strings.Contains(file.content, "apiVersion:") {
+			kind := strings.TrimSpace(strings.TrimPrefix(trimmed, "kind:"))
+			if kind != "" {
+				add("infra_resource", "Kubernetes "+kind, "kubernetes/"+kind, "kubernetes", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Kubernetes manifest kind"})
+			}
+		}
+		if strings.HasPrefix(strings.ToUpper(trimmed), "FROM ") && filepath.Base(file.path) == "Dockerfile" {
+			image := strings.TrimSpace(trimmed[5:])
+			if parts := strings.Fields(image); len(parts) > 0 {
+				add("deployment", "Container base "+parts[0], parts[0], "dockerfile", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "container base image"})
+			}
+		}
+		detectEnvironmentReference(file, lineNo, line, add)
+	})
+}
+
+func detectEnvironmentReference(file scannedFile, lineNo int, line string, add addCorrelationFunc) {
+	upper := strings.ToUpper(line)
+	refs := []struct {
+		token string
+		label string
+	}{
+		{"DATABASE_URL", "Database URL"},
+		{"REDIS_URL", "Redis URL"},
+		{"S3_BUCKET", "S3 bucket"},
+		{"BUCKET_NAME", "Object storage bucket"},
+		{"QUEUE_URL", "Queue URL"},
+		{"KAFKA_BROKERS", "Kafka brokers"},
+		{"OTEL_EXPORTER", "Telemetry exporter"},
+	}
+	for _, ref := range refs {
+		if strings.Contains(upper, ref.token) {
+			add("infra_reference", ref.label, ref.token, "environment", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "environment-backed infrastructure reference"})
+		}
+	}
+}
+
+func scanLines(file scannedFile, visit func(lineNo int, line string)) {
+	scanner := bufio.NewScanner(strings.NewReader(file.content))
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		visit(lineNo, scanner.Text())
+	}
+}
+
+func correlationOrder(kind string) int {
+	switch kind {
+	case "work_item":
+		return 0
+	case "service":
+		return 1
+	case "infra_resource":
+		return 2
+	case "infra_reference":
+		return 3
+	case "deployment":
+		return 4
+	case "dependency":
+		return 5
+	default:
+		return 99
+	}
+}
+
 func buildLanguageStats(files []scannedFile) []LanguageStat {
 	byID := map[string]*LanguageStat{}
 	totalLines := 0
@@ -708,7 +969,7 @@ func buildLanguageStats(files []scannedFile) []LanguageStat {
 	return out
 }
 
-func buildGraph(repoURL string, files []scannedFile, languages []LanguageStat, patterns []CodePattern) CodeGraph {
+func buildGraph(repoURL string, files []scannedFile, languages []LanguageStat, patterns []CodePattern, correlations []Correlation) CodeGraph {
 	nodes := make([]GraphNode, 0)
 	edges := make([]GraphEdge, 0)
 	addedNodes := map[string]bool{}
@@ -759,6 +1020,25 @@ func buildGraph(repoURL string, files []scannedFile, languages []LanguageStat, p
 		addEdge(GraphEdge{ID: stableID(rel.source + rel.target + rel.label), Source: "pattern:" + rel.source, Target: "pattern:" + rel.target, Type: "pattern-flow", Label: rel.label})
 	}
 
+	for _, corr := range topGraphCorrelations(correlations) {
+		addNode(GraphNode{
+			ID:    corr.ID,
+			Type:  "correlation",
+			Label: corr.Label,
+			Group: correlationGroup(corr.Type),
+			Metadata: map[string]interface{}{
+				"type":   corr.Type,
+				"value":  corr.Value,
+				"source": corr.Source,
+				"files":  corr.Files,
+			},
+		})
+		addEdge(GraphEdge{ID: stableID("repo:" + corr.ID), Source: "repo", Target: corr.ID, Type: "correlates", Label: "correlates"})
+		if patternID := patternForCorrelation(corr.Type); patternID != "" && patternIDs[patternID] {
+			addEdge(GraphEdge{ID: stableID("pattern:" + patternID + ":" + corr.ID), Source: "pattern:" + patternID, Target: corr.ID, Type: "correlation", Label: "links"})
+		}
+	}
+
 	topFiles := topGraphFiles(files)
 	for _, file := range topFiles {
 		fileID := "file:" + file.path
@@ -795,7 +1075,7 @@ func buildGraph(repoURL string, files []scannedFile, languages []LanguageStat, p
 	}
 
 	sort.SliceStable(nodes, func(i, j int) bool {
-		typeOrder := map[string]int{"repo": 0, "pattern": 1, "language": 2, "file": 3}
+		typeOrder := map[string]int{"repo": 0, "pattern": 1, "correlation": 2, "language": 3, "file": 4}
 		if typeOrder[nodes[i].Type] != typeOrder[nodes[j].Type] {
 			return typeOrder[nodes[i].Type] < typeOrder[nodes[j].Type]
 		}
@@ -883,6 +1163,55 @@ func resolveRelativeImport(fromPath, imp string, byPath map[string]scannedFile) 
 	return ""
 }
 
+func topGraphCorrelations(correlations []Correlation) []Correlation {
+	candidates := append([]Correlation(nil), correlations...)
+	sort.SliceStable(candidates, func(i, j int) bool {
+		oi := correlationOrder(candidates[i].Type)
+		oj := correlationOrder(candidates[j].Type)
+		if oi != oj {
+			return oi < oj
+		}
+		if len(candidates[i].Files) != len(candidates[j].Files) {
+			return len(candidates[i].Files) > len(candidates[j].Files)
+		}
+		return candidates[i].Label < candidates[j].Label
+	})
+	if len(candidates) > maxCorrelationNodes {
+		return candidates[:maxCorrelationNodes]
+	}
+	return candidates
+}
+
+func correlationGroup(kind string) string {
+	switch kind {
+	case "work_item":
+		return "Work Items"
+	case "service":
+		return "Runtime"
+	case "infra_resource", "infra_reference", "deployment":
+		return "Infrastructure"
+	case "dependency":
+		return "Dependencies"
+	default:
+		return "Workspace Links"
+	}
+}
+
+func patternForCorrelation(kind string) string {
+	switch kind {
+	case "dependency":
+		return "integrations"
+	case "infra_resource", "infra_reference", "deployment":
+		return "infrastructure"
+	case "service":
+		return "logging"
+	case "work_item":
+		return "documentation"
+	default:
+		return ""
+	}
+}
+
 func topGraphFiles(files []scannedFile) []scannedFile {
 	candidates := append([]scannedFile(nil), files...)
 	sort.SliceStable(candidates, func(i, j int) bool {
@@ -912,7 +1241,7 @@ func patternWeight(file scannedFile) int {
 	return weight
 }
 
-func buildSummary(files []scannedFile, languages []LanguageStat, patterns []CodePattern, graph CodeGraph) Summary {
+func buildSummary(files []scannedFile, languages []LanguageStat, patterns []CodePattern, correlations []Correlation, graph CodeGraph) Summary {
 	totalLines := 0
 	sourceFiles := 0
 	for _, file := range files {
@@ -942,18 +1271,19 @@ func buildSummary(files []scannedFile, languages []LanguageStat, patterns []Code
 		primary = languages[0].Label
 	}
 	return Summary{
-		PrimaryLanguage: primary,
-		TotalFiles:      len(files),
-		SourceFiles:     sourceFiles,
-		TotalLines:      totalLines,
-		PatternCount:    len(patterns),
-		ConnectionCount: len(graph.Edges),
-		EntryPoint:      entryPoint,
-		Framework:       framework,
-		HasAuth:         patternSet["auth"],
-		HasDatabase:     patternSet["database"],
-		HasMiddleware:   patternSet["middleware"],
-		HasTests:        patternSet["tests"],
+		PrimaryLanguage:  primary,
+		TotalFiles:       len(files),
+		SourceFiles:      sourceFiles,
+		TotalLines:       totalLines,
+		PatternCount:     len(patterns),
+		CorrelationCount: len(correlations),
+		ConnectionCount:  len(graph.Edges),
+		EntryPoint:       entryPoint,
+		Framework:        framework,
+		HasAuth:          patternSet["auth"],
+		HasDatabase:      patternSet["database"],
+		HasMiddleware:    patternSet["middleware"],
+		HasTests:         patternSet["tests"],
 	}
 }
 
@@ -1249,6 +1579,24 @@ func topPatternFindings(patterns []CodePattern) []string {
 			break
 		}
 		out = append(out, fmt.Sprintf("%s: %d files", pattern.Label, len(pattern.Files)))
+	}
+	return out
+}
+
+func correlationFindings(correlations []Correlation) []string {
+	counts := map[string]int{}
+	for _, corr := range correlations {
+		counts[corr.Type]++
+	}
+	order := []string{"work_item", "service", "infra_resource", "infra_reference", "deployment", "dependency"}
+	out := make([]string, 0, len(order))
+	for _, kind := range order {
+		if counts[kind] > 0 {
+			out = append(out, fmt.Sprintf("%s: %d", kind, counts[kind]))
+		}
+	}
+	if len(out) > 5 {
+		return out[:5]
 	}
 	return out
 }
