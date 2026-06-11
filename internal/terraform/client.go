@@ -15,14 +15,21 @@ import (
 type Client struct {
 	workspace string
 	path      string
+	binary    string
 }
 
 func NewClient(workspace string) (*Client, error) {
+	return NewClientWithTool(workspace, "")
+}
+
+func NewClientWithTool(workspace string, tool string) (*Client, error) {
+	binary := resolveTerraformBinary(tool)
 	if looksLikePath(workspace) {
 		if expanded, ok := expandTerraformPath(workspace); ok {
 			return &Client{
 				workspace: "local",
 				path:      expanded,
+				binary:    binary,
 			}, nil
 		}
 	}
@@ -59,7 +66,25 @@ func NewClient(workspace string) (*Client, error) {
 	return &Client{
 		workspace: workspace,
 		path:      path,
+		binary:    binary,
 	}, nil
+}
+
+func resolveTerraformBinary(tool string) string {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "tofu", "opentofu", "open-tofu":
+		return "tofu"
+	case "terraform":
+		return "terraform"
+	case "":
+		if _, err := exec.LookPath("terraform"); err == nil {
+			return "terraform"
+		}
+		if _, err := exec.LookPath("tofu"); err == nil {
+			return "tofu"
+		}
+	}
+	return "terraform"
 }
 
 func looksLikePath(value string) bool {
@@ -177,19 +202,19 @@ func mergeOutputs(primary string, secondary string) string {
 }
 
 func (c *Client) runCommand(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "terraform", args...)
+	cmd := exec.CommandContext(ctx, c.binary, args...)
 	cmd.Dir = c.path
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("terraform %s failed: %w\nOutput: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+		return "", fmt.Errorf("%s %s failed: %w\nOutput: %s", c.binary, strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 	}
 
 	return strings.TrimSpace(string(output)), nil
 }
 
 func (c *Client) getWorkspaceInfo(ctx context.Context) (string, error) {
-	cmd := exec.CommandContext(ctx, "terraform", "workspace", "show")
+	cmd := exec.CommandContext(ctx, c.binary, "workspace", "show")
 	cmd.Dir = c.path
 
 	output, err := cmd.Output()
@@ -197,11 +222,11 @@ func (c *Client) getWorkspaceInfo(ctx context.Context) (string, error) {
 		return "", err
 	}
 
-	return fmt.Sprintf("Current workspace: %s\nConfigured path: %s", strings.TrimSpace(string(output)), c.path), nil
+	return fmt.Sprintf("Current workspace: %s\nConfigured path: %s\nTool: %s", strings.TrimSpace(string(output)), c.path, c.binary), nil
 }
 
 func (c *Client) getStateInfo(ctx context.Context) (string, error) {
-	cmd := exec.CommandContext(ctx, "terraform", "state", "list")
+	cmd := exec.CommandContext(ctx, c.binary, "state", "list")
 	cmd.Dir = c.path
 
 	output, err := cmd.Output()
@@ -242,7 +267,7 @@ func (c *Client) getPlanInfo(ctx context.Context) (string, error) {
 	planFile := filepath.Join(c.path, "tfplan")
 	if _, err := os.Stat(planFile); os.IsNotExist(err) {
 		// Run terraform plan
-		cmd := exec.CommandContext(ctx, "terraform", "plan", "-no-color", "-compact-warnings")
+		cmd := exec.CommandContext(ctx, c.binary, "plan", "-no-color", "-compact-warnings")
 		cmd.Dir = c.path
 
 		output, err := cmd.Output()
@@ -264,7 +289,7 @@ func (c *Client) getPlanInfo(ctx context.Context) (string, error) {
 	}
 
 	// Show existing plan
-	cmd := exec.CommandContext(ctx, "terraform", "show", "-no-color", planFile)
+	cmd := exec.CommandContext(ctx, c.binary, "show", "-no-color", planFile)
 	cmd.Dir = c.path
 
 	output, err := cmd.Output()
@@ -284,13 +309,13 @@ func (c *Client) getPlanInfo(ctx context.Context) (string, error) {
 }
 
 func (c *Client) getOutputInfo(ctx context.Context) (string, error) {
-	cmd := exec.CommandContext(ctx, "terraform", "output", "-json")
+	cmd := exec.CommandContext(ctx, c.binary, "output", "-json")
 	cmd.Dir = c.path
 
 	output, err := cmd.Output()
 	if err != nil {
 		// Try non-JSON output as fallback
-		cmd = exec.CommandContext(ctx, "terraform", "output")
+		cmd = exec.CommandContext(ctx, c.binary, "output")
 		cmd.Dir = c.path
 		output, err = cmd.Output()
 		if err != nil {
@@ -307,7 +332,7 @@ func (c *Client) getOutputInfo(ctx context.Context) (string, error) {
 }
 
 func (c *Client) GetTerraformOutputs(ctx context.Context) (map[string]interface{}, error) {
-	cmd := exec.CommandContext(ctx, "terraform", "output", "-json")
+	cmd := exec.CommandContext(ctx, c.binary, "output", "-json")
 	cmd.Dir = c.path
 
 	output, err := cmd.Output()

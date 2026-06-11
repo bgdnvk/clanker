@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	tfclient "github.com/bgdnvk/clanker/internal/terraform"
 	"github.com/spf13/viper"
 )
 
@@ -107,7 +108,7 @@ type RunOptions struct {
 func Discover(ctx context.Context) Discovery {
 	_ = ctx
 	hostname, _ := os.Hostname()
-	tools := detectTools([]string{"docker", "kubectl", "helm", "otelcol", "otelcol-contrib", "prometheus", "loki", "aws", "gcloud", "az", "doctl", "hcloud", "vercel", "railway", "verda", "terraform", "git"})
+	tools := detectTools([]string{"docker", "kubectl", "helm", "otelcol", "otelcol-contrib", "prometheus", "loki", "aws", "gcloud", "az", "doctl", "hcloud", "vercel", "railway", "verda", "terraform", "tofu", "pulumi", "cdk", "crossplane", "git"})
 	toolMap := make(map[string]ToolStatus, len(tools))
 	for _, tool := range tools {
 		toolMap[tool.Name] = tool
@@ -509,8 +510,24 @@ func CollectObservations(ctx context.Context, discovery Discovery) map[string]an
 		terraform := map[string]any{
 			"signals": discovery.Terraform.Signals,
 		}
-		if output, err := runCommandOutput(ctx, 1500*time.Millisecond, "terraform", "workspace", "show"); err == nil {
+		binary := terraformSREBinary()
+		if output, err := runCommandOutput(ctx, 1500*time.Millisecond, binary, "workspace", "show"); err == nil {
 			terraform["workspace"] = strings.TrimSpace(output)
+		}
+		workspace := terraformWorkspaceForSRE()
+		if workspace != "" {
+			client, err := tfclient.NewClientWithTool(workspace, binary)
+			if err != nil {
+				terraform["analysisError"] = err.Error()
+			} else if report, err := client.Analyze(ctx, tfclient.AnalysisOptions{
+				Tool:           binary,
+				CheckDrift:     terraformSREDriftEnabled(),
+				MaxOutputLines: 20,
+			}); err == nil {
+				terraform["analysis"] = report
+			} else {
+				terraform["analysisError"] = err.Error()
+			}
 		}
 		observations["terraform"] = terraform
 	}
@@ -613,7 +630,12 @@ func BuildFindings(discovery Discovery, observations map[string]any) []string {
 		findings = append(findings, "ci/cd signals detected")
 	}
 	if discovery.Terraform.Available {
-		findings = append(findings, "terraform workspace signals detected")
+		findings = append(findings, "iac workspace signals detected")
+		if tf, ok := observations["terraform"].(map[string]any); ok {
+			if analysis, ok := tf["analysis"].(tfclient.AnalysisReport); ok && analysis.Drift != nil && analysis.Drift.HasChanges {
+				findings = append(findings, "ALERT: terraform/opentofu drift or pending plan changes detected")
+			}
+		}
 	}
 	if logs, ok := observations["logs"].(map[string]any); ok {
 		if journal, ok := logs["journal"].([]string); ok && len(journal) > 0 {
@@ -894,10 +916,96 @@ func detectCICD(tools map[string]ToolStatus) CapabilityStatus {
 }
 
 func detectTerraform(tools map[string]ToolStatus) CapabilityStatus {
-	if tools["terraform"].Available || viper.IsSet("terraform.workspaces") || viper.GetString("terraform.default_workspace") != "" {
-		return CapabilityStatus{Available: true, Detail: "terraform cli/config detected", Signals: []string{"terraform"}}
+	signals := []string{}
+	for _, tool := range []string{"terraform", "tofu", "pulumi", "cdk", "crossplane"} {
+		if tools[tool].Available {
+			signals = append(signals, tool)
+		}
 	}
-	return CapabilityStatus{Available: false, Detail: "terraform not detected"}
+	if viper.IsSet("terraform.workspaces") || viper.GetString("terraform.default_workspace") != "" || viper.GetString("terraform.workspace") != "" {
+		signals = append(signals, "terraform-config")
+	}
+	if len(signals) > 0 {
+		return CapabilityStatus{Available: true, Detail: "iac cli/config detected", Signals: dedupeStrings(signals)}
+	}
+	return CapabilityStatus{Available: false, Detail: "iac tooling not detected"}
+}
+
+func terraformSREBinary() string {
+	if tool := strings.TrimSpace(os.Getenv("CLANKER_TERRAFORM_TOOL")); tool != "" {
+		if strings.EqualFold(tool, "opentofu") {
+			return "tofu"
+		}
+		return tool
+	}
+	if _, err := exec.LookPath("terraform"); err == nil {
+		return "terraform"
+	}
+	if _, err := exec.LookPath("tofu"); err == nil {
+		return "tofu"
+	}
+	return "terraform"
+}
+
+func terraformSREDriftEnabled() bool {
+	return envTruthy("CLANKER_TERRAFORM_DRIFT") || viper.GetBool("terraform.sre_drift")
+}
+
+func terraformWorkspaceForSRE() string {
+	for _, value := range []string{
+		os.Getenv("CLANKER_TERRAFORM_WORKSPACE"),
+		viper.GetString("terraform.workspace"),
+		viper.GetString("terraform.default_workspace"),
+	} {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	cwd, err := os.Getwd()
+	if err == nil && directoryHasTerraformFiles(cwd) {
+		return cwd
+	}
+	return ""
+}
+
+func directoryHasTerraformFiles(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasSuffix(name, ".tf") || strings.HasSuffix(name, ".tf.json") {
+			return true
+		}
+	}
+	return false
+}
+
+func envTruthy(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func dedupeStrings(values []string) []string {
+	seen := map[string]bool{}
+	result := []string{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
 }
 
 func sreRunArgs(target string, interval time.Duration, provider string, deployID string) []string {

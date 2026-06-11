@@ -152,9 +152,11 @@ func InferContext(question string) ServiceContext {
 
 	terraformKeywords := []string{
 		// Core
-		"terraform", "tf ", "hcl", "plan", "apply", "destroy", "init",
+		"terraform", "opentofu", "open tofu", "tofu", "tf ", "hcl", "plan", "apply", "destroy", "init",
 		"workspace", "state", "backend", "provider", "resource", "data",
 		"module", "variable", "output", "local",
+		// Terraform alternatives
+		"pulumi", "crossplane", "cloudformation", "aws cdk", "cdktf", "bicep", "infrastructure manager",
 		// Operations
 		"infrastructure-as-code", "iac", "provisioning", "deployment",
 		"environment", "stack", "configuration", "template",
