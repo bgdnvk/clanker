@@ -193,6 +193,9 @@ export async function GET() {
 	if analysis.Summary.DocumentationFiles == 0 || analysis.Summary.SourceFiles == 0 {
 		t.Fatalf("expected docs and source role counts, got %#v", analysis.Summary)
 	}
+	if stat := languageStat(analysis, "typescript"); stat == nil || stat.Percentage < 90 {
+		t.Fatalf("expected TypeScript percentage to be based on code lines, got %#v", analysis.Languages)
+	}
 	if hasPattern(analysis, "auth") && patternFileCount(analysis, "auth") > 1 {
 		t.Fatalf("documentation should not inflate auth pattern: %#v", analysis.Patterns)
 	}
@@ -264,6 +267,61 @@ services:
 	}
 }
 
+func TestAnalyzeDetectsAdditionalFullStackSignals(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "services/api/package.json", `{"name":"polyglot-api","dependencies":{"fastify":"latest"}}`)
+	writeFile(t, dir, "services/api/Gemfile", `
+source "https://rubygems.org"
+gem "rails", "~> 7.2"
+gem "sidekiq"
+`)
+	writeFile(t, dir, "services/api/Polyglot.Api.csproj", `
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <AssemblyName>Polyglot.Api</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.0" />
+  </ItemGroup>
+</Project>
+`)
+	writeFile(t, dir, "services/api/openapi.yaml", `
+openapi: 3.1.0
+paths:
+  /users:
+    get:
+      operationId: listUsers
+`)
+	writeFile(t, dir, ".github/CODEOWNERS", `
+/services/api/ @acme/platform @acme/api
+`)
+
+	analysis, err := Analyze(dir, "https://github.com/acme/polyglot")
+	if err != nil {
+		t.Fatalf("Analyze returned error: %v", err)
+	}
+
+	pkg := packageByPath(analysis, "services/api")
+	if pkg == nil {
+		t.Fatalf("expected merged package for services/api, got %#v", analysis.Packages)
+	}
+	for _, manager := range []string{"npm", "bundler", "nuget"} {
+		if !strings.Contains(pkg.Manager, manager) {
+			t.Fatalf("expected package manager %q to be merged into %#v", manager, pkg)
+		}
+	}
+	for _, source := range []string{"Gemfile", ".csproj", "openapi", "openapi-path", "codeowners"} {
+		if !hasCorrelationSource(analysis, source) {
+			t.Fatalf("expected correlation source %q in %#v", source, analysis.Correlations)
+		}
+	}
+	for _, kind := range []string{"api_schema", "owner", "dependency", "catalog_entity"} {
+		if !hasCorrelation(analysis, kind) {
+			t.Fatalf("expected correlation kind %q in %#v", kind, analysis.Correlations)
+		}
+	}
+}
+
 func hasPattern(analysis *Analysis, id string) bool {
 	for _, pattern := range analysis.Patterns {
 		if pattern.ID == id {
@@ -308,6 +366,24 @@ func patternFileCount(analysis *Analysis, id string) int {
 		}
 	}
 	return 0
+}
+
+func languageStat(analysis *Analysis, id string) *LanguageStat {
+	for i := range analysis.Languages {
+		if analysis.Languages[i].ID == id {
+			return &analysis.Languages[i]
+		}
+	}
+	return nil
+}
+
+func packageByPath(analysis *Analysis, path string) *CodePackage {
+	for i := range analysis.Packages {
+		if analysis.Packages[i].Path == path {
+			return &analysis.Packages[i]
+		}
+	}
+	return nil
 }
 
 func hasGraphNodeType(analysis *Analysis, typ string) bool {

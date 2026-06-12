@@ -433,12 +433,16 @@ var goModRequireRE = regexp.MustCompile(`^\s*([A-Za-z0-9_.-]+/[^\s]+)\s+v[0-9][^
 var requirementRE = regexp.MustCompile(`^\s*([A-Za-z0-9_.-]+)\s*(?:==|>=|<=|~=|>|<|=).*$`)
 var cargoDependencyRE = regexp.MustCompile(`^\s*([A-Za-z0-9_-]+)\s*=\s*`)
 var gradleDependencyRE = regexp.MustCompile(`\b(?:api|implementation|compileOnly|runtimeOnly|testImplementation|classpath)\s*\(?\s*["']([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+):[^"']+["']`)
+var csprojPackageRefRE = regexp.MustCompile(`(?i)<PackageReference\s+[^>]*Include=["']([^"']+)["'][^>]*>`)
+var csprojPackageVersionRE = regexp.MustCompile(`(?i)\sVersion=["']([^"']+)["']`)
+var gemfileDependencyRE = regexp.MustCompile(`^\s*gem\s+["']([^"']+)["']`)
 var githubWorkURLRE = regexp.MustCompile(`https?://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/(issues|pull)/(\d+)`)
 var jiraURLRE = regexp.MustCompile(`https?://[A-Za-z0-9_.-]+\.atlassian\.net/browse/([A-Z][A-Z0-9]{1,9}-\d+)`)
 var kubeAppLabelRE = regexp.MustCompile(`^\s*(app\.kubernetes\.io/(?:name|part-of|component|managed-by|version))\s*:\s*["']?([^"',#]+)`)
 var prismaModelRE = regexp.MustCompile(`^\s*model\s+([A-Za-z0-9_]+)\s*\{`)
 var prismaProviderRE = regexp.MustCompile(`^\s*provider\s*=\s*["']([^"']+)["']`)
 var graphqlTypeRE = regexp.MustCompile(`^\s*(?:type|interface|input|enum)\s+([A-Za-z0-9_]+)\b`)
+var openAPIPathRE = regexp.MustCompile(`^\s*["']?(/[^"':\s]+)["']?\s*:`)
 
 func CloneAndAnalyze(ctx context.Context, repoURL string, opts AnalyzeOptions) (*Analysis, func(), error) {
 	repoURL = strings.TrimSpace(repoURL)
@@ -650,9 +654,6 @@ func classifyFileRole(path string, language string) string {
 		strings.Contains(lower, "generated-metadata") {
 		return roleGenerated
 	}
-	if language == "markdown" || strings.HasPrefix(lower, "docs/") || strings.Contains(lower, "/docs/") || strings.Contains(lower, "/documentation/") {
-		return roleDocs
-	}
 	if language == "terraform" ||
 		strings.HasPrefix(lower, "infra/") ||
 		strings.Contains(lower, "/infra/") ||
@@ -672,13 +673,17 @@ func classifyFileRole(path string, language string) string {
 		base == "railway.json" {
 		return roleInfra
 	}
-	if language == "yaml" ||
+	if base == "codeowners" ||
+		language == "yaml" ||
 		language == "shell" ||
 		isManifestFile(base) ||
 		strings.HasPrefix(base, ".env") ||
 		strings.Contains(lower, "/config/") ||
 		strings.Contains(lower, "/configs/") {
 		return roleConfig
+	}
+	if language == "markdown" || strings.HasPrefix(lower, "docs/") || strings.Contains(lower, "/docs/") || strings.Contains(lower, "/documentation/") {
+		return roleDocs
 	}
 	return roleCode
 }
@@ -721,10 +726,10 @@ func candidatePriority(candidate fileCandidate) int {
 
 func isManifestFile(base string) bool {
 	switch strings.ToLower(base) {
-	case "package.json", "composer.json", "go.mod", "cargo.toml", "pyproject.toml", "requirements.txt", "pom.xml", "build.gradle", "build.gradle.kts", "schema.prisma", "catalog-info.yaml", "catalog-info.yml":
+	case "package.json", "composer.json", "go.mod", "cargo.toml", "pyproject.toml", "requirements.txt", "pom.xml", "build.gradle", "build.gradle.kts", "gemfile", "schema.prisma", "catalog-info.yaml", "catalog-info.yml", "codeowners", "openapi.yaml", "openapi.yml", "openapi.json", "swagger.yaml", "swagger.yml", "swagger.json":
 		return true
 	default:
-		return false
+		return strings.HasSuffix(strings.ToLower(base), ".csproj")
 	}
 }
 
@@ -990,14 +995,15 @@ func buildCorrelations(files []scannedFile) []Correlation {
 
 func detectManifestCorrelations(file scannedFile, add addCorrelationFunc) {
 	base := filepath.Base(file.path)
-	switch base {
+	baseLower := strings.ToLower(base)
+	switch baseLower {
 	case "package.json":
 		detectPackageJSONCorrelations(file, add)
 	case "go.mod":
 		detectGoModCorrelations(file, add)
 	case "requirements.txt":
 		detectRequirementsCorrelations(file, add)
-	case "Cargo.toml":
+	case "cargo.toml":
 		detectCargoCorrelations(file, add)
 	case "composer.json":
 		detectComposerCorrelations(file, add)
@@ -1005,16 +1011,25 @@ func detectManifestCorrelations(file scannedFile, add addCorrelationFunc) {
 		detectMavenCorrelations(file, add)
 	case "build.gradle", "build.gradle.kts":
 		detectGradleCorrelations(file, add)
+	case "gemfile":
+		detectGemfileCorrelations(file, add)
 	case "schema.prisma":
 		detectPrismaCorrelations(file, add)
 	case "catalog-info.yaml", "catalog-info.yml":
 		detectCatalogInfoCorrelations(file, add)
+	case "codeowners":
+		detectCodeownersCorrelations(file, add)
 	case "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml":
 		detectDockerComposeCorrelations(file, add)
+	case "openapi.yaml", "openapi.yml", "openapi.json", "swagger.yaml", "swagger.yml", "swagger.json":
+		detectOpenAPICorrelations(file, add)
 	case "vercel.json", "netlify.toml", "fly.toml", "railway.json":
 		add("deployment", strings.TrimSuffix(base, filepath.Ext(base)), file.path, base, Evidence{File: file.path, Line: 1, Snippet: base, Reason: "hosted deployment config"})
-	case "Dockerfile":
+	case "dockerfile":
 		add("deployment", "Container build", "Dockerfile", "dockerfile", Evidence{File: file.path, Line: 1, Snippet: base, Reason: "container build descriptor"})
+	}
+	if strings.HasSuffix(baseLower, ".csproj") {
+		detectCSProjCorrelations(file, add)
 	}
 	if file.language == "graphql" {
 		detectGraphQLCorrelations(file, add)
@@ -1137,6 +1152,36 @@ func detectGradleCorrelations(file scannedFile, add addCorrelationFunc) {
 	})
 }
 
+func detectCSProjCorrelations(file scannedFile, add addCorrelationFunc) {
+	projectName := strings.TrimSuffix(filepath.Base(file.path), filepath.Ext(file.path))
+	if projectName != "" {
+		add("catalog_entity", projectName, "dotnet:"+projectName, ".csproj", Evidence{File: file.path, Line: 1, Snippet: filepath.Base(file.path), Reason: ".NET project file"})
+	}
+	scanLines(file, func(lineNo int, line string) {
+		match := csprojPackageRefRE.FindStringSubmatch(line)
+		if len(match) < 2 {
+			return
+		}
+		version := ""
+		if versionMatch := csprojPackageVersionRE.FindStringSubmatch(line); len(versionMatch) > 1 {
+			version = " " + versionMatch[1]
+		}
+		add("dependency", match[1], match[1], ".csproj", Evidence{File: file.path, Line: lineNo, Snippet: match[1] + version, Reason: ".NET package reference"})
+	})
+}
+
+func detectGemfileCorrelations(file scannedFile, add addCorrelationFunc) {
+	name := packageNameFromManifest(file)
+	add("catalog_entity", name, name, "Gemfile", Evidence{File: file.path, Line: 1, Snippet: filepath.Base(file.path), Reason: "Ruby bundle"})
+	scanLines(file, func(lineNo int, line string) {
+		match := gemfileDependencyRE.FindStringSubmatch(line)
+		if len(match) < 2 {
+			return
+		}
+		add("dependency", match[1], match[1], "Gemfile", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Ruby gem dependency"})
+	})
+}
+
 func detectPrismaCorrelations(file scannedFile, add addCorrelationFunc) {
 	scanLines(file, func(lineNo int, line string) {
 		if match := prismaProviderRE.FindStringSubmatch(line); len(match) > 1 {
@@ -1144,6 +1189,53 @@ func detectPrismaCorrelations(file scannedFile, add addCorrelationFunc) {
 		}
 		if match := prismaModelRE.FindStringSubmatch(line); len(match) > 1 {
 			add("data_model", match[1], match[1], "prisma-model", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Prisma model"})
+		}
+	})
+}
+
+func detectOpenAPICorrelations(file scannedFile, add addCorrelationFunc) {
+	addedSpec := false
+	inPaths := false
+	scanLines(file, func(lineNo int, line string) {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "openapi:") || strings.HasPrefix(lower, `"openapi"`) || strings.HasPrefix(lower, "swagger:") || strings.HasPrefix(lower, `"swagger"`) {
+			add("api_schema", "OpenAPI", file.path, "openapi", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "OpenAPI/Swagger document"})
+			addedSpec = true
+			return
+		}
+		if lower == "paths:" || strings.HasPrefix(lower, `"paths"`) {
+			inPaths = true
+			return
+		}
+		if !inPaths {
+			return
+		}
+		if match := openAPIPathRE.FindStringSubmatch(line); len(match) > 1 {
+			add("api_schema", match[1], match[1], "openapi-path", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "OpenAPI path"})
+		}
+	})
+	if !addedSpec {
+		add("api_schema", filepath.Base(file.path), file.path, "openapi", Evidence{File: file.path, Line: 1, Snippet: filepath.Base(file.path), Reason: "OpenAPI/Swagger manifest"})
+	}
+}
+
+func detectCodeownersCorrelations(file scannedFile, add addCorrelationFunc) {
+	scanLines(file, func(lineNo int, line string) {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			return
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) < 2 {
+			return
+		}
+		pathPattern := fields[0]
+		for _, owner := range fields[1:] {
+			if !strings.HasPrefix(owner, "@") {
+				continue
+			}
+			add("owner", owner, owner, "codeowners", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "CODEOWNERS entry for " + pathPattern})
 		}
 	})
 }
@@ -1372,13 +1464,13 @@ func correlationRank(corr Correlation) int {
 	rank += len(corr.Files) * 4
 	rank += len(corr.Evidence) * 6
 	switch corr.Source {
-	case "backstage-catalog", "catalog-info.yaml", "catalog-info.yml":
+	case "backstage-catalog", "catalog-info.yaml", "catalog-info.yml", "codeowners":
 		rank += 120
-	case "opentelemetry", "docker-compose", "app.kubernetes.io/name", "app.kubernetes.io/component", "prisma-datasource", "graphql-entrypoint":
+	case "opentelemetry", "docker-compose", "app.kubernetes.io/name", "app.kubernetes.io/component", "prisma-datasource", "graphql-entrypoint", "openapi", "openapi-path":
 		rank += 100
 	case "terraform", "kubernetes", "github-actions", "dockerfile", "vercel.json", "netlify.toml", "fly.toml", "railway.json":
 		rank += 75
-	case "package.json", "composer", "go.mod", "Cargo.toml", "pom.xml", "build.gradle.kts", "requirements.txt":
+	case "package.json", "composer", "go.mod", "Cargo.toml", "pom.xml", "build.gradle.kts", "requirements.txt", ".csproj", "Gemfile":
 		rank += 50
 	case "github-pr-url", "github-issue-url":
 		rank -= 80
@@ -1425,6 +1517,7 @@ func capCorrelations(items []Correlation, max int) []Correlation {
 func buildLanguageStats(files []scannedFile) []LanguageStat {
 	byID := map[string]*LanguageStat{}
 	totalLines := 0
+	totalCodeLines := 0
 	for _, file := range files {
 		if file.language == "" {
 			continue
@@ -1440,12 +1533,15 @@ func buildLanguageStats(files []scannedFile) []LanguageStat {
 		if file.role == roleCode {
 			stat.CodeFiles++
 			stat.CodeLines += file.lines
+			totalCodeLines += file.lines
 		}
 		totalLines += file.lines
 	}
 	out := make([]LanguageStat, 0, len(byID))
 	for _, stat := range byID {
-		if totalLines > 0 {
+		if totalCodeLines > 0 {
+			stat.Percentage = float64(stat.CodeLines) / float64(totalCodeLines) * 100
+		} else if totalLines > 0 {
 			stat.Percentage = float64(stat.Lines) / float64(totalLines) * 100
 		}
 		out = append(out, *stat)
@@ -1654,6 +1750,10 @@ func buildPackages(files []scannedFile) []CodePackage {
 		if name == "" {
 			name = repoRootPackageName(files)
 		}
+		if existing := roots[root]; existing != nil {
+			mergePackageManifest(existing, name, manager, kind)
+			continue
+		}
 		id := stableID(root + ":" + manager + ":" + name)
 		roots[root] = &packageAccumulator{
 			pkg: CodePackage{
@@ -1718,15 +1818,50 @@ func buildPackages(files []scannedFile) []CodePackage {
 	return out
 }
 
+func mergePackageManifest(acc *packageAccumulator, name, manager, kind string) {
+	if acc == nil {
+		return
+	}
+	if name != "" && isFallbackPackageName(acc.pkg.Name, acc.pkg.Path) {
+		acc.pkg.Name = name
+	}
+	acc.pkg.Manager = appendCSVUnique(acc.pkg.Manager, manager)
+	acc.pkg.Kind = appendCSVUnique(acc.pkg.Kind, kind)
+}
+
+func isFallbackPackageName(name, root string) bool {
+	if name == "" || name == "repository" || name == "root" {
+		return true
+	}
+	return root != "" && name == filepath.Base(root)
+}
+
+func appendCSVUnique(current, value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return current
+	}
+	if current == "" {
+		return value
+	}
+	for _, item := range strings.Split(current, ", ") {
+		if item == value {
+			return current
+		}
+	}
+	return current + ", " + value
+}
+
 func packageManifestKind(base string) (manager string, kind string) {
-	switch base {
+	lower := strings.ToLower(base)
+	switch lower {
 	case "package.json":
 		return "npm", "javascript"
 	case "composer.json":
 		return "composer", "php"
 	case "go.mod":
 		return "go", "go"
-	case "Cargo.toml":
+	case "cargo.toml":
 		return "cargo", "rust"
 	case "pyproject.toml", "requirements.txt":
 		return "python", "python"
@@ -1734,14 +1869,20 @@ func packageManifestKind(base string) (manager string, kind string) {
 		return "maven", "jvm"
 	case "build.gradle", "build.gradle.kts":
 		return "gradle", "jvm"
+	case "gemfile":
+		return "bundler", "ruby"
 	default:
+		if strings.HasSuffix(lower, ".csproj") {
+			return "nuget", "csharp"
+		}
 		return "", ""
 	}
 }
 
 func packageNameFromManifest(file scannedFile) string {
 	base := filepath.Base(file.path)
-	switch base {
+	lower := strings.ToLower(base)
+	switch lower {
 	case "package.json":
 		var pkg struct {
 			Name string `json:"name"`
@@ -1762,7 +1903,7 @@ func packageNameFromManifest(file scannedFile) string {
 				return fields[1]
 			}
 		}
-	case "Cargo.toml", "pyproject.toml":
+	case "cargo.toml", "pyproject.toml":
 		return firstTOMLName(file.content)
 	case "pom.xml":
 		var project struct {
@@ -1771,6 +1912,27 @@ func packageNameFromManifest(file scannedFile) string {
 		if xml.Unmarshal([]byte(file.content), &project) == nil {
 			return strings.TrimSpace(project.ArtifactID)
 		}
+	case "gemfile":
+		root := filepath.Dir(file.path)
+		if root == "." {
+			return repoRootPackageName([]scannedFile{file})
+		}
+		return filepath.Base(root)
+	}
+	if strings.HasSuffix(lower, ".csproj") {
+		var project struct {
+			AssemblyName string `xml:"PropertyGroup>AssemblyName"`
+			RootNS       string `xml:"PropertyGroup>RootNamespace"`
+		}
+		if xml.Unmarshal([]byte(file.content), &project) == nil {
+			if name := strings.TrimSpace(project.AssemblyName); name != "" {
+				return name
+			}
+			if name := strings.TrimSpace(project.RootNS); name != "" {
+				return name
+			}
+		}
+		return strings.TrimSuffix(base, filepath.Ext(base))
 	}
 	root := filepath.Dir(file.path)
 	if root == "." {
@@ -2194,8 +2356,9 @@ func shouldSkipFile(name string) bool {
 
 func languageForPath(path string) string {
 	base := filepath.Base(path)
-	switch base {
-	case "Dockerfile", "Makefile":
+	baseLower := strings.ToLower(base)
+	switch baseLower {
+	case "dockerfile", "makefile":
 		return "shell"
 	case "package.json", "tsconfig.json":
 		return "javascript"
@@ -2203,20 +2366,27 @@ func languageForPath(path string) string {
 		return "php"
 	case "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml":
 		return "yaml"
-	case "vercel.json", "railway.json":
+	case "vercel.json", "railway.json", "openapi.json", "swagger.json":
 		return "javascript"
 	case "netlify.toml", "fly.toml":
 		return "terraform"
 	case "go.mod", "go.sum":
 		return "go"
-	case "Cargo.toml":
+	case "cargo.toml":
 		return "rust"
 	case "pom.xml", "build.gradle", "build.gradle.kts":
 		return "java"
 	case "pyproject.toml":
 		return "python"
+	case "gemfile":
+		return "ruby"
 	case "schema.prisma":
 		return "prisma"
+	case "codeowners":
+		return "markdown"
+	}
+	if strings.HasSuffix(baseLower, ".csproj") {
+		return "csharp"
 	}
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == ".h" {
