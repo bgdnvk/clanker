@@ -1,8 +1,8 @@
-// Package secfile holds small file-permission primitives used by the
-// nine provider conversation-history modules. It exists to keep the
-// hardening from drifting again (issue #22): every history-file Save
-// goes through WritePrivate and every Load goes through ReadPrivate,
-// so adding a tenth provider can't reintroduce world-readable Q&A.
+// Package secfile holds small file-permission primitives used by local
+// Clanker state files. It exists to keep the hardening from drifting again
+// (issue #22): every private state-file Save goes through WritePrivate and
+// every Load goes through ReadPrivate, so new local state can't reintroduce
+// world-readable Q&A, plans, tokens, or cloud metadata.
 //
 // This is a security primitive (file modes + Chmod-repair), not a
 // conversation-history abstraction. The larger refactor — extracting
@@ -51,6 +51,20 @@ func WritePrivate(path string, data []byte) error {
 	// Idempotent: if WriteFile honored the mode (file is new), this
 	// is a no-op. If the file pre-existed with 0o644, this tightens it.
 	return os.Chmod(path, PrivateFileMode)
+}
+
+// OpenPrivate opens path with flag and 0o600 permissions, then repairs the
+// mode for existing files. Use it instead of os.Create for log/state files
+// that may include deployment output or credentials.
+func OpenPrivate(path string, flag int) (*os.File, error) {
+	f, err := os.OpenFile(path, flag, PrivateFileMode)
+	if err != nil {
+		return nil, err
+	}
+	if runtime.GOOS != "windows" {
+		_ = f.Chmod(PrivateFileMode)
+	}
+	return f, nil
 }
 
 // ReadPrivate opens path read-only, repairs its perms via the file

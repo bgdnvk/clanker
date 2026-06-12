@@ -32,6 +32,10 @@ func NewStore(dbPath string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := hardenSQLiteFiles(dbPath); err != nil {
+		db.Close()
+		return nil, err
+	}
 
 	return &Store{
 		db:   db,

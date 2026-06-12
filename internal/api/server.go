@@ -139,7 +139,10 @@ func writeData(w http.ResponseWriter, v interface{}) {
 // writeRaw is used for endpoints whose source is already JSON-encoded
 // (e.g. Tencent context gather funcs), so we don't double-encode.
 func writeRawData(w http.ResponseWriter, rawJSON string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = fmt.Fprintf(w, `{"data":%s}`, rawJSON)
+	raw := json.RawMessage(rawJSON)
+	if !json.Valid(raw) {
+		writeError(w, http.StatusBadGateway, "invalid_json", "upstream returned invalid JSON")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"data": raw})
 }

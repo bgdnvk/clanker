@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -113,32 +114,42 @@ func TestSanitizeFilename(t *testing.T) {
 		{
 			name:     "name with slashes",
 			input:    "my/cluster/name",
-			expected: "my-cluster-name",
+			expected: "myclustername",
 		},
 		{
 			name:     "name with backslashes",
 			input:    "my\\cluster\\name",
-			expected: "my-cluster-name",
+			expected: "myclustername",
 		},
 		{
 			name:     "name with colons",
 			input:    "cluster:prod:v1",
-			expected: "cluster-prod-v1",
+			expected: "clusterprodv1",
 		},
 		{
 			name:     "name with special chars",
 			input:    "test*?\"<>|cluster",
-			expected: "test------cluster",
+			expected: "testcluster",
 		},
 		{
 			name:     "empty string",
 			input:    "",
-			expected: "",
+			expected: "default",
 		},
 		{
 			name:     "all special chars",
 			input:    "/*\\:?\"<>|",
-			expected: "---------",
+			expected: "default",
+		},
+		{
+			name:     "path traversal",
+			input:    "../../prod.cluster",
+			expected: "prodcluster",
+		},
+		{
+			name:     "only separators",
+			input:    "---",
+			expected: "default",
 		},
 	}
 
@@ -194,6 +205,10 @@ func TestK8sPlanSavePlan(t *testing.T) {
 	if !strings.HasPrefix(planPath, expectedDir) {
 		t.Errorf("plan file %s is not in expected directory %s", planPath, expectedDir)
 	}
+	if runtime.GOOS != "windows" {
+		assertPlanPerm(t, expectedDir, 0o700)
+		assertPlanPerm(t, planPath, 0o600)
+	}
 
 	// Verify file contains valid JSON
 	data, err := os.ReadFile(planPath)
@@ -211,6 +226,17 @@ func TestK8sPlanSavePlan(t *testing.T) {
 	}
 	if makerPlan.Question != "Test question" {
 		t.Errorf("saved plan question %q does not match 'Test question'", makerPlan.Question)
+	}
+}
+
+func assertPlanPerm(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("%s mode = %04o, want %04o", filepath.Base(path), got, want)
 	}
 }
 

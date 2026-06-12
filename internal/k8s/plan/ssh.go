@@ -152,7 +152,7 @@ func generateSSHKeyPair(keyPath string) error {
 
 	// Write public key
 	publicKeyBytes := ssh.MarshalAuthorizedKey(publicKey)
-	if err := os.WriteFile(keyPath+".pub", publicKeyBytes, 0644); err != nil {
+	if err := os.WriteFile(keyPath+".pub", publicKeyBytes, 0600); err != nil {
 		return err
 	}
 

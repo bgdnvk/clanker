@@ -44,6 +44,23 @@ resource "aws_vpc" "main" {}
 	}
 }
 
+func TestScanWorkspaceSkipsSymlinkedTerraformFiles(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	writeFile(t, filepath.Join(outside, "outside.tf"), `resource "aws_db_instance" "leak" {}`)
+	if err := os.Symlink(filepath.Join(outside, "outside.tf"), filepath.Join(dir, "outside.tf")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	metadata := scanWorkspace(dir)
+	if len(metadata.files) != 0 {
+		t.Fatalf("expected no terraform files from symlink, got %#v", metadata.files)
+	}
+	if len(metadata.resourceTypes) != 0 {
+		t.Fatalf("expected no resource types from symlink, got %#v", metadata.resourceTypes)
+	}
+}
+
 func TestDetectStaleArtifactsFlagsOldPlanAndState(t *testing.T) {
 	dir := t.TempDir()
 	planPath := filepath.Join(dir, "tfplan")

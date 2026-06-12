@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/bgdnvk/clanker/internal/secfile"
 )
 
 const (
@@ -25,7 +27,7 @@ func heartbeatQueuePath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(stateDir, 0755); err != nil {
+	if err := secfile.EnsurePrivateDir(stateDir); err != nil {
 		return "", err
 	}
 	return filepath.Join(stateDir, heartbeatQueueFileName), nil
@@ -36,7 +38,7 @@ func loadQueuedHeartbeats() ([]queuedHeartbeat, error) {
 	if err != nil {
 		return nil, err
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := secfile.ReadPrivate(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return []queuedHeartbeat{}, nil
@@ -69,7 +71,7 @@ func saveQueuedHeartbeats(queue []queuedHeartbeat) error {
 		return err
 	}
 	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, body, 0644); err != nil {
+	if err := secfile.WritePrivate(tmpPath, body); err != nil {
 		return err
 	}
 	return os.Rename(tmpPath, path)

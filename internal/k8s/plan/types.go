@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/bgdnvk/clanker/internal/secfile"
 )
 
 const CurrentPlanVersion = 1
@@ -70,7 +72,7 @@ func (p *K8sPlan) SavePlan(question string) (string, error) {
 	}
 
 	plansDir := filepath.Join(home, ".clanker", "plans")
-	if err := os.MkdirAll(plansDir, 0755); err != nil {
+	if err := secfile.EnsurePrivateDir(plansDir); err != nil {
 		return "", fmt.Errorf("failed to create plans directory: %w", err)
 	}
 
@@ -89,7 +91,7 @@ func (p *K8sPlan) SavePlan(question string) (string, error) {
 	}
 
 	// Write to file
-	if err := os.WriteFile(planPath, data, 0644); err != nil {
+	if err := secfile.WritePrivate(planPath, data); err != nil {
 		return "", fmt.Errorf("failed to write plan file: %w", err)
 	}
 
@@ -98,16 +100,11 @@ func (p *K8sPlan) SavePlan(question string) (string, error) {
 
 // sanitizeFilename removes or replaces characters that aren't safe for filenames
 func sanitizeFilename(name string) string {
-	name = strings.ReplaceAll(name, "/", "-")
-	name = strings.ReplaceAll(name, "\\", "-")
-	name = strings.ReplaceAll(name, ":", "-")
-	name = strings.ReplaceAll(name, "*", "-")
-	name = strings.ReplaceAll(name, "?", "-")
-	name = strings.ReplaceAll(name, "\"", "-")
-	name = strings.ReplaceAll(name, "<", "-")
-	name = strings.ReplaceAll(name, ">", "-")
-	name = strings.ReplaceAll(name, "|", "-")
-	return name
+	slug := strings.Trim(secfile.SafeSlug(name), "-_")
+	if slug == "" {
+		return "default"
+	}
+	return slug
 }
 
 // K8sPlan represents an execution plan for K8s operations

@@ -105,6 +105,30 @@ func TestWriteTencentClientErr_Direct(t *testing.T) {
 	})
 }
 
+func TestWriteRawDataRejectsInvalidJSON(t *testing.T) {
+	t.Run("valid", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		writeRawData(rec, `{"ok":true}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("want 200, got %d body=%q", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"data":{"ok":true}`) {
+			t.Fatalf("unexpected body: %q", rec.Body.String())
+		}
+	})
+
+	t.Run("invalid", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		writeRawData(rec, `<script>alert(1)</script>`)
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("want 502, got %d body=%q", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"invalid_json"`) {
+			t.Fatalf("missing invalid_json code: %q", rec.Body.String())
+		}
+	})
+}
+
 // scrubTencentCreds wipes every credential surface ResolveCredentials reads.
 // Restoration is automatic via t.Setenv / viper.Reset, but we still need to
 // strip values that may be present in the developer's shell env.

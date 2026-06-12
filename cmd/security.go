@@ -1435,7 +1435,7 @@ func securityShouldAttemptTLS(scheme string, port string) bool {
 }
 
 func securityProbeTLSVersion(ctx context.Context, dialer *net.Dialer, hostname string, address string) (string, error) {
-	config := &tls.Config{InsecureSkipVerify: true}
+	config := &tls.Config{InsecureSkipVerify: true} // #nosec G402 -- unauthenticated TLS-version probe; no credentials are sent.
 	if net.ParseIP(strings.TrimSpace(hostname)) == nil {
 		config.ServerName = strings.TrimSpace(hostname)
 	}

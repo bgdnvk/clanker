@@ -23,7 +23,7 @@ func (e *Exporter) ExportToFile(data interface{}, format, outputPath string) err
 	// Ensure output directory exists
 	dir := filepath.Dir(outputPath)
 	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		if err := os.MkdirAll(dir, 0750); err != nil {
 			return fmt.Errorf("failed to create output directory: %w", err)
 		}
 	}
@@ -46,7 +46,7 @@ func (e *Exporter) ExportToFile(data interface{}, format, outputPath string) err
 	}
 
 	// Write to file
-	if err := os.WriteFile(outputPath, content, 0644); err != nil {
+	if err := os.WriteFile(outputPath, content, 0600); err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
 

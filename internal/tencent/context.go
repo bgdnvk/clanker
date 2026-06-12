@@ -348,7 +348,7 @@ func (c *Client) contextVPCs(ctx context.Context) (string, error) {
 			break
 		}
 		if len(slim) >= gatherMaxItems {
-			logGatherTruncated("VPC", c.creds.Region, int64(total), len(slim))
+			logGatherTruncated("VPC", c.creds.Region, safeInt64FromUint64(total), len(slim))
 			break
 		}
 		offsetStr = strconv.FormatInt(int64(len(slim)), 10)
@@ -403,7 +403,7 @@ func (c *Client) contextSecurityGroups(ctx context.Context) (string, error) {
 			break
 		}
 		if len(slim) >= gatherMaxItems {
-			logGatherTruncated("SecurityGroup", c.creds.Region, int64(total), len(slim))
+			logGatherTruncated("SecurityGroup", c.creds.Region, safeInt64FromUint64(total), len(slim))
 			break
 		}
 		offsetStr = strconv.FormatInt(int64(len(slim)), 10)
@@ -637,6 +637,14 @@ func derefUint64Raw(p *uint64) uint64 {
 		return 0
 	}
 	return *p
+}
+
+func safeInt64FromUint64(v uint64) int64 {
+	const maxInt64AsUint64 = uint64(1<<63 - 1)
+	if v > maxInt64AsUint64 {
+		return int64(maxInt64AsUint64)
+	}
+	return int64(v)
 }
 
 // Append to internal/tencent/context.go via the patcher. These reuse the

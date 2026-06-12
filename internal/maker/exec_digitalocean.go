@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/bgdnvk/clanker/internal/openclaw"
+	"github.com/bgdnvk/clanker/internal/sshknownhosts"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -2861,15 +2862,15 @@ func prepareSpecialDockerBuildContext(args []string, w io.Writer) (string, func(
 		return "", nil, false, fmt.Errorf("create temp DigitalOcean proxy build context: %w", err)
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
-	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(doOpenClawProxyDockerfile), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(doOpenClawProxyDockerfile), 0600); err != nil {
 		cleanup()
 		return "", nil, false, fmt.Errorf("write proxy Dockerfile: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(doOpenClawProxyMainGo), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(doOpenClawProxyMainGo), 0600); err != nil {
 		cleanup()
 		return "", nil, false, fmt.Errorf("write proxy main.go: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(doOpenClawProxyGoMod), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(doOpenClawProxyGoMod), 0600); err != nil {
 		cleanup()
 		return "", nil, false, fmt.Errorf("write proxy go.mod: %w", err)
 	}
@@ -3307,10 +3308,14 @@ func runDOSSHScript(ctx context.Context, host, privateKeyPath, script string) (s
 	if err != nil {
 		return "", fmt.Errorf("parse ssh private key: %w", err)
 	}
+	hostKeyCallback, err := sshknownhosts.NewTOFUCallback("")
+	if err != nil {
+		return "", err
+	}
 	config := &ssh.ClientConfig{
 		User:            "root",
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostKeyCallback,
 		Timeout:         30 * time.Second,
 	}
 	client, err := dialDOSSHClient(ctx, host, config)
@@ -3688,7 +3693,7 @@ func generateLocalSSHKeyPair(privateKeyPath string) error {
 		return err
 	}
 	publicKeyPath := privateKeyPath + ".pub"
-	if err := os.WriteFile(publicKeyPath, ssh.MarshalAuthorizedKey(publicKey), 0644); err != nil {
+	if err := os.WriteFile(publicKeyPath, ssh.MarshalAuthorizedKey(publicKey), 0600); err != nil {
 		return err
 	}
 	return nil

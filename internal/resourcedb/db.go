@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 
+	"github.com/bgdnvk/clanker/internal/secfile"
 	_ "modernc.org/sqlite"
 )
 
@@ -56,7 +58,7 @@ func openDB(dbPath string) (*sql.DB, error) {
 
 	// Ensure directory exists
 	dir := filepath.Dir(dbPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := secfile.EnsurePrivateDir(dir); err != nil {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 
@@ -78,6 +80,10 @@ func openDB(dbPath string) (*sql.DB, error) {
 			return nil, fmt.Errorf("failed to set pragma: %w", err)
 		}
 	}
+	if err := hardenSQLiteFiles(dbPath); err != nil {
+		db.Close()
+		return nil, err
+	}
 
 	return db, nil
 }
@@ -87,6 +93,18 @@ func migrate(db *sql.DB) error {
 	_, err := db.Exec(schema)
 	if err != nil {
 		return fmt.Errorf("failed to run migrations: %w", err)
+	}
+	return nil
+}
+
+func hardenSQLiteFiles(dbPath string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		if err := os.Chmod(path, secfile.PrivateFileMode); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to secure database file %s: %w", path, err)
+		}
 	}
 	return nil
 }
