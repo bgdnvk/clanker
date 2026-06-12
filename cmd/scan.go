@@ -147,7 +147,7 @@ func runScan(cmd *cobra.Command, args []string) error {
 	case "terminal", "":
 		out := cost.RenderScanReceipt(receipt, useColor, scanTop)
 		if scanExportPath != "" {
-			if err := os.WriteFile(scanExportPath, []byte(stripANSI(out)), 0644); err != nil {
+			if err := os.WriteFile(scanExportPath, []byte(stripANSI(out)), 0600); err != nil {
 				return fmt.Errorf("write export: %w", err)
 			}
 			fmt.Printf("Receipt written to %s\n", scanExportPath)
@@ -230,7 +230,7 @@ func emitScanReceipt(receipt *cost.ScanReceipt, format, exportPath string) error
 		return fmt.Errorf("unsupported format %q", format)
 	}
 	if exportPath != "" {
-		if err := os.WriteFile(exportPath, out, 0644); err != nil {
+		if err := os.WriteFile(exportPath, out, 0600); err != nil {
 			return err
 		}
 		fmt.Printf("Receipt written to %s\n", exportPath)
@@ -296,7 +296,7 @@ func writeFixPlan(receipt *cost.ScanReceipt, path, awsProfile string, started ti
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(abs, body, 0644); err != nil {
+	if err := os.WriteFile(abs, body, 0600); err != nil {
 		return "", err
 	}
 	return abs, nil

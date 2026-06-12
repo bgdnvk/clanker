@@ -89,7 +89,8 @@ func RefreshOAuthToken(refreshToken string) (*OAuthTokens, error) {
 		"refresh_token": {refreshToken},
 	}
 
-	resp, err := http.Post(openAIOAuthTokenEndpoint, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Post(openAIOAuthTokenEndpoint, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("token refresh request failed: %w", err)
 	}

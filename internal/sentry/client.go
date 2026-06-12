@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bgdnvk/clanker/internal/secrand"
 	"github.com/spf13/viper"
 )
 
@@ -369,7 +369,7 @@ func parseRetryWait(resp *http.Response) time.Duration {
 }
 
 func sleepWithJitter(base time.Duration) {
-	jitter := time.Duration(rand.Int63n(int64(base) / 2))
+	jitter := secrand.Duration(base / 2)
 	time.Sleep(base + jitter)
 }
 

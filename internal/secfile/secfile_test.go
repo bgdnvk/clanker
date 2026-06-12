@@ -82,6 +82,30 @@ func TestWritePrivate_TightensExistingLooseFile(t *testing.T) {
 	}
 }
 
+func TestOpenPrivate_NewFileIs0600(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits not meaningful on Windows")
+	}
+	path := filepath.Join(t.TempDir(), "output.log")
+	f, err := OpenPrivate(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	if err != nil {
+		t.Fatalf("OpenPrivate: %v", err)
+	}
+	if _, err := f.WriteString("secret-ish output"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != PrivateFileMode {
+		t.Errorf("open-private mode = %04o, want %04o", got, PrivateFileMode)
+	}
+}
+
 func TestReadPrivate_RepairsLoosePerms(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("mode bits not meaningful on Windows")

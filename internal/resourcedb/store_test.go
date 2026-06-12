@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -145,6 +146,49 @@ func TestStoreOperations(t *testing.T) {
 	count, _ = store.CountResources()
 	if count != 0 {
 		t.Errorf("expected count 0 after delete, got %d", count)
+	}
+}
+
+func TestStoreFilesArePrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits not meaningful on Windows")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "resourcedb-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+	if err := os.Chmod(tmpDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewStore failed: %v", err)
+	}
+	defer store.Close()
+
+	dirInfo, err := os.Stat(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0o700 {
+		t.Errorf("db dir mode = %04o, want 0700", got)
+	}
+
+	for _, path := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		info, err := os.Stat(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("%s mode = %04o, want 0600", filepath.Base(path), got)
+		}
 	}
 }
 

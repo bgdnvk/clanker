@@ -91,14 +91,14 @@ func (c *Client) deployWorkerWithWrangler(ctx context.Context, opts DeployWorker
 
 	// Write the worker script
 	scriptPath := filepath.Join(tmpDir, "index.js")
-	if err := os.WriteFile(scriptPath, []byte(script), 0644); err != nil {
+	if err := os.WriteFile(scriptPath, []byte(script), 0600); err != nil {
 		return nil, fmt.Errorf("failed to write worker script: %w", err)
 	}
 
 	// Generate wrangler.toml
 	wranglerConfig := c.generateWranglerConfig(opts)
 	configPath := filepath.Join(tmpDir, "wrangler.toml")
-	if err := os.WriteFile(configPath, []byte(wranglerConfig), 0644); err != nil {
+	if err := os.WriteFile(configPath, []byte(wranglerConfig), 0600); err != nil {
 		return nil, fmt.Errorf("failed to write wrangler config: %w", err)
 	}
 

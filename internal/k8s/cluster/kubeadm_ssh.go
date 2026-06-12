@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bgdnvk/clanker/internal/sshknownhosts"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -91,12 +92,17 @@ func (c *SSHClient) Connect(ctx context.Context) error {
 		return fmt.Errorf("failed to parse private key: %w", err)
 	}
 
+	hostKeyCallback, err := sshknownhosts.NewTOFUCallback("")
+	if err != nil {
+		return err
+	}
+
 	config := &ssh.ClientConfig{
 		User: c.user,
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(signer),
 		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostKeyCallback,
 		Timeout:         30 * time.Second,
 	}
 
@@ -260,7 +266,7 @@ func (c *SSHClient) Download(ctx context.Context, remotePath, localPath string) 
 		return fmt.Errorf("failed to read remote file: %w", err)
 	}
 
-	return os.WriteFile(localPath, stdout.Bytes(), 0644)
+	return os.WriteFile(localPath, stdout.Bytes(), 0600)
 }
 
 // DownloadBytes reads a remote file and returns its contents

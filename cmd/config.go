@@ -224,7 +224,7 @@ update:
 `
 		defaultConfig = strings.ReplaceAll(defaultConfig, "__UPDATE_CHANNEL__", normalizedUpdateChannel)
 
-		err = os.WriteFile(configPath, []byte(defaultConfig), 0644)
+		err = writePrivateUserConfig(configPath, []byte(defaultConfig))
 		if err != nil {
 			return fmt.Errorf("error creating config file: %w", err)
 		}
@@ -258,7 +258,7 @@ var configShowCmd = &cobra.Command{
 		}
 
 		fmt.Printf("Configuration file: %s\n\n", configPath)
-		fmt.Print(string(content))
+		fmt.Print(redactConfigForDisplay(content))
 		return nil
 	},
 }

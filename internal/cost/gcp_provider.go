@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -135,22 +136,26 @@ func (p *GCPProvider) getCostsFromBigQuery(ctx context.Context, start, end time.
 	if billingTable == "" {
 		billingTable = "gcp_billing_export_v1"
 	}
+	tableRef, err := bigQueryBillingTableRef(p.projectID, billingDataset, billingTable)
+	if err != nil {
+		return nil, err
+	}
 
 	query := fmt.Sprintf(`
 		SELECT
 			service.description as service_description,
 			SUM(cost) as total_cost,
 			currency
-		FROM %s.%s.%s
+		FROM %s
 		WHERE DATE(usage_start_time) >= '%s'
 		AND DATE(usage_start_time) < '%s'
 		AND project.id = '%s'
 		GROUP BY service.description, currency
 		ORDER BY total_cost DESC
-	`, p.projectID, billingDataset, billingTable,
+	`, tableRef,
 		start.Format("2006-01-02"),
 		end.Format("2006-01-02"),
-		p.projectID)
+		bigQueryStringLiteral(p.projectID))
 
 	cmd := exec.CommandContext(ctx, "bq", "query",
 		"--use_legacy_sql=false",
@@ -446,21 +451,25 @@ func (p *GCPProvider) getDailyTrendFromBigQuery(ctx context.Context, start, end 
 	if billingTable == "" {
 		billingTable = "gcp_billing_export_v1"
 	}
+	tableRef, err := bigQueryBillingTableRef(p.projectID, billingDataset, billingTable)
+	if err != nil {
+		return nil, err
+	}
 
 	query := fmt.Sprintf(`
 		SELECT
 			DATE(usage_start_time) as date,
 			SUM(cost) as total_cost
-		FROM %s.%s.%s
+		FROM %s
 		WHERE DATE(usage_start_time) >= '%s'
 		AND DATE(usage_start_time) < '%s'
 		AND project.id = '%s'
 		GROUP BY date
 		ORDER BY date
-	`, p.projectID, billingDataset, billingTable,
+	`, tableRef,
 		start.Format("2006-01-02"),
 		end.Format("2006-01-02"),
-		p.projectID)
+		bigQueryStringLiteral(p.projectID))
 
 	cmd := exec.CommandContext(ctx, "bq", "query",
 		"--use_legacy_sql=false",
@@ -506,24 +515,28 @@ func (p *GCPProvider) GetCostsByTag(ctx context.Context, tagKey string, start, e
 	if billingTable == "" {
 		billingTable = "gcp_billing_export_v1"
 	}
+	tableRef, err := bigQueryBillingTableRef(p.projectID, billingDataset, billingTable)
+	if err != nil {
+		return nil, err
+	}
 
 	query := fmt.Sprintf(`
 		SELECT
 			labels.key as tag_key,
 			labels.value as tag_value,
 			SUM(cost) as total_cost
-		FROM %s.%s.%s, UNNEST(labels) as labels
+		FROM %s, UNNEST(labels) as labels
 		WHERE DATE(usage_start_time) >= '%s'
 		AND DATE(usage_start_time) < '%s'
 		AND project.id = '%s'
 		AND labels.key = '%s'
 		GROUP BY tag_key, tag_value
 		ORDER BY total_cost DESC
-	`, p.projectID, billingDataset, billingTable,
+	`, tableRef,
 		start.Format("2006-01-02"),
 		end.Format("2006-01-02"),
-		p.projectID,
-		tagKey)
+		bigQueryStringLiteral(p.projectID),
+		bigQueryStringLiteral(tagKey))
 
 	cmd := exec.CommandContext(ctx, "bq", "query",
 		"--use_legacy_sql=false",
@@ -556,4 +569,27 @@ func (p *GCPProvider) GetCostsByTag(ctx context.Context, tagKey string, start, e
 	}
 
 	return tags, nil
+}
+
+var bigQueryIdentifierPartRe = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+func bigQueryBillingTableRef(projectID string, dataset string, table string) (string, error) {
+	parts := []struct {
+		label string
+		value string
+	}{
+		{label: "project ID", value: projectID},
+		{label: "billing dataset", value: dataset},
+		{label: "billing table", value: table},
+	}
+	for _, part := range parts {
+		if !bigQueryIdentifierPartRe.MatchString(strings.TrimSpace(part.value)) {
+			return "", fmt.Errorf("invalid BigQuery %s %q", part.label, part.value)
+		}
+	}
+	return fmt.Sprintf("`%s.%s.%s`", projectID, dataset, table), nil
+}
+
+func bigQueryStringLiteral(value string) string {
+	return strings.ReplaceAll(value, "'", "''")
 }

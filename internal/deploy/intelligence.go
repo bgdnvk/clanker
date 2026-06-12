@@ -2,7 +2,7 @@ package deploy
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -62,7 +62,7 @@ func repoResourcePrefix(repoURL string, deployID string) string {
 	if strings.TrimSpace(deployID) != "" {
 		seed += "|" + strings.ToLower(strings.TrimSpace(deployID))
 	}
-	sum := sha1.Sum([]byte(seed))
+	sum := sha256.Sum256([]byte(seed))
 	suffix := hex.EncodeToString(sum[:])
 	if len(suffix) > 6 {
 		suffix = suffix[:6]

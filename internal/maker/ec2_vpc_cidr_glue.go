@@ -2,6 +2,7 @@ package maker
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -364,7 +365,15 @@ func cidrRange(cidr string) (start uint32, end uint32, ok bool) {
 	}
 	netIP := ip4.Mask(ipnet.Mask)
 	start = ipv4ToUint32(netIP)
-	size := uint32(1) << uint32(32-ones)
+	hostBits := bits - ones
+	if hostBits < 0 || hostBits > 32 {
+		return 0, 0, false
+	}
+	if hostBits == 32 {
+		end = ^uint32(0)
+		return start, end, true
+	}
+	size := uint32(1) << uint(hostBits)
 	end = start + size - 1
 	return start, end, true
 }
@@ -375,7 +384,9 @@ func ipv4ToUint32(ip net.IP) uint32 {
 }
 
 func uint32ToIPv4(v uint32) net.IP {
-	return net.IPv4(byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], v)
+	return net.IPv4(b[0], b[1], b[2], b[3])
 }
 
 func cidrContains(cidr string, ip net.IP) bool {

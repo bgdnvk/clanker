@@ -1,7 +1,7 @@
 package maker
 
 import (
-	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/bgdnvk/clanker/internal/secfile"
 )
 
 type durableCheckpointState struct {
@@ -47,7 +49,7 @@ func loadDurableCheckpoint(plan *Plan, opts ExecOptions) (map[string]string, err
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(checkpointPath)
+	data, err := secfile.ReadPrivate(checkpointPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -70,7 +72,7 @@ func persistDurableCheckpoint(plan *Plan, opts ExecOptions, bindings map[string]
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(checkpointPath), 0o755); err != nil {
+	if err := secfile.EnsurePrivateDir(filepath.Dir(checkpointPath)); err != nil {
 		return err
 	}
 
@@ -84,7 +86,7 @@ func persistDurableCheckpoint(plan *Plan, opts ExecOptions, bindings map[string]
 	}
 
 	tmpPath := checkpointPath + ".tmp"
-	if err := os.WriteFile(tmpPath, payload, 0o600); err != nil {
+	if err := secfile.WritePrivate(tmpPath, payload); err != nil {
 		return err
 	}
 	if err := os.Rename(tmpPath, checkpointPath); err != nil {
@@ -139,7 +141,7 @@ func durableCheckpointKey(plan *Plan, opts ExecOptions) (string, error) {
 		strings.TrimSpace(opts.Region),
 		string(commandsJSON),
 	}, "\n")
-	sum := sha1.Sum([]byte(hashInput))
+	sum := sha256.Sum256([]byte(hashInput))
 	return "aws-" + hex.EncodeToString(sum[:]), nil
 }
 

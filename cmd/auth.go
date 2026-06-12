@@ -104,8 +104,9 @@ func runAuthLogin(_ *cobra.Command, _ []string) error {
 	})
 
 	server := &http.Server{
-		Addr:    "127.0.0.1:" + oauthCallbackPort,
-		Handler: mux,
+		Addr:              "127.0.0.1:" + oauthCallbackPort,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	go func() {
@@ -162,7 +163,8 @@ func exchangeAuthCode(code, codeVerifier string) (*ai.OAuthTokens, string, error
 		"redirect_uri":  {oauthRedirectURI},
 	}
 
-	resp, err := http.Post(oauthTokenURL, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Post(oauthTokenURL, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, "", fmt.Errorf("token exchange request failed: %w", err)
 	}
