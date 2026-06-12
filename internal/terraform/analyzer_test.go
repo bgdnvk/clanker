@@ -81,6 +81,61 @@ func TestResourceTypeFromAddress(t *testing.T) {
 	}
 }
 
+func TestBuildViewReportDescribesLocalRemoteAndAlternatives(t *testing.T) {
+	report := AnalysisReport{
+		Path:            "/infra/prod",
+		Tool:            "Terraform",
+		Mode:            "remote-state",
+		Remote:          true,
+		Files:           []string{"main.tf", "network/vpc.tf"},
+		Backends:        []string{"s3"},
+		ProviderSources: []string{"hashicorp/aws"},
+		Modules:         []string{"network"},
+		State: &StateSummary{
+			ResourceCount: 2,
+			ResourceTypes: map[string]int{
+				"aws_instance": 1,
+				"aws_vpc":      1,
+			},
+			Sample: []string{"aws_instance.web", "aws_vpc.main"},
+		},
+		Drift: &DriftReport{
+			Checked:    true,
+			HasChanges: true,
+			ExitCode:   2,
+			Command:    "terraform plan -refresh-only -detailed-exitcode",
+			Summary:    []string{"Plan: 0 to add, 1 to change, 0 to destroy."},
+		},
+		Alternatives: []AlternativeTool{
+			{Name: "Terraform", Binary: "terraform", Detected: true},
+			{Name: "OpenTofu", Binary: "tofu", Detected: false},
+		},
+	}
+
+	view := BuildViewReport("prod", report)
+	if view.Workspace != "prod" {
+		t.Fatalf("workspace = %q, want prod", view.Workspace)
+	}
+	if view.Status != "attention" {
+		t.Fatalf("status = %q, want attention", view.Status)
+	}
+	if view.Local.FileCount != 2 || view.State.Source != "remote" || view.State.Backend != "s3" {
+		t.Fatalf("unexpected local/state view: %#v %#v", view.Local, view.State)
+	}
+	if view.Remote.DriftStatus != "changed" || !view.Remote.HasChanges {
+		t.Fatalf("unexpected remote drift view: %#v", view.Remote)
+	}
+	if view.Drift == nil || view.Drift.Status != "changed" {
+		t.Fatalf("unexpected drift view: %#v", view.Drift)
+	}
+	if len(view.Alternatives) != 2 || view.Alternatives[0].Status != "available" || view.Alternatives[1].Status != "missing" {
+		t.Fatalf("unexpected alternatives: %#v", view.Alternatives)
+	}
+	if len(view.Summary) == 0 {
+		t.Fatal("expected generated summary")
+	}
+}
+
 func writeFile(t *testing.T, path string, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
