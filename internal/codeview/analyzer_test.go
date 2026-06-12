@@ -1,8 +1,10 @@
 package codeview
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -160,8 +162,105 @@ object App {
 	if analysis.Summary.CorrelationCount == 0 {
 		t.Fatalf("expected correlation count in summary")
 	}
+	if analysis.Summary.PackageCount == 0 || len(analysis.Packages) == 0 {
+		t.Fatalf("expected package summary, got summary=%#v packages=%#v", analysis.Summary, analysis.Packages)
+	}
 	if !hasGraphNodeType(analysis, "correlation") {
 		t.Fatalf("expected correlation graph nodes in %#v", analysis.Graph.Nodes)
+	}
+	if !hasGraphNodeType(analysis, "package") {
+		t.Fatalf("expected package graph nodes in %#v", analysis.Graph.Nodes)
+	}
+}
+
+func TestAnalyzeKeepsDocsOutOfPrimaryLanguage(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "package.json", `{"name":"docs-heavy-app","dependencies":{"next":"latest"}}`)
+	writeFile(t, dir, "apps/web/app/api/users/route.ts", `
+export async function GET() {
+  return Response.json({ ok: true })
+}
+`)
+	writeFile(t, dir, "docs/guide.md", strings.Repeat("architecture service workflow class database auth middleware\n", 5000))
+
+	analysis, err := Analyze(dir, "https://github.com/acme/docs-heavy-app")
+	if err != nil {
+		t.Fatalf("Analyze returned error: %v", err)
+	}
+	if analysis.Summary.PrimaryLanguage != "TypeScript" {
+		t.Fatalf("expected TypeScript primary language, got %#v languages=%#v", analysis.Summary, analysis.Languages)
+	}
+	if analysis.Summary.DocumentationFiles == 0 || analysis.Summary.SourceFiles == 0 {
+		t.Fatalf("expected docs and source role counts, got %#v", analysis.Summary)
+	}
+	if hasPattern(analysis, "auth") && patternFileCount(analysis, "auth") > 1 {
+		t.Fatalf("documentation should not inflate auth pattern: %#v", analysis.Patterns)
+	}
+}
+
+func TestAnalyzeBalancesNoisyWorkItemCorrelations(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "package.json", `{"name":"noisy-work-items","dependencies":{"next":"latest","@prisma/client":"latest","stripe":"latest"}}`)
+	writeFile(t, dir, "schema.prisma", `
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+model User {
+  id String @id
+}
+`)
+	lines := make([]string, 0, 280)
+	for i := 0; i < 280; i++ {
+		lines = append(lines, fmt.Sprintf("ACME-%d https://github.com/acme/noisy/issues/%d", i+1, i+1))
+	}
+	writeFile(t, dir, "docs/imported-issues.md", strings.Join(lines, "\n"))
+
+	analysis, err := Analyze(dir, "https://github.com/acme/noisy")
+	if err != nil {
+		t.Fatalf("Analyze returned error: %v", err)
+	}
+	if !hasCorrelation(analysis, "dependency") || !hasCorrelation(analysis, "database") || !hasCorrelation(analysis, "data_model") {
+		t.Fatalf("expected non-work-item correlations to survive cap: %#v", analysis.Correlations)
+	}
+	if got := correlationTypeCount(analysis, "work_item"); got > 36 {
+		t.Fatalf("expected work_item correlations to be quota capped, got %d", got)
+	}
+}
+
+func TestAnalyzeDetectsFullStackManifests(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "composer.json", `{"name":"acme/php-api","require":{"laravel/framework":"^11.0","guzzlehttp/guzzle":"^7.0"}}`)
+	writeFile(t, dir, "schema.graphql", `
+type Query {
+  users: [User!]!
+}
+type User {
+  id: ID!
+}
+`)
+	writeFile(t, dir, "compose.yaml", `
+services:
+  web:
+    image: acme/web
+  postgres:
+    image: postgres:16
+`)
+	writeFile(t, dir, "vercel.json", `{"buildCommand":"npm run build"}`)
+
+	analysis, err := Analyze(dir, "https://github.com/acme/fullstack")
+	if err != nil {
+		t.Fatalf("Analyze returned error: %v", err)
+	}
+	for _, source := range []string{"composer", "graphql-entrypoint", "graphql-type", "docker-compose", "vercel.json"} {
+		if !hasCorrelationSource(analysis, source) {
+			t.Fatalf("expected correlation source %q in %#v", source, analysis.Correlations)
+		}
+	}
+	for _, kind := range []string{"dependency", "api_schema", "service", "deployment", "catalog_entity"} {
+		if !hasCorrelation(analysis, kind) {
+			t.Fatalf("expected correlation kind %q in %#v", kind, analysis.Correlations)
+		}
 	}
 }
 
@@ -190,6 +289,25 @@ func hasCorrelationSource(analysis *Analysis, source string) bool {
 		}
 	}
 	return false
+}
+
+func correlationTypeCount(analysis *Analysis, kind string) int {
+	count := 0
+	for _, corr := range analysis.Correlations {
+		if corr.Type == kind {
+			count++
+		}
+	}
+	return count
+}
+
+func patternFileCount(analysis *Analysis, id string) int {
+	for _, pattern := range analysis.Patterns {
+		if pattern.ID == id {
+			return len(pattern.Files)
+		}
+	}
+	return 0
 }
 
 func hasGraphNodeType(analysis *Analysis, typ string) bool {

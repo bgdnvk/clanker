@@ -33,6 +33,14 @@ const (
 	maxCorrelationNodes    = 80
 )
 
+const (
+	roleCode      = "code"
+	roleDocs      = "docs"
+	roleConfig    = "config"
+	roleInfra     = "infra"
+	roleGenerated = "generated"
+)
+
 type AnalyzeOptions struct {
 	KeepClone bool
 }
@@ -44,6 +52,7 @@ type Analysis struct {
 	Summary            Summary        `json:"summary"`
 	SupportedLanguages []LanguageSpec `json:"supportedLanguages"`
 	Languages          []LanguageStat `json:"languages"`
+	Packages           []CodePackage  `json:"packages"`
 	Files              []CodeFile     `json:"files"`
 	Patterns           []CodePattern  `json:"patterns"`
 	Correlations       []Correlation  `json:"correlations"`
@@ -53,19 +62,24 @@ type Analysis struct {
 }
 
 type Summary struct {
-	PrimaryLanguage  string `json:"primaryLanguage"`
-	TotalFiles       int    `json:"totalFiles"`
-	SourceFiles      int    `json:"sourceFiles"`
-	TotalLines       int    `json:"totalLines"`
-	PatternCount     int    `json:"patternCount"`
-	CorrelationCount int    `json:"correlationCount"`
-	ConnectionCount  int    `json:"connectionCount"`
-	EntryPoint       string `json:"entryPoint,omitempty"`
-	Framework        string `json:"framework,omitempty"`
-	HasAuth          bool   `json:"hasAuth"`
-	HasDatabase      bool   `json:"hasDatabase"`
-	HasMiddleware    bool   `json:"hasMiddleware"`
-	HasTests         bool   `json:"hasTests"`
+	PrimaryLanguage    string `json:"primaryLanguage"`
+	TotalFiles         int    `json:"totalFiles"`
+	SourceFiles        int    `json:"sourceFiles"`
+	DocumentationFiles int    `json:"documentationFiles"`
+	ConfigFiles        int    `json:"configFiles"`
+	InfraFiles         int    `json:"infraFiles"`
+	GeneratedFiles     int    `json:"generatedFiles"`
+	TotalLines         int    `json:"totalLines"`
+	PackageCount       int    `json:"packageCount"`
+	PatternCount       int    `json:"patternCount"`
+	CorrelationCount   int    `json:"correlationCount"`
+	ConnectionCount    int    `json:"connectionCount"`
+	EntryPoint         string `json:"entryPoint,omitempty"`
+	Framework          string `json:"framework,omitempty"`
+	HasAuth            bool   `json:"hasAuth"`
+	HasDatabase        bool   `json:"hasDatabase"`
+	HasMiddleware      bool   `json:"hasMiddleware"`
+	HasTests           bool   `json:"hasTests"`
 }
 
 type LanguageSpec struct {
@@ -79,13 +93,28 @@ type LanguageStat struct {
 	Label      string   `json:"label"`
 	Files      int      `json:"files"`
 	Lines      int      `json:"lines"`
+	CodeFiles  int      `json:"codeFiles"`
+	CodeLines  int      `json:"codeLines"`
 	Percentage float64  `json:"percentage"`
 	Extensions []string `json:"extensions"`
+}
+
+type CodePackage struct {
+	ID         string   `json:"id"`
+	Path       string   `json:"path"`
+	Name       string   `json:"name"`
+	Kind       string   `json:"kind"`
+	Manager    string   `json:"manager"`
+	Frameworks []string `json:"frameworks,omitempty"`
+	Files      int      `json:"files"`
+	Languages  []string `json:"languages,omitempty"`
+	Patterns   []string `json:"patterns,omitempty"`
 }
 
 type CodeFile struct {
 	Path     string   `json:"path"`
 	Language string   `json:"language"`
+	Role     string   `json:"role,omitempty"`
 	Lines    int      `json:"lines"`
 	Bytes    int64    `json:"bytes"`
 	Patterns []string `json:"patterns,omitempty"`
@@ -168,11 +197,20 @@ type patternDef struct {
 type scannedFile struct {
 	path     string
 	language string
+	role     string
 	lines    int
 	bytes    int64
 	content  string
 	imports  []string
 	patterns map[string][]Evidence
+}
+
+type fileCandidate struct {
+	path     string
+	absPath  string
+	language string
+	role     string
+	bytes    int64
 }
 
 var languageDefs = []languageDef{
@@ -192,6 +230,8 @@ var languageDefs = []languageDef{
 	{id: "php", label: "PHP", extensions: []string{".php"}},
 	{id: "ruby", label: "Ruby", extensions: []string{".rb"}},
 	{id: "sql", label: "SQL", extensions: []string{".sql"}},
+	{id: "graphql", label: "GraphQL", extensions: []string{".graphql", ".gql"}},
+	{id: "prisma", label: "Prisma", extensions: []string{".prisma"}},
 	{id: "terraform", label: "Terraform", extensions: []string{".tf", ".tfvars"}},
 	{id: "yaml", label: "YAML", extensions: []string{".yml", ".yaml"}},
 	{id: "shell", label: "Shell", extensions: []string{".sh", ".bash", ".zsh"}},
@@ -396,6 +436,9 @@ var gradleDependencyRE = regexp.MustCompile(`\b(?:api|implementation|compileOnly
 var githubWorkURLRE = regexp.MustCompile(`https?://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/(issues|pull)/(\d+)`)
 var jiraURLRE = regexp.MustCompile(`https?://[A-Za-z0-9_.-]+\.atlassian\.net/browse/([A-Z][A-Z0-9]{1,9}-\d+)`)
 var kubeAppLabelRE = regexp.MustCompile(`^\s*(app\.kubernetes\.io/(?:name|part-of|component|managed-by|version))\s*:\s*["']?([^"',#]+)`)
+var prismaModelRE = regexp.MustCompile(`^\s*model\s+([A-Za-z0-9_]+)\s*\{`)
+var prismaProviderRE = regexp.MustCompile(`^\s*provider\s*=\s*["']([^"']+)["']`)
+var graphqlTypeRE = regexp.MustCompile(`^\s*(?:type|interface|input|enum)\s+([A-Za-z0-9_]+)\b`)
 
 func CloneAndAnalyze(ctx context.Context, repoURL string, opts AnalyzeOptions) (*Analysis, func(), error) {
 	repoURL = strings.TrimSpace(repoURL)
@@ -454,14 +497,19 @@ func Analyze(dir string, repoURL string) (*Analysis, error) {
 	correlations := buildCorrelations(files)
 	correlationDuration := time.Since(correlationStarted).Round(time.Millisecond).String()
 
+	packageStarted := time.Now()
+	packages := buildPackages(files)
+	packageDuration := time.Since(packageStarted).Round(time.Millisecond).String()
+
 	graphStarted := time.Now()
-	graph := buildGraph(repoURL, files, languages, patterns, correlations)
+	graph := buildGraph(repoURL, files, languages, patterns, correlations, packages)
 	graphDuration := time.Since(graphStarted).Round(time.Millisecond).String()
 
 	summaryStarted := time.Now()
-	summary := buildSummary(files, languages, patterns, correlations, graph)
+	summary := buildSummary(files, languages, patterns, correlations, packages, graph)
 	subagents := []SubagentRun{
 		{ID: "language-profiler", Label: "Language Profiler", Status: "done", Summary: fmt.Sprintf("%d source files across %d languages", summary.SourceFiles, len(languages)), Findings: languageFindings, Duration: languageDuration},
+		{ID: "monorepo-cartographer", Label: "Monorepo Cartographer", Status: "done", Summary: fmt.Sprintf("%d packages or services mapped", len(packages)), Findings: packageFindings(packages), Duration: packageDuration},
 		{ID: "pattern-cartographer", Label: "Pattern Cartographer", Status: "done", Summary: fmt.Sprintf("%d codebase patterns mapped", len(patterns)), Findings: topPatternFindings(patterns), Duration: patternDuration},
 		{ID: "workspace-correlator", Label: "Workspace Correlator", Status: "done", Summary: fmt.Sprintf("%d workspace correlation hints found", len(correlations)), Findings: correlationFindings(correlations), Duration: correlationDuration},
 		{ID: "dependency-mapper", Label: "Dependency Mapper", Status: "done", Summary: fmt.Sprintf("%d graph connections generated", len(graph.Edges)), Findings: dependencyFindings(graph), Duration: graphDuration},
@@ -478,6 +526,7 @@ func Analyze(dir string, repoURL string) (*Analysis, error) {
 		analysisFiles = append(analysisFiles, CodeFile{
 			Path:     file.path,
 			Language: file.language,
+			Role:     file.role,
 			Lines:    file.lines,
 			Bytes:    file.bytes,
 			Patterns: patternIDs,
@@ -497,6 +546,7 @@ func Analyze(dir string, repoURL string) (*Analysis, error) {
 		Summary:            summary,
 		SupportedLanguages: supportedLanguageSpecs(),
 		Languages:          languages,
+		Packages:           packages,
 		Files:              analysisFiles,
 		Patterns:           patterns,
 		Correlations:       correlations,
@@ -507,9 +557,9 @@ func Analyze(dir string, repoURL string) (*Analysis, error) {
 }
 
 func scanRepository(root string) ([]scannedFile, []string, error) {
-	files := make([]scannedFile, 0)
+	candidates := make([]fileCandidate, 0)
 	warnings := make([]string, 0)
-	totalVisited := 0
+	totalSupported := 0
 
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -526,15 +576,12 @@ func scanRepository(root string) ([]scannedFile, []string, error) {
 		if shouldSkipFile(name) {
 			return nil
 		}
-		totalVisited++
-		if len(files) >= maxFilesScanned {
-			return nil
-		}
 		rel := relPath(root, path)
 		lang := languageForPath(rel)
 		if lang == "" {
 			return nil
 		}
+		totalSupported++
 		info, statErr := d.Info()
 		if statErr != nil {
 			return nil
@@ -543,31 +590,142 @@ func scanRepository(root string) ([]scannedFile, []string, error) {
 			warnings = append(warnings, fmt.Sprintf("skipped large file %s (%d bytes)", rel, info.Size()))
 			return nil
 		}
-		content, readErr := readTextFile(path)
-		if readErr != nil {
-			warnings = append(warnings, fmt.Sprintf("skipped binary or unreadable file %s", rel))
-			return nil
-		}
-		sf := scannedFile{
+		candidates = append(candidates, fileCandidate{
 			path:     rel,
+			absPath:  path,
 			language: lang,
-			lines:    countLines(content),
+			role:     classifyFileRole(rel, lang),
 			bytes:    info.Size(),
-			content:  content,
-			imports:  detectImports(rel, content),
-			patterns: make(map[string][]Evidence),
-		}
-		detectPatterns(&sf)
-		files = append(files, sf)
+		})
 		return nil
 	})
 	if err != nil {
 		return nil, warnings, err
 	}
-	if totalVisited > maxFilesScanned {
-		warnings = append(warnings, fmt.Sprintf("scan capped at %d source files", maxFilesScanned))
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		pi := candidatePriority(candidates[i])
+		pj := candidatePriority(candidates[j])
+		if pi != pj {
+			return pi > pj
+		}
+		return candidates[i].path < candidates[j].path
+	})
+	if len(candidates) > maxFilesScanned {
+		warnings = append(warnings, fmt.Sprintf("scan prioritized %d of %d supported files", maxFilesScanned, totalSupported))
+		candidates = candidates[:maxFilesScanned]
+	}
+
+	files := make([]scannedFile, 0, len(candidates))
+	for _, candidate := range candidates {
+		content, readErr := readTextFile(candidate.absPath)
+		if readErr != nil {
+			warnings = append(warnings, fmt.Sprintf("skipped binary or unreadable file %s", candidate.path))
+			continue
+		}
+		sf := scannedFile{
+			path:     candidate.path,
+			language: candidate.language,
+			role:     candidate.role,
+			lines:    countLines(content),
+			bytes:    candidate.bytes,
+			content:  content,
+			imports:  detectImports(candidate.path, content),
+			patterns: make(map[string][]Evidence),
+		}
+		detectPatterns(&sf)
+		files = append(files, sf)
 	}
 	return files, warnings, nil
+}
+
+func classifyFileRole(path string, language string) string {
+	lower := strings.ToLower(path)
+	base := strings.ToLower(filepath.Base(path))
+	if strings.Contains(lower, "__generated__/") ||
+		strings.Contains(lower, "/generated/") ||
+		strings.Contains(lower, "/generated-") ||
+		strings.Contains(lower, "generated_") ||
+		strings.Contains(lower, ".generated.") ||
+		strings.Contains(lower, "generated-metadata") {
+		return roleGenerated
+	}
+	if language == "markdown" || strings.HasPrefix(lower, "docs/") || strings.Contains(lower, "/docs/") || strings.Contains(lower, "/documentation/") {
+		return roleDocs
+	}
+	if language == "terraform" ||
+		strings.HasPrefix(lower, "infra/") ||
+		strings.Contains(lower, "/infra/") ||
+		strings.HasPrefix(lower, "k8s/") ||
+		strings.Contains(lower, "/k8s/") ||
+		strings.HasPrefix(lower, "kubernetes/") ||
+		strings.Contains(lower, "/kubernetes/") ||
+		strings.HasPrefix(lower, ".github/workflows/") ||
+		base == "dockerfile" ||
+		base == "docker-compose.yml" ||
+		base == "docker-compose.yaml" ||
+		base == "compose.yml" ||
+		base == "compose.yaml" ||
+		base == "vercel.json" ||
+		base == "netlify.toml" ||
+		base == "fly.toml" ||
+		base == "railway.json" {
+		return roleInfra
+	}
+	if language == "yaml" ||
+		language == "shell" ||
+		isManifestFile(base) ||
+		strings.HasPrefix(base, ".env") ||
+		strings.Contains(lower, "/config/") ||
+		strings.Contains(lower, "/configs/") {
+		return roleConfig
+	}
+	return roleCode
+}
+
+func candidatePriority(candidate fileCandidate) int {
+	base := strings.ToLower(filepath.Base(candidate.path))
+	score := 0
+	switch candidate.role {
+	case roleCode:
+		score += 700
+	case roleInfra:
+		score += 900
+	case roleConfig:
+		score += 780
+	case roleDocs:
+		score += 260
+	case roleGenerated:
+		score += 80
+	default:
+		score += 300
+	}
+	if isManifestFile(base) {
+		score += 180
+	}
+	lower := strings.ToLower(candidate.path)
+	for _, hint := range []string{"apps/", "app/", "services/", "service/", "packages/", "pkg/", "src/", "backend/", "frontend/", "api/"} {
+		if strings.HasPrefix(lower, hint) || strings.Contains(lower, "/"+hint) {
+			score += 45
+			break
+		}
+	}
+	if strings.Contains(lower, "testdata/") || strings.Contains(lower, "fixtures/") || strings.Contains(lower, "__fixtures__/") {
+		score -= 120
+	}
+	if strings.Contains(lower, ".min.") || strings.Contains(lower, "bundle.") {
+		score -= 200
+	}
+	return score
+}
+
+func isManifestFile(base string) bool {
+	switch strings.ToLower(base) {
+	case "package.json", "composer.json", "go.mod", "cargo.toml", "pyproject.toml", "requirements.txt", "pom.xml", "build.gradle", "build.gradle.kts", "schema.prisma", "catalog-info.yaml", "catalog-info.yml":
+		return true
+	default:
+		return false
+	}
 }
 
 func detectPatterns(file *scannedFile) {
@@ -576,6 +734,9 @@ func detectPatterns(file *scannedFile) {
 	lowerContent := strings.ToLower(file.content)
 
 	for _, def := range patternDefs {
+		if !patternAllowedForRole(def.id, file.role) {
+			continue
+		}
 		score := 0
 		reasons := make([]string, 0, 3)
 		for _, hint := range def.pathHints {
@@ -621,6 +782,38 @@ func detectPatterns(file *scannedFile) {
 
 	if strings.HasSuffix(lowerPath, ".sql") && strings.Contains(lowerContent, "create table") {
 		file.patterns["migrations"] = appendLimitedEvidence(file.patterns["migrations"], Evidence{File: file.path, Line: 1, Snippet: "SQL schema or migration file", Reason: "SQL DDL detected"}, maxEvidencePerFile)
+	}
+}
+
+func patternAllowedForRole(patternID string, role string) bool {
+	switch role {
+	case roleCode:
+		return true
+	case roleDocs:
+		return patternID == "documentation"
+	case roleConfig:
+		switch patternID {
+		case "config", "infrastructure", "scripts", "documentation":
+			return true
+		default:
+			return false
+		}
+	case roleInfra:
+		switch patternID {
+		case "infrastructure", "config", "scripts", "migrations", "documentation":
+			return true
+		default:
+			return false
+		}
+	case roleGenerated:
+		switch patternID {
+		case "models", "api_schema", "documentation":
+			return true
+		default:
+			return false
+		}
+	default:
+		return true
 	}
 }
 
@@ -731,6 +924,12 @@ type mavenDependency struct {
 	Version    string `xml:"version"`
 }
 
+type composerManifest struct {
+	Name       string            `json:"name"`
+	Require    map[string]string `json:"require"`
+	RequireDev map[string]string `json:"require-dev"`
+}
+
 func buildCorrelations(files []scannedFile) []Correlation {
 	byKey := make(map[string]*correlationAccumulator)
 
@@ -776,20 +975,17 @@ func buildCorrelations(files []scannedFile) []Correlation {
 		out = append(out, acc.item)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
-		oi := correlationOrder(out[i].Type)
-		oj := correlationOrder(out[j].Type)
+		oi := correlationRank(out[i])
+		oj := correlationRank(out[j])
 		if oi != oj {
-			return oi < oj
+			return oi > oj
 		}
 		if len(out[i].Files) != len(out[j].Files) {
 			return len(out[i].Files) > len(out[j].Files)
 		}
 		return out[i].Label < out[j].Label
 	})
-	if len(out) > maxCorrelations {
-		return out[:maxCorrelations]
-	}
-	return out
+	return capCorrelations(out, maxCorrelations)
 }
 
 func detectManifestCorrelations(file scannedFile, add addCorrelationFunc) {
@@ -803,14 +999,25 @@ func detectManifestCorrelations(file scannedFile, add addCorrelationFunc) {
 		detectRequirementsCorrelations(file, add)
 	case "Cargo.toml":
 		detectCargoCorrelations(file, add)
+	case "composer.json":
+		detectComposerCorrelations(file, add)
 	case "pom.xml":
 		detectMavenCorrelations(file, add)
 	case "build.gradle", "build.gradle.kts":
 		detectGradleCorrelations(file, add)
+	case "schema.prisma":
+		detectPrismaCorrelations(file, add)
 	case "catalog-info.yaml", "catalog-info.yml":
 		detectCatalogInfoCorrelations(file, add)
+	case "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml":
+		detectDockerComposeCorrelations(file, add)
+	case "vercel.json", "netlify.toml", "fly.toml", "railway.json":
+		add("deployment", strings.TrimSuffix(base, filepath.Ext(base)), file.path, base, Evidence{File: file.path, Line: 1, Snippet: base, Reason: "hosted deployment config"})
 	case "Dockerfile":
 		add("deployment", "Container build", "Dockerfile", "dockerfile", Evidence{File: file.path, Line: 1, Snippet: base, Reason: "container build descriptor"})
+	}
+	if file.language == "graphql" {
+		detectGraphQLCorrelations(file, add)
 	}
 	if strings.HasPrefix(file.path, ".github/workflows/") {
 		add("deployment", filepath.Base(file.path), file.path, "github-actions", Evidence{File: file.path, Line: 1, Snippet: file.path, Reason: "GitHub Actions workflow"})
@@ -882,6 +1089,24 @@ func detectCargoCorrelations(file scannedFile, add addCorrelationFunc) {
 	})
 }
 
+func detectComposerCorrelations(file scannedFile, add addCorrelationFunc) {
+	var manifest composerManifest
+	if err := json.Unmarshal([]byte(file.content), &manifest); err != nil {
+		return
+	}
+	if strings.TrimSpace(manifest.Name) != "" {
+		add("catalog_entity", manifest.Name, manifest.Name, "composer.json", Evidence{File: file.path, Line: 1, Snippet: manifest.Name, Reason: "Composer package name"})
+	}
+	for group, deps := range map[string]map[string]string{"composer": manifest.Require, "composer-dev": manifest.RequireDev} {
+		for name, version := range deps {
+			if strings.TrimSpace(name) == "" || strings.HasPrefix(name, "php") || strings.HasPrefix(name, "ext-") {
+				continue
+			}
+			add("dependency", name, name, group, Evidence{File: file.path, Line: 1, Snippet: name + " " + version, Reason: "Composer dependency"})
+		}
+	}
+}
+
 func detectMavenCorrelations(file scannedFile, add addCorrelationFunc) {
 	var project mavenProject
 	if err := xml.Unmarshal([]byte(file.content), &project); err != nil {
@@ -909,6 +1134,54 @@ func detectGradleCorrelations(file scannedFile, add addCorrelationFunc) {
 		}
 		value := match[1] + ":" + match[2]
 		add("dependency", match[2], value, filepath.Base(file.path), Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Gradle dependency"})
+	})
+}
+
+func detectPrismaCorrelations(file scannedFile, add addCorrelationFunc) {
+	scanLines(file, func(lineNo int, line string) {
+		if match := prismaProviderRE.FindStringSubmatch(line); len(match) > 1 {
+			add("database", match[1], match[1], "prisma-datasource", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Prisma datasource provider"})
+		}
+		if match := prismaModelRE.FindStringSubmatch(line); len(match) > 1 {
+			add("data_model", match[1], match[1], "prisma-model", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Prisma model"})
+		}
+	})
+}
+
+func detectGraphQLCorrelations(file scannedFile, add addCorrelationFunc) {
+	scanLines(file, func(lineNo int, line string) {
+		match := graphqlTypeRE.FindStringSubmatch(line)
+		if len(match) < 2 {
+			return
+		}
+		source := "graphql-type"
+		if match[1] == "Query" || match[1] == "Mutation" || match[1] == "Subscription" {
+			source = "graphql-entrypoint"
+		}
+		add("api_schema", match[1], match[1], source, Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "GraphQL schema type"})
+	})
+}
+
+func detectDockerComposeCorrelations(file scannedFile, add addCorrelationFunc) {
+	inServices := false
+	scanLines(file, func(lineNo int, line string) {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "services:" {
+			inServices = true
+			return
+		}
+		if !inServices || trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			return
+		}
+		if !strings.HasPrefix(line, "  ") || strings.HasPrefix(line, "    ") {
+			return
+		}
+		name := strings.TrimSuffix(trimmed, ":")
+		if name == "" || strings.Contains(name, " ") || strings.HasPrefix(name, "-") {
+			return
+		}
+		add("service", name, name, "docker-compose", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Docker Compose service"})
+		add("deployment", "Compose "+name, name, "docker-compose", Evidence{File: file.path, Line: lineNo, Snippet: line, Reason: "Docker Compose service"})
 	})
 }
 
@@ -1065,27 +1338,88 @@ func scanLines(file scannedFile, visit func(lineNo int, line string)) {
 
 func correlationOrder(kind string) int {
 	switch kind {
-	case "work_item":
-		return 0
 	case "catalog_entity":
-		return 1
+		return 0
 	case "owner":
-		return 2
+		return 1
 	case "system":
-		return 3
+		return 2
 	case "service":
+		return 3
+	case "database":
 		return 4
-	case "infra_resource":
+	case "data_model":
 		return 5
-	case "infra_reference":
+	case "api_schema":
 		return 6
-	case "deployment":
+	case "infra_resource":
 		return 7
-	case "dependency":
+	case "infra_reference":
 		return 8
+	case "deployment":
+		return 9
+	case "dependency":
+		return 10
+	case "work_item":
+		return 11
 	default:
 		return 99
 	}
+}
+
+func correlationRank(corr Correlation) int {
+	rank := 1000 - correlationOrder(corr.Type)*45
+	rank += len(corr.Files) * 4
+	rank += len(corr.Evidence) * 6
+	switch corr.Source {
+	case "backstage-catalog", "catalog-info.yaml", "catalog-info.yml":
+		rank += 120
+	case "opentelemetry", "docker-compose", "app.kubernetes.io/name", "app.kubernetes.io/component", "prisma-datasource", "graphql-entrypoint":
+		rank += 100
+	case "terraform", "kubernetes", "github-actions", "dockerfile", "vercel.json", "netlify.toml", "fly.toml", "railway.json":
+		rank += 75
+	case "package.json", "composer", "go.mod", "Cargo.toml", "pom.xml", "build.gradle.kts", "requirements.txt":
+		rank += 50
+	case "github-pr-url", "github-issue-url":
+		rank -= 80
+	case "issue-key":
+		rank -= 45
+	}
+	return rank
+}
+
+func capCorrelations(items []Correlation, max int) []Correlation {
+	limits := map[string]int{
+		"catalog_entity":  24,
+		"owner":           18,
+		"system":          18,
+		"service":         36,
+		"database":        24,
+		"data_model":      34,
+		"api_schema":      34,
+		"infra_resource":  34,
+		"infra_reference": 24,
+		"deployment":      36,
+		"dependency":      60,
+		"work_item":       36,
+	}
+	selected := make([]Correlation, 0, max)
+	counts := map[string]int{}
+	for _, item := range items {
+		limit := limits[item.Type]
+		if limit == 0 {
+			limit = 16
+		}
+		if counts[item.Type] >= limit {
+			continue
+		}
+		selected = append(selected, item)
+		counts[item.Type]++
+		if len(selected) >= max {
+			return selected
+		}
+	}
+	return selected
 }
 
 func buildLanguageStats(files []scannedFile) []LanguageStat {
@@ -1103,6 +1437,10 @@ func buildLanguageStats(files []scannedFile) []LanguageStat {
 		}
 		stat.Files++
 		stat.Lines += file.lines
+		if file.role == roleCode {
+			stat.CodeFiles++
+			stat.CodeLines += file.lines
+		}
 		totalLines += file.lines
 	}
 	out := make([]LanguageStat, 0, len(byID))
@@ -1113,6 +1451,14 @@ func buildLanguageStats(files []scannedFile) []LanguageStat {
 		out = append(out, *stat)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
+		ip := languageSortPriority(out[i])
+		jp := languageSortPriority(out[j])
+		if ip != jp {
+			return ip > jp
+		}
+		if out[i].CodeLines != out[j].CodeLines {
+			return out[i].CodeLines > out[j].CodeLines
+		}
 		if out[i].Lines != out[j].Lines {
 			return out[i].Lines > out[j].Lines
 		}
@@ -1121,7 +1467,35 @@ func buildLanguageStats(files []scannedFile) []LanguageStat {
 	return out
 }
 
-func buildGraph(repoURL string, files []scannedFile, languages []LanguageStat, patterns []CodePattern, correlations []Correlation) CodeGraph {
+func languageSortPriority(stat LanguageStat) int {
+	if stat.CodeFiles > 0 && isCodeLanguage(stat.ID) {
+		return 4
+	}
+	if stat.CodeFiles > 0 {
+		return 3
+	}
+	switch stat.ID {
+	case "terraform", "prisma", "graphql", "sql":
+		return 2
+	case "yaml", "shell":
+		return 1
+	case "markdown":
+		return 0
+	default:
+		return 2
+	}
+}
+
+func isCodeLanguage(id string) bool {
+	switch id {
+	case "javascript", "typescript", "python", "java", "go", "rust", "csharp", "cpp", "c", "kotlin", "swift", "dart", "scala", "php", "ruby":
+		return true
+	default:
+		return false
+	}
+}
+
+func buildGraph(repoURL string, files []scannedFile, languages []LanguageStat, patterns []CodePattern, correlations []Correlation, packages []CodePackage) CodeGraph {
 	nodes := make([]GraphNode, 0)
 	edges := make([]GraphEdge, 0)
 	addedNodes := map[string]bool{}
@@ -1153,8 +1527,16 @@ func buildGraph(repoURL string, files []scannedFile, languages []LanguageStat, p
 
 	for _, lang := range languages {
 		id := "language:" + lang.ID
-		addNode(GraphNode{ID: id, Type: "language", Label: lang.Label, Group: "Language", Metadata: map[string]interface{}{"files": lang.Files, "lines": lang.Lines, "percentage": lang.Percentage}})
+		addNode(GraphNode{ID: id, Type: "language", Label: lang.Label, Group: "Language", Metadata: map[string]interface{}{"files": lang.Files, "lines": lang.Lines, "codeFiles": lang.CodeFiles, "codeLines": lang.CodeLines, "percentage": lang.Percentage}})
 		addEdge(GraphEdge{ID: stableID("repo:" + id), Source: "repo", Target: id, Type: "uses", Label: "uses"})
+	}
+
+	packageIDs := map[string]bool{}
+	for _, pkg := range packages {
+		id := "package:" + pkg.ID
+		packageIDs[pkg.ID] = true
+		addNode(GraphNode{ID: id, Type: "package", Label: pkg.Name, Group: "Packages", Metadata: map[string]interface{}{"path": pkg.Path, "kind": pkg.Kind, "manager": pkg.Manager, "files": pkg.Files, "frameworks": pkg.Frameworks, "languages": pkg.Languages, "patterns": pkg.Patterns}})
+		addEdge(GraphEdge{ID: stableID("repo:" + id), Source: "repo", Target: id, Type: "contains", Label: "contains"})
 	}
 
 	patternIDs := map[string]bool{}
@@ -1203,12 +1585,16 @@ func buildGraph(repoURL string, files []scannedFile, languages []LanguageStat, p
 			Metadata: map[string]interface{}{
 				"path":     file.path,
 				"language": file.language,
+				"role":     file.role,
 				"lines":    file.lines,
 				"patterns": sortedPatternIDs(file.patterns),
 			},
 		})
 		if file.language != "" {
 			addEdge(GraphEdge{ID: stableID("lang:" + file.language + ":" + file.path), Source: "language:" + file.language, Target: fileID, Type: "language-file", Label: "file"})
+		}
+		if pkg := packageForFile(file.path, packages); pkg.ID != "" && packageIDs[pkg.ID] {
+			addEdge(GraphEdge{ID: stableID("package:" + pkg.ID + ":" + file.path), Source: "package:" + pkg.ID, Target: fileID, Type: "package-file", Label: "owns"})
 		}
 		for _, patternID := range sortedPatternIDs(file.patterns) {
 			if exampleEdges >= maxPatternExampleEdges {
@@ -1232,7 +1618,7 @@ func buildGraph(repoURL string, files []scannedFile, languages []LanguageStat, p
 	}
 
 	sort.SliceStable(nodes, func(i, j int) bool {
-		typeOrder := map[string]int{"repo": 0, "pattern": 1, "correlation": 2, "language": 3, "file": 4}
+		typeOrder := map[string]int{"repo": 0, "package": 1, "pattern": 2, "correlation": 3, "language": 4, "file": 5}
 		if typeOrder[nodes[i].Type] != typeOrder[nodes[j].Type] {
 			return typeOrder[nodes[i].Type] < typeOrder[nodes[j].Type]
 		}
@@ -1241,6 +1627,229 @@ func buildGraph(repoURL string, files []scannedFile, languages []LanguageStat, p
 	sort.SliceStable(edges, func(i, j int) bool { return edges[i].ID < edges[j].ID })
 
 	return CodeGraph{Nodes: nodes, Edges: edges}
+}
+
+type packageAccumulator struct {
+	pkg         CodePackage
+	languageSet map[string]bool
+	patternSet  map[string]bool
+}
+
+func buildPackages(files []scannedFile) []CodePackage {
+	roots := map[string]*packageAccumulator{}
+	for _, file := range files {
+		base := filepath.Base(file.path)
+		manager, kind := packageManifestKind(base)
+		if manager == "" {
+			continue
+		}
+		root := filepath.Dir(file.path)
+		if root == "." {
+			root = ""
+		}
+		name := packageNameFromManifest(file)
+		if name == "" {
+			name = root
+		}
+		if name == "" {
+			name = repoRootPackageName(files)
+		}
+		id := stableID(root + ":" + manager + ":" + name)
+		roots[root] = &packageAccumulator{
+			pkg: CodePackage{
+				ID:      id,
+				Path:    root,
+				Name:    name,
+				Kind:    kind,
+				Manager: manager,
+			},
+			languageSet: map[string]bool{},
+			patternSet:  map[string]bool{},
+		}
+	}
+	if len(roots) == 0 {
+		return nil
+	}
+
+	for _, file := range files {
+		acc := packageAccumulatorForFile(file.path, roots)
+		if acc == nil {
+			continue
+		}
+		acc.pkg.Files++
+		if file.language != "" && !acc.languageSet[file.language] {
+			acc.languageSet[file.language] = true
+			acc.pkg.Languages = append(acc.pkg.Languages, file.language)
+		}
+		for _, patternID := range sortedPatternIDs(file.patterns) {
+			if !acc.patternSet[patternID] {
+				acc.patternSet[patternID] = true
+				acc.pkg.Patterns = append(acc.pkg.Patterns, patternID)
+			}
+		}
+		if fw := detectFramework(file); fw != "" {
+			acc.pkg.Frameworks = appendUnique(acc.pkg.Frameworks, fw)
+		}
+	}
+
+	out := make([]CodePackage, 0, len(roots))
+	for _, acc := range roots {
+		sort.Strings(acc.pkg.Languages)
+		sort.SliceStable(acc.pkg.Patterns, func(i, j int) bool {
+			oi := patternOrder(acc.pkg.Patterns[i])
+			oj := patternOrder(acc.pkg.Patterns[j])
+			if oi != oj {
+				return oi < oj
+			}
+			return acc.pkg.Patterns[i] < acc.pkg.Patterns[j]
+		})
+		sort.Strings(acc.pkg.Frameworks)
+		out = append(out, acc.pkg)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Files != out[j].Files {
+			return out[i].Files > out[j].Files
+		}
+		return out[i].Path < out[j].Path
+	})
+	if len(out) > 80 {
+		return out[:80]
+	}
+	return out
+}
+
+func packageManifestKind(base string) (manager string, kind string) {
+	switch base {
+	case "package.json":
+		return "npm", "javascript"
+	case "composer.json":
+		return "composer", "php"
+	case "go.mod":
+		return "go", "go"
+	case "Cargo.toml":
+		return "cargo", "rust"
+	case "pyproject.toml", "requirements.txt":
+		return "python", "python"
+	case "pom.xml":
+		return "maven", "jvm"
+	case "build.gradle", "build.gradle.kts":
+		return "gradle", "jvm"
+	default:
+		return "", ""
+	}
+}
+
+func packageNameFromManifest(file scannedFile) string {
+	base := filepath.Base(file.path)
+	switch base {
+	case "package.json":
+		var pkg struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal([]byte(file.content), &pkg) == nil {
+			return strings.TrimSpace(pkg.Name)
+		}
+	case "composer.json":
+		var manifest composerManifest
+		if json.Unmarshal([]byte(file.content), &manifest) == nil {
+			return strings.TrimSpace(manifest.Name)
+		}
+	case "go.mod":
+		scanner := bufio.NewScanner(strings.NewReader(file.content))
+		for scanner.Scan() {
+			fields := strings.Fields(scanner.Text())
+			if len(fields) == 2 && fields[0] == "module" {
+				return fields[1]
+			}
+		}
+	case "Cargo.toml", "pyproject.toml":
+		return firstTOMLName(file.content)
+	case "pom.xml":
+		var project struct {
+			ArtifactID string `xml:"artifactId"`
+		}
+		if xml.Unmarshal([]byte(file.content), &project) == nil {
+			return strings.TrimSpace(project.ArtifactID)
+		}
+	}
+	root := filepath.Dir(file.path)
+	if root == "." {
+		return ""
+	}
+	return filepath.Base(root)
+}
+
+func firstTOMLName(content string) string {
+	inPackage := false
+	scanner := bufio.NewScanner(strings.NewReader(content))
+	for scanner.Scan() {
+		trimmed := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			inPackage = trimmed == "[package]" || trimmed == "[project]"
+			continue
+		}
+		if !inPackage || !strings.HasPrefix(trimmed, "name") {
+			continue
+		}
+		parts := strings.SplitN(trimmed, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		return strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+	}
+	return ""
+}
+
+func repoRootPackageName(files []scannedFile) string {
+	for _, file := range files {
+		if filepath.Base(file.path) == "README.md" {
+			return "root"
+		}
+	}
+	return "repository"
+}
+
+func packageAccumulatorForFile(path string, roots map[string]*packageAccumulator) *packageAccumulator {
+	var best *packageAccumulator
+	bestLen := -1
+	for root, acc := range roots {
+		if root == "" {
+			if bestLen < 0 {
+				best = acc
+				bestLen = 0
+			}
+			continue
+		}
+		if path == root || strings.HasPrefix(path, root+"/") {
+			if len(root) > bestLen {
+				best = acc
+				bestLen = len(root)
+			}
+		}
+	}
+	return best
+}
+
+func packageForFile(path string, packages []CodePackage) CodePackage {
+	var best CodePackage
+	bestLen := -1
+	for _, pkg := range packages {
+		root := pkg.Path
+		if root == "" {
+			if bestLen < 0 {
+				best = pkg
+				bestLen = 0
+			}
+			continue
+		}
+		if path == root || strings.HasPrefix(path, root+"/") {
+			if len(root) > bestLen {
+				best = pkg
+				bestLen = len(root)
+			}
+		}
+	}
+	return best
 }
 
 var patternRelationships = []struct {
@@ -1323,10 +1932,10 @@ func resolveRelativeImport(fromPath, imp string, byPath map[string]scannedFile) 
 func topGraphCorrelations(correlations []Correlation) []Correlation {
 	candidates := append([]Correlation(nil), correlations...)
 	sort.SliceStable(candidates, func(i, j int) bool {
-		oi := correlationOrder(candidates[i].Type)
-		oj := correlationOrder(candidates[j].Type)
+		oi := correlationRank(candidates[i])
+		oj := correlationRank(candidates[j])
 		if oi != oj {
-			return oi < oj
+			return oi > oj
 		}
 		if len(candidates[i].Files) != len(candidates[j].Files) {
 			return len(candidates[i].Files) > len(candidates[j].Files)
@@ -1347,6 +1956,10 @@ func correlationGroup(kind string) string {
 		return "Workspace Links"
 	case "service":
 		return "Runtime"
+	case "database", "data_model":
+		return "State"
+	case "api_schema":
+		return "Inputs"
 	case "infra_resource", "infra_reference", "deployment":
 		return "Infrastructure"
 	case "dependency":
@@ -1364,6 +1977,10 @@ func patternForCorrelation(kind string) string {
 		return "infrastructure"
 	case "service":
 		return "logging"
+	case "database", "data_model":
+		return "database"
+	case "api_schema":
+		return "routes_handlers"
 	case "work_item":
 		return "documentation"
 	case "catalog_entity", "owner", "system":
@@ -1394,6 +2011,18 @@ func topGraphFiles(files []scannedFile) []scannedFile {
 
 func patternWeight(file scannedFile) int {
 	weight := len(file.patterns)
+	switch file.role {
+	case roleCode:
+		weight += 12
+	case roleInfra:
+		weight += 10
+	case roleConfig:
+		weight += 6
+	case roleDocs:
+		weight -= 4
+	case roleGenerated:
+		weight -= 12
+	}
 	for _, id := range importantPatternOrder {
 		if _, ok := file.patterns[id]; ok {
 			weight += 3
@@ -1402,13 +2031,26 @@ func patternWeight(file scannedFile) int {
 	return weight
 }
 
-func buildSummary(files []scannedFile, languages []LanguageStat, patterns []CodePattern, correlations []Correlation, graph CodeGraph) Summary {
+func buildSummary(files []scannedFile, languages []LanguageStat, patterns []CodePattern, correlations []Correlation, packages []CodePackage, graph CodeGraph) Summary {
 	totalLines := 0
 	sourceFiles := 0
+	documentationFiles := 0
+	configFiles := 0
+	infraFiles := 0
+	generatedFiles := 0
 	for _, file := range files {
 		totalLines += file.lines
-		if file.language != "markdown" && file.language != "yaml" {
+		switch file.role {
+		case roleCode:
 			sourceFiles++
+		case roleDocs:
+			documentationFiles++
+		case roleConfig:
+			configFiles++
+		case roleInfra:
+			infraFiles++
+		case roleGenerated:
+			generatedFiles++
 		}
 	}
 	patternSet := map[string]bool{}
@@ -1428,23 +2070,34 @@ func buildSummary(files []scannedFile, languages []LanguageStat, patterns []Code
 		}
 	}
 	primary := ""
-	if len(languages) > 0 {
+	for _, language := range languages {
+		if language.CodeFiles > 0 && isCodeLanguage(language.ID) {
+			primary = language.Label
+			break
+		}
+	}
+	if primary == "" && len(languages) > 0 {
 		primary = languages[0].Label
 	}
 	return Summary{
-		PrimaryLanguage:  primary,
-		TotalFiles:       len(files),
-		SourceFiles:      sourceFiles,
-		TotalLines:       totalLines,
-		PatternCount:     len(patterns),
-		CorrelationCount: len(correlations),
-		ConnectionCount:  len(graph.Edges),
-		EntryPoint:       entryPoint,
-		Framework:        framework,
-		HasAuth:          patternSet["auth"],
-		HasDatabase:      patternSet["database"],
-		HasMiddleware:    patternSet["middleware"],
-		HasTests:         patternSet["tests"],
+		PrimaryLanguage:    primary,
+		TotalFiles:         len(files),
+		SourceFiles:        sourceFiles,
+		DocumentationFiles: documentationFiles,
+		ConfigFiles:        configFiles,
+		InfraFiles:         infraFiles,
+		GeneratedFiles:     generatedFiles,
+		TotalLines:         totalLines,
+		PackageCount:       len(packages),
+		PatternCount:       len(patterns),
+		CorrelationCount:   len(correlations),
+		ConnectionCount:    len(graph.Edges),
+		EntryPoint:         entryPoint,
+		Framework:          framework,
+		HasAuth:            patternSet["auth"],
+		HasDatabase:        patternSet["database"],
+		HasMiddleware:      patternSet["middleware"],
+		HasTests:           patternSet["tests"],
 	}
 }
 
@@ -1544,14 +2197,26 @@ func languageForPath(path string) string {
 	switch base {
 	case "Dockerfile", "Makefile":
 		return "shell"
-	case "package.json", "tsconfig.json", "composer.json":
+	case "package.json", "tsconfig.json":
 		return "javascript"
+	case "composer.json":
+		return "php"
+	case "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml":
+		return "yaml"
+	case "vercel.json", "railway.json":
+		return "javascript"
+	case "netlify.toml", "fly.toml":
+		return "terraform"
 	case "go.mod", "go.sum":
 		return "go"
 	case "Cargo.toml":
 		return "rust"
 	case "pom.xml", "build.gradle", "build.gradle.kts":
 		return "java"
+	case "pyproject.toml":
+		return "python"
+	case "schema.prisma":
+		return "prisma"
 	}
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == ".h" {
@@ -1645,9 +2310,9 @@ func appendLimitedEvidence(items []Evidence, ev Evidence, max int) []Evidence {
 }
 
 func confidenceForPattern(files, evidence int) float64 {
-	score := 0.42 + float64(files)*0.035 + float64(evidence)*0.03
-	if score > 0.96 {
-		return 0.96
+	score := 0.32 + float64(files)*0.006 + float64(evidence)*0.022
+	if score > 0.9 {
+		return 0.9
 	}
 	if score < 0.35 {
 		return 0.35
@@ -1726,7 +2391,29 @@ func languageFindings(languages []LanguageStat) []string {
 		if i >= 3 {
 			break
 		}
-		out = append(out, fmt.Sprintf("%s: %d files / %d lines", lang.Label, lang.Files, lang.Lines))
+		if lang.CodeFiles > 0 {
+			out = append(out, fmt.Sprintf("%s: %d code files / %d total files", lang.Label, lang.CodeFiles, lang.Files))
+		} else {
+			out = append(out, fmt.Sprintf("%s: %d files / %d lines", lang.Label, lang.Files, lang.Lines))
+		}
+	}
+	return out
+}
+
+func packageFindings(packages []CodePackage) []string {
+	out := make([]string, 0, 5)
+	for i, pkg := range packages {
+		if i >= 5 {
+			break
+		}
+		parts := []string{fmt.Sprintf("%s: %d files", pkg.Name, pkg.Files)}
+		if pkg.Manager != "" {
+			parts = append(parts, pkg.Manager)
+		}
+		if len(pkg.Frameworks) > 0 {
+			parts = append(parts, strings.Join(pkg.Frameworks, ", "))
+		}
+		out = append(out, strings.Join(parts, " / "))
 	}
 	return out
 }
@@ -1747,7 +2434,7 @@ func correlationFindings(correlations []Correlation) []string {
 	for _, corr := range correlations {
 		counts[corr.Type]++
 	}
-	order := []string{"work_item", "service", "infra_resource", "infra_reference", "deployment", "dependency"}
+	order := []string{"catalog_entity", "owner", "system", "service", "database", "data_model", "api_schema", "infra_resource", "infra_reference", "deployment", "dependency", "work_item"}
 	out := make([]string, 0, len(order))
 	for _, kind := range order {
 		if counts[kind] > 0 {
@@ -1766,7 +2453,7 @@ func dependencyFindings(graph CodeGraph) []string {
 		counts[edge.Type]++
 	}
 	out := make([]string, 0, 4)
-	for _, typ := range []string{"pattern-flow", "example", "imports", "language-file"} {
+	for _, typ := range []string{"pattern-flow", "example", "imports", "package-file", "language-file"} {
 		if counts[typ] > 0 {
 			out = append(out, fmt.Sprintf("%s: %d", typ, counts[typ]))
 		}
