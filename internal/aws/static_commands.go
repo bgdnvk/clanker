@@ -26,11 +26,14 @@ Supported resources:
     ec2, instances       - EC2 instances
     ecs, clusters        - ECS clusters and services
     batch                - AWS Batch jobs
+    app-runner           - App Runner services
     asg                  - Auto Scaling Groups
+    launch-templates     - EC2 launch templates
     
   SERVERLESS:
     lambda, lambdas, functions    - Lambda functions
     layers                        - Lambda layers
+    step-functions                - Step Functions state machines
     
   CONTAINER:
     ecr, repositories    - ECR repositories
@@ -45,6 +48,7 @@ Supported resources:
     rds, databases       - RDS instances
     rds-clusters         - RDS Aurora clusters
     dynamodb, tables     - DynamoDB tables
+    elasticache          - ElastiCache clusters
     
   NETWORKING:
     vpcs                 - VPCs
@@ -57,6 +61,10 @@ Supported resources:
     sqs, queues          - SQS queues
     sns, topics          - SNS topics
     eventbridge, events  - EventBridge rules
+    eventbridge-buses    - EventBridge event buses
+    eventbridge-schedules - EventBridge Scheduler schedules
+    eventbridge-pipes    - EventBridge Pipes
+    kinesis              - Kinesis streams
     
   MONITORING:
     logs, cloudwatch     - CloudWatch log groups
@@ -64,16 +72,24 @@ Supported resources:
     
   SECURITY:
     iam-roles            - IAM roles
-		iam-groups           - IAM groups
+    iam-groups           - IAM groups
     iam-users            - IAM users
     kms, keys            - KMS keys
     certificates, acm    - ACM certificates
     secrets              - Secrets Manager secrets
+    ssm-parameters       - SSM parameters
+    waf-webacls          - WAFv2 web ACLs
+    verified-permissions - Verified Permissions policy stores
+    security-lake        - Security Lake data lakes
     
   DEVOPS:
     codebuild            - CodeBuild projects
     codepipeline         - CodePipeline pipelines
     codecommit           - CodeCommit repositories
+    cloudformation       - CloudFormation stacks
+    glue-jobs            - Glue jobs
+    glue-databases       - Glue Data Catalog databases
+    emr-clusters         - EMR clusters
     
   AI/ML:
     bedrock-models       - Bedrock foundation models
@@ -81,6 +97,8 @@ Supported resources:
     bedrock-agents       - Bedrock agents
     bedrock-kb, knowledge-bases - Bedrock knowledge bases
     bedrock-guardrails   - Bedrock guardrails
+    qbusiness            - Amazon Q Business applications
+    datazone             - Amazon DataZone domains
     sagemaker-endpoints  - SageMaker endpoints
     sagemaker-models     - SageMaker models
     sagemaker-jobs       - SageMaker training jobs
@@ -90,6 +108,10 @@ Supported resources:
     rekognition-collections - Rekognition collections
     
   OTHER:
+    all-services         - Read-only service availability checks
+    resources            - AWS Resource Explorer resources
+    tagged-resources     - Resource Groups Tagging API resources
+    budgets              - AWS Budgets
     api-gateways         - API Gateway APIs
     cloudfront           - CloudFront distributions
     route53              - Route53 hosted zones`,
@@ -201,8 +223,20 @@ Supported resources:
 					return err
 				}
 				fmt.Print(result)
+			case "app-runner", "apprunner":
+				result, err := executeOp("list_apprunner_services")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
 			case "asg":
 				result, err := executeOp("list_auto_scaling_groups")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "launch-templates":
+				result, err := executeOp("list_launch_templates")
 				if err != nil {
 					return err
 				}
@@ -217,6 +251,12 @@ Supported resources:
 				fmt.Print(info)
 			case "layers":
 				result, err := executeOp("list_lambda_layers")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "step-functions", "stepfunctions", "sfns":
+				result, err := executeOp("list_step_functions")
 				if err != nil {
 					return err
 				}
@@ -275,6 +315,12 @@ Supported resources:
 					return err
 				}
 				fmt.Print(result)
+			case "elasticache":
+				result, err := executeOp("list_elasticache_clusters")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
 
 			// NETWORKING
 			case "vpcs":
@@ -323,6 +369,30 @@ Supported resources:
 				fmt.Print(result)
 			case "eventbridge", "events":
 				result, err := executeOp("list_eventbridge_rules")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "eventbridge-buses", "event-buses":
+				result, err := executeOp("list_eventbridge_buses")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "eventbridge-schedules", "scheduler", "schedules":
+				result, err := executeOp("list_eventbridge_schedules")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "eventbridge-pipes", "pipes":
+				result, err := executeOp("list_eventbridge_pipes")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "kinesis", "streams":
+				result, err := executeOp("list_kinesis_streams")
 				if err != nil {
 					return err
 				}
@@ -379,6 +449,30 @@ Supported resources:
 					return err
 				}
 				fmt.Print(result)
+			case "ssm-parameters", "parameters":
+				result, err := executeOp("list_ssm_parameters")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "waf-webacls", "waf", "wafv2":
+				result, err := executeOp("list_waf_webacls")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "verified-permissions", "verifiedpermissions":
+				result, err := executeOp("list_verifiedpermissions_policy_stores")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "security-lake", "securitylake":
+				result, err := executeOp("list_securitylake_data_lakes")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
 
 			// DEVOPS
 			case "codebuild":
@@ -395,6 +489,30 @@ Supported resources:
 				fmt.Print(result)
 			case "codecommit":
 				result, err := executeOp("list_codecommit_repositories")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "cloudformation", "stacks":
+				result, err := executeOp("list_cloudformation_stacks")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "glue-jobs":
+				result, err := executeOp("list_glue_jobs")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "glue-databases", "glue-catalog":
+				result, err := executeOp("list_glue_databases")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "emr-clusters", "emr":
+				result, err := executeOp("list_emr_clusters")
 				if err != nil {
 					return err
 				}
@@ -427,6 +545,18 @@ Supported resources:
 				fmt.Print(result)
 			case "bedrock-guardrails":
 				result, err := executeOp("list_bedrock_guardrails")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "qbusiness", "q-business", "amazon-q":
+				result, err := executeOp("list_qbusiness_applications")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "datazone":
+				result, err := executeOp("list_datazone_domains")
 				if err != nil {
 					return err
 				}
@@ -475,6 +605,30 @@ Supported resources:
 				fmt.Print(result)
 
 			// OTHER
+			case "all-services", "service-checks":
+				result, err := executeOp("check_all_services_parallel")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "resources", "resource-explorer":
+				result, err := executeOp("search_resource_explorer")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "tagged-resources", "resource-tags":
+				result, err := executeOp("list_tagged_resources")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "budgets":
+				result, err := executeOp("list_budgets")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
 			case "api-gateways":
 				result, err := executeOp("list_api_gateways")
 				if err != nil {
