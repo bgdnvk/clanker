@@ -1358,6 +1358,9 @@ func (c *Client) askClankerCloudMessages(ctx context.Context, messages []Message
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		applyModelProviderAuthHeader(httpReq, token)
+		if strings.EqualFold(strings.TrimSpace(os.Getenv("CLANKER_CLOUD_CLIENT")), "desktop-app") {
+			httpReq.Header.Set("X-Clanker-Cloud-Client", "desktop-app")
+		}
 
 		resp, doErr := client.Do(httpReq)
 		if doErr != nil {
