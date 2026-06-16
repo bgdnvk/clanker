@@ -32,6 +32,10 @@ ai:
       api_key_env: GEMINI_API_KEY
     github-models:
       model: openai/gpt-5.4
+    clanker-cloud:
+      model: gemini-3.5-flash
+      base_url: https://clanker-auth-gw-zc0ce3o.uk.gateway.dev/v1/llm
+      api_key_env: CLANKER_CLOUD_AUTH_TOKEN
     deepseek:
       model: deepseek-chat
       api_key_env: DEEPSEEK_API_KEY
@@ -57,7 +61,7 @@ ai:
 		t.Fatal("expected 'ai.providers' key in parsed config")
 	}
 
-	expectedProviders := []string{"bedrock", "openai", "anthropic", "gemini", "gemini-api", "github-models", "deepseek", "cohere", "minimax"}
+	expectedProviders := []string{"bedrock", "openai", "anthropic", "gemini", "gemini-api", "github-models", "clanker-cloud", "deepseek", "cohere", "minimax"}
 	for _, name := range expectedProviders {
 		if _, exists := providers[name]; !exists {
 			t.Errorf("expected provider %q in config template", name)

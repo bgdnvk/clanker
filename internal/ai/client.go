@@ -104,6 +104,8 @@ const (
 	defaultAIRetryMaxDelay     = 16 * time.Second
 	defaultAIHTTPClientTimeout = 120 * time.Second
 	defaultOpenAIBaseURL       = "https://api.openai.com/v1"
+	defaultClankerCloudLLMURL  = "https://clanker-auth-gw-zc0ce3o.uk.gateway.dev/v1/llm"
+	defaultClankerCloudModel   = "gemini-3.5-flash"
 )
 
 var (
@@ -187,6 +189,29 @@ func normalizeLocalModelInferenceURL(raw string) string {
 		parsed.Path = "/v1"
 	}
 
+	return strings.TrimRight(parsed.String(), "/")
+}
+
+func normalizeClankerCloudLLMBaseURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		trimmed = defaultClankerCloudLLMURL
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return strings.TrimRight(trimmed, "/")
+	}
+
+	path := strings.TrimRight(parsed.Path, "/")
+	switch path {
+	case "", "/":
+		parsed.Path = "/v1/llm"
+	case "/v1":
+		parsed.Path = "/v1/llm"
+	default:
+		parsed.Path = path
+	}
 	return strings.TrimRight(parsed.String(), "/")
 }
 
@@ -450,6 +475,27 @@ func resolveEnvVarKeyPointer(apiKey string) string {
 	return apiKey
 }
 
+func resolveClankerCloudLLMToken(apiKey string) string {
+	if key := resolveEnvVarKeyPointer(apiKey); strings.TrimSpace(key) != "" {
+		return key
+	}
+	if key := strings.TrimSpace(viper.GetString("ai.providers.clanker-cloud.api_key")); key != "" {
+		return resolveEnvVarKeyPointer(key)
+	}
+	if envName := strings.TrimSpace(viper.GetString("ai.providers.clanker-cloud.api_key_env")); envName != "" {
+		if key := strings.TrimSpace(os.Getenv(envName)); key != "" {
+			return key
+		}
+	}
+	if key := strings.TrimSpace(os.Getenv("CLANKER_CLOUD_AUTH_TOKEN")); key != "" {
+		return key
+	}
+	if key := strings.TrimSpace(os.Getenv("CLANKER_CLOUD_LLM_TOKEN")); key != "" {
+		return key
+	}
+	return ""
+}
+
 func NewClient(provider, apiKey string, debug bool, aiProfile ...string) *Client {
 	client := &Client{
 		provider: provider,
@@ -507,6 +553,12 @@ func NewClient(provider, apiKey string, debug bool, aiProfile ...string) *Client
 		}
 	case "openai":
 		client.baseURL = defaultOpenAIBaseURL
+	case "clanker-cloud":
+		client.apiKey = resolveClankerCloudLLMToken(client.apiKey)
+		client.baseURL = normalizeClankerCloudLLMBaseURL(firstNonEmptyString(
+			os.Getenv("CLANKER_CLOUD_LLM_BASE_URL"),
+			viper.GetString("ai.providers.clanker-cloud.base_url"),
+		))
 	case "github-models":
 		client.baseURL = "https://models.github.ai"
 	case "anthropic":
@@ -661,6 +713,8 @@ func (c *Client) askWithDynamicAnalysis(ctx context.Context, question, awsContex
 		analysisResponse, err = c.askBedrock(ctx, analysisPrompt)
 	case "openai":
 		analysisResponse, err = c.askOpenAI(ctx, analysisPrompt)
+	case "clanker-cloud":
+		analysisResponse, err = c.askClankerCloud(ctx, analysisPrompt)
 	case "github-models":
 		analysisResponse, err = c.askGitHubModels(ctx, analysisPrompt)
 	case "anthropic":
@@ -831,6 +885,8 @@ Please provide a comprehensive answer based on the live data above.`, question, 
 		return c.askBedrock(ctx, finalPrompt)
 	case "openai":
 		return c.askOpenAI(ctx, finalPrompt)
+	case "clanker-cloud":
+		return c.askClankerCloud(ctx, finalPrompt)
 	case "github-models":
 		return c.askGitHubModels(ctx, finalPrompt)
 	case "anthropic":
@@ -903,11 +959,22 @@ func (c *Client) AskOriginal(ctx context.Context, question, awsContext, codeCont
 		return c.askMiniMax(ctx, prompt)
 	case "openai":
 		return c.askOpenAI(ctx, prompt)
+	case "clanker-cloud":
+		return c.askClankerCloud(ctx, prompt)
 	default:
 		// Default to Bedrock (currently uses AWS CLI)
 		// AWS SDK fallback was: if c.bedrockClient != nil { return c.askBedrock(ctx, prompt) }
 		return c.askBedrock(ctx, prompt)
 	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (c *Client) buildPrompt(question, awsContext, codeContext, githubContext string) string {
@@ -1238,6 +1305,101 @@ func (c *Client) askOpenAI(ctx context.Context, prompt string) (string, error) {
 		return "", fmt.Errorf("no response from AI")
 	}
 
+	return response.Choices[0].Message.Content, nil
+}
+
+func (c *Client) clankerCloudModel() string {
+	if model := strings.TrimSpace(os.Getenv("CLANKER_CLOUD_LLM_MODEL")); model != "" {
+		return model
+	}
+	if model := strings.TrimSpace(viper.GetString("ai.providers.clanker-cloud.model")); model != "" {
+		return model
+	}
+	return defaultClankerCloudModel
+}
+
+func (c *Client) askClankerCloud(ctx context.Context, prompt string) (string, error) {
+	return c.askClankerCloudMessages(ctx, []Message{{
+		Role:    "user",
+		Content: sanitizeASCII(prompt),
+	}})
+}
+
+func (c *Client) askClankerCloudMessages(ctx context.Context, messages []Message) (string, error) {
+	token := resolveClankerCloudLLMToken(c.apiKey)
+	if strings.TrimSpace(token) == "" {
+		return "", fmt.Errorf("Clanker Cloud auth token not configured")
+	}
+	baseURL := normalizeClankerCloudLLMBaseURL(firstNonEmptyString(
+		c.baseURL,
+		os.Getenv("CLANKER_CLOUD_LLM_BASE_URL"),
+		viper.GetString("ai.providers.clanker-cloud.base_url"),
+	))
+	model := c.clankerCloudModel()
+	reqBody := OpenAIRequest{
+		Model:    model,
+		Messages: messages,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	endpoint := strings.TrimRight(baseURL, "/") + "/chat/completions"
+	emitProgressTrace("provider", fmt.Sprintf("Calling Clanker Cloud LLM with model %s.", model))
+
+	client := &http.Client{Timeout: aiHTTPClientTimeout}
+	var body []byte
+	for attempt := 1; attempt <= aiRetryMaxAttempts; attempt++ {
+		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBuffer(jsonData))
+		if reqErr != nil {
+			return "", fmt.Errorf("failed to create request: %w", reqErr)
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		applyModelProviderAuthHeader(httpReq, token)
+
+		resp, doErr := client.Do(httpReq)
+		if doErr != nil {
+			if attempt == aiRetryMaxAttempts || !isRetryableProviderErrorText(doErr.Error()) {
+				return "", fmt.Errorf("failed to send request: %w", doErr)
+			}
+			if wErr := waitForAIRetry(ctx, aiRetryDelay(attempt-1)); wErr != nil {
+				return "", wErr
+			}
+			continue
+		}
+
+		body, err = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return "", fmt.Errorf("failed to read response: %w", err)
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+
+		if attempt == aiRetryMaxAttempts || !(isRetryableHTTPStatus(resp.StatusCode) || isRetryableProviderErrorText(string(body))) {
+			return "", fmt.Errorf("Clanker Cloud LLM request failed with status %d: %s", resp.StatusCode, string(body))
+		}
+
+		delay := aiRetryDelay(attempt - 1)
+		if ra, ok := retryAfterDelay(resp.Header); ok {
+			delay = ra
+		}
+		if wErr := waitForAIRetry(ctx, delay); wErr != nil {
+			return "", wErr
+		}
+	}
+
+	var response OpenAIResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+	if len(response.Choices) == 0 {
+		return "", fmt.Errorf("no response from Clanker Cloud LLM")
+	}
 	return response.Choices[0].Message.Content, nil
 }
 
@@ -1864,6 +2026,8 @@ func (c *Client) AskPrompt(ctx context.Context, prompt string) (string, error) {
 		return c.askBedrock(ctx, prompt)
 	case "openai":
 		return c.askOpenAI(ctx, prompt)
+	case "clanker-cloud":
+		return c.askClankerCloud(ctx, prompt)
 	case "github-models":
 		return c.askGitHubModels(ctx, prompt)
 	case "anthropic":
@@ -1895,6 +2059,8 @@ func (c *Client) AskWithContext(ctx context.Context, conv *ConversationContext, 
 		response, err = c.askAnthropicWithHistory(ctx, conv)
 	case "openai":
 		response, err = c.askOpenAIWithHistory(ctx, conv)
+	case "clanker-cloud":
+		response, err = c.askClankerCloudWithHistory(ctx, conv)
 	case "github-models":
 		response, err = c.askGitHubModelsWithHistory(ctx, conv)
 	case "cohere":
@@ -1915,6 +2081,15 @@ func (c *Client) AskWithContext(ctx context.Context, conv *ConversationContext, 
 	conv.AddAssistantMessage(response)
 
 	return response, nil
+}
+
+func (c *Client) askClankerCloudWithHistory(ctx context.Context, conv *ConversationContext) (string, error) {
+	messages := make([]Message, 0, len(conv.Messages)+1)
+	if conv.SystemPrompt != "" {
+		messages = append(messages, Message{Role: "system", Content: conv.SystemPrompt})
+	}
+	messages = append(messages, conv.Messages...)
+	return c.askClankerCloudMessages(ctx, messages)
 }
 
 // askBedrockWithHistory sends a multi-turn request to Bedrock
@@ -2748,6 +2923,8 @@ Take your time to thoroughly analyze the data. Think extremely hard about what t
 		response, err = c.askBedrock(ctx, finalPrompt)
 	case "openai":
 		response, err = c.askOpenAI(ctx, finalPrompt)
+	case "clanker-cloud":
+		response, err = c.askClankerCloud(ctx, finalPrompt)
 	case "github-models":
 		response, err = c.askGitHubModels(ctx, finalPrompt)
 	case "anthropic":
@@ -2940,6 +3117,8 @@ func (c *Client) dispatchLLM(ctx context.Context, prompt string) (string, error)
 		return c.askBedrock(ctx, prompt)
 	case "openai":
 		return c.askOpenAI(ctx, prompt)
+	case "clanker-cloud":
+		return c.askClankerCloud(ctx, prompt)
 	case "github-models":
 		return c.askGitHubModels(ctx, prompt)
 	case "anthropic":
