@@ -1357,7 +1357,7 @@ func (c *Client) askClankerCloudMessages(ctx context.Context, messages []Message
 			return "", fmt.Errorf("failed to create request: %w", reqErr)
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
-		applyModelProviderAuthHeader(httpReq, token)
+		httpReq.Header.Set("X-API-Key", strings.TrimSpace(token))
 		if strings.EqualFold(strings.TrimSpace(os.Getenv("CLANKER_CLOUD_CLIENT")), "desktop-app") {
 			httpReq.Header.Set("X-Clanker-Cloud-Client", "desktop-app")
 		}
