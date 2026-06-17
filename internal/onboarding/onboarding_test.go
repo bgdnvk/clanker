@@ -25,6 +25,12 @@ func TestScanIncludesOfficialAuthGuides(t *testing.T) {
 	if !strings.Contains(result.AgentInstructions, "official docs and token URLs") {
 		t.Fatalf("agent instructions do not enforce official auth sources:\n%s", result.AgentInstructions)
 	}
+	if !strings.Contains(result.AgentInstructions, "clanker_cloud_install_setup_dependencies") {
+		t.Fatalf("agent instructions do not tell MCP agents to perform dependency install:\n%s", result.AgentInstructions)
+	}
+	if !strings.Contains(result.AgentInstructions, "wait for it before chat") {
+		t.Fatalf("agent instructions do not require waiting for scan before app use:\n%s", result.AgentInstructions)
+	}
 }
 
 func TestGuidesPreferOfficialVendorDocs(t *testing.T) {

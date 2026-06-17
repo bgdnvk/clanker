@@ -64,9 +64,9 @@ clanker update --channel main
 
 ```bash
 clanker onboarding scan
-clanker onboarding scan --provider aws,gcp,azure --format json
-clanker onboarding install --dry-run --provider aws,gcp,azure
-clanker onboarding install --yes aws gcloud az
+clanker onboarding scan --provider aws,gcp,azure,kubernetes,flyio,linear,notion --format json
+clanker onboarding install --dry-run --provider aws,gcp,azure,kubernetes,flyio
+clanker onboarding install --yes aws gcloud az kubectl flyctl
 ```
 
 `clanker onboarding scan` detects local credentials and missing provider CLIs,
@@ -74,7 +74,10 @@ then returns official install docs, auth commands, and token/account URLs for
 users and agents. Install only the tools needed for selected or detected
 providers. Examples: AWS uses the official AWS CLI installer and local profiles,
 GCP uses the official Google Cloud CLI plus Application Default Credentials, and
-Azure uses the official Azure CLI sign-in flow.
+Azure uses the official Azure CLI sign-in flow. Agents that have been asked to
+install or use Clanker Cloud should run the install step, rerun the scan, then
+walk any remaining browser login, SSO, sudo, or official API-token step with the
+user.
 
 ## Config
 

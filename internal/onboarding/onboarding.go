@@ -435,8 +435,9 @@ func BuildAgentInstructions(providers []ProviderStatus, missing []ToolStatus, au
 	b.WriteString("Clanker Cloud onboarding task:\n")
 	b.WriteString("1. Run `clanker onboarding scan --format json` on this machine.\n")
 	b.WriteString("2. Ask the user which cloud providers they want Clanker Cloud to manage if no provider is detected or selected.\n")
-	b.WriteString("3. For selected or detected providers, install only the missing provider CLIs with `clanker onboarding install --yes <tool>`.\n")
-	b.WriteString("4. After installation, run `clanker onboarding scan --format json` again and help the user authenticate each provider CLI using only the official docs and token URLs from `authGuides`.\n")
+	b.WriteString("3. If the user asked you to install or use Clanker Cloud, perform the install step instead of only reporting missing tools. In Clanker Cloud MCP, call `clanker_cloud_install_setup_dependencies` with `dependencySummary.recommendedMissingTools`; otherwise run `clanker onboarding install --yes <tool>` for selected or detected providers only.\n")
+	b.WriteString("4. After installation, run `clanker onboarding scan --format json` again. If a tool still requires browser login, SSO, sudo, or an API token, tell the user exactly what you need and use only the official docs and token URLs from `authGuides`.\n")
+	b.WriteString("5. Once auth is configured, start the Clanker Cloud infrastructure scan and wait for it before chat, Kubernetes, research, or security work.\n")
 	if len(missing) > 0 {
 		ids := make([]string, 0, len(missing))
 		for _, tool := range missing {

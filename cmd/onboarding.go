@@ -42,8 +42,9 @@ var onboardingInstallCmd = &cobra.Command{
 	Long: `Install provider CLIs using allowlisted platform commands.
 
 Pass explicit tools such as aws, gcloud, az, wrangler, doctl, hcloud, kubectl,
-gh, terraform, opentofu, or docker. If no tools are passed, Clanker installs
-the missing tools for detected providers or providers named with --provider.`,
+gh, railway, supabase, vercel, flyctl, terraform, opentofu, or docker. If no
+tools are passed, Clanker installs the missing tools for detected providers or
+providers named with --provider.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		format, _ := cmd.Flags().GetString("format")
 		providers, _ := cmd.Flags().GetStringSlice("provider")
