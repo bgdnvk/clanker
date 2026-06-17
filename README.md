@@ -60,11 +60,24 @@ clanker update --channel main
 ### Requirements
 
 - Go
-- AWS CLI v2 (recommended; v1 breaks `--no-cli-pager`)
+- Provider CLIs only for the providers you want Clanker to inspect or manage
 
 ```bash
-brew install awscli
+clanker onboarding scan
+clanker onboarding scan --provider aws,gcp,azure,kubernetes,flyio,linear,notion --format json
+clanker onboarding install --dry-run --provider aws,gcp,azure,kubernetes,flyio
+clanker onboarding install --yes aws gcloud az kubectl flyctl
 ```
+
+`clanker onboarding scan` detects local credentials and missing provider CLIs,
+then returns official install docs, auth commands, and token/account URLs for
+users and agents. Install only the tools needed for selected or detected
+providers. Examples: AWS uses the official AWS CLI installer and local profiles,
+GCP uses the official Google Cloud CLI plus Application Default Credentials, and
+Azure uses the official Azure CLI sign-in flow. Agents that have been asked to
+install or use Clanker Cloud should run the install step, rerun the scan, then
+walk any remaining browser login, SSO, sudo, or official API-token step with the
+user.
 
 ## Config
 
@@ -99,9 +112,12 @@ If you run without `~/.clanker.yaml`:
 
 Clanker uses your local AWS CLI profiles (not raw access keys in the clanker config).
 
-Create a profile:
+Create a profile with the official AWS CLI. Prefer SSO where your AWS account
+supports it; use access keys only when your account requires them.
 
 ```bash
+aws configure sso
+aws sso login --profile clankercloud-tekbog
 aws configure --profile clankercloud-tekbog | cat
 aws sts get-caller-identity --profile clankercloud-tekbog | cat
 ```
