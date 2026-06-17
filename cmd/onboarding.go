@@ -149,6 +149,7 @@ func printOnboardingScan(result onboarding.ScanResult) {
 		}
 		fmt.Printf("  clanker onboarding install --yes %s\n", strings.Join(ids, " "))
 	}
+	printOnboardingAuthGuidance(result)
 }
 
 func printOnboardingInstall(result onboarding.InstallResult) {
@@ -171,6 +172,43 @@ func printOnboardingInstall(result onboarding.InstallResult) {
 			fmt.Printf("%s: installed\n", tool.Tool)
 		} else {
 			fmt.Printf("%s: commands finished, but %s was not found in PATH yet\n", tool.Tool, tool.Binary)
+		}
+	}
+}
+
+func printOnboardingAuthGuidance(result onboarding.ScanResult) {
+	rows := make([]onboarding.AuthGuide, 0)
+	seen := map[string]bool{}
+	for _, provider := range result.Providers {
+		if !provider.Wanted && !provider.Detected && !provider.Configured {
+			continue
+		}
+		guide, ok := result.AuthGuides[provider.ID]
+		if !ok || seen[guide.ID] {
+			continue
+		}
+		seen[guide.ID] = true
+		rows = append(rows, guide)
+	}
+	if len(rows) == 0 {
+		return
+	}
+	fmt.Println("\nAuthenticate next:")
+	for _, guide := range rows {
+		command := ""
+		if len(guide.LoginCommands) > 0 {
+			command = guide.LoginCommands[0]
+		}
+		if command != "" {
+			fmt.Printf("- %s: %s\n", guide.Provider, command)
+		} else {
+			fmt.Printf("- %s: %s\n", guide.Provider, guide.Purpose)
+		}
+		if guide.DocsURL != "" {
+			fmt.Printf("  docs: %s\n", guide.DocsURL)
+		}
+		if guide.TokenURL != "" {
+			fmt.Printf("  token/account: %s\n", guide.TokenURL)
 		}
 	}
 }
