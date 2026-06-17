@@ -357,6 +357,7 @@ func newClankerMCPServer() *mcptransport.MCPServer {
 		}),
 	)
 
+	registerCloudProviderMCPTools(server)
 	registerSentryMCPTools(server)
 	registerTencentMCPTools(server)
 	registerLinearMCPTools(server)

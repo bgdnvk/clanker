@@ -276,6 +276,57 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 		context.WriteString("\n\n")
 	}
 
+	for _, section := range []struct {
+		name string
+		op   string
+		keys []string
+	}{
+		{name: "App Runner Services", op: "list_apprunner_services", keys: []string{"app runner", "apprunner"}},
+		{name: "AWS Resource Explorer", op: "search_resource_explorer", keys: []string{"resource explorer", "all resources", "inventory", "what resources"}},
+		{name: "Tagged Resources", op: "list_tagged_resources", keys: []string{"tagged resources", "resource tags", "tags"}},
+		{name: "Service Checks", op: "check_all_services_parallel", keys: []string{"all services", "service coverage", "service checks", "enabled services"}},
+		{name: "Lambda Layers", op: "list_lambda_layers", keys: []string{"lambda layer", "lambda layers"}},
+		{name: "Step Functions", op: "list_step_functions", keys: []string{"step function", "step functions", "state machine", "state machines"}},
+		{name: "EventBridge Schedules", op: "list_eventbridge_schedules", keys: []string{"eventbridge scheduler", "scheduler", "schedule", "schedules"}},
+		{name: "EventBridge Pipes", op: "list_eventbridge_pipes", keys: []string{"eventbridge pipe", "eventbridge pipes", "pipes"}},
+		{name: "EventBridge Event Buses", op: "list_eventbridge_buses", keys: []string{"event bus", "event buses"}},
+		{name: "Kinesis Streams", op: "list_kinesis_streams", keys: []string{"kinesis", "stream", "streams"}},
+		{name: "CloudFormation Stacks", op: "list_cloudformation_stacks", keys: []string{"cloudformation", "cloud formation", "stack", "stacks"}},
+		{name: "Glue Jobs", op: "list_glue_jobs", keys: []string{"glue job", "glue jobs"}},
+		{name: "Glue Databases", op: "list_glue_databases", keys: []string{"glue database", "glue databases", "data catalog"}},
+		{name: "EMR Clusters", op: "list_emr_clusters", keys: []string{"emr", "emr cluster", "emr clusters"}},
+		{name: "ElastiCache Clusters", op: "list_elasticache_clusters", keys: []string{"elasticache", "cache cluster", "redis", "memcached"}},
+		{name: "Bedrock Foundation Models", op: "list_bedrock_foundation_models", keys: []string{"bedrock", "foundation model", "foundation models"}},
+		{name: "Bedrock Agents", op: "list_bedrock_agents", keys: []string{"bedrock agent", "bedrock agents", "agentcore"}},
+		{name: "Bedrock Knowledge Bases", op: "list_bedrock_knowledge_bases", keys: []string{"bedrock knowledge", "knowledge base", "knowledge bases", "rag"}},
+		{name: "Bedrock Guardrails", op: "list_bedrock_guardrails", keys: []string{"bedrock guardrail", "bedrock guardrails", "guardrail", "guardrails"}},
+		{name: "SageMaker Endpoints", op: "list_sagemaker_endpoints", keys: []string{"sagemaker", "sage maker", "model endpoint", "model endpoints"}},
+		{name: "Amazon Q Business Applications", op: "list_qbusiness_applications", keys: []string{"qbusiness", "q business", "amazon q"}},
+		{name: "Amazon DataZone Domains", op: "list_datazone_domains", keys: []string{"datazone", "data zone"}},
+		{name: "Verified Permissions Policy Stores", op: "list_verifiedpermissions_policy_stores", keys: []string{"verified permissions", "verifiedpermissions", "policy store", "cedar"}},
+		{name: "Security Lake Data Lakes", op: "list_securitylake_data_lakes", keys: []string{"security lake", "securitylake"}},
+	} {
+		matched := false
+		for _, key := range section.keys {
+			if strings.Contains(questionLower, key) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		result, err := c.executeOperation(ctx, section.op, nil)
+		if err != nil {
+			context.WriteString(fmt.Sprintf("%s:\nNote: %v\n\n", section.name, err))
+			continue
+		}
+		context.WriteString(section.name)
+		context.WriteString(":\n")
+		context.WriteString(result)
+		context.WriteString("\n\n")
+	}
+
 	if strings.Contains(questionLower, "iam") || strings.Contains(questionLower, "role") {
 		rolesInfo, err := c.getIAMRolesInfo(ctx)
 		if err != nil {

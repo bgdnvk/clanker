@@ -67,7 +67,7 @@ ai:
     openai:
       model: gpt-5
       api_key_env: OPENAI_API_KEY
-			# local_model_inference_url: http://127.0.0.1:8080/v1
+      # local_model_inference_url: http://127.0.0.1:8080/v1
 
     anthropic:
       model: claude-opus-4-6
@@ -82,6 +82,11 @@ ai:
 
     github-models:
       model: openai/gpt-5.4
+
+    clanker-cloud:
+      model: gemini-3.5-flash
+      base_url: https://clanker-auth-gw-zc0ce3o.uk.gateway.dev/v1/llm
+      api_key_env: CLANKER_CLOUD_AUTH_TOKEN
 
     deepseek:
       model: deepseek-chat

@@ -24,28 +24,40 @@ func CreateGCPCommands() *cobra.Command {
 		Long: `List GCP resources of a specific type.
 
 Supported resources:
+  services, enabled-services - Enabled Google Cloud services/APIs
+  available-services    - Services/APIs available to enable
+  resources             - Cloud Asset inventory resources (top 200)
   iam, service-accounts - IAM service accounts
   iam-roles             - IAM roles
   cloudrun, run         - Cloud Run services
   run-jobs              - Cloud Run jobs
-	firestore             - Firestore databases
-	firebase-apps         - Firebase apps
+  run-revisions         - Cloud Run revisions
+  run-worker-pools      - Cloud Run worker pools
+  run-domain-mappings   - Cloud Run domain mappings
+  run-multi-region      - Cloud Run multi-region services
+  workflows             - Workflows
+  batch-jobs            - Cloud Batch jobs
+  vertex-endpoints      - Vertex AI endpoints
+  vertex-indexes        - Vertex AI vector indexes
+  firestore             - Firestore databases
+  firebase-apps         - Firebase apps
   compute, instances    - Compute Engine instances
   instance-groups       - Compute instance groups
   networks              - VPC networks
   subnets               - VPC subnets
   firewall              - Firewall rules
   load-balancers        - Forwarding rules (load balancers)
-	lb-forwarding-rules    - Forwarding rules (global + regional)
-	lb-target-proxies      - Target HTTP/HTTPS proxies
-	lb-url-maps            - URL maps
-	lb-backend-services    - Backend services
-	lb-health-checks       - Health checks
-	lb-ssl-certs           - SSL certificates
+  lb-forwarding-rules   - Forwarding rules (global + regional)
+  lb-target-proxies     - Target HTTP/HTTPS proxies
+  lb-url-maps           - URL maps
+  lb-backend-services   - Backend services
+  lb-health-checks      - Health checks
+  lb-ssl-certs          - SSL certificates
   armor                 - Cloud Armor security policies
   dns                   - Cloud DNS managed zones
   gke, clusters         - GKE clusters
   cloudsql, sql         - Cloud SQL instances
+  alloydb               - AlloyDB clusters
   bigquery              - BigQuery datasets
   spanner               - Spanner instances
   bigtable              - Bigtable instances
@@ -53,24 +65,25 @@ Supported resources:
   memcache              - Memorystore (Memcached)
   gcs, buckets          - Cloud Storage buckets
   artifacts             - Artifact Registry repositories
+  composer              - Cloud Composer environments
   functions             - Cloud Functions
-	functions-gen2        - Cloud Functions (Gen2)
+  functions-gen2        - Cloud Functions (Gen2)
   pubsub, topics        - Pub/Sub topics
   subscriptions         - Pub/Sub subscriptions
   tasks                 - Cloud Tasks queues
   scheduler             - Cloud Scheduler jobs
   secrets               - Secret Manager secrets
-	secret-versions        - Secret Manager secret versions (last 5)
-	kms                   - Cloud KMS keyrings
+  secret-versions       - Secret Manager secret versions (last 5)
+  kms                   - Cloud KMS keyrings
   build-triggers        - Cloud Build triggers
   deploy-pipelines      - Cloud Deploy delivery pipelines
   logging-sinks         - Cloud Logging sinks
   alert-policies        - Cloud Monitoring alert policies
-	artifact-packages      - Artifact Registry packages (per repo, limited)
-	artifact-images        - Artifact Registry docker images (per repo, limited)
-	dns-record-sets        - Cloud DNS record sets (per zone)
-	eventarc-triggers      - Eventarc triggers (multi-region)
-	api-gateway           - API Gateway APIs`,
+  artifact-packages     - Artifact Registry packages (per repo, limited)
+  artifact-images       - Artifact Registry docker images (per repo, limited)
+  dns-record-sets       - Cloud DNS record sets (per zone)
+  eventarc-triggers     - Eventarc triggers (multi-region)
+  api-gateway           - API Gateway APIs`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resourceType := strings.ToLower(args[0])
@@ -99,8 +112,32 @@ Supported resources:
 				"us-central1", "us-east1", "us-east4", "us-west1", "us-west2",
 				"europe-west1", "europe-west2", "asia-east1", "asia-northeast1",
 			}
+			locationOrDefault := func(def string) string {
+				if strings.TrimSpace(location) != "" {
+					return strings.TrimSpace(location)
+				}
+				return def
+			}
 
 			switch resourceType {
+			case "services", "enabled-services", "enabled-apis":
+				result, err := exec("services", "list", "--enabled", "--format", "table(config.name,state)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "available-services", "available-apis":
+				result, err := exec("services", "list", "--available", "--format", "table(config.name,title)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "resources", "asset-resources", "asset-inventory", "cloud-asset":
+				result, err := exec("asset", "search-all-resources", "--scope", "projects/"+projectID, "--limit", "200", "--format", "table(name,assetType,location,project)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
 			case "iam", "service-accounts":
 				result, err := exec("iam", "service-accounts", "list", "--format", "table(email,displayName,disabled)")
 				if err != nil {
@@ -121,6 +158,58 @@ Supported resources:
 				fmt.Print(result)
 			case "run-jobs":
 				result, err := exec("run", "jobs", "list", "--platform", "managed", "--format", "table(name,region,createTime)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "run-revisions":
+				result, err := exec("run", "revisions", "list", "--platform", "managed", "--format", "table(service,revision,region,active)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "run-worker-pools", "worker-pools":
+				result, err := exec("run", "worker-pools", "list", "--format", "table(name,region,createTime)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "run-domain-mappings", "domain-mappings":
+				result, err := exec("run", "domain-mappings", "list", "--platform", "managed", "--format", "table(name,region,routeName)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "run-multi-region", "run-multi-region-services", "multi-region-services":
+				result, err := exec("run", "multi-region-services", "list", "--format", "table(name,regions)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "workflows":
+				loc := locationOrDefault("us-central1")
+				result, err := exec("workflows", "list", "--location", loc, "--format", "table(name,state,revisionId,updateTime)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "batch-jobs", "batch":
+				loc := locationOrDefault("us-central1")
+				result, err := exec("batch", "jobs", "list", "--location", loc, "--format", "table(name,state,createTime)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "vertex-endpoints", "vertex-ai-endpoints", "ai-endpoints":
+				loc := locationOrDefault("us-central1")
+				result, err := exec("ai", "endpoints", "list", "--region", loc, "--format", "table(name,displayName,createTime)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "vertex-indexes", "vertex-vector-indexes", "ai-indexes":
+				loc := locationOrDefault("us-central1")
+				result, err := exec("ai", "indexes", "list", "--region", loc, "--format", "table(name,displayName,createTime)")
 				if err != nil {
 					return err
 				}
@@ -246,6 +335,13 @@ Supported resources:
 					return err
 				}
 				fmt.Print(result)
+			case "alloydb", "alloy-db":
+				loc := locationOrDefault("us-central1")
+				result, err := exec("alloydb", "clusters", "list", "--region", loc, "--format", "table(name,network,clusterType,createTime)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
 			case "bigquery":
 				result, err := exec("bigquery", "datasets", "list", "--format", "table(id,location)")
 				if err != nil {
@@ -284,6 +380,13 @@ Supported resources:
 				fmt.Print(result)
 			case "artifacts":
 				result, err := exec("artifacts", "repositories", "list", "--format", "table(name,format,location)")
+				if err != nil {
+					return err
+				}
+				fmt.Print(result)
+			case "composer", "cloud-composer", "airflow":
+				loc := locationOrDefault("us-central1")
+				result, err := exec("composer", "environments", "list", "--locations", loc, "--format", "table(name,location,state)")
 				if err != nil {
 					return err
 				}

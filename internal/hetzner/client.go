@@ -135,7 +135,12 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 		{name: "Primary IPs", args: []string{"primary-ip", "list", "--output", "json"}, keys: []string{"primary ip", "ip address"}},
 		{name: "SSH Keys", args: []string{"ssh-key", "list", "--output", "json"}, keys: []string{"ssh", "key", "ssh key"}},
 		{name: "Images", args: []string{"image", "list", "--output", "json"}, keys: []string{"image", "snapshot", "backup"}},
+		{name: "ISOs", args: []string{"iso", "list", "--output", "json"}, keys: []string{"iso", "isos", "rescue", "install media"}},
 		{name: "Certificates", args: []string{"certificate", "list", "--output", "json"}, keys: []string{"certificate", "ssl", "tls"}},
+		{name: "Placement Groups", args: []string{"placement-group", "list", "--output", "json"}, keys: []string{"placement group", "placement groups", "anti affinity", "spread"}},
+		{name: "Server Types", args: []string{"server-type", "list", "--output", "json"}, keys: []string{"server type", "server types", "instance type", "flavor"}},
+		{name: "Locations", args: []string{"location", "list", "--output", "json"}, keys: []string{"location", "locations", "region"}},
+		{name: "Datacenters", args: []string{"datacenter", "list", "--output", "json"}, keys: []string{"datacenter", "datacenters", "data center", "data centers"}},
 	}
 
 	defaultSections := map[string]bool{
