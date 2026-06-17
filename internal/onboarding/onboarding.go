@@ -307,6 +307,19 @@ func Guides() map[string]ToolGuide {
 			},
 			DocsURL: "https://vercel.com/docs/cli",
 		},
+		"flyctl": {
+			ID:            "flyctl",
+			Tool:          "flyctl",
+			Binary:        "fly",
+			Providers:     []string{"Fly.io"},
+			VerifyCommand: "fly version",
+			InstallCommands: map[string][]string{
+				"darwin":  {"brew install flyctl"},
+				"linux":   {"curl -L https://fly.io/install.sh | sh"},
+				"windows": {"powershell -NoProfile -ExecutionPolicy Bypass -Command \"iwr https://fly.io/install.ps1 -useb | iex\""},
+			},
+			DocsURL: "https://fly.io/docs/flyctl/install/",
+		},
 	}
 }
 
@@ -563,6 +576,60 @@ func AuthGuides() map[string]AuthGuide {
 			DocsURL:       "https://vercel.com/docs/cli",
 			TokenURL:      "https://vercel.com/docs/rest-api#authentication",
 		},
+		"flyio": {
+			ID:            "flyio",
+			Provider:      "Fly.io",
+			Purpose:       "Use a scoped Fly.io token for REST inventory and install flyctl for deploy, logs, SSH, scale, and secrets operations.",
+			LoginCommands: []string{"fly auth login", "fly auth whoami", "fly tokens create org <org-slug>"},
+			EnvVars:       []string{"FLY_API_TOKEN", "FLY_ACCESS_TOKEN", "FLY_ORG", "FLY_ORG_SLUG"},
+			DocsURL:       "https://fly.io/docs/flyctl/auth/",
+			TokenURL:      "https://fly.io/docs/security/tokens/",
+		},
+		"tencent": {
+			ID:            "tencent",
+			Provider:      "Tencent Cloud",
+			Purpose:       "Create a Tencent Cloud SecretId/SecretKey pair for direct Tencent API access. Prefer sub-user credentials scoped to the services Clanker should inspect.",
+			LoginCommands: []string{},
+			EnvVars:       []string{"TENCENTCLOUD_SECRET_ID", "TENCENTCLOUD_SECRET_KEY", "TENCENTCLOUD_REGION", "TENCENT_SECRET_ID", "TENCENT_SECRET_KEY", "TENCENT_REGION"},
+			DocsURL:       "https://www.tencentcloud.com/document/product/214/1526",
+			TokenURL:      "https://www.tencentcloud.com/document/product/598/32675",
+		},
+		"verda": {
+			ID:            "verda",
+			Provider:      "Verda Cloud",
+			Purpose:       "Create Verda Cloud API client credentials for GPU/AI infrastructure inventory, actions, and security coverage.",
+			LoginCommands: []string{},
+			EnvVars:       []string{"VERDA_CLIENT_ID", "VERDA_CLIENT_SECRET", "VERDA_PROJECT_ID"},
+			DocsURL:       "https://api.verda.com/v1/docs",
+			TokenURL:      "https://console.verda.com/account/api-keys",
+		},
+		"sentry": {
+			ID:            "sentry",
+			Provider:      "Sentry",
+			Purpose:       "Create an official Sentry auth token and provide the org slug for issues, releases, monitors, and alert management.",
+			LoginCommands: []string{},
+			EnvVars:       []string{"SENTRY_AUTH_TOKEN", "SENTRY_ORG", "SENTRY_HOST"},
+			DocsURL:       "https://docs.sentry.io/api/auth/",
+			TokenURL:      "https://docs.sentry.io/api/guides/create-auth-token/",
+		},
+		"linear": {
+			ID:            "linear",
+			Provider:      "Linear",
+			Purpose:       "Create a Linear API key for issue triage, projects, cycles, comments, and project-management actions.",
+			LoginCommands: []string{},
+			EnvVars:       []string{"LINEAR_API_KEY", "LINEAR_WORKSPACE_ID", "LINEAR_TEAM"},
+			DocsURL:       "https://linear.app/developers/graphql",
+			TokenURL:      "https://linear.app/settings/api",
+		},
+		"notion": {
+			ID:            "notion",
+			Provider:      "Notion",
+			Purpose:       "Create a Notion integration token and share the specific pages/databases with the integration before expecting search or write access.",
+			LoginCommands: []string{},
+			EnvVars:       []string{"NOTION_API_KEY", "NOTION_TOKEN", "NOTION_INTEGRATION_TOKEN", "NOTION_DATABASE_ID"},
+			DocsURL:       "https://developers.notion.com/guides/get-started/authorization",
+			TokenURL:      "https://www.notion.so/my-integrations",
+		},
 	}
 }
 
@@ -586,7 +653,11 @@ func scanTools(ctx context.Context) map[string]ToolStatus {
 			AllCommands:     guide.InstallCommands,
 			DocsURL:         guide.DocsURL,
 		}
-		if path, err := exec.LookPath(guide.Binary); err == nil {
+		path, err := exec.LookPath(guide.Binary)
+		if key == "flyctl" && err != nil {
+			path, err = exec.LookPath("flyctl")
+		}
+		if err == nil {
 			status.Installed = true
 			status.Path = path
 			status.Version = detectVersion(ctx, guide)
@@ -737,6 +808,57 @@ func providerGuides() []providerGuide {
 			}
 			return len(notes) > 0, len(notes) > 0, notes
 		}},
+		{ID: "flyio", Name: "Fly.io", RequiredTools: []string{"flyctl"}, Detect: func() (bool, bool, []string) {
+			notes := []string{}
+			if hasAnyEnv("FLY_API_TOKEN", "FLY_ACCESS_TOKEN", "FLY_ORG", "FLY_ORG_SLUG") {
+				notes = append(notes, "fly.io env")
+			}
+			if fileExists(homePath(".fly", "config.yml")) || fileExists(homePath(".fly", "config.yaml")) {
+				notes = append(notes, "fly config")
+			}
+			return len(notes) > 0, len(notes) > 0, notes
+		}},
+		{ID: "tencent", Name: "Tencent Cloud", RequiredTools: []string{}, Detect: func() (bool, bool, []string) {
+			notes := []string{}
+			if hasAnyEnv("TENCENTCLOUD_SECRET_ID", "TENCENTCLOUD_SECRET_KEY", "TENCENT_SECRET_ID", "TENCENT_SECRET_KEY") {
+				notes = append(notes, "tencent env")
+			}
+			return len(notes) > 0, len(notes) > 0, notes
+		}},
+		{ID: "verda", Name: "Verda Cloud", RequiredTools: []string{}, Detect: func() (bool, bool, []string) {
+			notes := []string{}
+			if hasAnyEnv("VERDA_CLIENT_ID", "VERDA_CLIENT_SECRET", "VERDA_PROJECT_ID") {
+				notes = append(notes, "verda env")
+			}
+			if fileExists(homePath(".verda", "credentials")) {
+				notes = append(notes, "verda credentials")
+			}
+			return len(notes) > 0, len(notes) > 0, notes
+		}},
+		{ID: "sentry", Name: "Sentry", RequiredTools: []string{}, Detect: func() (bool, bool, []string) {
+			notes := []string{}
+			if hasAnyEnv("SENTRY_AUTH_TOKEN", "SENTRY_ORG", "SENTRY_HOST") {
+				notes = append(notes, "sentry env")
+			}
+			if fileExists(homePath(".sentryclirc")) {
+				notes = append(notes, "sentry config")
+			}
+			return len(notes) > 0, len(notes) > 0, notes
+		}},
+		{ID: "linear", Name: "Linear", RequiredTools: []string{}, Detect: func() (bool, bool, []string) {
+			notes := []string{}
+			if hasAnyEnv("LINEAR_API_KEY", "LINEAR_WORKSPACE_ID", "LINEAR_TEAM") {
+				notes = append(notes, "linear env")
+			}
+			return len(notes) > 0, len(notes) > 0, notes
+		}},
+		{ID: "notion", Name: "Notion", RequiredTools: []string{}, Detect: func() (bool, bool, []string) {
+			notes := []string{}
+			if hasAnyEnv("NOTION_API_KEY", "NOTION_TOKEN", "NOTION_INTEGRATION_TOKEN", "NOTION_DATABASE_ID") {
+				notes = append(notes, "notion env")
+			}
+			return len(notes) > 0, len(notes) > 0, notes
+		}},
 		{ID: "terraform", Name: "Terraform", RequiredTools: []string{"terraform"}, Detect: func() (bool, bool, []string) {
 			notes := []string{}
 			if fileExists("main.tf") || fileExists("terraform.tfstate") || fileExists(".terraform.lock.hcl") {
@@ -814,6 +936,8 @@ func normalizeToolID(raw string) string {
 		return "vercel"
 	case "github", "github-cli":
 		return "gh"
+	case "fly", "flyio", "fly.io":
+		return "flyctl"
 	default:
 		return value
 	}
@@ -837,6 +961,13 @@ func detectVersion(ctx context.Context, guide ToolGuide) string {
 	parts := strings.Fields(guide.VerifyCommand)
 	if len(parts) == 0 {
 		return ""
+	}
+	if guide.ID == "flyctl" {
+		if _, err := exec.LookPath(parts[0]); err != nil {
+			if _, fallbackErr := exec.LookPath("flyctl"); fallbackErr == nil {
+				parts[0] = "flyctl"
+			}
+		}
 	}
 	versionCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()

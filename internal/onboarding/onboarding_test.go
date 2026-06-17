@@ -7,9 +7,9 @@ import (
 )
 
 func TestScanIncludesOfficialAuthGuides(t *testing.T) {
-	result := Scan(context.Background(), ScanOptions{WantedProviders: []string{"aws", "gcp", "azure", "railway", "supabase"}})
+	result := Scan(context.Background(), ScanOptions{WantedProviders: []string{"aws", "gcp", "azure", "railway", "supabase", "flyio", "tencent", "verda", "sentry", "linear", "notion"}})
 
-	for _, id := range []string{"aws", "gcp", "azure", "railway", "supabase"} {
+	for _, id := range []string{"aws", "gcp", "azure", "railway", "supabase", "flyio", "tencent", "verda", "sentry", "linear", "notion"} {
 		guide, ok := result.AuthGuides[id]
 		if !ok {
 			t.Fatalf("missing auth guide for %s", id)
@@ -37,6 +37,7 @@ func TestGuidesPreferOfficialVendorDocs(t *testing.T) {
 		"doctl":    "https://docs.digitalocean.com/",
 		"railway":  "https://docs.railway.com/",
 		"supabase": "https://supabase.com/docs/",
+		"flyctl":   "https://fly.io/docs/",
 	}
 	for id, prefix := range checks {
 		guide, ok := guides[id]
