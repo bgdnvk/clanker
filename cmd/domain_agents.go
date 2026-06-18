@@ -400,7 +400,7 @@ func collectObservabilityAgentContext(ctx context.Context, question string, debu
 
 	if shouldQueryObservabilityProvider(question, "azure") {
 		azureClient := azure.NewClientWithOptionalSubscription(strings.TrimSpace(azure.ResolveSubscriptionID()), debug)
-		azureInfo, azureErr := azureClient.GetRelevantContext(ctx, "activity log logs errors monitor alerts metrics application insights log analytics warnings incidents")
+		azureInfo, azureErr := azureClient.GetRelevantContext(ctx, "resource graph resources inventory activity log logs errors monitor alerts metrics application insights log analytics warnings incidents container apps app services function apps virtual machines")
 		if azureErr != nil {
 			warnings = appendDomainWarning(warnings, "Azure observability", azureErr)
 		} else {

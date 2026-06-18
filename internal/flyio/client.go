@@ -464,6 +464,16 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 		}
 	}
 
+	if flyioObservabilityLogIntent(questionLower) {
+		logsCtx, logsErr := c.collectAppLogsContext(ctx)
+		if logsErr != nil {
+			warnings = append(warnings, fmt.Sprintf("App Logs: %v", logsErr))
+		} else if logsCtx != "" {
+			out.WriteString(logsCtx)
+			out.WriteString("\n")
+		}
+	}
+
 	// Volumes / Postgres / Secrets context: GraphQL fan-out when explicitly
 	// asked about; Phase 1 keeps this minimal to keep prompt sizes small.
 
@@ -488,6 +498,21 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 	return out.String(), nil
 }
 
+func flyioObservabilityLogIntent(questionLower string) bool {
+	return containsAnyFlyioPhrase(questionLower,
+		"log", "logs", "event", "events", "error", "errors", "warning", "warnings",
+		"trace", "traces", "metric", "metrics", "observability", "incident", "incidents")
+}
+
+func containsAnyFlyioPhrase(value string, phrases ...string) bool {
+	for _, phrase := range phrases {
+		if strings.Contains(value, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 // mentionsMachineKeywords gates the per-app machine fan-out in context gather.
 func mentionsMachineKeywords(q string) bool {
 	keywords := []string{
@@ -502,6 +527,65 @@ func mentionsMachineKeywords(q string) bool {
 	return false
 }
 
+type flyioAppSummary struct {
+	Name string `json:"name"`
+}
+
+func parseFlyioApps(body string) ([]flyioAppSummary, error) {
+	var appsResp struct {
+		Apps []flyioAppSummary `json:"apps"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(body)), &appsResp); err == nil && len(appsResp.Apps) > 0 {
+		return appsResp.Apps, nil
+	}
+	var bare []flyioAppSummary
+	if err := json.Unmarshal([]byte(strings.TrimSpace(body)), &bare); err == nil {
+		return bare, nil
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(body)), &appsResp); err != nil {
+		return nil, err
+	}
+	return appsResp.Apps, nil
+}
+
+func (c *Client) collectAppLogsContext(ctx context.Context) (string, error) {
+	appsBody, err := c.RunAPIWithContext(ctx, "GET", "/apps", "")
+	if err != nil {
+		return "", err
+	}
+	apps, err := parseFlyioApps(appsBody)
+	if err != nil {
+		return "", err
+	}
+	if len(apps) == 0 {
+		return "App Logs:\nNo Fly.io apps found.\n", nil
+	}
+
+	maxApps := minFlyioInt(len(apps), 3)
+	var out strings.Builder
+	out.WriteString("App Logs:\n")
+	for i := 0; i < maxApps; i++ {
+		appName := strings.TrimSpace(apps[i].Name)
+		if appName == "" {
+			continue
+		}
+		body, err := c.RunAPIWithContext(ctx, "GET", "/apps/"+url.PathEscape(appName)+"/logs", "")
+		if err != nil {
+			out.WriteString(fmt.Sprintf("%s: logs unavailable: %v\n", appName, err))
+			continue
+		}
+		out.WriteString(fmt.Sprintf("%s:\n", appName))
+		out.WriteString(indentFlyioLines(truncateFlyioContext(strings.TrimSpace(body), 2500), "  "))
+		if !strings.HasSuffix(out.String(), "\n") {
+			out.WriteString("\n")
+		}
+	}
+	if len(apps) > maxApps {
+		out.WriteString(fmt.Sprintf("(... %d more apps omitted)\n", len(apps)-maxApps))
+	}
+	return out.String(), nil
+}
+
 // collectMachineContext fetches up to 5 apps and lists their machines as a
 // compact summary line per machine. Used by GetRelevantContext.
 func (c *Client) collectMachineContext(ctx context.Context) (string, error) {
@@ -509,40 +593,24 @@ func (c *Client) collectMachineContext(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var appsResp struct {
-		Apps []struct {
-			Name string `json:"name"`
-		} `json:"apps"`
-	}
-	if err := json.Unmarshal([]byte(appsBody), &appsResp); err != nil {
-		// Fly sometimes returns a bare array; tolerate both shapes.
-		var bare []struct {
-			Name string `json:"name"`
-		}
-		if jErr := json.Unmarshal([]byte(appsBody), &bare); jErr == nil {
-			for _, a := range bare {
-				appsResp.Apps = append(appsResp.Apps, struct {
-					Name string `json:"name"`
-				}{Name: a.Name})
-			}
-		} else {
-			return "", err
-		}
+	apps, err := parseFlyioApps(appsBody)
+	if err != nil {
+		return "", err
 	}
 
-	if len(appsResp.Apps) == 0 {
+	if len(apps) == 0 {
 		return "", nil
 	}
 
 	maxApps := 5
-	if len(appsResp.Apps) < maxApps {
-		maxApps = len(appsResp.Apps)
+	if len(apps) < maxApps {
+		maxApps = len(apps)
 	}
 
 	var out strings.Builder
 	out.WriteString("Machines (top apps):\n")
 	for i := 0; i < maxApps; i++ {
-		appName := appsResp.Apps[i].Name
+		appName := apps[i].Name
 		machinesBody, mErr := c.RunAPIWithContext(ctx, "GET", "/apps/"+url.PathEscape(appName)+"/machines", "")
 		if mErr != nil {
 			out.WriteString(fmt.Sprintf("  %s: (error: %v)\n", appName, mErr))
@@ -580,11 +648,36 @@ func (c *Client) collectMachineContext(ctx context.Context) (string, error) {
 		}
 	}
 
-	if len(appsResp.Apps) > maxApps {
-		out.WriteString(fmt.Sprintf("  (... %d more apps omitted)\n", len(appsResp.Apps)-maxApps))
+	if len(apps) > maxApps {
+		out.WriteString(fmt.Sprintf("  (... %d more apps omitted)\n", len(apps)-maxApps))
 	}
 
 	return out.String(), nil
+}
+
+func truncateFlyioContext(value string, max int) string {
+	if max <= 0 || len(value) <= max {
+		return value
+	}
+	return value[:max] + "...<truncated>"
+}
+
+func indentFlyioLines(value string, prefix string) string {
+	if strings.TrimSpace(value) == "" {
+		return prefix + "(no log entries returned)\n"
+	}
+	lines := strings.Split(value, "\n")
+	for i, line := range lines {
+		lines[i] = prefix + line
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func minFlyioInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // checkAPIError inspects a Fly.io REST response for an error object. Fly

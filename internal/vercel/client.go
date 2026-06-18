@@ -332,6 +332,7 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 
 	var out strings.Builder
 	var warnings []string
+	var deploymentsBody string
 
 	for _, s := range sections {
 		if questionLower != "" && len(s.keys) > 0 {
@@ -352,10 +353,23 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 			warnings = append(warnings, fmt.Sprintf("%s: %v", s.name, err))
 			continue
 		}
+		if s.name == "Deployments" {
+			deploymentsBody = result
+		}
 
 		formatted := formatAPIResponse(s.name, result)
 		if formatted != "" {
 			out.WriteString(formatted)
+			out.WriteString("\n")
+		}
+	}
+
+	if vercelObservabilityLogIntent(questionLower) {
+		eventsContext, err := c.collectDeploymentEventsContext(ctx, deploymentsBody)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("Deployment Events: %v", err))
+		} else if strings.TrimSpace(eventsContext) != "" {
+			out.WriteString(eventsContext)
 			out.WriteString("\n")
 		}
 	}
@@ -384,6 +398,164 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 	}
 
 	return out.String(), nil
+}
+
+func vercelObservabilityLogIntent(questionLower string) bool {
+	return containsAnyVercelPhrase(questionLower,
+		"log", "logs", "event", "events", "error", "errors", "warning", "warnings",
+		"trace", "traces", "metric", "metrics", "observability", "incident", "incidents")
+}
+
+func containsAnyVercelPhrase(value string, phrases ...string) bool {
+	for _, phrase := range phrases {
+		if strings.Contains(value, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) collectDeploymentEventsContext(ctx context.Context, deploymentsBody string) (string, error) {
+	deployments, err := parseVercelDeployments(deploymentsBody)
+	if err != nil || len(deployments) == 0 {
+		fetched, fetchErr := c.RunAPIWithContext(ctx, "GET", "/v6/deployments?limit=10", "")
+		if fetchErr != nil {
+			if err != nil {
+				return "", fmt.Errorf("%v; fetch deployments: %w", err, fetchErr)
+			}
+			return "", fetchErr
+		}
+		deployments, err = parseVercelDeployments(fetched)
+		if err != nil {
+			return "", err
+		}
+	}
+	if len(deployments) == 0 {
+		return "Deployment Events:\nNo recent Vercel deployments found.\n", nil
+	}
+
+	maxDeployments := minInt(len(deployments), 3)
+	var out strings.Builder
+	out.WriteString("Deployment Events:\n")
+	for i := 0; i < maxDeployments; i++ {
+		deployment := deployments[i]
+		if strings.TrimSpace(deployment.UID) == "" {
+			continue
+		}
+		name := strings.TrimSpace(deployment.Name)
+		if name == "" {
+			name = deployment.UID
+		}
+		state := strings.TrimSpace(deployment.State)
+		if state == "" {
+			state = deployment.ReadyState
+		}
+		out.WriteString(fmt.Sprintf("%s [%s]:\n", name, state))
+		eventsBody, err := c.RunAPIWithContext(ctx, "GET", "/v2/deployments/"+url.PathEscape(deployment.UID)+"/events?limit=50", "")
+		if err != nil {
+			out.WriteString(fmt.Sprintf("  (events unavailable: %v)\n", err))
+			continue
+		}
+		summary := formatVercelDeploymentEvents(eventsBody, 12)
+		if strings.TrimSpace(summary) == "" {
+			out.WriteString("  No deployment events returned.\n")
+			continue
+		}
+		out.WriteString(summary)
+		if !strings.HasSuffix(summary, "\n") {
+			out.WriteString("\n")
+		}
+	}
+	return out.String(), nil
+}
+
+func parseVercelDeployments(body string) ([]Deployment, error) {
+	trimmed := strings.TrimSpace(body)
+	if trimmed == "" {
+		return nil, nil
+	}
+	var envelope struct {
+		Deployments []Deployment `json:"deployments"`
+	}
+	if err := json.Unmarshal([]byte(trimmed), &envelope); err == nil && len(envelope.Deployments) > 0 {
+		return envelope.Deployments, nil
+	}
+	var bare []Deployment
+	if err := json.Unmarshal([]byte(trimmed), &bare); err == nil {
+		return bare, nil
+	}
+	if err := json.Unmarshal([]byte(trimmed), &envelope); err != nil {
+		return nil, fmt.Errorf("parse deployments: %w", err)
+	}
+	return envelope.Deployments, nil
+}
+
+func formatVercelDeploymentEvents(body string, limit int) string {
+	type eventPayload struct {
+		Text string `json:"text,omitempty"`
+		Info struct {
+			Name string `json:"name,omitempty"`
+		} `json:"info,omitempty"`
+	}
+	type event struct {
+		Type    string       `json:"type"`
+		Created int64        `json:"created,omitempty"`
+		Payload eventPayload `json:"payload,omitempty"`
+	}
+	var events []event
+	if err := json.Unmarshal([]byte(strings.TrimSpace(body)), &events); err != nil {
+		var envelope struct {
+			Events []event `json:"events"`
+		}
+		if err2 := json.Unmarshal([]byte(strings.TrimSpace(body)), &envelope); err2 != nil {
+			return "  " + truncateVercelContext(strings.TrimSpace(body), 1200) + "\n"
+		}
+		events = envelope.Events
+	}
+	if len(events) == 0 {
+		return ""
+	}
+	if limit <= 0 || limit > len(events) {
+		limit = len(events)
+	}
+	var out strings.Builder
+	for i := 0; i < limit; i++ {
+		event := events[i]
+		ts := ""
+		if event.Created > 0 {
+			ts = time.UnixMilli(event.Created).UTC().Format(time.RFC3339)
+		}
+		text := strings.TrimSpace(event.Payload.Text)
+		if text == "" {
+			text = strings.TrimSpace(event.Payload.Info.Name)
+		}
+		if text == "" {
+			text = "(no event message)"
+		}
+		if ts != "" {
+			out.WriteString(fmt.Sprintf("  [%s] %-10s %s\n", ts, event.Type, text))
+		} else {
+			out.WriteString(fmt.Sprintf("  %-10s %s\n", event.Type, text))
+		}
+	}
+	if len(events) > limit {
+		out.WriteString(fmt.Sprintf("  (... %d more events omitted)\n", len(events)-limit))
+	}
+	return out.String()
+}
+
+func truncateVercelContext(value string, max int) string {
+	if max <= 0 || len(value) <= max {
+		return value
+	}
+	return value[:max] + "...<truncated>"
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // checkAPIError inspects a Vercel JSON response for a top-level `error` object.

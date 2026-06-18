@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -279,6 +280,7 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 
 	var out strings.Builder
 	var warnings []string
+	var aiGatewayBody string
 
 	for _, s := range sections {
 		if s.requiresAcctID && strings.TrimSpace(c.accountID) == "" {
@@ -312,10 +314,23 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 			warnings = append(warnings, fmt.Sprintf("%s: %v", s.name, err))
 			continue
 		}
+		if s.name == "AI Gateway" {
+			aiGatewayBody = result
+		}
 
 		formatted := formatAPIResponse(s.name, result)
 		if formatted != "" {
 			out.WriteString(formatted)
+			out.WriteString("\n")
+		}
+	}
+
+	if cloudflareObservabilityLogIntent(questionLower) && strings.TrimSpace(c.accountID) != "" {
+		logsContext, err := c.collectAIGatewayLogsContext(ctx, aiGatewayBody)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("AI Gateway Logs: %v", err))
+		} else if strings.TrimSpace(logsContext) != "" {
+			out.WriteString(logsContext)
 			out.WriteString("\n")
 		}
 	}
@@ -339,6 +354,163 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 	}
 
 	return out.String(), nil
+}
+
+func cloudflareObservabilityLogIntent(questionLower string) bool {
+	return containsAnyCloudflarePhrase(questionLower,
+		"log", "logs", "event", "events", "error", "errors", "warning", "warnings",
+		"trace", "traces", "metric", "metrics", "observability", "incident", "incidents")
+}
+
+func containsAnyCloudflarePhrase(value string, phrases ...string) bool {
+	for _, phrase := range phrases {
+		if strings.Contains(value, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+type aiGatewaySummary struct {
+	ID   string
+	Name string
+}
+
+func (c *Client) collectAIGatewayLogsContext(ctx context.Context, gatewaysBody string) (string, error) {
+	gateways, err := parseAIGateways(gatewaysBody)
+	if err != nil || len(gateways) == 0 {
+		fetched, fetchErr := c.RunAPIWithContext(ctx, "GET", fmt.Sprintf("/accounts/%s/ai-gateway/gateways", c.accountID), "")
+		if fetchErr != nil {
+			if err != nil {
+				return "", fmt.Errorf("%v; list gateways: %w", err, fetchErr)
+			}
+			return "", fetchErr
+		}
+		gateways, err = parseAIGateways(fetched)
+		if err != nil {
+			return "", err
+		}
+	}
+	if len(gateways) == 0 {
+		return "AI Gateway Logs:\nNo Cloudflare AI Gateway gateways found.\n", nil
+	}
+
+	maxGateways := minCloudflareInt(len(gateways), 3)
+	var out strings.Builder
+	out.WriteString("AI Gateway Logs:\n")
+	for i := 0; i < maxGateways; i++ {
+		gateway := gateways[i]
+		gatewayID := strings.TrimSpace(gateway.ID)
+		if gatewayID == "" {
+			continue
+		}
+		name := strings.TrimSpace(gateway.Name)
+		if name == "" {
+			name = gatewayID
+		}
+		body, err := c.RunAPIWithContext(ctx, "GET", fmt.Sprintf("/accounts/%s/ai-gateway/gateways/%s/logs", c.accountID, url.PathEscape(gatewayID)), "")
+		if err != nil {
+			out.WriteString(fmt.Sprintf("%s: logs unavailable: %v\n", name, err))
+			continue
+		}
+		out.WriteString(fmt.Sprintf("%s:\n", name))
+		out.WriteString(indentCloudflareLines(truncateCloudflareContext(strings.TrimSpace(body), 2500), "  "))
+	}
+	if len(gateways) > maxGateways {
+		out.WriteString(fmt.Sprintf("(... %d more gateways omitted)\n", len(gateways)-maxGateways))
+	}
+	return out.String(), nil
+}
+
+func parseAIGateways(body string) ([]aiGatewaySummary, error) {
+	trimmed := strings.TrimSpace(body)
+	if trimmed == "" {
+		return nil, nil
+	}
+	var raw []map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &raw); err != nil {
+		var envelope struct {
+			Result any `json:"result"`
+		}
+		if err2 := json.Unmarshal([]byte(trimmed), &envelope); err2 != nil {
+			return nil, err
+		}
+		switch typed := envelope.Result.(type) {
+		case []any:
+			raw = mapsFromAnySlice(typed)
+		case map[string]any:
+			if gateways, ok := typed["gateways"].([]any); ok {
+				raw = mapsFromAnySlice(gateways)
+			} else if items, ok := typed["items"].([]any); ok {
+				raw = mapsFromAnySlice(items)
+			} else {
+				raw = []map[string]any{typed}
+			}
+		}
+	}
+	gateways := make([]aiGatewaySummary, 0, len(raw))
+	for _, item := range raw {
+		id := cloudflareStringFromAny(item["id"])
+		if id == "" {
+			id = cloudflareStringFromAny(item["gateway_id"])
+		}
+		if id == "" {
+			id = cloudflareStringFromAny(item["slug"])
+		}
+		name := cloudflareStringFromAny(item["name"])
+		if id == "" {
+			continue
+		}
+		gateways = append(gateways, aiGatewaySummary{ID: id, Name: name})
+	}
+	return gateways, nil
+}
+
+func mapsFromAnySlice(values []any) []map[string]any {
+	out := make([]map[string]any, 0, len(values))
+	for _, value := range values {
+		if item, ok := value.(map[string]any); ok {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func cloudflareStringFromAny(value any) string {
+	if value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	default:
+		return strings.TrimSpace(fmt.Sprint(typed))
+	}
+}
+
+func truncateCloudflareContext(value string, max int) string {
+	if strings.TrimSpace(value) == "" {
+		return "(no output)"
+	}
+	if max <= 0 || len(value) <= max {
+		return value
+	}
+	return value[:max] + "...<truncated>"
+}
+
+func indentCloudflareLines(value string, prefix string) string {
+	lines := strings.Split(value, "\n")
+	for i, line := range lines {
+		lines[i] = prefix + line
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func minCloudflareInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // checkAPIError checks if the API response contains an error

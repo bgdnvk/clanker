@@ -56,6 +56,29 @@ func TestShouldQueryObservabilityProvider_BroadConfiguredProvidersIncludesClouds
 	}
 }
 
+func TestShouldQueryObservabilityProvider_GenericLogsMetricsTracesIncludesAllProviders(t *testing.T) {
+	query := "Show me recent logs, metrics, traces, errors, and warnings for anything connected in my infrastructure."
+
+	for _, provider := range []string{
+		"local",
+		"kubernetes",
+		"aws",
+		"gcp",
+		"azure",
+		"cloudflare",
+		"digitalocean",
+		"hetzner",
+		"vercel",
+		"flyio",
+		"railway",
+		"sentry",
+	} {
+		if !shouldQueryObservabilityProvider(query, provider) {
+			t.Fatalf("provider %q should be queried for generic observability prompt", provider)
+		}
+	}
+}
+
 func TestShouldQueryObservabilityProvider_ExplicitScopeStillLimitsProviders(t *testing.T) {
 	query := "show sentry issues from the last deploy"
 
