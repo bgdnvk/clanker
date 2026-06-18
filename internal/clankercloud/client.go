@@ -21,6 +21,7 @@ var candidatePorts = []int{8080, 8081, 8082, 8083, 8084}
 
 const defaultAppBundleID = "com.clanker.cloud"
 const defaultAppName = "Clanker Cloud"
+const defaultHTTPTimeout = 12 * time.Minute
 
 type Client struct {
 	httpClient *http.Client
@@ -86,7 +87,7 @@ type SSEEvent struct {
 
 func NewClient() *Client {
 	return &Client{
-		httpClient: &http.Client{Timeout: 60 * time.Second},
+		httpClient: &http.Client{Timeout: defaultHTTPTimeout},
 	}
 }
 
@@ -232,10 +233,10 @@ func appLaunchCandidates(opts LaunchOptions) []launchCandidate {
 func (c *Client) LaunchApp(ctx context.Context, opts LaunchOptions) map[string]any {
 	timeoutSeconds := opts.TimeoutSeconds
 	if timeoutSeconds <= 0 {
-		timeoutSeconds = 60
+		timeoutSeconds = 120
 	}
-	if timeoutSeconds > 300 {
-		timeoutSeconds = 300
+	if timeoutSeconds > 900 {
+		timeoutSeconds = 900
 	}
 
 	before := c.Status(ctx)

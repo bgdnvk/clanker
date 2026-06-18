@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -43,7 +44,7 @@ type cloudAppLaunchArgs struct {
 	AppPath        string `json:"appPath,omitempty" jsonschema:"description=Optional explicit path to the Clanker Cloud app or executable"`
 	BundleID       string `json:"bundleId,omitempty" jsonschema:"description=Optional macOS bundle identifier override; defaults to com.clanker.cloud"`
 	Wait           *bool  `json:"wait,omitempty" jsonschema:"description=Wait for the local app backend to become healthy; defaults to true"`
-	TimeoutSeconds int    `json:"timeoutSeconds,omitempty" jsonschema:"description=How long to wait for the backend when wait=true; defaults to 60 seconds"`
+	TimeoutSeconds int    `json:"timeoutSeconds,omitempty" jsonschema:"description=How long to wait for the backend when wait=true; defaults to 120 seconds and caps at 900"`
 }
 
 type cloudAppAskArgs struct {
@@ -57,6 +58,29 @@ type cloudBackendAPIArgs struct {
 	Query    map[string]string `json:"query,omitempty" jsonschema:"description=Optional query string parameters"`
 	BodyJSON string            `json:"bodyJson,omitempty" jsonschema:"description=Optional JSON request body"`
 	Profile  string            `json:"profile,omitempty" jsonschema:"description=Optional AWS profile header"`
+}
+
+type cloudStartScanArgs struct {
+	Regions         []string `json:"regions,omitempty" jsonschema:"description=Regions to include in the regional scan. Defaults to the app/backend configured regions when available."`
+	IncludeRegional *bool    `json:"includeRegional,omitempty" jsonschema:"description=Call the regional resources endpoint after /api/infrastructure; defaults to true."`
+	ForceFresh      *bool    `json:"forceFresh,omitempty" jsonschema:"description=Invalidate the app infrastructure cache before scanning; defaults to true."`
+	Profile         string   `json:"profile,omitempty" jsonschema:"description=Optional AWS profile header."`
+}
+
+type cloudPlanChangesArgs struct {
+	Question    string `json:"question" jsonschema:"description=Natural-language infrastructure change to plan,required"`
+	ContextBlob string `json:"contextBlob,omitempty" jsonschema:"description=Optional live context to include with the plan request."`
+	Profile     string `json:"profile,omitempty" jsonschema:"description=Optional AWS profile header."`
+}
+
+type cloudApplyPlanArgs struct {
+	Plan      map[string]any    `json:"plan,omitempty" jsonschema:"description=Plan object returned by clanker_cloud_plan_changes or the app Maker UI."`
+	PlanJSON  string            `json:"planJson,omitempty" jsonschema:"description=Plan JSON string returned by clanker_cloud_plan_changes or the app Maker UI."`
+	Profile   string            `json:"profile,omitempty" jsonschema:"description=Optional AWS profile header."`
+	Approved  bool              `json:"approved" jsonschema:"description=Must be true after explicit user approval before applying infrastructure changes,required"`
+	Destroyer bool              `json:"destroyer,omitempty" jsonschema:"description=Allow destructive delete/destroy actions in the approved plan."`
+	EnvVars   map[string]string `json:"envVars,omitempty" jsonschema:"description=Optional environment variables for the apply process."`
+	RunID     string            `json:"runId,omitempty" jsonschema:"description=Optional run id to associate with this apply stream."`
 }
 
 type vercelAskArgs struct {
@@ -267,6 +291,42 @@ func newClankerMCPServer() *mcptransport.MCPServer {
 
 	server.AddTool(
 		mcp.NewTool(
+			"clanker_cloud_start_scan",
+			mcp.WithDescription("Run the current Clanker Cloud app backend scan path and wait for live API data. Invalidates the cache by default, reads /api/infrastructure, optionally reads /api/regions/resources, and returns current counts/errors."),
+			mcp.WithInputSchema[cloudStartScanArgs](),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args cloudStartScanArgs) (*mcp.CallToolResult, error) {
+			return handleMCPCloudStartScan(ctx, args)
+		}),
+	)
+
+	server.AddTool(
+		mcp.NewTool(
+			"clanker_cloud_plan_changes",
+			mcp.WithDescription("Ask the running Clanker Cloud app to create a Maker plan for a requested infrastructure change using saved app settings. Read-only; return the plan for user review."),
+			mcp.WithInputSchema[cloudPlanChangesArgs](),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args cloudPlanChangesArgs) (*mcp.CallToolResult, error) {
+			return handleMCPCloudPlanChanges(ctx, args)
+		}),
+	)
+
+	server.AddTool(
+		mcp.NewTool(
+			"clanker_cloud_apply_plan",
+			mcp.WithDescription("Apply a Clanker Cloud Maker plan through the running app backend. Requires approved=true after explicit user approval. Set destroyer=true only when destructive changes were approved."),
+			mcp.WithInputSchema[cloudApplyPlanArgs](),
+			mcp.WithDestructiveHintAnnotation(true),
+		),
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args cloudApplyPlanArgs) (*mcp.CallToolResult, error) {
+			return handleMCPCloudApplyPlan(ctx, args)
+		}),
+	)
+
+	server.AddTool(
+		mcp.NewTool(
 			"clanker_vercel_ask",
 			mcp.WithDescription("Ask a natural language question about your Vercel infrastructure. Gathers Vercel context (projects, deployments, domains) and uses the configured AI provider to answer."),
 			mcp.WithInputSchema[vercelAskArgs](),
@@ -365,6 +425,362 @@ func newClankerMCPServer() *mcptransport.MCPServer {
 	registerK8sMCPTools(server)
 
 	return server
+}
+
+func handleMCPCloudStartScan(ctx context.Context, args cloudStartScanArgs) (*mcp.CallToolResult, error) {
+	client := clankercloud.NewClient()
+	profile := strings.TrimSpace(args.Profile)
+	forceFresh := boolDefault(args.ForceFresh, true)
+	includeRegional := boolDefault(args.IncludeRegional, true)
+	out := map[string]any{
+		"mode":            "api",
+		"forceFresh":      forceFresh,
+		"includeRegional": includeRegional,
+		"profile":         profile,
+		"message":         "Scanning resources through the running Clanker Cloud backend; this can take several minutes.",
+	}
+
+	if forceFresh {
+		invalidation, err := client.CallAPI(ctx, http.MethodPost, "/api/infrastructure/invalidate", nil, nil, profile)
+		out["cacheInvalidation"] = cloudAPISummary(invalidation, err)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("cache invalidation failed: %v", err)), nil
+		}
+	}
+
+	health, healthErr := client.CallAPI(ctx, http.MethodGet, "/api/health", nil, nil, profile)
+	out["health"] = cloudAPISummary(health, healthErr)
+
+	resourcesSummary, summaryErr := client.CallAPI(ctx, http.MethodGet, "/api/resources/summary", nil, nil, profile)
+	out["resourcesSummary"] = cloudAPISummary(resourcesSummary, summaryErr)
+
+	infrastructure, infraErr := client.CallAPI(ctx, http.MethodGet, "/api/infrastructure", nil, nil, profile)
+	out["infrastructure"] = cloudScanBodySummary(infrastructure, infraErr)
+	if infraErr != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("infrastructure scan failed: %v", infraErr)), nil
+	}
+
+	regions := normalizeCloudRegions(args.Regions)
+	if includeRegional && len(regions) == 0 {
+		regionsCatalog, regionsErr := client.CallAPI(ctx, http.MethodGet, "/api/regions", nil, nil, profile)
+		out["regionsCatalog"] = cloudAPISummary(regionsCatalog, regionsErr)
+		if regionsErr == nil {
+			regions = cloudStringSlice(cloudBodyMap(regionsCatalog.Body)["regions"])
+		}
+	}
+	out["regions"] = regions
+
+	var regional *clankercloud.APICallResult
+	var regionalErr error
+	if includeRegional && len(regions) > 0 {
+		payload, err := json.Marshal(map[string]any{"regions": regions})
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("encode regional scan request: %v", err)), nil
+		}
+		regional, regionalErr = client.CallAPI(ctx, http.MethodPost, "/api/regions/resources", nil, payload, profile)
+		out["regional"] = cloudScanBodySummary(regional, regionalErr)
+	} else if includeRegional {
+		out["regional"] = map[string]any{
+			"ok":              true,
+			"skippedReason":   "no regions configured or discovered",
+			"resourceCount":   0,
+			"selectedRegions": []string{},
+		}
+	}
+
+	baseResources := cloudResources(infrastructure)
+	regionalResources := cloudResources(regional)
+	merged := mergeCloudResources(baseResources, regionalResources)
+	out["resourceCount"] = len(merged)
+	out["baseResourceCount"] = len(baseResources)
+	out["regionalResourceCount"] = len(regionalResources)
+	out["resourcesPreview"] = cloudResourcePreview(merged, 30)
+	out["scanErrors"] = append(cloudScanErrors(infrastructure), cloudScanErrors(regional)...)
+	out["completedAt"] = time.Now().UTC().Format(time.RFC3339)
+	return mcp.NewToolResultJSON(out)
+}
+
+func handleMCPCloudPlanChanges(ctx context.Context, args cloudPlanChangesArgs) (*mcp.CallToolResult, error) {
+	question := strings.TrimSpace(args.Question)
+	if question == "" {
+		return mcp.NewToolResultError("question is required"), nil
+	}
+	payload := map[string]any{
+		"question":     question,
+		"userQuestion": question,
+		"contextBlob":  strings.TrimSpace(args.ContextBlob),
+		"profile":      strings.TrimSpace(args.Profile),
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("encode plan request: %v", err)), nil
+	}
+	client := clankercloud.NewClient()
+	result, err := client.CallAPI(ctx, http.MethodPost, "/api/maker/plan", nil, body, args.Profile)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("maker plan failed: %v", err)), nil
+	}
+	return mcp.NewToolResultJSON(result)
+}
+
+func handleMCPCloudApplyPlan(ctx context.Context, args cloudApplyPlanArgs) (*mcp.CallToolResult, error) {
+	if !args.Approved {
+		return mcp.NewToolResultError("approved must be true after explicit user approval before applying infrastructure changes"), nil
+	}
+	plan, err := encodeCloudApplyPlan(args)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	payload := map[string]any{
+		"plan":      json.RawMessage(plan),
+		"profile":   strings.TrimSpace(args.Profile),
+		"destroyer": args.Destroyer,
+	}
+	if len(args.EnvVars) > 0 {
+		payload["envVars"] = args.EnvVars
+	}
+	if runID := strings.TrimSpace(args.RunID); runID != "" {
+		payload["runId"] = runID
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("encode apply request: %v", err)), nil
+	}
+	client := clankercloud.NewClient()
+	result, err := client.CallAPI(ctx, http.MethodPost, "/api/maker/apply", nil, body, args.Profile)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("maker apply failed: %v", err)), nil
+	}
+	return mcp.NewToolResultJSON(result)
+}
+
+func encodeCloudApplyPlan(args cloudApplyPlanArgs) ([]byte, error) {
+	if len(args.Plan) > 0 {
+		encoded, err := json.Marshal(args.Plan)
+		if err != nil {
+			return nil, fmt.Errorf("encode plan: %w", err)
+		}
+		return encoded, nil
+	}
+	trimmed := strings.TrimSpace(args.PlanJSON)
+	if trimmed == "" {
+		return nil, fmt.Errorf("plan or planJson is required")
+	}
+	var probe any
+	if err := json.Unmarshal([]byte(trimmed), &probe); err != nil {
+		return nil, fmt.Errorf("planJson must be valid JSON: %w", err)
+	}
+	return []byte(trimmed), nil
+}
+
+func cloudAPISummary(result *clankercloud.APICallResult, err error) map[string]any {
+	summary := map[string]any{
+		"ok":    err == nil && result != nil && result.Status >= 200 && result.Status < 300,
+		"error": "",
+	}
+	if err != nil {
+		summary["error"] = err.Error()
+	}
+	if result == nil {
+		return summary
+	}
+	summary["status"] = result.Status
+	if result.FinalMessage != "" {
+		summary["finalMessage"] = result.FinalMessage
+	}
+	body := cloudBodyMap(result.Body)
+	if result.Status < 200 || result.Status >= 300 {
+		summary["error"] = firstNonEmpty(fmt.Sprint(summary["error"]), cloudString(body["error"]), cloudString(body["message"]), fmt.Sprintf("status %d", result.Status))
+	}
+	return summary
+}
+
+func cloudScanBodySummary(result *clankercloud.APICallResult, err error) map[string]any {
+	summary := cloudAPISummary(result, err)
+	if result == nil {
+		return summary
+	}
+	body := cloudBodyMap(result.Body)
+	resources := cloudResources(result)
+	summary["resourceCount"] = len(resources)
+	if totalCost, ok := body["totalCost"]; ok {
+		summary["totalCost"] = totalCost
+	}
+	if partial, ok := body["partial"]; ok {
+		summary["partial"] = partial
+	}
+	if scanErrors := cloudScanErrors(result); len(scanErrors) > 0 {
+		summary["scanErrors"] = scanErrors
+	}
+	if providerStatus := cloudProviderStatus(body); len(providerStatus) > 0 {
+		summary["providerStatus"] = providerStatus
+	}
+	return summary
+}
+
+func cloudBodyMap(value any) map[string]any {
+	if values, ok := value.(map[string]any); ok {
+		return values
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return map[string]any{}
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		return map[string]any{}
+	}
+	return decoded
+}
+
+func cloudResources(result *clankercloud.APICallResult) []any {
+	if result == nil {
+		return nil
+	}
+	body := cloudBodyMap(result.Body)
+	if resources, ok := body["resources"].([]any); ok {
+		return resources
+	}
+	encoded, err := json.Marshal(body["resources"])
+	if err != nil {
+		return nil
+	}
+	var decoded []any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		return nil
+	}
+	return decoded
+}
+
+func cloudScanErrors(result *clankercloud.APICallResult) []any {
+	if result == nil {
+		return nil
+	}
+	body := cloudBodyMap(result.Body)
+	if errors, ok := body["scanErrors"].([]any); ok {
+		return errors
+	}
+	return nil
+}
+
+func normalizeCloudRegions(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		region := strings.TrimSpace(value)
+		if region == "" || seen[region] {
+			continue
+		}
+		seen[region] = true
+		out = append(out, region)
+	}
+	return out
+}
+
+func cloudStringSlice(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return normalizeCloudRegions(typed)
+	case []any:
+		values := make([]string, 0, len(typed))
+		for _, item := range typed {
+			values = append(values, fmt.Sprint(item))
+		}
+		return normalizeCloudRegions(values)
+	default:
+		return nil
+	}
+}
+
+func mergeCloudResources(groups ...[]any) []any {
+	seen := map[string]bool{}
+	out := make([]any, 0)
+	for _, group := range groups {
+		for _, resource := range group {
+			resourceMap := cloudBodyMap(resource)
+			key := strings.ToLower(strings.Join([]string{
+				firstNonEmpty(cloudString(resourceMap["id"]), cloudString(resourceMap["resourceId"]), cloudString(resourceMap["name"])),
+				cloudString(resourceMap["type"]),
+				firstNonEmpty(cloudString(resourceMap["region"]), cloudString(resourceMap["location"])),
+				firstNonEmpty(cloudString(resourceMap["provider"]), cloudString(resourceMap["cloud"])),
+			}, "|"))
+			if key == "|||" {
+				key = fmt.Sprintf("resource-%d", len(out))
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, resource)
+		}
+	}
+	return out
+}
+
+func cloudResourcePreview(resources []any, limit int) []map[string]any {
+	if limit <= 0 {
+		limit = 30
+	}
+	if len(resources) < limit {
+		limit = len(resources)
+	}
+	out := make([]map[string]any, 0, limit)
+	for i := 0; i < limit; i++ {
+		resource := cloudBodyMap(resources[i])
+		out = append(out, map[string]any{
+			"id":       firstNonEmpty(cloudString(resource["id"]), cloudString(resource["resourceId"])),
+			"name":     firstNonEmpty(cloudString(resource["name"]), cloudString(resource["label"])),
+			"type":     cloudString(resource["type"]),
+			"provider": firstNonEmpty(cloudString(resource["provider"]), cloudString(resource["cloud"])),
+			"region":   firstNonEmpty(cloudString(resource["region"]), cloudString(resource["location"])),
+			"state":    firstNonEmpty(cloudString(resource["state"]), cloudString(resource["status"])),
+		})
+	}
+	return out
+}
+
+func cloudProviderStatus(body map[string]any) []map[string]any {
+	out := make([]map[string]any, 0)
+	for key, value := range body {
+		valueMap := cloudBodyMap(value)
+		if len(valueMap) == 0 {
+			continue
+		}
+		if _, ok := valueMap["attempted"]; !ok {
+			if _, ok := valueMap["enabled"]; !ok {
+				if _, ok := valueMap["included"]; !ok {
+					if _, ok := valueMap["skipped"]; !ok {
+						continue
+					}
+				}
+			}
+		}
+		out = append(out, map[string]any{
+			"provider":  key,
+			"attempted": valueMap["attempted"],
+			"enabled":   valueMap["enabled"],
+			"included":  valueMap["included"],
+			"skipped":   valueMap["skipped"],
+			"error":     valueMap["error"],
+		})
+	}
+	return out
+}
+
+func cloudString(value any) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 // handleMCPVercelAsk resolves Vercel credentials, gathers context, and asks
