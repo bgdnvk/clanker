@@ -29,13 +29,14 @@ import (
 )
 
 const (
-	maxDomainAgentSectionChars   = 8000
-	maxDatabaseQueryPromptRows   = 12
-	defaultDatabasePreviewRows   = 20
-	maxDeterministicTableQueries = 3
-	runtimeDatabaseModeEnv       = "CLANKER_RUNTIME_DB_MODE"
-	runtimeDatabaseResourceEnv   = "CLANKER_RUNTIME_DB_RESOURCE_CONTEXT"
-	runtimeGitHubTrackedReposEnv = "CLANKER_RUNTIME_GITHUB_TRACKED_REPOS_JSON"
+	maxDomainAgentSectionChars    = 8000
+	maxObservabilityFallbackChars = 4000
+	maxDatabaseQueryPromptRows    = 12
+	defaultDatabasePreviewRows    = 20
+	maxDeterministicTableQueries  = 3
+	runtimeDatabaseModeEnv        = "CLANKER_RUNTIME_DB_MODE"
+	runtimeDatabaseResourceEnv    = "CLANKER_RUNTIME_DB_RESOURCE_CONTEXT"
+	runtimeGitHubTrackedReposEnv  = "CLANKER_RUNTIME_GITHUB_TRACKED_REPOS_JSON"
 )
 
 type domainContextSection struct {
@@ -1357,11 +1358,74 @@ func runDomainAgentQuery(ctx context.Context, domain string, question string, se
 	prompt := buildDomainAgentPrompt(domain, question, sections, warnings)
 	response, err := aiClient.AskPrompt(ctx, prompt)
 	if err != nil {
+		if domain == "observability" {
+			fmt.Println(buildObservabilityFallbackReport(question, sections, warnings, err))
+			return nil
+		}
 		return fmt.Errorf("failed to get %s agent response: %w", domain, err)
 	}
 
 	fmt.Println(response)
 	return nil
+}
+
+func buildObservabilityFallbackReport(question string, sections []domainContextSection, warnings []string, synthesisErr error) string {
+	var b strings.Builder
+	b.WriteString("Observability agent collected context, but AI synthesis failed.\n\n")
+	if synthesisErr != nil {
+		b.WriteString("Synthesis error: ")
+		b.WriteString(strings.TrimSpace(synthesisErr.Error()))
+		b.WriteString("\n\n")
+	}
+	if trimmedQuestion := strings.TrimSpace(question); trimmedQuestion != "" {
+		b.WriteString("Question: ")
+		b.WriteString(trimmedQuestion)
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString("Collected Evidence\n")
+	if len(sections) == 0 {
+		b.WriteString("- No live observability evidence was collected before synthesis failed.\n")
+	} else {
+		for _, section := range sections {
+			title := strings.TrimSpace(section.Title)
+			content := truncateObservabilityFallbackSection(section.Content)
+			if title == "" || content == "" {
+				continue
+			}
+			b.WriteString("\n## ")
+			b.WriteString(title)
+			b.WriteString("\n")
+			b.WriteString(content)
+			b.WriteString("\n")
+		}
+	}
+
+	if len(warnings) > 0 {
+		b.WriteString("\nUnavailable Sources / Warnings\n")
+		for _, warning := range warnings {
+			warning = strings.TrimSpace(warning)
+			if warning == "" {
+				continue
+			}
+			b.WriteString("- ")
+			b.WriteString(warning)
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString("\nNext Checks\n")
+	b.WriteString("- Retry once the configured LLM provider is healthy to get a synthesized incident summary.\n")
+	b.WriteString("- Review unavailable sources above; missing credentials or tools can hide provider logs, traces, metrics, or alerts.\n")
+	return strings.TrimSpace(b.String())
+}
+
+func truncateObservabilityFallbackSection(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if len(trimmed) <= maxObservabilityFallbackChars {
+		return trimmed
+	}
+	return trimmed[:maxObservabilityFallbackChars] + "\n...<truncated>"
 }
 
 func buildDomainAgentPrompt(domain string, question string, sections []domainContextSection, warnings []string) string {
