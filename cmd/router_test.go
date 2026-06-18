@@ -81,6 +81,33 @@ func TestShouldIncludeDatabaseContextWithContext_RealDBStillMatches(t *testing.T
 	}
 }
 
+func TestShouldRouteToObservabilityAgent(t *testing.T) {
+	for _, q := range []string{
+		"show me recent error logs for prod api",
+		"trace 500 errors in cloud run",
+		"show cloudwatch alarms and warning logs",
+		"what sentry issues are active",
+		"find crashloop warnings in my pods",
+	} {
+		if !shouldRouteToObservabilityAgent(q) {
+			t.Errorf("query %q SHOULD route to observability agent", q)
+		}
+	}
+}
+
+func TestShouldRouteToObservabilityAgent_DoesNotStealCICDOrDB(t *testing.T) {
+	for _, q := range []string{
+		"show me failing github actions workflows",
+		"what is the deployment status for github actions",
+		"my database connection is failing",
+		"show me postgres tables",
+	} {
+		if shouldRouteToObservabilityAgent(q) {
+			t.Errorf("query %q should NOT route to observability agent", q)
+		}
+	}
+}
+
 // End-to-end via determineRoutingDecisionDetailsWithContext (the path
 // `clanker ask --route-only` exposes to clanker-cloud's backend).
 // Each case below was wrong on master pre-fix.
@@ -103,6 +130,12 @@ func TestDetermineRoutingDecision_PostFixRegressions(t *testing.T) {
 		// CICD-vs-deployment overlap (cmd/ask.go early CICD bypass added)
 		{"setup github actions for deployment", "agent-cicd", "github-actions wins over deployment+action"},
 		{"deploy via github actions", "agent-cicd", "explicit cicd context"},
+		{"show me failing github actions workflows", "agent-cicd", "workflow status stays with cicd"},
+
+		// Observability intent
+		{"show me recent error logs for prod api", "agent-observability", "runtime error logs"},
+		{"trace 500 errors in cloud run", "agent-observability", "trace/error request"},
+		{"show cloudwatch alarms and warning logs", "agent-observability", "cloudwatch alarms/logs"},
 
 		// Real cases that must still route correctly
 		{"how many lambda do i have", "cli", "no action keyword + non-DB"},
