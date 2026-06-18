@@ -221,7 +221,7 @@ Examples:
 		} else if agentName == "cicd" {
 			return handleCICDQuery(context.Background(), question, debug)
 		} else if agentName == "observability" {
-			return handleObservabilityQuery(context.Background(), question, debug)
+			return handleObservabilityQuery(context.Background(), question, debug, profile)
 		} else if agentName == "software-blocks" {
 			return handleSoftwareBlocksQuery(context.Background(), question, debug)
 		} else if agentName == "data_flow" {
@@ -848,7 +848,7 @@ Format as a professional compliance table suitable for government security docum
 		}
 
 		if includeObservability {
-			return handleObservabilityQuery(context.Background(), question, debug)
+			return handleObservabilityQuery(context.Background(), question, debug, profile)
 		}
 
 		// Provider-specific Q&A paths.
@@ -992,7 +992,7 @@ Format as a professional compliance table suitable for government security docum
 			}
 
 			if shouldRouteToObservabilityAgent(routingQuestion) {
-				return handleObservabilityQuery(context.Background(), routingQuestion, debug)
+				return handleObservabilityQuery(context.Background(), routingQuestion, debug, profile)
 			}
 
 			if shouldRouteToDatabaseAgentWithContext(routingQuestion, dbConnection) {

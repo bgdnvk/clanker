@@ -63,9 +63,9 @@ func handleCICDQuery(ctx context.Context, question string, debug bool) error {
 	return runDomainAgentQuery(ctx, "cicd", question, sections, warnings, debug)
 }
 
-func handleObservabilityQuery(ctx context.Context, question string, debug bool) error {
+func handleObservabilityQuery(ctx context.Context, question string, debug bool, profile string) error {
 	routingQuestion := questionForRouting(question)
-	sections, warnings := collectObservabilityAgentContext(ctx, routingQuestion, debug)
+	sections, warnings := collectObservabilityAgentContext(ctx, routingQuestion, debug, profile)
 	return runDomainAgentQuery(ctx, "observability", question, sections, warnings, debug)
 }
 
@@ -333,7 +333,7 @@ func collectDatabaseAgentContext(ctx context.Context, question string, dbConnect
 	return sections, warnings
 }
 
-func collectObservabilityAgentContext(ctx context.Context, question string, debug bool) ([]domainContextSection, []string) {
+func collectObservabilityAgentContext(ctx context.Context, question string, debug bool, profile string) ([]domainContextSection, []string) {
 	sections := make([]domainContextSection, 0, 16)
 	warnings := make([]string, 0, 12)
 
@@ -358,17 +358,23 @@ func collectObservabilityAgentContext(ctx context.Context, question string, debu
 		}
 	}
 
-	if shouldQueryObservabilityProvider(question, "aws") && hasAWSDomainAccess() {
-		awsProfile := resolveAWSProfile("")
-		awsClient, err := aws.NewClientWithProfileAndDebug(ctx, awsProfile, debug)
-		if err != nil {
-			warnings = appendDomainWarning(warnings, "AWS observability", err)
+	if shouldQueryObservabilityProvider(question, "aws") {
+		awsProfile := resolveAWSProfile(profile)
+		if !hasAWSObservabilityAccess(profile) {
+			if isObservabilityProviderScoped(question, "aws") {
+				warnings = append(warnings, "AWS observability: AWS profile or credentials are not configured")
+			}
 		} else {
-			awsInfo, awsErr := awsClient.GetRelevantContext(ctx, "cloudwatch logs recent error logs alarms metrics traces x-ray lambda ecs api gateway cloudtrail")
-			if awsErr != nil {
-				warnings = appendDomainWarning(warnings, "AWS observability", awsErr)
+			awsClient, err := aws.NewClientWithProfileAndDebug(ctx, awsProfile, debug)
+			if err != nil {
+				warnings = appendDomainWarning(warnings, "AWS observability", err)
 			} else {
-				sections = appendDomainSection(sections, "AWS Observability", awsInfo)
+				awsInfo, awsErr := awsClient.GetRelevantContext(ctx, "cloudwatch logs recent error logs alarms metrics traces x-ray lambda ecs api gateway cloudtrail")
+				if awsErr != nil {
+					warnings = appendDomainWarning(warnings, "AWS observability", awsErr)
+				} else {
+					sections = appendDomainSection(sections, "AWS Observability", awsInfo)
+				}
 			}
 		}
 	}
@@ -1717,6 +1723,10 @@ func hasAWSDomainAccess() bool {
 	return strings.TrimSpace(viper.GetString("aws.default_profile")) != ""
 }
 
+func hasAWSObservabilityAccess(profile string) bool {
+	return strings.TrimSpace(profile) != "" || hasAWSDomainAccess()
+}
+
 func hasHetznerDomainAccess() bool {
 	return strings.TrimSpace(hetzner.ResolveAPIToken()) != ""
 }
@@ -1761,6 +1771,9 @@ func shouldQueryObservabilityProvider(question string, provider string) bool {
 	if lower == "" {
 		return true
 	}
+	if hasBroadObservabilityProviderScope(lower) {
+		return true
+	}
 
 	anyScoped := false
 	for _, signals := range providerSignals {
@@ -1778,6 +1791,31 @@ func shouldQueryObservabilityProvider(question string, provider string) bool {
 		return true
 	}
 	return containsAnyPhrase(lower, signals...)
+}
+
+func hasBroadObservabilityProviderScope(lower string) bool {
+	return containsAnyPhrase(lower,
+		"any configured provider",
+		"any configured providers",
+		"configured provider",
+		"configured providers",
+		"all configured provider",
+		"all configured providers",
+		"cloud provider",
+		"cloud providers",
+		"all provider",
+		"all providers",
+		"provider logs",
+		"provider log",
+		"provider traces",
+		"provider metrics",
+		"provider alerts",
+		"across providers",
+		"across clouds",
+		"all clouds",
+		"every provider",
+		"every cloud",
+	)
 }
 
 func isObservabilityProviderScoped(question string, provider string) bool {
