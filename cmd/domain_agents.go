@@ -3,8 +3,11 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -14,20 +17,26 @@ import (
 	"github.com/bgdnvk/clanker/internal/cloudflare"
 	"github.com/bgdnvk/clanker/internal/dbcontext"
 	"github.com/bgdnvk/clanker/internal/digitalocean"
+	"github.com/bgdnvk/clanker/internal/flyio"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	ghclient "github.com/bgdnvk/clanker/internal/github"
 	"github.com/bgdnvk/clanker/internal/hetzner"
+	"github.com/bgdnvk/clanker/internal/railway"
+	"github.com/bgdnvk/clanker/internal/sentry"
+	"github.com/bgdnvk/clanker/internal/sre"
+	"github.com/bgdnvk/clanker/internal/vercel"
 	"github.com/spf13/viper"
 )
 
 const (
-	maxDomainAgentSectionChars   = 8000
-	maxDatabaseQueryPromptRows   = 12
-	defaultDatabasePreviewRows   = 20
-	maxDeterministicTableQueries = 3
-	runtimeDatabaseModeEnv       = "CLANKER_RUNTIME_DB_MODE"
-	runtimeDatabaseResourceEnv   = "CLANKER_RUNTIME_DB_RESOURCE_CONTEXT"
-	runtimeGitHubTrackedReposEnv = "CLANKER_RUNTIME_GITHUB_TRACKED_REPOS_JSON"
+	maxDomainAgentSectionChars    = 8000
+	maxObservabilityFallbackChars = 4000
+	maxDatabaseQueryPromptRows    = 12
+	defaultDatabasePreviewRows    = 20
+	maxDeterministicTableQueries  = 3
+	runtimeDatabaseModeEnv        = "CLANKER_RUNTIME_DB_MODE"
+	runtimeDatabaseResourceEnv    = "CLANKER_RUNTIME_DB_RESOURCE_CONTEXT"
+	runtimeGitHubTrackedReposEnv  = "CLANKER_RUNTIME_GITHUB_TRACKED_REPOS_JSON"
 )
 
 type domainContextSection struct {
@@ -52,6 +61,12 @@ func handleCICDQuery(ctx context.Context, question string, debug bool) error {
 	routingQuestion := questionForRouting(question)
 	sections, warnings := collectCICDAgentContext(ctx, routingQuestion, debug)
 	return runDomainAgentQuery(ctx, "cicd", question, sections, warnings, debug)
+}
+
+func handleObservabilityQuery(ctx context.Context, question string, debug bool, profile string) error {
+	routingQuestion := questionForRouting(question)
+	sections, warnings := collectObservabilityAgentContext(ctx, routingQuestion, debug, profile)
+	return runDomainAgentQuery(ctx, "observability", question, sections, warnings, debug)
 }
 
 func handleSoftwareBlocksQuery(ctx context.Context, question string, debug bool) error {
@@ -316,6 +331,300 @@ func collectDatabaseAgentContext(ctx context.Context, question string, dbConnect
 	}
 
 	return sections, warnings
+}
+
+func collectObservabilityAgentContext(ctx context.Context, question string, debug bool, profile string) ([]domainContextSection, []string) {
+	sections := make([]domainContextSection, 0, 16)
+	warnings := make([]string, 0, 12)
+
+	discovery := sre.Discover(ctx)
+	if raw, err := json.MarshalIndent(discovery, "", "  "); err == nil {
+		sections = appendDomainSection(sections, "Clanker SRE Discovery", string(raw))
+	}
+
+	if shouldQueryObservabilityProvider(question, "local") {
+		if localInfo, err := collectLocalObservabilityContext(ctx, question); err != nil {
+			warnings = appendDomainWarning(warnings, "Local host observability", err)
+		} else {
+			sections = appendDomainSection(sections, "Local Host Signals", localInfo)
+		}
+	}
+
+	if shouldQueryObservabilityProvider(question, "kubernetes") {
+		if k8sInfo, err := collectKubernetesObservabilityContext(ctx); err != nil {
+			warnings = appendDomainWarning(warnings, "Kubernetes observability", err)
+		} else {
+			sections = appendDomainSection(sections, "Kubernetes Signals", k8sInfo)
+		}
+	}
+
+	if shouldQueryObservabilityProvider(question, "aws") {
+		awsProfile := resolveAWSProfile(profile)
+		if !hasAWSObservabilityAccess(profile) {
+			if isObservabilityProviderScoped(question, "aws") {
+				warnings = append(warnings, "AWS observability: AWS profile or credentials are not configured")
+			}
+		} else {
+			awsClient, err := aws.NewClientWithProfileAndDebug(ctx, awsProfile, debug)
+			if err != nil {
+				warnings = appendDomainWarning(warnings, "AWS observability", err)
+			} else {
+				awsInfo, awsErr := awsClient.GetRelevantContext(ctx, "cloudwatch logs recent error logs alarms metrics traces x-ray lambda ecs api gateway cloudtrail")
+				if awsErr != nil {
+					warnings = appendDomainWarning(warnings, "AWS observability", awsErr)
+				} else {
+					sections = appendDomainSection(sections, "AWS Observability", awsInfo)
+				}
+			}
+		}
+	}
+
+	if shouldQueryObservabilityProvider(question, "gcp") {
+		projectID := strings.TrimSpace(gcp.ResolveProjectID())
+		if projectID != "" {
+			gcpClient, err := gcp.NewClient(projectID, debug)
+			if err != nil {
+				warnings = appendDomainWarning(warnings, "GCP observability", err)
+			} else {
+				gcpInfo, gcpErr := gcpClient.GetRelevantContext(ctx, "logs error errors incident cloud logging cloud monitoring alert policy error reporting trace metrics cloud run gke compute")
+				if gcpErr != nil {
+					warnings = appendDomainWarning(warnings, "GCP observability", gcpErr)
+				} else {
+					sections = appendDomainSection(sections, "GCP Observability", gcpInfo)
+				}
+			}
+		} else if isObservabilityProviderScoped(question, "gcp") {
+			warnings = append(warnings, "GCP observability: project is not configured")
+		}
+	}
+
+	if shouldQueryObservabilityProvider(question, "azure") {
+		azureClient := azure.NewClientWithOptionalSubscription(strings.TrimSpace(azure.ResolveSubscriptionID()), debug)
+		azureInfo, azureErr := azureClient.GetRelevantContext(ctx, "resource graph resources inventory activity log logs errors monitor alerts metrics application insights log analytics warnings incidents container apps app services function apps virtual machines")
+		if azureErr != nil {
+			warnings = appendDomainWarning(warnings, "Azure observability", azureErr)
+		} else {
+			sections = appendDomainSection(sections, "Azure Observability", azureInfo)
+		}
+	}
+
+	if shouldQueryObservabilityProvider(question, "cloudflare") {
+		apiToken := strings.TrimSpace(cloudflare.ResolveAPIToken())
+		if apiToken != "" {
+			cfClient, err := cloudflare.NewClient(cloudflare.ResolveAccountID(), apiToken, debug)
+			if err != nil {
+				warnings = appendDomainWarning(warnings, "Cloudflare observability", err)
+			} else {
+				cfInfo, cfErr := cfClient.GetRelevantContext(ctx, "logs logpush observability analytics workers errors waf ai gateway logs traces metrics")
+				if cfErr != nil {
+					warnings = appendDomainWarning(warnings, "Cloudflare observability", cfErr)
+				} else {
+					sections = appendDomainSection(sections, "Cloudflare Observability", cfInfo)
+				}
+			}
+		} else if isObservabilityProviderScoped(question, "cloudflare") {
+			warnings = append(warnings, "Cloudflare observability: API token is not configured")
+		}
+	}
+
+	if shouldQueryObservabilityProvider(question, "digitalocean") {
+		apiToken := strings.TrimSpace(digitalocean.ResolveAPIToken())
+		if apiToken != "" {
+			doClient, err := digitalocean.NewClient(apiToken, debug)
+			if err != nil {
+				warnings = appendDomainWarning(warnings, "DigitalOcean observability", err)
+			} else {
+				doInfo, doErr := doClient.GetRelevantContext(ctx, "apps app platform deployments logs monitoring alerts droplets kubernetes")
+				if doErr != nil {
+					warnings = appendDomainWarning(warnings, "DigitalOcean observability", doErr)
+				} else {
+					sections = appendDomainSection(sections, "DigitalOcean Observability", doInfo)
+				}
+			}
+		} else if isObservabilityProviderScoped(question, "digitalocean") {
+			warnings = append(warnings, "DigitalOcean observability: API token is not configured")
+		}
+	}
+
+	if shouldQueryObservabilityProvider(question, "hetzner") {
+		apiToken := strings.TrimSpace(hetzner.ResolveAPIToken())
+		if apiToken != "" {
+			hzClient, err := hetzner.NewClient(apiToken, debug)
+			if err != nil {
+				warnings = appendDomainWarning(warnings, "Hetzner observability", err)
+			} else {
+				hzInfo, hzErr := hzClient.GetRelevantContext(ctx, "servers firewalls load balancers status logs monitoring")
+				if hzErr != nil {
+					warnings = appendDomainWarning(warnings, "Hetzner observability", hzErr)
+				} else {
+					sections = appendDomainSection(sections, "Hetzner Observability", hzInfo)
+				}
+			}
+		} else if isObservabilityProviderScoped(question, "hetzner") {
+			warnings = append(warnings, "Hetzner observability: API token is not configured")
+		}
+	}
+
+	if shouldQueryObservabilityProvider(question, "vercel") {
+		apiToken := strings.TrimSpace(vercel.ResolveAPIToken())
+		if apiToken != "" {
+			vcClient, err := vercel.NewClient(apiToken, vercel.ResolveTeamID(), debug)
+			if err != nil {
+				warnings = appendDomainWarning(warnings, "Vercel observability", err)
+			} else {
+				vcInfo, vcErr := vcClient.GetRelevantContext(ctx, "deployments events logs errors functions analytics")
+				if vcErr != nil {
+					warnings = appendDomainWarning(warnings, "Vercel observability", vcErr)
+				} else {
+					sections = appendDomainSection(sections, "Vercel Observability", vcInfo)
+				}
+			}
+		} else if isObservabilityProviderScoped(question, "vercel") {
+			warnings = append(warnings, "Vercel observability: API token is not configured")
+		}
+	}
+
+	if shouldQueryObservabilityProvider(question, "flyio") {
+		apiToken := strings.TrimSpace(flyio.ResolveAPIToken())
+		if apiToken != "" {
+			flyClient, err := flyio.NewClient(apiToken, flyio.ResolveOrgSlug(), debug)
+			if err != nil {
+				warnings = appendDomainWarning(warnings, "Fly.io observability", err)
+			} else {
+				flyInfo, flyErr := flyClient.GetRelevantContext(ctx, "logs machines apps releases errors warnings metrics")
+				if flyErr != nil {
+					warnings = appendDomainWarning(warnings, "Fly.io observability", flyErr)
+				} else {
+					sections = appendDomainSection(sections, "Fly.io Observability", flyInfo)
+				}
+			}
+		} else if isObservabilityProviderScoped(question, "flyio") {
+			warnings = append(warnings, "Fly.io observability: API token is not configured")
+		}
+	}
+
+	if shouldQueryObservabilityProvider(question, "railway") {
+		apiToken := strings.TrimSpace(railway.ResolveAPIToken())
+		if apiToken != "" {
+			railwayClient, err := railway.NewClient(apiToken, railway.ResolveWorkspaceID(), debug)
+			if err != nil {
+				warnings = appendDomainWarning(warnings, "Railway observability", err)
+			} else {
+				railwayInfo, railwayErr := railwayClient.GetRelevantContext(ctx, "deployments logs runtime logs build logs errors warnings incidents metrics services")
+				if railwayErr != nil {
+					warnings = appendDomainWarning(warnings, "Railway observability", railwayErr)
+				} else {
+					sections = appendDomainSection(sections, "Railway Observability", railwayInfo)
+				}
+			}
+		} else if isObservabilityProviderScoped(question, "railway") {
+			warnings = append(warnings, "Railway observability: API token is not configured")
+		}
+	}
+
+	if shouldQueryObservabilityProvider(question, "sentry") {
+		authToken := strings.TrimSpace(sentry.ResolveAuthToken())
+		orgSlug := strings.TrimSpace(sentry.ResolveOrgSlug())
+		if authToken != "" && orgSlug != "" {
+			sentryClient, err := sentry.NewClient(authToken, orgSlug, sentry.ResolveHost(), debug)
+			if err != nil {
+				warnings = appendDomainWarning(warnings, "Sentry observability", err)
+			} else {
+				sentryInfo, sentryErr := gatherSentryContext(ctx, sentryClient, question, sentry.ResolveDefaultProject(), "", debug)
+				if sentryErr != nil {
+					warnings = appendDomainWarning(warnings, "Sentry observability", sentryErr)
+				} else {
+					sections = appendDomainSection(sections, "Sentry Observability", sentryInfo)
+				}
+			}
+		} else if isObservabilityProviderScoped(question, "sentry") {
+			warnings = append(warnings, "Sentry observability: auth token and org slug are required")
+		}
+	}
+
+	return sections, warnings
+}
+
+type observabilityCommand struct {
+	name    string
+	binary  string
+	args    []string
+	timeout time.Duration
+}
+
+func collectLocalObservabilityContext(ctx context.Context, question string) (string, error) {
+	commands := []observabilityCommand{
+		{name: "Host Uptime", binary: "uptime", args: nil, timeout: 2 * time.Second},
+		{name: "Disk Usage", binary: "df", args: []string{"-h"}, timeout: 3 * time.Second},
+	}
+	if commandAvailable("docker") {
+		commands = append(commands, observabilityCommand{name: "Docker Containers", binary: "docker", args: []string{"ps", "--format", "table {{.Names}}\t{{.Status}}\t{{.Image}}"}, timeout: 5 * time.Second})
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		if commandAvailable("log") {
+			commands = append(commands, observabilityCommand{
+				name:    "macOS Recent Error Logs",
+				binary:  "log",
+				args:    []string{"show", "--last", "10m", "--style", "compact", "--predicate", `eventMessage CONTAINS[c] "error" OR eventMessage CONTAINS[c] "warning" OR eventMessage CONTAINS[c] "fault"`},
+				timeout: 5 * time.Second,
+			})
+		}
+	case "linux":
+		if commandAvailable("journalctl") {
+			commands = append(commands, observabilityCommand{name: "Systemd Journal Warnings", binary: "journalctl", args: []string{"-p", "warning..alert", "-n", "80", "--no-pager"}, timeout: 5 * time.Second})
+		}
+	}
+	return runObservabilityCommands(ctx, commands)
+}
+
+func collectKubernetesObservabilityContext(ctx context.Context) (string, error) {
+	if !commandAvailable("kubectl") {
+		return "", fmt.Errorf("kubectl is not available")
+	}
+	commands := []observabilityCommand{
+		{name: "Kubernetes Pods", binary: "kubectl", args: []string{"get", "pods", "--all-namespaces", "-o", "wide"}, timeout: 8 * time.Second},
+		{name: "Kubernetes Recent Events", binary: "kubectl", args: []string{"get", "events", "--all-namespaces", "--sort-by=.lastTimestamp"}, timeout: 8 * time.Second},
+	}
+	return runObservabilityCommands(ctx, commands)
+}
+
+func runObservabilityCommands(ctx context.Context, commands []observabilityCommand) (string, error) {
+	var out strings.Builder
+	var errs []string
+	for _, command := range commands {
+		if !commandAvailable(command.binary) {
+			continue
+		}
+		timeout := command.timeout
+		if timeout <= 0 {
+			timeout = 5 * time.Second
+		}
+		cmdCtx, cancel := context.WithTimeout(ctx, timeout)
+		output, err := exec.CommandContext(cmdCtx, command.binary, command.args...).CombinedOutput()
+		cancel()
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", command.name, err))
+			continue
+		}
+		text := strings.TrimSpace(string(output))
+		if text == "" {
+			continue
+		}
+		out.WriteString(command.name)
+		out.WriteString(":\n")
+		out.WriteString(text)
+		out.WriteString("\n\n")
+	}
+	if strings.TrimSpace(out.String()) == "" && len(errs) > 0 {
+		return "", errors.New(strings.Join(errs, "; "))
+	}
+	return out.String(), nil
+}
+
+func commandAvailable(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }
 
 func buildDatabaseConnectionInventoryContext(ctx context.Context) (string, error) {
@@ -1055,11 +1364,74 @@ func runDomainAgentQuery(ctx context.Context, domain string, question string, se
 	prompt := buildDomainAgentPrompt(domain, question, sections, warnings)
 	response, err := aiClient.AskPrompt(ctx, prompt)
 	if err != nil {
+		if domain == "observability" {
+			fmt.Println(buildObservabilityFallbackReport(question, sections, warnings, err))
+			return nil
+		}
 		return fmt.Errorf("failed to get %s agent response: %w", domain, err)
 	}
 
 	fmt.Println(response)
 	return nil
+}
+
+func buildObservabilityFallbackReport(question string, sections []domainContextSection, warnings []string, synthesisErr error) string {
+	var b strings.Builder
+	b.WriteString("Observability agent collected context, but AI synthesis failed.\n\n")
+	if synthesisErr != nil {
+		b.WriteString("Synthesis error: ")
+		b.WriteString(strings.TrimSpace(synthesisErr.Error()))
+		b.WriteString("\n\n")
+	}
+	if trimmedQuestion := strings.TrimSpace(question); trimmedQuestion != "" {
+		b.WriteString("Question: ")
+		b.WriteString(trimmedQuestion)
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString("Collected Evidence\n")
+	if len(sections) == 0 {
+		b.WriteString("- No live observability evidence was collected before synthesis failed.\n")
+	} else {
+		for _, section := range sections {
+			title := strings.TrimSpace(section.Title)
+			content := truncateObservabilityFallbackSection(section.Content)
+			if title == "" || content == "" {
+				continue
+			}
+			b.WriteString("\n## ")
+			b.WriteString(title)
+			b.WriteString("\n")
+			b.WriteString(content)
+			b.WriteString("\n")
+		}
+	}
+
+	if len(warnings) > 0 {
+		b.WriteString("\nUnavailable Sources / Warnings\n")
+		for _, warning := range warnings {
+			warning = strings.TrimSpace(warning)
+			if warning == "" {
+				continue
+			}
+			b.WriteString("- ")
+			b.WriteString(warning)
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString("\nNext Checks\n")
+	b.WriteString("- Retry once the configured LLM provider is healthy to get a synthesized incident summary.\n")
+	b.WriteString("- Review unavailable sources above; missing credentials or tools can hide provider logs, traces, metrics, or alerts.\n")
+	return strings.TrimSpace(b.String())
+}
+
+func truncateObservabilityFallbackSection(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if len(trimmed) <= maxObservabilityFallbackChars {
+		return trimmed
+	}
+	return trimmed[:maxObservabilityFallbackChars] + "\n...<truncated>"
 }
 
 func buildDomainAgentPrompt(domain string, question string, sections []domainContextSection, warnings []string) string {
@@ -1088,6 +1460,28 @@ Rules:
 - If a provider or engine is missing, say it was not available from current credentials or integrations.
 - Do not invent schema details, table names, counts, or status.
 - Be concrete about engines, tables, columns, state, and obvious gaps.`
+	case "observability":
+		instructions = `You are Clanker's observability agent.
+
+Use the evidence below to answer questions about logs, traces, metrics, alerts, errors, warnings, incidents, and runtime health across local machines, Kubernetes, cloud providers, and observability services.
+
+Coverage in this repo can include:
+- local host signals, system logs, Docker inventory, and Kubernetes events/pods
+- AWS CloudWatch Logs, CloudWatch alarms/metrics, CloudTrail, Lambda/ECS/API Gateway error evidence
+- GCP Cloud Logging, Error Reporting, Cloud Monitoring, Cloud Run, GKE, and compute evidence
+- Azure Monitor activity logs, alert rules, Log Analytics, Application Insights, apps, functions, containers, and VMs
+- Cloudflare Logpush, Workers/Pages deployment signals, analytics, WAF, and AI Gateway logs
+- DigitalOcean, Hetzner, Vercel, Fly.io, and Railway runtime/deployment/log surfaces
+- Sentry issues, events, releases, monitors, and alert rules
+
+Rules:
+- This agent is strictly read-only. Do not recommend applying changes unless the user asks for remediation after the evidence is summarized.
+- Start with the highest-confidence observed failures, warnings, alerts, or missing telemetry.
+- Separate observed facts from hypotheses and next checks.
+- When evidence spans multiple providers or machines, group the answer by provider/system.
+- If logs or traces were unavailable because credentials, project, org, or tools were missing, say exactly which source was unavailable.
+- Do not invent log lines, stack traces, metric values, incident IDs, issue IDs, regions, or resource names.
+- Be concrete about timestamp windows, severity, affected service/resource, suspected blast radius, and whether the result is live evidence or only inventory.`
 	default:
 		instructions = `You are Clanker's CI/CD agent.
 
@@ -1329,6 +1723,10 @@ func hasAWSDomainAccess() bool {
 	return strings.TrimSpace(viper.GetString("aws.default_profile")) != ""
 }
 
+func hasAWSObservabilityAccess(profile string) bool {
+	return strings.TrimSpace(profile) != "" || hasAWSDomainAccess()
+}
+
 func hasHetznerDomainAccess() bool {
 	return strings.TrimSpace(hetzner.ResolveAPIToken()) != ""
 }
@@ -1365,6 +1763,84 @@ func shouldQueryDomainProvider(question string, provider string) bool {
 		return true
 	}
 	return containsAnyPhrase(lower, signals...)
+}
+
+func shouldQueryObservabilityProvider(question string, provider string) bool {
+	providerSignals := observabilityProviderSignals()
+	lower := strings.ToLower(strings.TrimSpace(question))
+	if lower == "" {
+		return true
+	}
+	if hasBroadObservabilityProviderScope(lower) {
+		return true
+	}
+
+	anyScoped := false
+	for _, signals := range providerSignals {
+		if containsAnyPhrase(lower, signals...) {
+			anyScoped = true
+			break
+		}
+	}
+	if !anyScoped {
+		return true
+	}
+
+	signals, ok := providerSignals[provider]
+	if !ok {
+		return true
+	}
+	return containsAnyPhrase(lower, signals...)
+}
+
+func hasBroadObservabilityProviderScope(lower string) bool {
+	return containsAnyPhrase(lower,
+		"any configured provider",
+		"any configured providers",
+		"configured provider",
+		"configured providers",
+		"all configured provider",
+		"all configured providers",
+		"cloud provider",
+		"cloud providers",
+		"all provider",
+		"all providers",
+		"provider logs",
+		"provider log",
+		"provider traces",
+		"provider metrics",
+		"provider alerts",
+		"across providers",
+		"across clouds",
+		"all clouds",
+		"every provider",
+		"every cloud",
+	)
+}
+
+func isObservabilityProviderScoped(question string, provider string) bool {
+	signals := observabilityProviderSignals()[provider]
+	if len(signals) == 0 {
+		return false
+	}
+	return containsAnyPhrase(strings.ToLower(strings.TrimSpace(question)), signals...)
+}
+
+func observabilityProviderSignals() map[string][]string {
+	return map[string][]string{
+		"local":        {"local", "host", "machine", "systemd", "journalctl", "syslog", "docker"},
+		"kubernetes":   {"kubernetes", "k8s", "kubectl", "pod", "pods", "namespace", "cluster", "node", "crashloop", "crashloopbackoff"},
+		"aws":          {"aws", "cloudwatch", "cloudtrail", "x-ray", "xray", "lambda", "ecs", "api gateway", "eks"},
+		"gcp":          {"gcp", "google cloud", "cloud logging", "cloud monitoring", "error reporting", "cloud trace", "cloud run", "gke"},
+		"azure":        {"azure", "azure monitor", "log analytics", "application insights", "app insights", "activity log"},
+		"cloudflare":   {"cloudflare", "workers", "pages", "logpush", "wrangler", "ai gateway", "waf"},
+		"digitalocean": {"digitalocean", "digital ocean", "doctl", "droplet", "doks", "app platform"},
+		"hetzner":      {"hetzner", "hcloud"},
+		"vercel":       {"vercel"},
+		"flyio":        {"fly", "fly.io", "flyio", "flyctl"},
+		"railway":      {"railway"},
+		"sentry":       {"sentry"},
+	}
 }
 
 func shouldRouteToDatabaseAgent(question string) bool {
@@ -1520,4 +1996,33 @@ func shouldRouteToCICDAgent(question string) bool {
 		return true
 	}
 	return containsAnyPhrase(lower, "build status", "deploy status", "deployment status", "failed build", "failing pipeline", "release pipeline")
+}
+
+func shouldRouteToObservabilityAgent(question string) bool {
+	lower := strings.ToLower(strings.TrimSpace(question))
+	if lower == "" {
+		return false
+	}
+	if containsAnyPhrase(lower, "github actions", "workflow", "workflows", "workflow run", "codebuild", "codepipeline", "cloud build", "cloud deploy", "pipeline", "pipelines", "runner", "runners") &&
+		!containsAnyPhrase(lower, "cloudwatch", "cloud logging", "azure monitor", "log analytics", "application insights", "sentry", "datadog", "grafana", "prometheus", "loki", "opentelemetry", "otel", "trace", "traces", "metric", "metrics", "alert", "alerts", "alarm", "alarms") {
+		return false
+	}
+	if containsAnyPhrase(lower, "database connection", "db connection", "foreign key", "primary key", "migration", "migrations", "sql query") &&
+		!containsAnyPhrase(lower, "log", "logs", "trace", "traces", "metric", "metrics", "alert", "alerts", "alarm", "alarms") {
+		return false
+	}
+	if containsAnyPhrase(lower,
+		"observability", "log", "logs", "log group", "log groups", "log stream", "log streams",
+		"trace", "traces", "tracing", "metric", "metrics", "telemetry", "opentelemetry", "otel",
+		"cloudwatch", "cloud logging", "cloud monitoring", "azure monitor", "log analytics",
+		"application insights", "app insights", "sentry", "datadog", "grafana", "prometheus",
+		"loki", "new relic", "honeycomb", "splunk", "pagerduty", "alert", "alerts", "alarm",
+		"alarms", "incident", "incidents", "warning", "warnings", "5xx", "4xx") {
+		return true
+	}
+	if containsAnyPhrase(lower, "error", "errors", "exception", "exceptions", "timeout", "timeouts", "crash", "crashes", "crashloop", "crashloopbackoff") &&
+		containsAnyPhrase(lower, "lambda", "function", "cloud run", "service", "app", "worker", "api", "pod", "container", "machine", "vm", "server", "request", "production", "prod") {
+		return true
+	}
+	return false
 }

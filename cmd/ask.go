@@ -121,6 +121,8 @@ Examples:
 		includeVerda, _ := cmd.Flags().GetBool("verda")
 		includeTencent, _ := cmd.Flags().GetBool("tencent")
 		sreMode, _ := cmd.Flags().GetBool("sre")
+		includeObservability, _ := cmd.Flags().GetBool("observability")
+		observabilityRequestedExplicitly := includeObservability
 		includeTerraform, _ := cmd.Flags().GetBool("terraform")
 		includeIAM, _ := cmd.Flags().GetBool("iam")
 		dbConnection, _ := cmd.Flags().GetString("db-connection")
@@ -170,6 +172,9 @@ Examples:
 		if includeCICD {
 			includeGitHub = true
 		}
+		if !includeObservability && shouldRouteToObservabilityAgent(routingQuestion) {
+			includeObservability = true
+		}
 		if strings.TrimSpace(dbConnection) != "" {
 			includeDB = true
 		}
@@ -186,6 +191,12 @@ Examples:
 				return json.NewEncoder(os.Stdout).Encode(map[string]string{
 					"agent":  "sre",
 					"reason": "--sre requested adaptive SRE discovery/runtime context",
+				})
+			}
+			if observabilityRequestedExplicitly {
+				return json.NewEncoder(os.Stdout).Encode(map[string]string{
+					"agent":  "agent-observability",
+					"reason": "--observability requested logs, traces, metrics, alerts, errors, and warnings context",
 				})
 			}
 			decision := determineRoutingDecisionDetailsWithContext(question, dbConnection)
@@ -209,6 +220,8 @@ Examples:
 			return handleDatabaseQuery(context.Background(), question, debug, dbConnection)
 		} else if agentName == "cicd" {
 			return handleCICDQuery(context.Background(), question, debug)
+		} else if agentName == "observability" {
+			return handleObservabilityQuery(context.Background(), question, debug, profile)
 		} else if agentName == "software-blocks" {
 			return handleSoftwareBlocksQuery(context.Background(), question, debug)
 		} else if agentName == "data_flow" {
@@ -216,7 +229,7 @@ Examples:
 		} else if isGitHubCodingAgent(agentName) {
 			selectedGitHubCodingAgent = agentName
 		} else if agentName != "" {
-			return fmt.Errorf("unknown agent: %s (available: hermes, claude-code, database, cicd, software-blocks, data_flow, copilot, codex, claude)", agentName)
+			return fmt.Errorf("unknown agent: %s (available: hermes, claude-code, database, cicd, observability, software-blocks, data_flow, copilot, codex, claude)", agentName)
 		}
 
 		// Handle apply mode (independent of maker mode)
@@ -834,6 +847,10 @@ Format as a professional compliance table suitable for government security docum
 			includeTerraform = true
 		}
 
+		if includeObservability {
+			return handleObservabilityQuery(context.Background(), question, debug, profile)
+		}
+
 		// Provider-specific Q&A paths.
 		// NOTE: makerMode returns above, so these only fire for
 		// plain --<provider> queries (not --maker --<provider>).
@@ -972,6 +989,10 @@ Format as a professional compliance table suitable for government security docum
 			// Handle IAM queries by delegating to IAM agent
 			if includeIAM || svcCtx.IAM {
 				return handleIAMQuery(context.Background(), routingQuestion, debug, iamRoleARN, iamPolicyARN)
+			}
+
+			if shouldRouteToObservabilityAgent(routingQuestion) {
+				return handleObservabilityQuery(context.Background(), routingQuestion, debug, profile)
 			}
 
 			if shouldRouteToDatabaseAgentWithContext(routingQuestion, dbConnection) {
@@ -1464,6 +1485,7 @@ func init() {
 	askCmd.Flags().String("db-connection", "", "Database connection name to inspect when using --db")
 	askCmd.Flags().Bool("terraform", false, "Include Terraform workspace context")
 	askCmd.Flags().Bool("iam", false, "Route query to IAM agent for security analysis")
+	askCmd.Flags().Bool("observability", false, "Route query to observability agent for logs, traces, metrics, alerts, errors, and warnings")
 	askCmd.Flags().String("role-arn", "", "Scope IAM query to a specific role ARN")
 	askCmd.Flags().String("policy-arn", "", "Scope IAM query to a specific policy ARN")
 	askCmd.Flags().Bool("discovery", false, "Run comprehensive infrastructure discovery (all services)")
@@ -1493,7 +1515,7 @@ func init() {
 	askCmd.Flags().Bool("apply", false, "Apply an approved maker plan (reads from stdin unless --plan-file is provided)")
 	askCmd.Flags().String("plan-file", "", "Optional path to maker plan JSON file for --apply")
 	askCmd.Flags().Bool("route-only", false, "Return routing decision as JSON without executing (for backend integration)")
-	askCmd.Flags().String("agent", "", "Use a specific agent to handle the query (e.g., hermes, claude-code, database, cicd, software-blocks, data_flow, copilot, codex, claude)")
+	askCmd.Flags().String("agent", "", "Use a specific agent to handle the query (e.g., hermes, claude-code, database, cicd, observability, software-blocks, data_flow, copilot, codex, claude)")
 	askCmd.Flags().String("github-coding-agent-model", "", "Override the Copilot CLI model used for GitHub coding-agent delegation")
 }
 
@@ -3615,6 +3637,10 @@ func determineRoutingDecisionDetailsWithContext(question string, dbConnection st
 		if strings.Contains(questionLower, kw) {
 			return routingDecisionDetails{Agent: "iam", Reason: "IAM query or security analysis request"}
 		}
+	}
+
+	if shouldRouteToObservabilityAgent(questionLower) {
+		return routingDecisionDetails{Agent: "agent-observability", Reason: "Observability request detected"}
 	}
 
 	terraformSignals := []string{

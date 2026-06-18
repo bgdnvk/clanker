@@ -3,6 +3,7 @@ package digitalocean
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -229,6 +230,7 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 
 	var out strings.Builder
 	var warnings []string
+	var appsBody string
 
 	for _, s := range sections {
 		if questionLower != "" && len(s.keys) > 0 {
@@ -251,6 +253,9 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 		}
 		if strings.TrimSpace(result) == "" {
 			continue
+		}
+		if s.name == "Apps" {
+			appsBody = result
 		}
 		out.WriteString(s.name)
 		out.WriteString(":\n")
@@ -278,6 +283,19 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 		}
 	}
 
+	if digitalOceanObservabilityLogIntent(questionLower) {
+		appLogs, err := c.collectAppPlatformLogsContext(ctx, appsBody)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("App Platform Logs: %v", err))
+		} else if strings.TrimSpace(appLogs) != "" {
+			out.WriteString("App Platform Logs:\n")
+			out.WriteString(appLogs)
+			if !strings.HasSuffix(appLogs, "\n") {
+				out.WriteString("\n")
+			}
+		}
+	}
+
 	if len(warnings) > 0 {
 		out.WriteString("Digital Ocean Warnings:\n")
 		for i, warn := range warnings {
@@ -297,6 +315,150 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 	}
 
 	return out.String(), nil
+}
+
+func digitalOceanObservabilityLogIntent(questionLower string) bool {
+	return containsAnyDigitalOceanPhrase(questionLower,
+		"log", "logs", "event", "events", "error", "errors", "warning", "warnings",
+		"trace", "traces", "metric", "metrics", "observability", "incident", "incidents")
+}
+
+func containsAnyDigitalOceanPhrase(value string, phrases ...string) bool {
+	for _, phrase := range phrases {
+		if strings.Contains(value, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+type appPlatformSummary struct {
+	ID   string
+	Name string
+}
+
+func (c *Client) collectAppPlatformLogsContext(ctx context.Context, appsBody string) (string, error) {
+	apps, err := parseDigitalOceanApps(appsBody)
+	if err != nil || len(apps) == 0 {
+		fetched, fetchErr := c.RunDoctl(ctx, "apps", "list", "--format", "json")
+		if fetchErr != nil {
+			if err != nil {
+				return "", fmt.Errorf("%v; list apps: %w", err, fetchErr)
+			}
+			return "", fetchErr
+		}
+		apps, err = parseDigitalOceanApps(fetched)
+		if err != nil {
+			return "", err
+		}
+	}
+	if len(apps) == 0 {
+		return "No DigitalOcean App Platform apps found.\n", nil
+	}
+
+	maxApps := minDigitalOceanInt(len(apps), 3)
+	var out strings.Builder
+	for i := 0; i < maxApps; i++ {
+		app := apps[i]
+		if strings.TrimSpace(app.ID) == "" {
+			continue
+		}
+		name := strings.TrimSpace(app.Name)
+		if name == "" {
+			name = app.ID
+		}
+		out.WriteString(fmt.Sprintf("%s (%s):\n", name, app.ID))
+		deployments, depErr := c.RunDoctl(ctx, "apps", "list-deployments", app.ID, "--format", "json")
+		if depErr != nil {
+			out.WriteString(fmt.Sprintf("  deployments unavailable: %v\n", depErr))
+		} else if strings.TrimSpace(deployments) != "" {
+			out.WriteString("  deployments:\n")
+			out.WriteString(indentDigitalOceanLines(truncateDigitalOceanContext(strings.TrimSpace(deployments), 1200), "    "))
+		}
+		logs, logErr := c.RunDoctl(ctx, "apps", "logs", app.ID, "--type", "run", "--tail", "100", "--no-prefix")
+		if logErr != nil {
+			out.WriteString(fmt.Sprintf("  run logs unavailable: %v\n", logErr))
+			continue
+		}
+		out.WriteString("  run logs:\n")
+		out.WriteString(indentDigitalOceanLines(truncateDigitalOceanContext(strings.TrimSpace(logs), 2500), "    "))
+	}
+	if len(apps) > maxApps {
+		out.WriteString(fmt.Sprintf("(... %d more apps omitted)\n", len(apps)-maxApps))
+	}
+	return out.String(), nil
+}
+
+func parseDigitalOceanApps(body string) ([]appPlatformSummary, error) {
+	trimmed := strings.TrimSpace(body)
+	if trimmed == "" {
+		return nil, nil
+	}
+	var rawApps []map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &rawApps); err != nil {
+		var envelope struct {
+			Apps []map[string]any `json:"apps"`
+		}
+		if err2 := json.Unmarshal([]byte(trimmed), &envelope); err2 != nil {
+			return nil, err
+		}
+		rawApps = envelope.Apps
+	}
+	apps := make([]appPlatformSummary, 0, len(rawApps))
+	for _, raw := range rawApps {
+		id := stringFromAny(raw["id"])
+		if id == "" {
+			id = stringFromAny(raw["ID"])
+		}
+		name := stringFromAny(raw["name"])
+		if spec, ok := raw["spec"].(map[string]any); ok {
+			if specName := stringFromAny(spec["name"]); specName != "" {
+				name = specName
+			}
+		}
+		if id == "" {
+			continue
+		}
+		apps = append(apps, appPlatformSummary{ID: id, Name: name})
+	}
+	return apps, nil
+}
+
+func stringFromAny(value any) string {
+	if value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	default:
+		return strings.TrimSpace(fmt.Sprint(typed))
+	}
+}
+
+func truncateDigitalOceanContext(value string, max int) string {
+	if strings.TrimSpace(value) == "" {
+		return "(no output)"
+	}
+	if max <= 0 || len(value) <= max {
+		return value
+	}
+	return value[:max] + "...<truncated>"
+}
+
+func indentDigitalOceanLines(value string, prefix string) string {
+	lines := strings.Split(value, "\n")
+	for i, line := range lines {
+		lines[i] = prefix + line
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func minDigitalOceanInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // isRetryableDOError checks if an error is retryable

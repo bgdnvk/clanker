@@ -151,15 +151,25 @@ func gatherSentryContext(ctx context.Context, client *sentry.Client, question, p
 	wantReleases := containsAny(questionLower, []string{"release", "deploy", "version", "rollout", "regress"})
 	wantMonitors := containsAny(questionLower, []string{"monitor", "cron", "schedule"})
 	wantAlerts := containsAny(questionLower, []string{"alert", "rule", "notify", "page"})
+	wantEvents := containsAny(questionLower, []string{"event", "events", "log", "logs", "trace", "traces", "stacktrace", "breadcrumb", "breadcrumbs", "sample", "samples"})
+	if wantIssues && containsAny(questionLower, []string{"error", "crash", "exception", "fail", "failing", "broken"}) {
+		wantEvents = true
+	}
+
+	// Event/log questions still include issues because issue events can be
+	// fetched without a configured default project.
+	if wantEvents && !wantIssues {
+		wantIssues = true
+	}
 
 	// Default to issues if the question doesn't pattern-match — most "what's
 	// going on" questions want issues first.
-	if !wantIssues && !wantReleases && !wantMonitors && !wantAlerts {
+	if !wantIssues && !wantReleases && !wantMonitors && !wantAlerts && !wantEvents {
 		wantIssues = true
 	}
 
 	g, gctx := errgroup.WithContext(ctx)
-	var issuesBlock, releasesBlock, monitorsBlock, alertsBlock string
+	var issuesBlock, eventsBlock, releasesBlock, monitorsBlock, alertsBlock string
 
 	if wantIssues {
 		g.Go(func() error {
@@ -186,7 +196,57 @@ func gatherSentryContext(ctx context.Context, client *sentry.Client, question, p
 					i.Level, i.ShortID, i.Title, i.Count, i.UserCount, i.LastSeen.Format(time.RFC3339))
 			}
 			b.WriteString("\n")
+			if wantEvents {
+				b.WriteString("Recent event samples from top issues:\n")
+				sampleCount := 0
+				for _, issue := range issues {
+					if sampleCount >= 3 {
+						break
+					}
+					if strings.TrimSpace(issue.ID) == "" {
+						continue
+					}
+					events, err := client.GetIssueEvents(gctx, issue.ID, 2)
+					if err != nil {
+						if debug {
+							fmt.Printf("[debug] get issue events %s: %v\n", issue.ShortID, err)
+						}
+						continue
+					}
+					if len(events) == 0 {
+						continue
+					}
+					sampleCount++
+					for _, event := range events {
+						fmt.Fprintf(&b, "  - %s: %s\n", issue.ShortID, formatSentryEventSummary(event))
+					}
+				}
+				if sampleCount == 0 {
+					b.WriteString("  - No issue event samples returned.\n")
+				}
+				b.WriteString("\n")
+			}
 			issuesBlock = b.String()
+			return nil
+		})
+	}
+
+	if wantEvents && project != "" {
+		g.Go(func() error {
+			events, err := client.ListProjectEvents(gctx, client.OrgSlug(), project, 10)
+			if err != nil {
+				if debug {
+					fmt.Printf("[debug] list project events: %v\n", err)
+				}
+				return nil
+			}
+			var b strings.Builder
+			b.WriteString("Recent project events:\n")
+			for _, event := range events {
+				fmt.Fprintf(&b, "  - %s\n", formatSentryEventSummary(event))
+			}
+			b.WriteString("\n")
+			eventsBlock = b.String()
 			return nil
 		})
 	}
@@ -262,6 +322,7 @@ func gatherSentryContext(ctx context.Context, client *sentry.Client, question, p
 
 	var sb strings.Builder
 	sb.WriteString(issuesBlock)
+	sb.WriteString(eventsBlock)
 	sb.WriteString(releasesBlock)
 	sb.WriteString(monitorsBlock)
 	sb.WriteString(alertsBlock)
@@ -270,6 +331,62 @@ func gatherSentryContext(ctx context.Context, client *sentry.Client, question, p
 		return "No Sentry data fetched (check token permissions and org slug).", nil
 	}
 	return sb.String(), nil
+}
+
+func formatSentryEventSummary(event sentry.Event) string {
+	id := firstNonEmptySentryValue(event.EventID, event.ID)
+	if id == "" {
+		id = "(unknown event)"
+	}
+	title := firstNonEmptySentryValue(event.Title, event.Message)
+	if title == "" {
+		title = "(no message)"
+	}
+	observedAt := event.DateReceived
+	if observedAt.IsZero() {
+		observedAt = event.DateCreated
+	}
+	when := "(unknown time)"
+	if !observedAt.IsZero() {
+		when = observedAt.Format(time.RFC3339)
+	}
+	entryTypes := sentryEventEntryTypes(event.Entries)
+	if entryTypes == "" {
+		return fmt.Sprintf("%s at %s: %s", id, when, title)
+	}
+	return fmt.Sprintf("%s at %s: %s (entries=%s)", id, when, title, entryTypes)
+}
+
+func sentryEventEntryTypes(entries []sentry.EventEntry) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	seen := make(map[string]struct{}, len(entries))
+	types := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		entryType := strings.TrimSpace(entry.Type)
+		if entryType == "" {
+			continue
+		}
+		if _, ok := seen[entryType]; ok {
+			continue
+		}
+		seen[entryType] = struct{}{}
+		types = append(types, entryType)
+		if len(types) >= 5 {
+			break
+		}
+	}
+	return strings.Join(types, ",")
+}
+
+func firstNonEmptySentryValue(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func buildSentryPrompt(question, dataContext, historyContext, statusContext string) string {

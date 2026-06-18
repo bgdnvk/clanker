@@ -751,6 +751,13 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 			},
 		},
 		{
+			name: "Deployment Logs",
+			keys: []string{"log", "logs", "runtime log", "runtime logs", "error", "errors", "warning", "warnings", "incident", "observability"},
+			run: func() (string, error) {
+				return c.collectDeploymentLogsContext(ctx, questionLower)
+			},
+		},
+		{
 			name: "Domains",
 			keys: []string{"domain", "dns", "custom domain", "up.railway.app"},
 			run: func() (string, error) {
@@ -915,6 +922,86 @@ func (c *Client) GetRelevantContext(ctx context.Context, question string) (strin
 }
 
 // --- helpers ---
+
+func (c *Client) collectDeploymentLogsContext(ctx context.Context, questionLower string) (string, error) {
+	deployments, err := c.ListDeployments(ctx, "", "", "", 8)
+	if err != nil {
+		return "", err
+	}
+	if len(deployments) == 0 {
+		return "No recent Railway deployments found.", nil
+	}
+
+	maxDeployments := minRailwayInt(len(deployments), 3)
+	var out strings.Builder
+	for i := 0; i < maxDeployments; i++ {
+		deployment := deployments[i]
+		if strings.TrimSpace(deployment.ID) == "" {
+			continue
+		}
+		out.WriteString(fmt.Sprintf("%s [%s] service=%s env=%s:\n",
+			deployment.ID,
+			strings.TrimSpace(deployment.Status),
+			strings.TrimSpace(deployment.ServiceID),
+			strings.TrimSpace(deployment.EnvironmentID),
+		))
+		runtimeLogs, err := c.ListDeploymentLogs(ctx, deployment.ID, false, 50)
+		if err != nil {
+			out.WriteString(fmt.Sprintf("  runtime logs unavailable: %v\n", err))
+		} else {
+			out.WriteString(formatRailwayLogEntries(runtimeLogs, 12))
+		}
+		if strings.Contains(questionLower, "build") {
+			buildLogs, err := c.ListDeploymentLogs(ctx, deployment.ID, true, 40)
+			if err != nil {
+				out.WriteString(fmt.Sprintf("  build logs unavailable: %v\n", err))
+			} else if len(buildLogs) > 0 {
+				out.WriteString("  build logs:\n")
+				out.WriteString(formatRailwayLogEntries(buildLogs, 8))
+			}
+		}
+	}
+	if len(deployments) > maxDeployments {
+		out.WriteString(fmt.Sprintf("(... %d more deployments omitted)\n", len(deployments)-maxDeployments))
+	}
+	return out.String(), nil
+}
+
+func formatRailwayLogEntries(entries []map[string]any, limit int) string {
+	if len(entries) == 0 {
+		return "  No deployment log entries returned.\n"
+	}
+	if limit <= 0 || limit > len(entries) {
+		limit = len(entries)
+	}
+	var out strings.Builder
+	for i := 0; i < limit; i++ {
+		entry := entries[i]
+		ts, _ := entry["timestamp"].(string)
+		msg, _ := entry["message"].(string)
+		sev, _ := entry["severity"].(string)
+		msg = strings.TrimSpace(msg)
+		if msg == "" {
+			msg = "(no message)"
+		}
+		if ts != "" {
+			out.WriteString(fmt.Sprintf("  [%s] %-5s %s\n", ts, sev, msg))
+		} else {
+			out.WriteString(fmt.Sprintf("  %-5s %s\n", sev, msg))
+		}
+	}
+	if len(entries) > limit {
+		out.WriteString(fmt.Sprintf("  (... %d more log entries omitted)\n", len(entries)-limit))
+	}
+	return out.String()
+}
+
+func minRailwayInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
 
 func jsonPretty(v any) (string, error) {
 	b, err := json.MarshalIndent(v, "", "  ")
