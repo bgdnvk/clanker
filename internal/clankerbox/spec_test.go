@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -109,5 +110,42 @@ func TestServerTerminalRunsCommand(t *testing.T) {
 	}
 	if !resp.OK || resp.SessionID != "term-1" || resp.ExitCode != 0 || resp.Output != "terminal-ok" {
 		t.Fatalf("unexpected terminal response %#v", resp)
+	}
+}
+
+func TestServerTerminalPostRunsCommand(t *testing.T) {
+	server := NewServer(RuntimeConfig{Name: "test", Agent: "clanker-cli", Region: "us-central1", RequireAuth: true, EnableTerminal: true, APIToken: "secret"}, fakeRunner{})
+	req := httptest.NewRequest(http.MethodPost, "/v1/box/terminal", bytes.NewBufferString(`{"sessionId":"term-1","command":"printf terminal-ok","timeoutSeconds":5}`))
+	req.Header.Set("X-API-Key", "secret")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp TerminalResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode terminal response: %v", err)
+	}
+	if !resp.OK || resp.SessionID != "term-1" || resp.Output != "terminal-ok" {
+		t.Fatalf("unexpected terminal response %#v", resp)
+	}
+}
+
+func TestInstallAgentRejectsUnknownAgent(t *testing.T) {
+	if _, err := InstallAgent(context.Background(), "unknown"); err == nil {
+		t.Fatal("expected unsupported agent error")
+	}
+}
+
+func TestInstallTimeoutSupportsDurationsAndSeconds(t *testing.T) {
+	t.Setenv("CLANKER_BOX_INSTALL_TIMEOUT_SECONDS", "2m")
+	if got := installTimeout(); got != 2*time.Minute {
+		t.Fatalf("duration timeout = %s, want 2m", got)
+	}
+	t.Setenv("CLANKER_BOX_INSTALL_TIMEOUT_SECONDS", "30")
+	if got := installTimeout(); got != 30*time.Second {
+		t.Fatalf("seconds timeout = %s, want 30s", got)
 	}
 }

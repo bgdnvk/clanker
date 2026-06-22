@@ -192,6 +192,20 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "terminal access is disabled"})
 		return
 	}
+	if r.Method == http.MethodPost {
+		var req TerminalRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, TerminalResponse{OK: false, Error: "invalid json", ExitCode: 1, CreatedAt: time.Now().UTC()})
+			return
+		}
+		resp := s.runTerminal(r.Context(), req)
+		status := http.StatusOK
+		if !resp.OK {
+			status = http.StatusBadGateway
+		}
+		writeJSON(w, status, resp)
+		return
+	}
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -299,6 +313,9 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 type DefaultRunner struct{}
 
 func (DefaultRunner) RunAgentMessage(ctx context.Context, cfg RuntimeConfig, req MessageRequest) (string, error) {
+	if err := ensureAgentInstalled(ctx, cfg.Agent); err != nil {
+		return "", err
+	}
 	switch normalizeID(cfg.Agent) {
 	case "hermes":
 		return runHermes(ctx, req.Message)

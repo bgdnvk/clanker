@@ -9,9 +9,15 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/clanker .
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git openssh-client python3 nodejs npm \
+    && apt-get install -y --no-install-recommends bash ca-certificates curl git gnupg openssh-client python3 python3-venv \
+    && install -d -m 0755 /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends nodejs \
     && groupadd --system clankerbox \
     && useradd --system --create-home --gid clankerbox --shell /bin/sh clankerbox \
+    && mkdir -p /home/clankerbox/.local \
     && mkdir -p /workspace \
     && chown -R clankerbox:clankerbox /workspace /home/clankerbox \
     && rm -rf /var/lib/apt/lists/*
@@ -22,8 +28,11 @@ ENV CLANKER_BOX_AGENT=clanker-cli \
     CLANKER_BOX_REGION=us-central1 \
     CLANKER_BOX_REQUIRE_AUTH=true \
     CLANKER_BOX_ENABLE_TERMINAL=true \
+    CLANKER_BOX_AUTO_INSTALL=true \
     CLANKER_BOX_WORKDIR=/workspace \
     HOME=/home/clankerbox \
+    NPM_CONFIG_PREFIX=/home/clankerbox/.local \
+    PATH=/home/clankerbox/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
     PORT=8080
 
 USER clankerbox

@@ -227,6 +227,7 @@ func NewManifest(name, agentID, regionID string, opts ManifestOptions) (Manifest
 		"CLANKER_BOX_REGION":          region.ID,
 		"CLANKER_BOX_REQUIRE_AUTH":    fmt.Sprintf("%t", opts.RequireAuth),
 		"CLANKER_BOX_ENABLE_TERMINAL": "true",
+		"CLANKER_BOX_AUTO_INSTALL":    "true",
 		"CLANKER_BOX_WORKDIR":         "/workspace",
 	}
 	if opts.ControlPlaneBaseURL != "" {

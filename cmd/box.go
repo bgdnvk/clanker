@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -73,6 +74,28 @@ func newBoxCmd() *cobra.Command {
 	manifestCmd.Flags().BoolVar(&requireAuth, "require-auth", true, "Require X-API-Key or Bearer token for message endpoints")
 	manifestCmd.Flags().IntVar(&websocketTimeout, "websocket-timeout-minutes", 60, "Cloud Run WebSocket request timeout target")
 
+	installCmd := &cobra.Command{
+		Use:   "install [agent|all]",
+		Short: "Install a Clanker Box agent runtime",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			enc := json.NewEncoder(cmd.OutOrStdout())
+			enc.SetIndent("", "  ")
+			if strings.EqualFold(strings.TrimSpace(args[0]), "all") {
+				results, err := clankerbox.InstallAllAgents(context.Background())
+				if encodeErr := enc.Encode(map[string]any{"ok": err == nil, "results": results}); encodeErr != nil {
+					return encodeErr
+				}
+				return err
+			}
+			result, err := clankerbox.InstallAgent(context.Background(), args[0])
+			if encodeErr := enc.Encode(map[string]any{"ok": err == nil, "result": result}); encodeErr != nil {
+				return encodeErr
+			}
+			return err
+		},
+	}
+
 	serveCmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Serve a Clanker Box agent runtime over HTTP",
@@ -100,6 +123,6 @@ func newBoxCmd() *cobra.Command {
 	serveCmd.Flags().StringVar(&agent, "agent", "", "Agent to run")
 	serveCmd.Flags().StringVar(&region, "region", "", "Cloud Run region")
 
-	boxCmd.AddCommand(catalogCmd, manifestCmd, serveCmd)
+	boxCmd.AddCommand(catalogCmd, manifestCmd, installCmd, serveCmd)
 	return boxCmd
 }
