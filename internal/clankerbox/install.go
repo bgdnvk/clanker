@@ -51,6 +51,8 @@ func installAgent(parent context.Context, agentID string) (InstallResult, error)
 	ctx, cancel := context.WithTimeout(parent, installTimeout())
 	defer cancel()
 	switch normalizeID(agentID) {
+	case "empty":
+		return InstallResult{Agent: "empty", Installed: true, Command: "sh", Version: "base-shell"}, nil
 	case "clanker-cli":
 		return installClankerCLI(ctx)
 	case "codex":

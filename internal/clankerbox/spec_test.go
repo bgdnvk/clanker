@@ -54,6 +54,22 @@ func TestNewManifestValidatesAgentAndRegion(t *testing.T) {
 	}
 }
 
+func TestNewManifestSupportsEmptySandbox(t *testing.T) {
+	manifest, err := NewManifest("Shell Box", "blank", "us-central1", ManifestOptions{RequireAuth: true})
+	if err != nil {
+		t.Fatalf("NewManifest returned error: %v", err)
+	}
+	if manifest.Agent.ID != "empty" {
+		t.Fatalf("expected empty alias, got %q", manifest.Agent.ID)
+	}
+	if manifest.Environment["CLANKER_BOX_AUTO_INSTALL"] != "false" {
+		t.Fatalf("empty sandbox should disable auto-install: %#v", manifest.Environment)
+	}
+	if manifest.Environment["CLANKER_BOX_ENABLE_TERMINAL"] != "true" {
+		t.Fatalf("empty sandbox should keep terminal enabled: %#v", manifest.Environment)
+	}
+}
+
 func TestNewManifestRejectsUnknownRegion(t *testing.T) {
 	_, err := NewManifest("Prod Agent", "hermes", "moon-1", ManifestOptions{})
 	if err == nil {
@@ -168,6 +184,26 @@ func TestServerTerminalPostRunsCommand(t *testing.T) {
 func TestInstallAgentRejectsUnknownAgent(t *testing.T) {
 	if _, err := InstallAgent(context.Background(), "unknown"); err == nil {
 		t.Fatal("expected unsupported agent error")
+	}
+}
+
+func TestInstallAgentAcceptsEmptySandbox(t *testing.T) {
+	result, err := InstallAgent(context.Background(), "empty")
+	if err != nil {
+		t.Fatalf("InstallAgent returned error: %v", err)
+	}
+	if !result.Installed || result.Agent != "empty" {
+		t.Fatalf("unexpected install result: %#v", result)
+	}
+}
+
+func TestDefaultRunnerSupportsEmptySandboxMessage(t *testing.T) {
+	reply, err := DefaultRunner{}.RunAgentMessage(context.Background(), RuntimeConfig{Agent: "empty"}, MessageRequest{Message: "hello"})
+	if err != nil {
+		t.Fatalf("RunAgentMessage returned error: %v", err)
+	}
+	if !strings.Contains(reply, "terminal") {
+		t.Fatalf("expected terminal guidance, got %q", reply)
 	}
 }
 

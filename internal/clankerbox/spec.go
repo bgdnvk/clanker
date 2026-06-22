@@ -89,6 +89,14 @@ var serviceNameRE = regexp.MustCompile(`[^a-z0-9-]+`)
 func Agents() []AgentSpec {
 	return []AgentSpec{
 		{
+			ID:             "empty",
+			Name:           "Empty Sandbox",
+			Summary:        "Basic shell environment with terminal access and no preselected agent.",
+			Runtime:        "base-shell",
+			Status:         "ready",
+			DefaultCommand: []string{"clanker", "box", "serve", "--agent", "empty"},
+		},
+		{
 			ID:              "hermes",
 			Name:            "Hermes",
 			Summary:         "Hermes agent bridge for autonomous infrastructure and code tasks.",
@@ -231,6 +239,9 @@ func NewManifest(name, agentID, regionID string, opts ManifestOptions) (Manifest
 		"CLANKER_BOX_AUTO_INSTALL":    "true",
 		"CLANKER_BOX_WORKDIR":         "/workspace",
 	}
+	if agent.ID == "empty" {
+		env["CLANKER_BOX_AUTO_INSTALL"] = "false"
+	}
 	if opts.ControlPlaneBaseURL != "" {
 		env["CLANKER_BOX_CONTROL_PLANE_URL"] = strings.TrimRight(opts.ControlPlaneBaseURL, "/")
 	}
@@ -333,6 +344,8 @@ func normalizeID(raw string) string {
 		return "clanker-cli"
 	case "openai-codex":
 		return "codex"
+	case "base", "blank", "empty-sandbox", "shell":
+		return "empty"
 	default:
 		return id
 	}

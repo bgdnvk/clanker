@@ -313,6 +313,8 @@ func (DefaultRunner) RunAgentMessage(ctx context.Context, cfg RuntimeConfig, req
 		return "", err
 	}
 	switch normalizeID(cfg.Agent) {
+	case "empty":
+		return "Empty sandbox is running. Use the terminal endpoint to run shell commands.", nil
 	case "hermes":
 		return runHermes(ctx, req.Message)
 	case "claude-code":
