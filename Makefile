@@ -17,10 +17,14 @@ INSTALL_PATH ?= $(INSTALL_BIN)/$(BINARY_NAME)
 TAG ?= v0.0.0
 DIST_DIR ?= ./dist
 RELEASE_LDFLAGS := -X github.com/bgdnvk/clanker/cmd.Version=$(TAG)
+CLANKER_BOX_PROJECT ?= $(shell gcloud config get-value project 2>/dev/null)
+CLANKER_BOX_REGION ?= us-east4
+CLANKER_BOX_REPO ?= clanker
+CLANKER_BOX_IMAGE ?= $(CLANKER_BOX_REGION)-docker.pkg.dev/$(CLANKER_BOX_PROJECT)/$(CLANKER_BOX_REPO)/clanker-box:latest
 
 .PHONY: build build-all clean test test-short run install uninstall dev deps fmt vet lint docs quick ci help \
 	release-clean release-build-macos release-tar-macos release-sha release release-create release-upload \
-	setup-hermes
+	setup-hermes clanker-box-image clanker-box-image-push
 
 # Default target
 all: build
@@ -159,11 +163,24 @@ help:
 	@echo "  release-upload         - Upload tarballs to an existing GitHub release (TAG=vX.Y.Z)"
 	@echo "  release-clean          - Remove dist/ artifacts"
 	@echo "  setup-hermes           - Install Hermes Agent into vendor/hermes-agent"
+	@echo "  clanker-box-image      - Build the Clanker Box runtime image"
+	@echo "  clanker-box-image-push - Build and push the Clanker Box runtime image"
 
 # -------------------- Hermes Agent --------------------
 
 setup-hermes:
 	@bash scripts/setup-hermes.sh
+
+# -------------------- Clanker Box Runtime Image --------------------
+
+clanker-box-image:
+	@test -n "$(CLANKER_BOX_PROJECT)" || (echo "CLANKER_BOX_PROJECT is required" && exit 1)
+	@echo "Building Clanker Box runtime image: $(CLANKER_BOX_IMAGE)"
+	@docker build -f Dockerfile.clankerbox -t $(CLANKER_BOX_IMAGE) .
+
+clanker-box-image-push: clanker-box-image
+	@echo "Pushing Clanker Box runtime image: $(CLANKER_BOX_IMAGE)"
+	@docker push $(CLANKER_BOX_IMAGE)
 
 # -------------------- Release targets (macOS tarballs for Homebrew) --------------------
 
