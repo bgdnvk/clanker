@@ -166,6 +166,8 @@ func init() {
 	// (`clanker ask --tencent ...`) will land in a later phase.
 	tencentCmd := tencent.CreateTencentCommands()
 	rootCmd.AddCommand(tencentCmd)
+
+	rootCmd.AddCommand(newBoxCmd())
 }
 
 // initConfig reads in config file and ENV variables if set.
