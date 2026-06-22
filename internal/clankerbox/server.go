@@ -17,12 +17,13 @@ import (
 )
 
 type RuntimeConfig struct {
-	Name        string `json:"name"`
-	Agent       string `json:"agent"`
-	Region      string `json:"region"`
-	RequireAuth bool   `json:"requireAuth"`
-	APIToken    string `json:"-"`
-	Version     string `json:"version,omitempty"`
+	Name           string `json:"name"`
+	Agent          string `json:"agent"`
+	Region         string `json:"region"`
+	RequireAuth    bool   `json:"requireAuth"`
+	EnableTerminal bool   `json:"enableTerminal"`
+	APIToken       string `json:"-"`
+	Version        string `json:"version,omitempty"`
 }
 
 type MessageRequest struct {
@@ -40,6 +41,23 @@ type MessageResponse struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+type TerminalRequest struct {
+	SessionID      string `json:"sessionId,omitempty"`
+	Command        string `json:"command"`
+	WorkingDir     string `json:"workingDir,omitempty"`
+	TimeoutSeconds int    `json:"timeoutSeconds,omitempty"`
+}
+
+type TerminalResponse struct {
+	OK        bool      `json:"ok"`
+	SessionID string    `json:"sessionId,omitempty"`
+	Command   string    `json:"command,omitempty"`
+	Output    string    `json:"output,omitempty"`
+	Error     string    `json:"error,omitempty"`
+	ExitCode  int       `json:"exitCode"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
 type AgentRunner interface {
 	RunAgentMessage(ctx context.Context, cfg RuntimeConfig, req MessageRequest) (string, error)
 }
@@ -52,12 +70,13 @@ type Server struct {
 
 func RuntimeConfigFromEnv(version string) RuntimeConfig {
 	return RuntimeConfig{
-		Name:        envOr("CLANKER_BOX_NAME", "clanker-box"),
-		Agent:       envOr("CLANKER_BOX_AGENT", "clanker-cli"),
-		Region:      envOr("CLANKER_BOX_REGION", "us-central1"),
-		RequireAuth: parseBoolEnv("CLANKER_BOX_REQUIRE_AUTH", true),
-		APIToken:    strings.TrimSpace(os.Getenv("CLANKER_BOX_API_TOKEN")),
-		Version:     version,
+		Name:           envOr("CLANKER_BOX_NAME", "clanker-box"),
+		Agent:          envOr("CLANKER_BOX_AGENT", "clanker-cli"),
+		Region:         envOr("CLANKER_BOX_REGION", "us-central1"),
+		RequireAuth:    parseBoolEnv("CLANKER_BOX_REQUIRE_AUTH", true),
+		EnableTerminal: parseBoolEnv("CLANKER_BOX_ENABLE_TERMINAL", true),
+		APIToken:       strings.TrimSpace(os.Getenv("CLANKER_BOX_API_TOKEN")),
+		Version:        version,
 	}
 }
 
@@ -80,6 +99,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/box/info", s.handleInfo)
 	mux.HandleFunc("/v1/box/messages", s.withAuth(s.handleMessage))
 	mux.HandleFunc("/v1/box/ws", s.withAuth(s.handleWebSocket))
+	mux.HandleFunc("/v1/box/terminal", s.withAuth(s.handleTerminal))
 	return mux
 }
 
@@ -110,12 +130,14 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		"agent":       agent,
 		"region":      region,
 		"requireAuth": s.cfg.RequireAuth,
+		"terminal":    s.cfg.EnableTerminal,
 		"version":     s.cfg.Version,
 		"endpoints": []EndpointSpec{
 			{Kind: "health", Path: "/healthz", Description: "Liveness check."},
 			{Kind: "info", Path: "/v1/box/info", Description: "Runtime metadata."},
 			{Kind: "message", Path: "/v1/box/messages", Description: "JSON message endpoint."},
 			{Kind: "websocket", Path: "/v1/box/ws", Description: "Bidirectional message endpoint."},
+			{Kind: "terminal", Path: "/v1/box/terminal", Description: "Authenticated WebSocket shell endpoint for box access."},
 		},
 	})
 }
@@ -163,6 +185,78 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.EnableTerminal {
+		writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "terminal access is disabled"})
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	for {
+		var req TerminalRequest
+		if err := conn.ReadJSON(&req); err != nil {
+			return
+		}
+		resp := s.runTerminal(r.Context(), req)
+		if err := conn.WriteJSON(resp); err != nil {
+			return
+		}
+	}
+}
+
+func (s *Server) runTerminal(parent context.Context, req TerminalRequest) TerminalResponse {
+	req.Command = strings.TrimSpace(req.Command)
+	resp := TerminalResponse{
+		OK:        false,
+		SessionID: req.SessionID,
+		Command:   req.Command,
+		ExitCode:  1,
+		CreatedAt: time.Now().UTC(),
+	}
+	if req.Command == "" {
+		resp.Error = "command is required"
+		return resp
+	}
+	timeout := req.TimeoutSeconds
+	if timeout <= 0 || timeout > 120 {
+		timeout = 120
+	}
+	ctx, cancel := context.WithTimeout(parent, time.Duration(timeout)*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sh", "-lc", req.Command)
+	cmd.Dir = terminalWorkingDir(req.WorkingDir)
+	cmd.Env = append(os.Environ(),
+		"CLANKER_BOX_NAME="+s.cfg.Name,
+		"CLANKER_BOX_AGENT="+s.cfg.Agent,
+		"CLANKER_BOX_REGION="+s.cfg.Region,
+	)
+	output, err := cmd.CombinedOutput()
+	resp.Output = trimTerminalOutput(string(output))
+	if ctx.Err() == context.DeadlineExceeded {
+		resp.Error = "command timed out"
+		return resp
+	}
+	if err != nil {
+		resp.Error = err.Error()
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			resp.ExitCode = exitErr.ExitCode()
+		}
+		return resp
+	}
+	resp.OK = true
+	resp.ExitCode = 0
+	return resp
 }
 
 func (s *Server) run(ctx context.Context, req MessageRequest) (string, error) {
@@ -273,6 +367,27 @@ func executable() string {
 		return path
 	}
 	return "clanker"
+}
+
+func terminalWorkingDir(requested string) string {
+	if requested = strings.TrimSpace(requested); requested != "" {
+		return requested
+	}
+	if workdir := strings.TrimSpace(os.Getenv("CLANKER_BOX_WORKDIR")); workdir != "" {
+		return workdir
+	}
+	if workdir, err := os.Getwd(); err == nil && strings.TrimSpace(workdir) != "" {
+		return workdir
+	}
+	return "/workspace"
+}
+
+func trimTerminalOutput(output string) string {
+	const maxTerminalOutputBytes = 64 * 1024
+	if len(output) <= maxTerminalOutputBytes {
+		return output
+	}
+	return "[output truncated]\n" + output[len(output)-maxTerminalOutputBytes:]
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

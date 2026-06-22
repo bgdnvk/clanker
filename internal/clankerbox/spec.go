@@ -32,6 +32,26 @@ type EndpointSpec struct {
 	Description string `json:"description"`
 }
 
+type SizeSpec struct {
+	CPU                  string `json:"cpu"`
+	Memory               string `json:"memory"`
+	MinInstances         int    `json:"minInstances"`
+	MaxInstances         int    `json:"maxInstances"`
+	Concurrency          int    `json:"concurrency"`
+	RequestTimeoutSecond int    `json:"requestTimeoutSeconds"`
+}
+
+type SecuritySpec struct {
+	Ingress              string   `json:"ingress"`
+	AllowUnauthenticated bool     `json:"allowUnauthenticated"`
+	RuntimeUser          string   `json:"runtimeUser"`
+	PerBoxServiceAccount bool     `json:"perBoxServiceAccount"`
+	NoCloudSQL           bool     `json:"noCloudSql"`
+	NoVPCConnector       bool     `json:"noVpcConnector"`
+	TerminalMode         string   `json:"terminalMode"`
+	Controls             []string `json:"controls"`
+}
+
 type ManifestOptions struct {
 	ProjectID            string
 	Image                string
@@ -55,6 +75,8 @@ type Manifest struct {
 	StateBucket          string            `json:"stateBucket,omitempty"`
 	RequireAuth          bool              `json:"requireAuth"`
 	WebSocketTimeoutMins int               `json:"webSocketTimeoutMins"`
+	Size                 SizeSpec          `json:"size"`
+	Security             SecuritySpec      `json:"security"`
 	Environment          map[string]string `json:"environment"`
 	Endpoints            []EndpointSpec    `json:"endpoints"`
 	IAMRoles             []string          `json:"iamRoles"`
@@ -197,12 +219,15 @@ func NewManifest(name, agentID, regionID string, opts ManifestOptions) (Manifest
 	if timeout <= 0 {
 		timeout = 60
 	}
+	size := DefaultSize()
 	serviceName := ServiceName(displayName, agent.ID)
 	env := map[string]string{
-		"CLANKER_BOX_NAME":         displayName,
-		"CLANKER_BOX_AGENT":        agent.ID,
-		"CLANKER_BOX_REGION":       region.ID,
-		"CLANKER_BOX_REQUIRE_AUTH": fmt.Sprintf("%t", opts.RequireAuth),
+		"CLANKER_BOX_NAME":            displayName,
+		"CLANKER_BOX_AGENT":           agent.ID,
+		"CLANKER_BOX_REGION":          region.ID,
+		"CLANKER_BOX_REQUIRE_AUTH":    fmt.Sprintf("%t", opts.RequireAuth),
+		"CLANKER_BOX_ENABLE_TERMINAL": "true",
+		"CLANKER_BOX_WORKDIR":         "/workspace",
 	}
 	if opts.ControlPlaneBaseURL != "" {
 		env["CLANKER_BOX_CONTROL_PLANE_URL"] = strings.TrimRight(opts.ControlPlaneBaseURL, "/")
@@ -223,12 +248,30 @@ func NewManifest(name, agentID, regionID string, opts ManifestOptions) (Manifest
 		StateBucket:          strings.TrimSpace(opts.StateBucket),
 		RequireAuth:          opts.RequireAuth,
 		WebSocketTimeoutMins: timeout,
-		Environment:          env,
+		Size:                 size,
+		Security: SecuritySpec{
+			Ingress:              "internal-and-cloud-load-balancing",
+			AllowUnauthenticated: false,
+			RuntimeUser:          "clankerbox",
+			PerBoxServiceAccount: true,
+			NoCloudSQL:           true,
+			NoVPCConnector:       true,
+			TerminalMode:         "authenticated-websocket-terminal",
+			Controls: []string{
+				"One Clanker Box per account during beta.",
+				"Cloud Run max instances is capped at 1 with concurrency 1.",
+				"Runtime must use a unique per-box service account.",
+				"Do not attach Cloud SQL roles, database credentials, or a private VPC connector.",
+				"Grant Cloud Run invoker only to the Clanker Cloud control plane.",
+			},
+		},
+		Environment: env,
 		Endpoints: []EndpointSpec{
 			{Kind: "health", Path: "/healthz", Description: "Cloud Run startup and liveness check."},
 			{Kind: "info", Path: "/v1/box/info", Description: "Box metadata, agent adapter, and endpoint contract."},
 			{Kind: "message", Path: "/v1/box/messages", Description: "Authenticated request/response agent messages."},
 			{Kind: "websocket", Path: "/v1/box/ws", Description: "Authenticated bidirectional agent session stream."},
+			{Kind: "terminal", Path: "/v1/box/terminal", Description: "Authenticated WebSocket terminal for SSH-style box access."},
 		},
 		IAMRoles: []string{
 			"roles/logging.logWriter",
@@ -243,6 +286,17 @@ func NewManifest(name, agentID, regionID string, opts ManifestOptions) (Manifest
 			"region": region.ID,
 		},
 	}, nil
+}
+
+func DefaultSize() SizeSpec {
+	return SizeSpec{
+		CPU:                  "1",
+		Memory:               "2Gi",
+		MinInstances:         0,
+		MaxInstances:         1,
+		Concurrency:          1,
+		RequestTimeoutSecond: 3600,
+	}
 }
 
 func ServiceName(name, agentID string) string {

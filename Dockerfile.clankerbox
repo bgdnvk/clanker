@@ -10,6 +10,10 @@ FROM debian:bookworm-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git openssh-client python3 nodejs npm \
+    && groupadd --system clankerbox \
+    && useradd --system --create-home --gid clankerbox --shell /bin/sh clankerbox \
+    && mkdir -p /workspace \
+    && chown -R clankerbox:clankerbox /workspace /home/clankerbox \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/clanker /usr/local/bin/clanker
@@ -17,7 +21,12 @@ COPY --from=build /out/clanker /usr/local/bin/clanker
 ENV CLANKER_BOX_AGENT=clanker-cli \
     CLANKER_BOX_REGION=us-central1 \
     CLANKER_BOX_REQUIRE_AUTH=true \
+    CLANKER_BOX_ENABLE_TERMINAL=true \
+    CLANKER_BOX_WORKDIR=/workspace \
+    HOME=/home/clankerbox \
     PORT=8080
 
+USER clankerbox
+WORKDIR /workspace
 EXPOSE 8080
 ENTRYPOINT ["clanker", "box", "serve"]
