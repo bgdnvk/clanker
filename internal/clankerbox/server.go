@@ -3,6 +3,7 @@ package clankerbox
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -96,7 +97,7 @@ func NewServer(cfg RuntimeConfig, runner AgentRunner) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
-	mux.HandleFunc("/v1/box/info", s.handleInfo)
+	mux.HandleFunc("/v1/box/info", s.withAuth(s.handleInfo))
 	mux.HandleFunc("/v1/box/messages", s.withAuth(s.handleMessage))
 	mux.HandleFunc("/v1/box/ws", s.withAuth(s.handleWebSocket))
 	mux.HandleFunc("/v1/box/terminal", s.withAuth(s.handleTerminal))
@@ -113,12 +114,7 @@ func (s *Server) ListenAndServe(addr string) error {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":     true,
-		"name":   s.cfg.Name,
-		"agent":  s.cfg.Agent,
-		"region": s.cfg.Region,
-	})
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
@@ -302,7 +298,7 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		if got == "" {
 			got = strings.TrimSpace(r.URL.Query().Get("token"))
 		}
-		if got != expected {
+		if subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "unauthorized"})
 			return
 		}

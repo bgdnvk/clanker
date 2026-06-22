@@ -80,6 +80,7 @@ type Manifest struct {
 	Environment          map[string]string `json:"environment"`
 	Endpoints            []EndpointSpec    `json:"endpoints"`
 	IAMRoles             []string          `json:"iamRoles"`
+	IAMConditions        []string          `json:"iamConditions,omitempty"`
 	Labels               map[string]string `json:"labels"`
 }
 
@@ -262,7 +263,7 @@ func NewManifest(name, agentID, regionID string, opts ManifestOptions) (Manifest
 				"One Clanker Box per account during beta.",
 				"Cloud Run max instances is capped at 1 with concurrency 1.",
 				"Runtime must use a unique per-box service account.",
-				"Do not attach Cloud SQL roles, database credentials, or a private VPC connector.",
+				"Do not attach Cloud SQL roles, Secret Manager roles, database credentials, or a private VPC connector.",
 				"Grant Cloud Run invoker only to the Clanker Cloud control plane.",
 			},
 		},
@@ -278,8 +279,10 @@ func NewManifest(name, agentID, regionID string, opts ManifestOptions) (Manifest
 			"roles/logging.logWriter",
 			"roles/monitoring.metricWriter",
 			"roles/artifactregistry.reader",
-			"roles/secretmanager.secretAccessor",
 			"roles/storage.objectAdmin",
+		},
+		IAMConditions: []string{
+			"Grant roles/storage.objectAdmin only with an IAM condition limited to CLANKER_BOX_STATE_PREFIX.",
 		},
 		Labels: map[string]string{
 			"app":    "clanker-box",

@@ -44,6 +44,14 @@ func TestNewManifestValidatesAgentAndRegion(t *testing.T) {
 	if !manifest.Security.PerBoxServiceAccount || !manifest.Security.NoCloudSQL || manifest.Security.AllowUnauthenticated {
 		t.Fatalf("unexpected security defaults: %#v", manifest.Security)
 	}
+	for _, role := range manifest.IAMRoles {
+		if strings.Contains(role, "secretmanager") {
+			t.Fatalf("box manifest should not include broad Secret Manager access: %#v", manifest.IAMRoles)
+		}
+	}
+	if len(manifest.IAMConditions) == 0 || !strings.Contains(strings.Join(manifest.IAMConditions, "\n"), "CLANKER_BOX_STATE_PREFIX") {
+		t.Fatalf("box manifest should require state-prefix IAM conditions: %#v", manifest.IAMConditions)
+	}
 }
 
 func TestNewManifestRejectsUnknownRegion(t *testing.T) {
@@ -65,6 +73,30 @@ func (fakeRunner) RunAgentMessage(ctx context.Context, cfg RuntimeConfig, req Me
 func TestServerMessageRequiresToken(t *testing.T) {
 	server := NewServer(RuntimeConfig{Name: "test", Agent: "clanker-cli", Region: "us-central1", RequireAuth: true, APIToken: "secret"}, fakeRunner{})
 	req := httptest.NewRequest(http.MethodPost, "/v1/box/messages", bytes.NewBufferString(`{"message":"hello"}`))
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestServerHealthDoesNotExposeBoxMetadata(t *testing.T) {
+	server := NewServer(RuntimeConfig{Name: "private-name", Agent: "claude-code", Region: "us-east4", RequireAuth: true, APIToken: "secret"}, fakeRunner{})
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "private-name") || strings.Contains(body, "claude-code") || strings.Contains(body, "us-east4") {
+		t.Fatalf("health response leaked box metadata: %s", body)
+	}
+}
+
+func TestServerInfoRequiresToken(t *testing.T) {
+	server := NewServer(RuntimeConfig{Name: "test", Agent: "clanker-cli", Region: "us-central1", RequireAuth: true, APIToken: "secret"}, fakeRunner{})
+	req := httptest.NewRequest(http.MethodGet, "/v1/box/info", nil)
 	rec := httptest.NewRecorder()
 	server.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
