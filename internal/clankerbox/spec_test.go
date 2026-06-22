@@ -181,6 +181,57 @@ func TestServerTerminalPostRunsCommand(t *testing.T) {
 	}
 }
 
+func TestServerTerminalPostReturnsCommandExitAsJSON(t *testing.T) {
+	server := NewServer(RuntimeConfig{Name: "test", Agent: "empty", Region: "us-central1", RequireAuth: true, EnableTerminal: true, APIToken: "secret"}, fakeRunner{})
+	req := httptest.NewRequest(http.MethodPost, "/v1/box/terminal", bytes.NewBufferString(`{"sessionId":"term-1","command":"printf nope; exit 7","timeoutSeconds":5}`))
+	req.Header.Set("X-API-Key", "secret")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp TerminalResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode terminal response: %v", err)
+	}
+	if resp.OK || resp.ExitCode != 7 || resp.Output != "nope" {
+		t.Fatalf("unexpected failed terminal response %#v", resp)
+	}
+}
+
+func TestServerMessageCanExecuteTerminalCommand(t *testing.T) {
+	server := NewServer(RuntimeConfig{Name: "test", Agent: "empty", Region: "us-central1", RequireAuth: true, EnableTerminal: true, APIToken: "secret"}, fakeRunner{})
+	req := httptest.NewRequest(http.MethodPost, "/v1/box/messages", bytes.NewBufferString(`{"sessionId":"chat-1","message":"run printf chat-ok"}`))
+	req.Header.Set("X-API-Key", "secret")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp MessageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode message response: %v", err)
+	}
+	if !resp.OK || resp.Terminal == nil || resp.Terminal.Output != "chat-ok" {
+		t.Fatalf("expected terminal response in chat, got %#v", resp)
+	}
+}
+
+func TestTerminalCommandFromMessageMapsAgentInstall(t *testing.T) {
+	cmd, ok := terminalCommandFromMessage("install codex", "empty")
+	if !ok || cmd != "clanker box install codex" {
+		t.Fatalf("install codex command = %q ok=%v", cmd, ok)
+	}
+	cmd, ok = terminalCommandFromMessage("install docker", "empty")
+	if !ok || !strings.Contains(cmd, "download.docker.com") {
+		t.Fatalf("install docker command = %q ok=%v", cmd, ok)
+	}
+}
+
 func TestInstallAgentRejectsUnknownAgent(t *testing.T) {
 	if _, err := InstallAgent(context.Background(), "unknown"); err == nil {
 		t.Fatal("expected unsupported agent error")

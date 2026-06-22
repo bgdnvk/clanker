@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -34,12 +35,13 @@ type MessageRequest struct {
 }
 
 type MessageResponse struct {
-	OK        bool      `json:"ok"`
-	SessionID string    `json:"sessionId,omitempty"`
-	Agent     string    `json:"agent"`
-	Message   string    `json:"message,omitempty"`
-	Error     string    `json:"error,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
+	OK        bool              `json:"ok"`
+	SessionID string            `json:"sessionId,omitempty"`
+	Agent     string            `json:"agent"`
+	Message   string            `json:"message,omitempty"`
+	Error     string            `json:"error,omitempty"`
+	Terminal  *TerminalResponse `json:"terminal,omitempty"`
+	CreatedAt time.Time         `json:"createdAt"`
 }
 
 type TerminalRequest struct {
@@ -148,14 +150,12 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, MessageResponse{OK: false, Agent: s.cfg.Agent, Error: "invalid json", CreatedAt: time.Now().UTC()})
 		return
 	}
-	reply, err := s.run(r.Context(), req)
-	status := http.StatusOK
-	resp := MessageResponse{OK: err == nil, SessionID: req.SessionID, Agent: s.cfg.Agent, Message: reply, CreatedAt: time.Now().UTC()}
+	reply, terminal, err := s.run(r.Context(), req)
+	resp := MessageResponse{OK: err == nil, SessionID: req.SessionID, Agent: s.cfg.Agent, Message: reply, Terminal: terminal, CreatedAt: time.Now().UTC()}
 	if err != nil {
-		status = http.StatusBadGateway
 		resp.Error = err.Error()
 	}
-	writeJSON(w, status, resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -171,9 +171,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
-		reply, runErr := s.run(ctx, req)
+		reply, terminal, runErr := s.run(ctx, req)
 		cancel()
-		resp := MessageResponse{OK: runErr == nil, SessionID: req.SessionID, Agent: s.cfg.Agent, Message: reply, CreatedAt: time.Now().UTC()}
+		resp := MessageResponse{OK: runErr == nil, SessionID: req.SessionID, Agent: s.cfg.Agent, Message: reply, Terminal: terminal, CreatedAt: time.Now().UTC()}
 		if runErr != nil {
 			resp.Error = runErr.Error()
 		}
@@ -195,11 +195,7 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		resp := s.runTerminal(r.Context(), req)
-		status := http.StatusOK
-		if !resp.OK {
-			status = http.StatusBadGateway
-		}
-		writeJSON(w, status, resp)
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -244,7 +240,7 @@ func (s *Server) runTerminal(parent context.Context, req TerminalRequest) Termin
 	ctx, cancel := context.WithTimeout(parent, time.Duration(timeout)*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-lc", req.Command)
+	cmd := exec.CommandContext(ctx, "sh", "-c", req.Command)
 	cmd.Dir = terminalWorkingDir(req.WorkingDir)
 	cmd.Env = append(os.Environ(),
 		"CLANKER_BOX_NAME="+s.cfg.Name,
@@ -269,15 +265,43 @@ func (s *Server) runTerminal(parent context.Context, req TerminalRequest) Termin
 	return resp
 }
 
-func (s *Server) run(ctx context.Context, req MessageRequest) (string, error) {
+func (s *Server) run(ctx context.Context, req MessageRequest) (string, *TerminalResponse, error) {
 	req.Message = strings.TrimSpace(req.Message)
 	if req.Message == "" {
-		return "", fmt.Errorf("message is required")
+		return "", nil, fmt.Errorf("message is required")
 	}
 	if _, ok := AgentByID(s.cfg.Agent); !ok {
-		return "", fmt.Errorf("unsupported agent %q", s.cfg.Agent)
+		return "", nil, fmt.Errorf("unsupported agent %q", s.cfg.Agent)
 	}
-	return s.runner.RunAgentMessage(ctx, s.cfg, req)
+	if terminalReq, ok := s.terminalRequestFromMessage(req); ok {
+		resp := s.runTerminal(ctx, terminalReq)
+		message := formatTerminalMessage(resp)
+		if resp.OK {
+			return message, &resp, nil
+		}
+		errMessage := resp.Error
+		if errMessage == "" {
+			errMessage = "terminal command failed"
+		}
+		return message, &resp, fmt.Errorf("%s", errMessage)
+	}
+	reply, err := s.runner.RunAgentMessage(ctx, s.cfg, req)
+	return reply, nil, err
+}
+
+func (s *Server) terminalRequestFromMessage(req MessageRequest) (TerminalRequest, bool) {
+	if !s.cfg.EnableTerminal {
+		return TerminalRequest{}, false
+	}
+	command, ok := terminalCommandFromMessage(req.Message, s.cfg.Agent)
+	if !ok {
+		return TerminalRequest{}, false
+	}
+	return TerminalRequest{
+		SessionID:      req.SessionID,
+		Command:        command,
+		TimeoutSeconds: 120,
+	}, true
 }
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -331,6 +355,94 @@ func (DefaultRunner) RunAgentMessage(ctx context.Context, cfg RuntimeConfig, req
 	default:
 		return "", fmt.Errorf("unsupported agent %q", cfg.Agent)
 	}
+}
+
+func terminalCommandFromMessage(message string, agent string) (string, bool) {
+	text := strings.TrimSpace(message)
+	lower := strings.ToLower(text)
+	switch {
+	case strings.HasPrefix(text, "$ "):
+		return strings.TrimSpace(strings.TrimPrefix(text, "$ ")), true
+	case strings.HasPrefix(lower, "run "):
+		return strings.TrimSpace(text[4:]), true
+	case strings.HasPrefix(lower, "exec "):
+		return strings.TrimSpace(text[5:]), true
+	case strings.HasPrefix(lower, "execute "):
+		return strings.TrimSpace(text[8:]), true
+	case strings.HasPrefix(lower, "shell "):
+		return strings.TrimSpace(text[6:]), true
+	case strings.HasPrefix(lower, "terminal "):
+		return strings.TrimSpace(text[9:]), true
+	case lower == "doctor" || strings.Contains(lower, "cloud doctor"):
+		return "clanker cloud doctor", true
+	case strings.HasPrefix(lower, "install "):
+		target := strings.TrimSpace(text[len("install "):])
+		return installCommandFromChat(target, agent), true
+	default:
+		return "", false
+	}
+}
+
+func installCommandFromChat(target string, agent string) string {
+	normalized := normalizeID(target)
+	normalized = strings.TrimPrefix(normalized, "the-")
+	normalized = strings.TrimSuffix(normalized, "-agent")
+	switch normalized {
+	case "codex", "openai-codex":
+		return "clanker box install codex"
+	case "claude", "claude-code", "anthropic-claude-code":
+		return "clanker box install claude-code"
+	case "hermes", "nous-hermes":
+		return "clanker box install hermes"
+	case "openclaw", "open-claw":
+		return "clanker box install openclaw"
+	case "clanker", "clanker-cli", "cli":
+		return "clanker box install clanker-cli && clanker --version"
+	case "docker", "docker-cli":
+		return dockerCLIInstallCommand()
+	case "":
+		if normalizeID(agent) == "empty" {
+			return "pwd && ls -la"
+		}
+		return "clanker box install " + normalizeID(agent)
+	default:
+		return fmt.Sprintf("if command -v %s >/dev/null 2>&1; then %s --version || true; else printf 'No built-in installer for %s. Use the terminal to run the official installer.\\n'; exit 1; fi", shellQuoteWord(normalized), shellQuoteWord(normalized), shellQuoteWord(target))
+	}
+}
+
+func dockerCLIInstallCommand() string {
+	return `set -e; export PATH="$HOME/.local/bin:$PATH"; arch="$(uname -m)"; case "$arch" in x86_64|amd64) docker_arch=x86_64 ;; aarch64|arm64) docker_arch=aarch64 ;; *) echo "unsupported docker static binary arch: $arch"; exit 1 ;; esac; mkdir -p "$HOME/.local/bin" "$HOME/.cache/clanker-box/docker"; cd "$HOME/.cache/clanker-box/docker"; curl -fsSL "https://download.docker.com/linux/static/stable/${docker_arch}/docker-27.5.1.tgz" -o docker.tgz; tar -xzf docker.tgz; cp docker/docker "$HOME/.local/bin/docker"; chmod +x "$HOME/.local/bin/docker"; "$HOME/.local/bin/docker" --version; printf '\nDocker CLI installed in $HOME/.local/bin. Cloud Run does not provide a Docker daemon, so docker build/run needs a remote daemon or Cloud Build.\n'`
+}
+
+func formatTerminalMessage(resp TerminalResponse) string {
+	var b strings.Builder
+	if resp.Command != "" {
+		b.WriteString("Executed in Clanker Box terminal:\n$ ")
+		b.WriteString(resp.Command)
+		b.WriteString("\n")
+	}
+	if strings.TrimSpace(resp.Output) != "" {
+		b.WriteString(resp.Output)
+		b.WriteString("\n")
+	}
+	if resp.Error != "" {
+		b.WriteString("exit ")
+		b.WriteString(fmt.Sprint(resp.ExitCode))
+		b.WriteString(": ")
+		b.WriteString(resp.Error)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func shellQuoteWord(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "''"
+	}
+	if regexp.MustCompile(`^[a-zA-Z0-9._/-]+$`).MatchString(value) {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
 func runHermes(ctx context.Context, message string) (string, error) {
