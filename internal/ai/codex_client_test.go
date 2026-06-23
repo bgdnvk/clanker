@@ -194,8 +194,17 @@ func TestAskClankerCloudMessagesUsesAppTokenHeaders(t *testing.T) {
 		if client := r.Header.Get("X-Clanker-Cloud-Client"); client != "desktop-app" {
 			t.Errorf("unexpected X-Clanker-Cloud-Client header: %q", client)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"cloud hello"}}]}`))
+		var raw map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if stream, ok := raw["stream"].(bool); !ok || !stream {
+			t.Fatalf("expected Clanker Cloud request stream=true, got %#v", raw["stream"])
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"cloud \"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
 	}))
 	defer mockServer.Close()
 
