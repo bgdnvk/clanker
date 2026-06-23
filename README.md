@@ -106,7 +106,7 @@ If you run without `~/.clanker.yaml`:
 - OpenAI key order: `--openai-key` → `OPENAI_API_KEY` (also supports `ai.providers.openai.api_key` and `ai.providers.openai.api_key_env` if config exists).
 - Gemini API key order (when using `--ai-profile gemini-api`): `--gemini-key` → `GEMINI_API_KEY` (also supports `ai.providers.gemini-api.api_key` and `ai.providers.gemini-api.api_key_env` if config exists).
 - Cohere API key order (when using `--ai-profile cohere`): `--cohere-key` → `COHERE_API_KEY` (also supports `ai.providers.cohere.api_key` and `ai.providers.cohere.api_key_env` if config exists).
-- Model: `openai` defaults to `gpt-5`; `gemini`/`gemini-api` defaults to `gemini-3-pro-preview`; `cohere` defaults to `command-a-03-2025`.
+- Model: `openai` defaults to `gpt-5`; `gemini`/`gemini-api` defaults to `gemini-2.5-flash`; `cohere` defaults to `command-a-03-2025`.
 
 ### AWS
 
@@ -525,6 +525,7 @@ clanker k8s ask --debug "how many pods are running"
 | `--context`       | kubectl context to use (overrides --cluster)        |
 | `-n, --namespace` | Default namespace for queries                       |
 | `--ai-profile`    | AI profile to use for LLM queries                   |
+| `--model`         | AI model for the selected AI profile                |
 | `--debug`         | Show detailed debug output including LLM operations |
 
 ### Legacy Natural Language Queries (via `clanker ask`)
