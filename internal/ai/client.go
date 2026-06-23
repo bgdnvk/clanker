@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -368,6 +369,7 @@ type ClaudeContent struct {
 type OpenAIRequest struct {
 	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`
+	Stream   bool      `json:"stream,omitempty"`
 	// ChatTemplateKwargs is a vLLM/SGLang vendor extension. The most useful
 	// case is `enable_thinking: false` for Qwen3-style reasoning models —
 	// it skips the internal "thinking" trace and emits the answer directly,
@@ -1339,6 +1341,7 @@ func (c *Client) askClankerCloudMessages(ctx context.Context, messages []Message
 	reqBody := OpenAIRequest{
 		Model:    model,
 		Messages: messages,
+		Stream:   true,
 	}
 
 	jsonData, err := json.Marshal(reqBody)
@@ -1357,6 +1360,7 @@ func (c *Client) askClankerCloudMessages(ctx context.Context, messages []Message
 			return "", fmt.Errorf("failed to create request: %w", reqErr)
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Accept", "text/event-stream")
 		httpReq.Header.Set("X-API-Key", strings.TrimSpace(token))
 		if strings.EqualFold(strings.TrimSpace(os.Getenv("CLANKER_CLOUD_CLIENT")), "desktop-app") {
 			httpReq.Header.Set("X-Clanker-Cloud-Client", "desktop-app")
@@ -1373,14 +1377,27 @@ func (c *Client) askClankerCloudMessages(ctx context.Context, messages []Message
 			continue
 		}
 
+		if resp.StatusCode == http.StatusOK {
+			if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
+				reply, streamErr := readOpenAICompatibleStreamText(resp.Body)
+				resp.Body.Close()
+				if streamErr != nil {
+					return "", fmt.Errorf("failed to read Clanker Cloud stream: %w", streamErr)
+				}
+				return reply, nil
+			}
+			body, err = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				return "", fmt.Errorf("failed to read response: %w", err)
+			}
+			break
+		}
+
 		body, err = io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
 			return "", fmt.Errorf("failed to read response: %w", err)
-		}
-
-		if resp.StatusCode == http.StatusOK {
-			break
 		}
 
 		if attempt == aiRetryMaxAttempts || !(isRetryableHTTPStatus(resp.StatusCode) || isRetryableProviderErrorText(string(body))) {
@@ -1404,6 +1421,77 @@ func (c *Client) askClankerCloudMessages(ctx context.Context, messages []Message
 		return "", fmt.Errorf("no response from Clanker Cloud LLM")
 	}
 	return response.Choices[0].Message.Content, nil
+}
+
+type openAICompatibleStreamChunk struct {
+	Choices []struct {
+		Delta        Message `json:"delta"`
+		Message      Message `json:"message"`
+		FinishReason string  `json:"finish_reason"`
+	} `json:"choices"`
+	Error *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+	} `json:"error,omitempty"`
+}
+
+func readOpenAICompatibleStreamText(r io.Reader) (string, error) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var sb strings.Builder
+	eventLines := make([]string, 0, 4)
+	flushEvent := func() error {
+		if len(eventLines) == 0 {
+			return nil
+		}
+		data := strings.TrimSpace(strings.Join(eventLines, "\n"))
+		eventLines = eventLines[:0]
+		if data == "" || data == "[DONE]" {
+			return nil
+		}
+		var chunk openAICompatibleStreamChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			return fmt.Errorf("decode stream chunk: %w", err)
+		}
+		if chunk.Error != nil && strings.TrimSpace(chunk.Error.Message) != "" {
+			return fmt.Errorf("%s", strings.TrimSpace(chunk.Error.Message))
+		}
+		for _, choice := range chunk.Choices {
+			if choice.Delta.Content != "" {
+				sb.WriteString(choice.Delta.Content)
+			} else if choice.Message.Content != "" {
+				sb.WriteString(choice.Message.Content)
+			}
+		}
+		return nil
+	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.TrimSpace(line) == "" {
+			if err := flushEvent(); err != nil {
+				return "", err
+			}
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(line), ":") {
+			continue
+		}
+		if strings.HasPrefix(line, "data:") {
+			eventLines = append(eventLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+	if err := flushEvent(); err != nil {
+		return "", err
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("read stream: %w", err)
+	}
+	if sb.Len() == 0 {
+		return "", fmt.Errorf("stream returned no assistant reply")
+	}
+	return sb.String(), nil
 }
 
 func (c *Client) resolveGitHubModelsToken(ctx context.Context) string {
