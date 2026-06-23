@@ -117,14 +117,20 @@ func (c *railwayCollector) Tail(ctx context.Context, opts Options, emit Emit) er
 	}
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+	fails := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
 			if err := poll(); err != nil {
-				return err
+				if fails++; fails >= maxConsecutivePollErrors {
+					return err
+				}
+				EmitProgress("tail", fmt.Sprintf("railway poll error (%d/%d), retrying: %v", fails, maxConsecutivePollErrors, err))
+				continue
 			}
+			fails = 0
 		}
 	}
 }

@@ -35,6 +35,8 @@ type Cluster struct {
 	Count     int
 	FirstTs   string
 	LastTs    string
+	firstMs   int64
+	lastMs    int64
 	SampleRef string
 	Sample    string
 }
@@ -54,6 +56,8 @@ func ClusterEntries(entries []Entry) []Cluster {
 				Level:     e.Level,
 				FirstTs:   e.Ts,
 				LastTs:    e.Ts,
+				firstMs:   e.EpochMs,
+				lastMs:    e.EpochMs,
 				SampleRef: e.Ref,
 				Sample:    e.Message,
 			}
@@ -61,10 +65,14 @@ func ClusterEntries(entries []Entry) []Cluster {
 			order = append(order, key)
 		}
 		cl.Count++
-		if e.Ts < cl.FirstTs {
+		// Compare numeric epochs, not RFC3339Nano strings (whole-second
+		// timestamps drop the fractional part and would sort incorrectly).
+		if e.EpochMs < cl.firstMs {
+			cl.firstMs = e.EpochMs
 			cl.FirstTs = e.Ts
 		}
-		if e.Ts > cl.LastTs {
+		if e.EpochMs > cl.lastMs {
+			cl.lastMs = e.EpochMs
 			cl.LastTs = e.Ts
 		}
 	}

@@ -65,7 +65,12 @@ func (c *awsCollector) fetch(ctx context.Context, opts Options, startMs, endMs i
 		"--log-group-name", opts.Resource,
 		"--start-time", fmt.Sprintf("%d", startMs),
 		"--end-time", fmt.Sprintf("%d", endMs),
+		// --limit bounds the single API page; --no-paginate stops the CLI from
+		// auto-following nextToken, so the result is a hard cap of `limit`
+		// events instead of the whole window. (--max-items can't be used: it
+		// conflicts with --no-paginate, which some AWS CLI configs set.)
 		"--limit", fmt.Sprintf("%d", limit),
+		"--no-paginate",
 	}
 	out, err := runJSON(ctx, "aws", c.awsArgs(opts, base...), opts.Env)
 	if err != nil {
@@ -149,6 +154,7 @@ func (c *awsCollector) Tail(ctx context.Context, opts Options, emit Emit) error 
 
 	ticker := time.NewTicker(5 * time.Second) // poll floor for the billed FilterLogEvents API
 	defer ticker.Stop()
+	fails := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -157,8 +163,14 @@ func (c *awsCollector) Tail(ctx context.Context, opts Options, emit Emit) error 
 			// 1s overlap so boundary-straddling events aren't missed; dedup by ref.
 			events, err := c.fetch(ctx, opts, lastMs-1000, time.Now().UnixMilli(), 1000)
 			if err != nil {
-				return err
+				// Tolerate transient API blips; only give up after a streak.
+				if fails++; fails >= maxConsecutivePollErrors {
+					return err
+				}
+				EmitProgress("tail", fmt.Sprintf("aws poll error (%d/%d), retrying: %v", fails, maxConsecutivePollErrors, err))
+				continue
 			}
+			fails = 0
 			if err := flush(events); err != nil {
 				return err
 			}

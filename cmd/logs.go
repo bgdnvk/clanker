@@ -58,9 +58,11 @@ func newLogsCmd() *cobra.Command {
 			Profile:  profile,
 		}
 		if strings.TrimSpace(until) != "" {
-			if t, err := time.Parse(time.RFC3339, until); err == nil {
-				opts.Until = t
+			t, err := time.Parse(time.RFC3339, until)
+			if err != nil {
+				return logs.Options{}, fmt.Errorf("invalid --until %q: use an RFC3339 timestamp", until)
 			}
+			opts.Until = t
 		}
 		return opts, nil
 	}

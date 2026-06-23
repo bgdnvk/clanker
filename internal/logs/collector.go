@@ -81,15 +81,23 @@ func Providers() []string {
 	return out
 }
 
-// compiledMatcher precompiles the grep filter once per collection.
+// compiledMatcher precompiles the level/grep/time filter once per collection.
 type compiledMatcher struct {
-	level string
-	sub   string
-	re    *regexp.Regexp
+	level   string
+	sub     string
+	re      *regexp.Regexp
+	sinceMs int64
+	untilMs int64
 }
 
 func newMatcher(opts Options) compiledMatcher {
 	m := compiledMatcher{level: strings.ToLower(strings.TrimSpace(opts.Level))}
+	if !opts.Since.IsZero() {
+		m.sinceMs = opts.Since.UnixMilli()
+	}
+	if !opts.Until.IsZero() {
+		m.untilMs = opts.Until.UnixMilli()
+	}
 	grep := strings.TrimSpace(opts.Grep)
 	if len(grep) >= 2 && strings.HasPrefix(grep, "/") && strings.HasSuffix(grep, "/") {
 		if re, err := regexp.Compile("(?i)" + grep[1:len(grep)-1]); err == nil {
@@ -101,8 +109,16 @@ func newMatcher(opts Options) compiledMatcher {
 	return m
 }
 
-// Match applies the client-side level + grep filter to an entry.
+// Match applies the client-side time + level + grep filter to an entry. The
+// time bound makes the requested window honest for providers whose APIs don't
+// (or can't) push it down (Fly/Vercel/Railway return latest-N regardless).
 func (m compiledMatcher) Match(e Entry) bool {
+	if m.sinceMs > 0 && e.EpochMs > 0 && e.EpochMs < m.sinceMs {
+		return false
+	}
+	if m.untilMs > 0 && e.EpochMs > 0 && e.EpochMs > m.untilMs {
+		return false
+	}
 	if !e.AtLeast(m.level) {
 		return false
 	}
@@ -115,6 +131,10 @@ func (m compiledMatcher) Match(e Entry) bool {
 	}
 	return true
 }
+
+// maxConsecutivePollErrors bounds transient failures before a poll-tail gives
+// up, so a momentary 429/5xx/network blip doesn't end a long-running tail.
+const maxConsecutivePollErrors = 5
 
 // refDedup tracks recently-emitted entry refs for poll-based tails, keyed by
 // epoch ms so it can be pruned by a sliding time window instead of cleared
