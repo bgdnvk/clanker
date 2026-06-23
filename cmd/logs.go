@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -12,7 +13,12 @@ import (
 
 	"github.com/bgdnvk/clanker/internal/logs"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
+
+// errCollectLimit stops collection once the chat cap is reached (a deliberate
+// early exit, distinct from a cancelled context).
+var errCollectLimit = errors.New("collect limit reached")
 
 // newLogsCmd builds `clanker logs`, the provider-agnostic log surface the cloud
 // app drives. `query`/`tail` stream normalized JSON-lines on stdout (progress
@@ -165,7 +171,7 @@ the talk-to-logs agent.`,
 			if limit <= 0 || limit > 5000 {
 				opts.Limit = 2000
 			}
-			return runLogsChat(cmd.Context(), opts, question)
+			return runLogsChat(cmd.Context(), opts, question, aiProfile)
 		},
 	}
 	chatCmd.Flags().StringVar(&aiProfile, "ai-profile", "", "AI provider profile override")
@@ -176,10 +182,15 @@ the talk-to-logs agent.`,
 
 // runLogsChat collects the scoped logs, compresses them, and streams an
 // LLM answer grounded in citable lines.
-func runLogsChat(ctx context.Context, opts logs.Options, question string) error {
+func runLogsChat(ctx context.Context, opts logs.Options, question, aiProfile string) error {
 	collector, err := logs.Get(opts.Provider)
 	if err != nil {
 		return err
+	}
+	// Override the AI provider for this run if requested (createAIClient reads
+	// ai.default_provider when no per-command profile is set).
+	if strings.TrimSpace(aiProfile) != "" {
+		viper.Set("ai.default_provider", strings.TrimSpace(aiProfile))
 	}
 
 	logs.EmitProgress("collect", fmt.Sprintf("collecting %s logs for analysis", opts.Provider))
@@ -191,11 +202,11 @@ func runLogsChat(ctx context.Context, opts logs.Options, question string) error 
 	collectErr := collector.Query(ctx, opts, func(e logs.Entry) error {
 		entries = append(entries, e)
 		if len(entries) >= cap {
-			return context.Canceled // stop once we hit the cap
+			return errCollectLimit // stop once we hit the cap
 		}
 		return nil
 	})
-	if collectErr != nil && collectErr != context.Canceled {
+	if collectErr != nil && !errors.Is(collectErr, errCollectLimit) {
 		return collectErr
 	}
 

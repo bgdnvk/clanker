@@ -126,26 +126,22 @@ func (c *vercelCollector) Query(ctx context.Context, opts Options, emit Emit) er
 
 func (c *vercelCollector) Tail(ctx context.Context, opts Options, emit Emit) error {
 	matcher := newMatcher(opts)
-	seen := map[string]struct{}{}
+	seen := newRefDedup(10 * time.Minute)
 	poll := func() error {
 		entries, err := c.events(ctx, opts, 100)
 		if err != nil {
 			return err
 		}
 		for _, e := range entries {
-			if _, dup := seen[e.Ref]; dup {
+			if !seen.add(e.Ref, e.EpochMs) {
 				continue
 			}
-			seen[e.Ref] = struct{}{}
 			if !matcher.Match(e) {
 				continue
 			}
 			if err := emit(e); err != nil {
 				return err
 			}
-		}
-		if len(seen) > 20000 {
-			seen = map[string]struct{}{}
 		}
 		return nil
 	}

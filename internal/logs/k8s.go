@@ -58,9 +58,6 @@ func (c *k8sCollector) Sources(ctx context.Context, opts Options) ([]Source, err
 }
 
 func (c *k8sCollector) logArgs(opts Options, follow bool) []string {
-	if opts.Resource == "" {
-		opts.Resource = "" // validated by caller
-	}
 	args := c.base(opts, "logs", opts.Resource, "--timestamps")
 	if !opts.Since.IsZero() {
 		if d := time.Since(opts.Since); d > 0 {

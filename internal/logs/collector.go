@@ -116,6 +116,36 @@ func (m compiledMatcher) Match(e Entry) bool {
 	return true
 }
 
+// refDedup tracks recently-emitted entry refs for poll-based tails, keyed by
+// epoch ms so it can be pruned by a sliding time window instead of cleared
+// wholesale (a full clear re-emits the next poll's overlap as duplicates).
+type refDedup struct {
+	seen     map[string]int64
+	windowMs int64
+}
+
+func newRefDedup(window time.Duration) *refDedup {
+	return &refDedup{seen: map[string]int64{}, windowMs: window.Milliseconds()}
+}
+
+// add reports whether ref is new (not seen within the window) and records it.
+func (d *refDedup) add(ref string, epochMs int64) bool {
+	if _, ok := d.seen[ref]; ok {
+		return false
+	}
+	d.seen[ref] = epochMs
+	// Prune entries older than the retention window relative to this one.
+	if len(d.seen) > 4096 {
+		cutoff := epochMs - d.windowMs
+		for k, ts := range d.seen {
+			if ts < cutoff {
+				delete(d.seen, k)
+			}
+		}
+	}
+	return true
+}
+
 // ParseSince resolves a relative ("15m", "2h", "3d") or absolute (RFC3339)
 // window-start string against now. Empty defaults to 15m ago (the cost-safe
 // default). now is passed in so callers/tests control the clock.

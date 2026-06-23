@@ -66,6 +66,12 @@ func streamLines(ctx context.Context, name string, args []string, env map[string
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		if err := fn(scanner.Text()); err != nil {
+			// Consumer gave up (e.g. broken pipe): kill the whole process group
+			// and reap, so kubectl/flyctl don't outlive us as orphans.
+			if cmd.Process != nil {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			}
+			_ = cmd.Wait()
 			return err
 		}
 	}

@@ -124,17 +124,16 @@ func (c *awsCollector) Tail(ctx context.Context, opts Options, emit Emit) error 
 	if err != nil {
 		return err
 	}
-	seen := map[string]struct{}{}
+	seen := newRefDedup(2 * time.Minute)
 	flush := func(events []awsEvent) error {
 		for _, ev := range events {
 			if ev.Timestamp > lastMs {
 				lastMs = ev.Timestamp
 			}
 			e := c.toEntry(opts, ev)
-			if _, dup := seen[e.Ref]; dup {
+			if !seen.add(e.Ref, ev.Timestamp) {
 				continue
 			}
-			seen[e.Ref] = struct{}{}
 			if !matcher.Match(e) {
 				continue
 			}
@@ -162,9 +161,6 @@ func (c *awsCollector) Tail(ctx context.Context, opts Options, emit Emit) error 
 			}
 			if err := flush(events); err != nil {
 				return err
-			}
-			if len(seen) > 20000 { // bound the dedup set on long-lived tails
-				seen = map[string]struct{}{}
 			}
 		}
 	}
