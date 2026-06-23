@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -34,6 +35,7 @@ func registeredK8sToolNames(t *testing.T) []string {
 func wantedK8sToolNames() []string {
 	return []string{
 		"clanker_k8s_apply",
+		"clanker_k8s_ask_cluster",
 		"clanker_k8s_delete_resource",
 		"clanker_k8s_exec",
 		"clanker_k8s_get_resources",
@@ -64,8 +66,8 @@ func TestMCPK8sTools_ExpectedNames(t *testing.T) {
 	// smoke (running the MCP server and asking for tools/list) is the
 	// truthier check; this is the unit-level prefix sanity.
 	got := registeredK8sToolNames(t)
-	if len(got) != 16 {
-		t.Errorf("expected 16 k8s MCP tools, got %d", len(got))
+	if len(got) != 17 {
+		t.Errorf("expected 17 k8s MCP tools, got %d", len(got))
 	}
 	for _, name := range got {
 		if !strings.HasPrefix(name, "clanker_k8s_") {
@@ -91,6 +93,46 @@ func TestMCPAppendBoolIf_OnlyAppendsWhenTrue(t *testing.T) {
 	}
 	if got := mcpAppendBoolIf([]string{"helm"}, "--wait", true); len(got) != 2 || got[1] != "--wait" {
 		t.Errorf("mcpAppendBoolIf(true) = %v", got)
+	}
+}
+
+func TestBuildK8sAskCommandArgs_GKEModelOverride(t *testing.T) {
+	got, err := buildK8sAskCommandArgs(k8sAskClusterArgs{
+		k8sConnectionArgs: k8sConnectionArgs{
+			Context:   "gke-prod",
+			Namespace: "payments",
+		},
+		Question:   "why is checkout crashing?",
+		Cluster:    "prod-gke",
+		Provider:   "gke",
+		AIProfile:  "openai",
+		Model:      "gpt-5.1",
+		GCPProject: "prod-project",
+		GCPRegion:  "us-central1",
+	})
+	if err != nil {
+		t.Fatalf("buildK8sAskCommandArgs returned error: %v", err)
+	}
+	want := []string{
+		"k8s", "ask",
+		"--cluster", "prod-gke",
+		"--context", "gke-prod",
+		"--namespace", "payments",
+		"--ai-profile", "openai",
+		"--model", "gpt-5.1",
+		"--gcp",
+		"--gcp-project", "prod-project",
+		"--gcp-region", "us-central1",
+		"why is checkout crashing?",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("buildK8sAskCommandArgs() = %v, want %v", got, want)
+	}
+}
+
+func TestBuildK8sAskCommandArgs_RequiresQuestion(t *testing.T) {
+	if _, err := buildK8sAskCommandArgs(k8sAskClusterArgs{}); err == nil {
+		t.Fatal("expected empty question to fail")
 	}
 }
 
