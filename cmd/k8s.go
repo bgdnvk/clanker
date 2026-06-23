@@ -281,6 +281,7 @@ var (
 	k8sAskKubeconfig string
 	k8sAskContext    string
 	k8sAskAIProfile  string
+	k8sAskModel      string
 	k8sAskDebug      bool
 	// GKE flags
 	k8sGCPMode        bool
@@ -405,6 +406,7 @@ func init() {
 	k8sAskCmd.Flags().StringVar(&k8sAskContext, "context", "", "kubectl context to use (overrides --cluster)")
 	k8sAskCmd.Flags().StringVarP(&k8sNamespace, "namespace", "n", "", "Default namespace for queries (default: all namespaces)")
 	k8sAskCmd.Flags().StringVar(&k8sAskAIProfile, "ai-profile", "", "AI profile to use for LLM queries")
+	k8sAskCmd.Flags().StringVar(&k8sAskModel, "model", "", "AI model to use for LLM queries (overrides selected AI profile config)")
 	k8sAskCmd.Flags().BoolVar(&k8sAskDebug, "debug", false, "Enable debug output")
 	k8sAskCmd.Flags().BoolVar(&k8sGCPMode, "gcp", false, "Use GKE cluster instead of EKS")
 	k8sAskCmd.Flags().StringVar(&k8sGCPProject, "gcp-project", "", "GCP project ID for GKE clusters")
@@ -2715,5 +2717,10 @@ func createAIClient(debug bool) (*ai.Client, error) {
 		fmt.Printf("[k8s ask] Using AI provider: %s\n", provider)
 	}
 
-	return ai.NewClient(provider, apiKey, debug, k8sAskAIProfile), nil
+	if model := strings.TrimSpace(k8sAskModel); model != "" {
+		configKey := fmt.Sprintf("ai.providers.%s.model", provider)
+		viper.Set(configKey, model)
+	}
+
+	return ai.NewClient(provider, apiKey, debug, provider), nil
 }

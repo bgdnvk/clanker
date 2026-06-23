@@ -57,6 +57,26 @@ func TestApplyCommandAIOverrides_RespectsConfiguredProvider(t *testing.T) {
 	}
 }
 
+func TestCreateAIClient_AppliesK8sModelOverride(t *testing.T) {
+	previousProfile := k8sAskAIProfile
+	previousModel := k8sAskModel
+	previousConfiguredModel := viper.GetString("ai.providers.openai.model")
+	k8sAskAIProfile = "openai"
+	k8sAskModel = "gpt-k8s-selected"
+	t.Cleanup(func() {
+		k8sAskAIProfile = previousProfile
+		k8sAskModel = previousModel
+		viper.Set("ai.providers.openai.model", previousConfiguredModel)
+	})
+
+	if _, err := createAIClient(false); err != nil {
+		t.Fatalf("createAIClient returned error: %v", err)
+	}
+	if got := viper.GetString("ai.providers.openai.model"); got != "gpt-k8s-selected" {
+		t.Fatalf("expected k8s --model override to set selected provider model, got %q", got)
+	}
+}
+
 func TestApplyDiscoveryContextDefaults_UsesConfiguredHetzner(t *testing.T) {
 	useDefaultInfraProvider(t, "hetzner")
 
