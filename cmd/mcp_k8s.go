@@ -28,6 +28,19 @@ type k8sGetResourcesArgs struct {
 	Kubeconfig string `json:"kubeconfig,omitempty" jsonschema:"description=Path to kubeconfig file"`
 }
 
+type k8sAskClusterArgs struct {
+	k8sConnectionArgs
+	Question   string `json:"question" jsonschema:"description=Natural language question to ask about the Kubernetes cluster,required"`
+	Cluster    string `json:"cluster,omitempty" jsonschema:"description=EKS or GKE cluster name. If omitted, uses the active kubeconfig context."`
+	Provider   string `json:"provider,omitempty" jsonschema:"description=Cluster provider hint: eks, gke, kubeconfig, or current. GKE enables --gcp."`
+	Profile    string `json:"profile,omitempty" jsonschema:"description=AWS profile for EKS clusters"`
+	AIProfile  string `json:"aiProfile,omitempty" jsonschema:"description=AI profile/provider to use for the LLM pipeline"`
+	Model      string `json:"model,omitempty" jsonschema:"description=AI model override for the selected AI profile"`
+	GCPProject string `json:"gcpProject,omitempty" jsonschema:"description=GCP project ID for GKE clusters"`
+	GCPRegion  string `json:"gcpRegion,omitempty" jsonschema:"description=GCP region for GKE clusters"`
+	Debug      bool   `json:"debug,omitempty" jsonschema:"description=Enable debug output from clanker k8s ask"`
+}
+
 type k8sScaleArgs struct {
 	k8sConnectionArgs
 	Kind     string `json:"kind" jsonschema:"description=Workload kind: deployment, statefulset, or replicaset,required"`
@@ -176,6 +189,51 @@ func mcpAppendBoolIf(args []string, flag string, v bool) []string {
 	return append(args, flag)
 }
 
+func buildK8sAskCommandArgs(args k8sAskClusterArgs) ([]string, error) {
+	question := strings.TrimSpace(args.Question)
+	if question == "" {
+		return nil, fmt.Errorf("question is required")
+	}
+
+	command := []string{"k8s", "ask"}
+	command = mcpAppendIf(command, "--cluster", strings.TrimSpace(args.Cluster))
+	command = mcpAppendIf(command, "--profile", strings.TrimSpace(args.Profile))
+	command = mcpAppendIf(command, "--kubeconfig", strings.TrimSpace(args.Kubeconfig))
+	command = mcpAppendIf(command, "--context", strings.TrimSpace(args.Context))
+	command = mcpAppendIf(command, "--namespace", strings.TrimSpace(args.Namespace))
+	command = mcpAppendIf(command, "--ai-profile", strings.TrimSpace(args.AIProfile))
+	command = mcpAppendIf(command, "--model", strings.TrimSpace(args.Model))
+
+	provider := strings.ToLower(strings.TrimSpace(args.Provider))
+	switch provider {
+	case "", "eks", "aws", "kubeconfig", "current":
+	case "gke", "gcp":
+		command = append(command, "--gcp")
+	default:
+		return nil, fmt.Errorf("unsupported Kubernetes provider %q (use eks, gke, kubeconfig, or current)", args.Provider)
+	}
+
+	if provider == "gke" || provider == "gcp" || strings.TrimSpace(args.GCPProject) != "" || strings.TrimSpace(args.GCPRegion) != "" {
+		if !containsArg(command, "--gcp") {
+			command = append(command, "--gcp")
+		}
+		command = mcpAppendIf(command, "--gcp-project", strings.TrimSpace(args.GCPProject))
+		command = mcpAppendIf(command, "--gcp-region", strings.TrimSpace(args.GCPRegion))
+	}
+	command = mcpAppendBoolIf(command, "--debug", args.Debug)
+	command = append(command, question)
+	return command, nil
+}
+
+func containsArg(args []string, needle string) bool {
+	for _, arg := range args {
+		if arg == needle {
+			return true
+		}
+	}
+	return false
+}
+
 // normalizeHelmListOutput turns `helm list -o json` output into a
 // stable response shape: {"releases": [...], "raw": "..."}.
 //
@@ -256,6 +314,31 @@ func registerK8sMCPTools(server *mcptransport.MCPServer) {
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 			return mcp.NewToolResultJSON(resources)
+		}),
+	)
+
+	server.AddTool(
+		mcp.NewTool(
+			"clanker_k8s_ask_cluster",
+			mcp.WithDescription("Ask a natural-language question about any reachable Kubernetes cluster. Reuses 'clanker k8s ask' so MCP agents get cluster discovery, kubeconfig/context selection, provider auth, conversation history, and model overrides."),
+			mcp.WithInputSchema[k8sAskClusterArgs](),
+			mcp.WithReadOnlyHintAnnotation(true),
+		),
+		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args k8sAskClusterArgs) (*mcp.CallToolResult, error) {
+			cliArgs, err := buildK8sAskCommandArgs(args)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			result, err := runClankerCommand(ctx, commandArgs{Args: cliArgs})
+			if err != nil {
+				if result != nil {
+					if output := strings.TrimSpace(fmt.Sprint(result["output"])); output != "" {
+						return mcp.NewToolResultError(fmt.Sprintf("%v\n%s", err, output)), nil
+					}
+				}
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return mcp.NewToolResultJSON(result)
 		}),
 	)
 

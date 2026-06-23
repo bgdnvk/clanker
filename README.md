@@ -195,6 +195,7 @@ The CLI MCP currently exposes tools to:
 - return Clanker routing decisions for a prompt
 - run local `clanker` commands through MCP, including `ask`, `openclaw`, and other subcommands
 - launch and talk to the Clanker Cloud desktop app through its local backend
+- inspect and chat with Kubernetes clusters through native `clanker_k8s_*` MCP tools, including `clanker_k8s_ask_cluster`
 
 Clanker chat routing also recognizes Clanker Cloud app questions now. If you use `clanker talk` and ask about the running desktop app or its saved settings, it will try the local Clanker Cloud backend first and fall back to Hermes if the app is not running.
 
@@ -252,6 +253,23 @@ The standalone CLI MCP currently exposes these tools:
 - `clanker_cloud_launch_app`
 - `clanker_cloud_ask_app`
 - `clanker_cloud_call_backend_api`
+- `clanker_k8s_list_clusters`
+- `clanker_k8s_get_resources`
+- `clanker_k8s_ask_cluster`
+- `clanker_k8s_logs`
+- `clanker_k8s_exec`
+- `clanker_k8s_scale`
+- `clanker_k8s_restart`
+- `clanker_k8s_rollout`
+- `clanker_k8s_apply`
+- `clanker_k8s_delete_resource`
+- `clanker_k8s_helm_install`
+- `clanker_k8s_helm_upgrade`
+- `clanker_k8s_helm_list`
+- `clanker_k8s_helm_uninstall`
+- `clanker_k8s_node_cordon`
+- `clanker_k8s_node_uncordon`
+- `clanker_k8s_node_drain`
 
 Flags:
 
@@ -513,6 +531,23 @@ clanker k8s ask "now show me its logs"
 
 # Debug mode (shows LLM operations)
 clanker k8s ask --debug "how many pods are running"
+```
+
+MCP agents can use the same pipeline through `clanker_k8s_ask_cluster` after starting `clanker mcp`. The tool accepts `question`, optional `cluster`, `context`, `namespace`, `kubeconfig`, `profile`, `provider`, `gcpProject`, `gcpRegion`, `aiProfile`, and `model` fields so agents can ask any reachable EKS, GKE, or kubeconfig-backed cluster without shelling through a generic command tool.
+
+```json
+{
+  "name": "clanker_k8s_ask_cluster",
+  "arguments": {
+    "question": "which pods are unhealthy and what should I check next?",
+    "cluster": "prod-gke",
+    "provider": "gke",
+    "gcpProject": "prod-project",
+    "gcpRegion": "us-central1",
+    "namespace": "payments",
+    "model": "gpt-5.1"
+  }
+}
 ```
 
 #### K8s Ask Flags

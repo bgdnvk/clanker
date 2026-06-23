@@ -31,6 +31,9 @@ func TestScanIncludesOfficialAuthGuides(t *testing.T) {
 	if !strings.Contains(result.AgentInstructions, "wait for it before chat") {
 		t.Fatalf("agent instructions do not require waiting for scan before app use:\n%s", result.AgentInstructions)
 	}
+	if !strings.Contains(result.AgentInstructions, "clanker_k8s_ask_cluster") {
+		t.Fatalf("agent instructions do not tell MCP agents how to chat with Kubernetes clusters:\n%s", result.AgentInstructions)
+	}
 }
 
 func TestGuidesPreferOfficialVendorDocs(t *testing.T) {
