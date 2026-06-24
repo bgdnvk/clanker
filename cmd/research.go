@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -30,6 +31,7 @@ const (
 	runtimeDeepResearchEstateEnv    = "CLANKER_RUNTIME_DEEP_RESEARCH_ESTATE_JSON"
 	maxDeepResearchNarrativeBullets = 4
 	maxDeepResearchFindings         = 14
+	maxDeepResearchSystemRecs       = 6
 )
 
 type deepResearchEstateSnapshot struct {
@@ -63,14 +65,17 @@ type deepResearchResourceConnection struct {
 }
 
 type deepResearchResult struct {
-	Query       string                     `json:"query"`
-	GeneratedAt string                     `json:"generatedAt"`
-	Summary     deepResearchSummary        `json:"summary"`
-	Findings    []deepResearchFinding      `json:"findings"`
-	Providers   []deepResearchProviderRoll `json:"providers,omitempty"`
-	Subagents   []deepResearchSubagentRun  `json:"subagents,omitempty"`
-	Warnings    []string                   `json:"warnings,omitempty"`
-	Narrative   []string                   `json:"narrative,omitempty"`
+	Query             string                         `json:"query"`
+	GeneratedAt       string                         `json:"generatedAt"`
+	Summary           deepResearchSummary            `json:"summary"`
+	Findings          []deepResearchFinding          `json:"findings"`
+	Providers         []deepResearchProviderRoll     `json:"providers,omitempty"`
+	Subagents         []deepResearchSubagentRun      `json:"subagents,omitempty"`
+	Warnings          []string                       `json:"warnings,omitempty"`
+	Narrative         []string                       `json:"narrative,omitempty"`
+	SystemImprovement *deepResearchSystemImprovement `json:"systemImprovement,omitempty"`
+	ResearchQuality   *deepResearchQuality           `json:"researchQuality,omitempty"`
+	AdvisorBenchmarks *deepResearchAdvisorBenchmarks `json:"advisorBenchmarks,omitempty"`
 }
 
 type deepResearchSummary struct {
@@ -91,6 +96,87 @@ type deepResearchEvidenceDetail struct {
 	Source   string `json:"source,omitempty"`
 	Provider string `json:"provider,omitempty"`
 	Section  string `json:"section,omitempty"`
+}
+
+type deepResearchSystemImprovement struct {
+	Overview        string                             `json:"overview,omitempty"`
+	Traffic         deepResearchSystemImprovementBlock `json:"traffic"`
+	Codebase        deepResearchSystemImprovementBlock `json:"codebase"`
+	Architecture    deepResearchSystemImprovementBlock `json:"architecture"`
+	Recommendations []deepResearchSystemRecommendation `json:"recommendations,omitempty"`
+}
+
+type deepResearchSystemImprovementBlock struct {
+	Status   string   `json:"status,omitempty"`
+	Summary  string   `json:"summary,omitempty"`
+	Evidence []string `json:"evidence,omitempty"`
+	Gaps     []string `json:"gaps,omitempty"`
+}
+
+type deepResearchSystemRecommendation struct {
+	ID       string   `json:"id"`
+	Priority string   `json:"priority"`
+	Title    string   `json:"title"`
+	Summary  string   `json:"summary"`
+	Impact   string   `json:"impact,omitempty"`
+	Effort   string   `json:"effort,omitempty"`
+	Evidence []string `json:"evidence,omitempty"`
+	Actions  []string `json:"actions,omitempty"`
+}
+
+type deepResearchQuality struct {
+	Score             int                        `json:"score"`
+	Confidence        string                     `json:"confidence"`
+	Summary           string                     `json:"summary,omitempty"`
+	EvidenceMix       []deepResearchEvidenceMix  `json:"evidenceMix,omitempty"`
+	Checks            []deepResearchQualityCheck `json:"checks,omitempty"`
+	ContextGaps       []string                   `json:"contextGaps,omitempty"`
+	NextDataToCollect []string                   `json:"nextDataToCollect,omitempty"`
+}
+
+type deepResearchEvidenceMix struct {
+	Source string `json:"source"`
+	Label  string `json:"label"`
+	Count  int    `json:"count"`
+}
+
+type deepResearchQualityCheck struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Summary string `json:"summary"`
+}
+
+type deepResearchAdvisorBenchmarks struct {
+	Summary  string                            `json:"summary,omitempty"`
+	Pillars  []deepResearchAdvisorPillar       `json:"pillars,omitempty"`
+	Lessons  []deepResearchAdvisorLesson       `json:"lessons,omitempty"`
+	Workflow []deepResearchAdvisorWorkflowStep `json:"workflow,omitempty"`
+}
+
+type deepResearchAdvisorPillar struct {
+	ID                  string   `json:"id"`
+	Label               string   `json:"label"`
+	Status              string   `json:"status"`
+	Score               int      `json:"score"`
+	Summary             string   `json:"summary"`
+	FindingCount        int      `json:"findingCount"`
+	RecommendationCount int      `json:"recommendationCount"`
+	Evidence            []string `json:"evidence,omitempty"`
+	NextAction          string   `json:"nextAction,omitempty"`
+}
+
+type deepResearchAdvisorLesson struct {
+	Product   string `json:"product"`
+	Lesson    string `json:"lesson"`
+	AppliedAs string `json:"appliedAs"`
+}
+
+type deepResearchAdvisorWorkflowStep struct {
+	ID      string   `json:"id"`
+	Label   string   `json:"label"`
+	Summary string   `json:"summary"`
+	Inputs  []string `json:"inputs,omitempty"`
+	Outputs []string `json:"outputs,omitempty"`
 }
 
 type deepResearchFinding struct {
@@ -251,16 +337,22 @@ and emits a final structured JSON payload that clanker-cloud can render into a r
 		providers := buildDeepResearchProviderRollup(estate.Resources, estate.TotalCost)
 		findings = sortAndCapDeepResearchFindings(findings)
 		narrative := buildDeterministicNarrative(findings, providers)
+		systemImprovement := buildDeepResearchSystemImprovement(estate, findings, providers, buildDeepResearchQuestionPlan(question, estate))
+		researchQuality := buildDeepResearchQuality(estate, findings, providers, systemImprovement)
+		advisorBenchmarks := buildDeepResearchAdvisorBenchmarks(estate, findings, providers, systemImprovement, researchQuality)
 
 		result := deepResearchResult{
-			Query:       question,
-			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-			Summary:     buildDeepResearchSummary(estate, findings),
-			Findings:    findings,
-			Providers:   providers,
-			Subagents:   subagents,
-			Warnings:    uniqueNonEmptyStrings(warnings),
-			Narrative:   narrative,
+			Query:             question,
+			GeneratedAt:       time.Now().UTC().Format(time.RFC3339),
+			Summary:           buildDeepResearchSummary(estate, findings),
+			Findings:          findings,
+			Providers:         providers,
+			Subagents:         subagents,
+			Warnings:          uniqueNonEmptyStrings(warnings),
+			Narrative:         narrative,
+			SystemImprovement: systemImprovement,
+			ResearchQuality:   researchQuality,
+			AdvisorBenchmarks: advisorBenchmarks,
 		}
 
 		if enriched, err := enrichDeepResearchNarrative(context.Background(), result, debug); err == nil && len(enriched) > 0 {
@@ -2152,6 +2244,1404 @@ func buildDeepResearchProviderRollup(resources []deepResearchResource, totalCost
 	return providers
 }
 
+func buildDeepResearchSystemImprovement(estate deepResearchEstateSnapshot, findings []deepResearchFinding, providers []deepResearchProviderRoll, plan deepResearchQuestionPlan) *deepResearchSystemImprovement {
+	traffic := buildDeepResearchTrafficAssessment(estate.Resources, findings, plan)
+	codebase := buildDeepResearchCodebaseAssessment(estate.Resources)
+	architecture := buildDeepResearchArchitectureAssessment(estate, findings, providers)
+	recommendations := buildDeepResearchSystemRecommendations(estate, findings, providers, traffic, codebase, architecture)
+
+	overviewParts := []string{
+		fmt.Sprintf("Reviewed %d resources", len(estate.Resources)),
+		fmt.Sprintf("%d provider groups", len(providers)),
+		fmt.Sprintf("%d regions", len(deepResearchRegions(estate.Resources))),
+	}
+	if len(recommendations) > 0 {
+		overviewParts = append(overviewParts, fmt.Sprintf("%d improvement tracks", len(recommendations)))
+	}
+
+	return &deepResearchSystemImprovement{
+		Overview:        strings.Join(overviewParts, ", "),
+		Traffic:         traffic,
+		Codebase:        codebase,
+		Architecture:    architecture,
+		Recommendations: recommendations,
+	}
+}
+
+func buildDeepResearchTrafficAssessment(resources []deepResearchResource, findings []deepResearchFinding, plan deepResearchQuestionPlan) deepResearchSystemImprovementBlock {
+	edges, typedEdges, entrypoints := deepResearchTopologyCounts(resources)
+	trafficSignals := collectDeepResearchTrafficSignals(resources, 6)
+	hotspots := collectDeepResearchTrafficHotspots(resources, 4)
+	costTraffic := collectDeepResearchCostTrafficSignals(resources, 3)
+	bottlenecks := deepResearchFindingsByCategory(findings, "bottleneck")
+
+	evidence := []string{
+		fmt.Sprintf("Topology model contains %d dependency edges, including %d typed edges.", edges, typedEdges),
+		fmt.Sprintf("Detected %d likely ingress, edge, or entrypoint resources.", entrypoints),
+	}
+	evidence = append(evidence, trafficSignals...)
+	evidence = append(evidence, hotspots...)
+	evidence = append(evidence, costTraffic...)
+	evidence = uniqueNonEmptyStrings(evidence)
+
+	gaps := make([]string, 0, 3)
+	status := "ok"
+	if len(trafficSignals) == 0 {
+		status = "gap"
+		gaps = append(gaps, "No direct request, latency, throughput, error-rate, or bandwidth metrics were present in the estate snapshot.")
+	}
+	if typedEdges == 0 && edges > 0 {
+		gaps = append(gaps, "Connections exist, but typed connection labels are missing, which weakens traffic-path analysis.")
+	}
+	if entrypoints == 0 {
+		gaps = append(gaps, "No clear edge or ingress resources were identified, so production traffic entrypoints should be marked explicitly.")
+	}
+	if len(bottlenecks) > 0 && status == "ok" {
+		status = "warning"
+	}
+
+	summary := "Traffic analysis used topology, edge resources, and available metrics to identify where requests probably concentrate."
+	if len(trafficSignals) == 0 {
+		summary = "Traffic analysis is mostly inferential because the snapshot does not include live request or latency metrics."
+	} else if len(bottlenecks) > 0 {
+		summary = fmt.Sprintf("Traffic analysis found %d measured signals and %d topology bottleneck candidates.", len(trafficSignals), len(bottlenecks))
+	} else if len(costTraffic) > 0 {
+		summary = fmt.Sprintf("Traffic analysis found %d measured signals and %d cost-versus-traffic correlation candidates.", len(trafficSignals), len(costTraffic))
+	}
+	if plan.WantsLogs {
+		summary += " Recent logs and alerts were prioritized for live provider drilldowns."
+	}
+
+	return deepResearchSystemImprovementBlock{
+		Status:   status,
+		Summary:  summary,
+		Evidence: deepResearchLimitStrings(evidence, 8),
+		Gaps:     uniqueNonEmptyStrings(gaps),
+	}
+}
+
+func buildDeepResearchCodebaseAssessment(resources []deepResearchResource) deepResearchSystemImprovementBlock {
+	trackedRepos := loadDeepResearchTrackedRepos()
+	codeSignals := collectDeepResearchCodebaseSignals(resources, 6)
+	deploySignals := collectDeepResearchDeploySignals(resources, 5)
+	untagged := 0
+	for _, resource := range resources {
+		if !deepResearchHasOwnershipTags(resource.Tags) {
+			untagged++
+		}
+	}
+
+	evidence := make([]string, 0, 8)
+	if len(trackedRepos) > 0 {
+		for _, repo := range deepResearchLimitStrings(trackedRepos, 4) {
+			evidence = append(evidence, "Tracked repo: "+repo)
+		}
+	}
+	evidence = append(evidence, codeSignals...)
+	evidence = append(evidence, deploySignals...)
+	if untagged > 0 {
+		evidence = append(evidence, fmt.Sprintf("%d resources do not expose owner or environment tags.", untagged))
+	}
+
+	gaps := make([]string, 0, 3)
+	status := "ok"
+	if len(trackedRepos) == 0 && len(codeSignals) == 0 {
+		status = "gap"
+		gaps = append(gaps, "No tracked repositories or repository-linked resources were visible to this run.")
+	}
+	if len(deploySignals) == 0 {
+		gaps = append(gaps, "No deployment pipeline, build, or release resources were visible in the snapshot.")
+	}
+	if untagged > len(resources)/3 && len(resources) > 0 {
+		gaps = append(gaps, "Ownership tags are sparse enough that code-to-infra accountability will be weak.")
+		if status == "ok" {
+			status = "warning"
+		}
+	}
+
+	summary := "Codebase understanding used tracked GitHub repos, repository-linked resources, deployment resources, and ownership tags."
+	if status == "gap" {
+		summary = "Codebase understanding is limited because no repo or deployment-system context was available in this run."
+	} else if len(trackedRepos) > 0 {
+		summary = fmt.Sprintf("Codebase understanding includes %d tracked repos plus %d resource-level code or deploy signals.", len(trackedRepos), len(codeSignals)+len(deploySignals))
+	}
+
+	return deepResearchSystemImprovementBlock{
+		Status:   status,
+		Summary:  summary,
+		Evidence: deepResearchLimitStrings(uniqueNonEmptyStrings(evidence), 8),
+		Gaps:     uniqueNonEmptyStrings(gaps),
+	}
+}
+
+func buildDeepResearchArchitectureAssessment(estate deepResearchEstateSnapshot, findings []deepResearchFinding, providers []deepResearchProviderRoll) deepResearchSystemImprovementBlock {
+	edges, typedEdges, entrypoints := deepResearchTopologyCounts(estate.Resources)
+	regions := deepResearchRegions(estate.Resources)
+	criticalPaths := collectDeepResearchCriticalPaths(estate.Resources, 4)
+	resilienceFindings := deepResearchFindingsByCategory(findings, "resilience")
+	misconfigFindings := deepResearchFindingsByCategory(findings, "misconfiguration")
+	costFindings := deepResearchFindingsByCategory(findings, "cost")
+
+	evidence := []string{
+		fmt.Sprintf("%d resources across %d regions and %d provider groups.", len(estate.Resources), len(regions), len(providers)),
+		fmt.Sprintf("%d dependency edges, %d typed edges, %d likely entrypoints.", edges, typedEdges, entrypoints),
+	}
+	if len(providers) > 0 {
+		evidence = append(evidence, fmt.Sprintf("%s is the largest observed provider by spend at %.1f%%.", strings.ToUpper(providers[0].Provider), providers[0].ShareOfCost))
+	}
+	evidence = append(evidence, criticalPaths...)
+	if len(resilienceFindings) > 0 {
+		evidence = append(evidence, fmt.Sprintf("%d resilience findings indicate single points, degraded state, or limited redundancy.", len(resilienceFindings)))
+	}
+	if len(misconfigFindings) > 0 {
+		evidence = append(evidence, fmt.Sprintf("%d misconfiguration findings affect architecture hardening.", len(misconfigFindings)))
+	}
+	if len(costFindings) > 0 {
+		evidence = append(evidence, fmt.Sprintf("%d cost findings should shape the architecture review order.", len(costFindings)))
+	}
+
+	gaps := make([]string, 0, 4)
+	status := "ok"
+	if edges == 0 {
+		status = "gap"
+		gaps = append(gaps, "No dependency graph edges were present, so architecture analysis cannot distinguish active paths from isolated inventory.")
+	}
+	if typedEdges == 0 && edges > 0 {
+		gaps = append(gaps, "Dependency edges are untyped, so request, data, auth, and deploy relationships cannot be separated yet.")
+	}
+	if len(criticalPaths) == 0 && entrypoints > 0 {
+		gaps = append(gaps, "Entrypoints exist, but no multi-hop service or data paths could be reconstructed from the graph.")
+	}
+	if len(regions) >= 5 {
+		if status == "ok" {
+			status = "warning"
+		}
+		gaps = append(gaps, "Region spread is large enough to deserve a latency, egress, and failover review.")
+	}
+	if len(resilienceFindings) > 0 && status == "ok" {
+		status = "warning"
+	}
+
+	summary := "Architecture review combined provider mix, regions, dependency graph density, entrypoints, and ranked findings."
+	if status == "gap" {
+		summary = "Architecture review is inventory-heavy because dependency relationships are missing from the snapshot."
+	} else if len(resilienceFindings) > 0 || len(costFindings) > 0 {
+		summary = fmt.Sprintf("Architecture review found %d resilience and %d cost signals that should drive the improvement roadmap.", len(resilienceFindings), len(costFindings))
+	}
+
+	return deepResearchSystemImprovementBlock{
+		Status:   status,
+		Summary:  summary,
+		Evidence: deepResearchLimitStrings(uniqueNonEmptyStrings(evidence), 8),
+		Gaps:     uniqueNonEmptyStrings(gaps),
+	}
+}
+
+func buildDeepResearchSystemRecommendations(estate deepResearchEstateSnapshot, findings []deepResearchFinding, providers []deepResearchProviderRoll, traffic deepResearchSystemImprovementBlock, codebase deepResearchSystemImprovementBlock, architecture deepResearchSystemImprovementBlock) []deepResearchSystemRecommendation {
+	recommendations := make([]deepResearchSystemRecommendation, 0, maxDeepResearchSystemRecs)
+	appendRecommendation := func(rec deepResearchSystemRecommendation) {
+		if strings.TrimSpace(rec.ID) == "" || strings.TrimSpace(rec.Title) == "" {
+			return
+		}
+		for _, existing := range recommendations {
+			if existing.ID == rec.ID {
+				return
+			}
+		}
+		rec.Evidence = deepResearchLimitStrings(uniqueNonEmptyStrings(rec.Evidence), 4)
+		rec.Actions = deepResearchLimitStrings(uniqueNonEmptyStrings(rec.Actions), 4)
+		recommendations = append(recommendations, rec)
+	}
+
+	bottlenecks := deepResearchFindingsByCategory(findings, "bottleneck")
+	resilience := deepResearchFindingsByCategory(findings, "resilience")
+	costs := deepResearchFindingsByCategory(findings, "cost")
+	misconfigs := deepResearchFindingsByCategory(findings, "misconfiguration")
+	trafficGap := traffic.Status == "gap"
+	codebaseGap := codebase.Status == "gap"
+	architectureGap := architecture.Status == "gap"
+
+	if trafficGap || len(bottlenecks) > 0 {
+		priority := "high"
+		if !trafficGap && len(bottlenecks) == 0 {
+			priority = "medium"
+		}
+		appendRecommendation(deepResearchSystemRecommendation{
+			ID:       "traffic-observability",
+			Priority: priority,
+			Title:    "Make traffic and saturation measurable",
+			Summary:  "Instrument request volume, latency percentiles, errors, queue depth, and capacity pressure on every ingress and concentration point before the next optimization pass.",
+			Impact:   "Turns inferred bottlenecks into measured targets and prevents cost changes from hurting production paths.",
+			Effort:   "medium",
+			Evidence: append(traffic.Evidence, traffic.Gaps...),
+			Actions: []string{
+				"Attach request-rate, p95/p99 latency, error-rate, and saturation metrics to edge, gateway, queue, database, and cache resources.",
+				"Mark production entrypoints explicitly in resource attributes or tags.",
+				"Run the next deep research pass after metrics are visible so traffic-heavy resources outrank idle inventory.",
+			},
+		})
+	}
+
+	if codebaseGap || len(codebase.Gaps) > 0 {
+		appendRecommendation(deepResearchSystemRecommendation{
+			ID:       "code-to-infra-ownership",
+			Priority: "high",
+			Title:    "Connect code ownership to infrastructure ownership",
+			Summary:  "Map repositories, deployment pipelines, services, and owner tags so the report can recommend the responsible code path, not only the cloud resource.",
+			Impact:   "Shortens remediation handoff and makes architecture recommendations executable by the right team.",
+			Effort:   "small",
+			Evidence: append(codebase.Evidence, codebase.Gaps...),
+			Actions: []string{
+				"Track GitHub repos used by the estate and include deploy resources in scans.",
+				"Add owner, environment, service, repo, and criticality tags to long-lived resources.",
+				"Link Vercel, Railway, Cloudflare Workers, Kubernetes workloads, and cloud resources back to repository names where possible.",
+			},
+		})
+	}
+
+	if architectureGap || len(bottlenecks) > 0 {
+		appendRecommendation(deepResearchSystemRecommendation{
+			ID:       "dependency-map",
+			Priority: "high",
+			Title:    "Tighten the dependency graph before redesign work",
+			Summary:  "Add typed edges for request, data, auth, event, deploy, and monitoring relationships so architecture recommendations can distinguish critical paths from incidental inventory.",
+			Impact:   "Improves blast-radius analysis, capacity planning, and change sequencing.",
+			Effort:   "medium",
+			Evidence: append(architecture.Evidence, architecture.Gaps...),
+			Actions: []string{
+				"Prefer typed connections over untyped adjacency when merging provider resources.",
+				"Flag edge services, databases, queues, caches, and deployment pipelines as architecture-critical.",
+				"Use dependency fan-in plus live traffic to decide which components need redundancy or decomposition first.",
+			},
+		})
+	}
+
+	if len(resilience) > 0 || len(misconfigs) > 0 {
+		appendRecommendation(deepResearchSystemRecommendation{
+			ID:       "resilience-hardening",
+			Priority: "high",
+			Title:    "Harden the critical path before aggressive optimization",
+			Summary:  "Fix single points, degraded resources, public data planes, missing backups, and encryption gaps before reducing capacity or removing resources.",
+			Impact:   "Keeps savings work from increasing outage or exposure risk.",
+			Effort:   "medium",
+			Evidence: deepResearchTopFindingTitles(append(resilience, misconfigs...), 4),
+			Actions: []string{
+				"Validate backups, restore paths, encryption, and private networking on data stores.",
+				"Add redundancy or failover for single visible databases, caches, queues, and edges that serve production traffic.",
+				"Use recent logs and alerts to decide which degraded resources block optimization work.",
+			},
+		})
+	}
+
+	if len(costs) > 0 || (len(providers) > 0 && providers[0].ShareOfCost >= 60) {
+		appendRecommendation(deepResearchSystemRecommendation{
+			ID:       "cost-and-capacity-loop",
+			Priority: "medium",
+			Title:    "Run cost optimization as a measured capacity loop",
+			Summary:  "Pair the top cost drivers with utilization and traffic data, then right-size only after demand, redundancy, and owner intent are known.",
+			Impact:   "Avoids blind cuts while still prioritizing high-return savings.",
+			Effort:   "medium",
+			Evidence: append(deepResearchTopFindingTitles(costs, 4), architecture.Evidence...),
+			Actions: []string{
+				"Group cost drivers by provider, service, owner, and traffic path.",
+				"Prioritize idle and orphaned resources first, then right-size hot paths with utilization evidence.",
+				"Record accepted savings as follow-up tickets with rollback criteria.",
+			},
+		})
+	}
+
+	if len(recommendations) == 0 {
+		appendRecommendation(deepResearchSystemRecommendation{
+			ID:       "baseline-improvement-loop",
+			Priority: "medium",
+			Title:    "Create a repeatable improvement baseline",
+			Summary:  "The current snapshot has no dominant critical theme, so improve the next scan by adding traffic metrics, typed dependencies, owner tags, and repo links.",
+			Impact:   "Makes future research more precise and cheaper to act on.",
+			Effort:   "small",
+			Evidence: []string{
+				fmt.Sprintf("%d resources reviewed.", len(estate.Resources)),
+				fmt.Sprintf("%d ranked findings generated.", len(findings)),
+			},
+			Actions: []string{
+				"Tag owners and criticality for production resources.",
+				"Add typed connections for user-facing and data paths.",
+				"Connect deploy sources and rerun deep research after the next scan.",
+			},
+		})
+	}
+
+	if len(recommendations) > maxDeepResearchSystemRecs {
+		return append([]deepResearchSystemRecommendation(nil), recommendations[:maxDeepResearchSystemRecs]...)
+	}
+	return recommendations
+}
+
+func buildDeepResearchQuality(estate deepResearchEstateSnapshot, findings []deepResearchFinding, providers []deepResearchProviderRoll, systemImprovement *deepResearchSystemImprovement) *deepResearchQuality {
+	edges, typedEdges, entrypoints := deepResearchTopologyCounts(estate.Resources)
+	trafficSignals := collectDeepResearchTrafficSignals(estate.Resources, 0)
+	costTrafficSignals := collectDeepResearchCostTrafficSignals(estate.Resources, 0)
+	trackedRepos := loadDeepResearchTrackedRepos()
+	codeSignals := collectDeepResearchCodebaseSignals(estate.Resources, 0)
+	deploySignals := collectDeepResearchDeploySignals(estate.Resources, 0)
+	evidenceMix := buildDeepResearchEvidenceMix(findings)
+	sourceCounts := make(map[string]int, len(evidenceMix))
+	for _, item := range evidenceMix {
+		sourceCounts[item.Source] = item.Count
+	}
+
+	untagged := 0
+	for _, resource := range estate.Resources {
+		if !deepResearchHasOwnershipTags(resource.Tags) {
+			untagged++
+		}
+	}
+
+	score := 30
+	checks := make([]deepResearchQualityCheck, 0, 7)
+	addCheck := func(name string, status string, summary string, scoreDelta int) {
+		checks = append(checks, deepResearchQualityCheck{Name: name, Status: status, Summary: summary})
+		score += scoreDelta
+	}
+
+	switch {
+	case len(estate.Resources) >= 25:
+		addCheck("Estate context", "ok", fmt.Sprintf("%d resources were available for estate-wide ranking.", len(estate.Resources)), 12)
+	case len(estate.Resources) > 0:
+		addCheck("Estate context", "warning", fmt.Sprintf("Only %d resources were available; conclusions may be narrow.", len(estate.Resources)), 4)
+	default:
+		addCheck("Estate context", "gap", "No estate resources were available to deep research.", -18)
+	}
+
+	switch {
+	case len(trafficSignals) > 0 && len(costTrafficSignals) > 0:
+		addCheck("Traffic telemetry", "ok", fmt.Sprintf("%d traffic signals and %d cost-traffic candidates were present.", len(trafficSignals), len(costTrafficSignals)), 14)
+	case len(trafficSignals) > 0:
+		addCheck("Traffic telemetry", "warning", fmt.Sprintf("%d traffic signals were present, but cost correlation is limited.", len(trafficSignals)), 8)
+	default:
+		addCheck("Traffic telemetry", "gap", "No direct request, latency, throughput, or bandwidth metrics were present.", -10)
+	}
+
+	switch {
+	case typedEdges > 0:
+		addCheck("Service topology", "ok", fmt.Sprintf("%d dependency edges include %d typed relationships.", edges, typedEdges), 12)
+	case edges > 0:
+		addCheck("Service topology", "warning", fmt.Sprintf("%d dependency edges exist, but none are typed.", edges), 4)
+	default:
+		addCheck("Service topology", "gap", "No dependency edges were available for path analysis.", -10)
+	}
+
+	switch {
+	case sourceCounts["provider-drilldown"] > 0:
+		addCheck("Provider evidence", "ok", fmt.Sprintf("%d live drilldown evidence items were attached to findings.", sourceCounts["provider-drilldown"]), 14)
+	case sourceCounts["provider-scout"] > 0:
+		addCheck("Provider evidence", "warning", fmt.Sprintf("%d provider scout evidence items were attached, but no drilldowns landed.", sourceCounts["provider-scout"]), 8)
+	case len(findings) > 0:
+		addCheck("Provider evidence", "gap", "Findings are mostly heuristic; provider scouts did not attach live evidence.", -6)
+	default:
+		addCheck("Provider evidence", "gap", "No findings were available for evidence enrichment.", -8)
+	}
+
+	switch {
+	case len(trackedRepos) > 0 || len(codeSignals) > 0:
+		addCheck("Code context", "ok", fmt.Sprintf("%d tracked repos and %d resource code signals were visible.", len(trackedRepos), len(codeSignals)), 10)
+	case len(deploySignals) > 0:
+		addCheck("Code context", "warning", fmt.Sprintf("%d deployment signals were visible, but repository links were missing.", len(deploySignals)), 5)
+	default:
+		addCheck("Code context", "gap", "No repository or code ownership context was visible.", -8)
+	}
+
+	if estate.TotalCost > 0 && len(costTrafficSignals) > 0 {
+		addCheck("Cost-performance correlation", "ok", "Cost data and traffic signals can be compared in this run.", 10)
+	} else if estate.TotalCost > 0 {
+		addCheck("Cost-performance correlation", "warning", "Cost data is present, but traffic signals are missing or too sparse for validation.", 4)
+	} else {
+		addCheck("Cost-performance correlation", "gap", "No estate cost total was available for efficiency analysis.", -6)
+	}
+
+	if len(estate.Resources) > 0 && untagged <= len(estate.Resources)/3 {
+		addCheck("Ownership metadata", "ok", fmt.Sprintf("%d of %d resources lack owner or environment tags.", untagged, len(estate.Resources)), 8)
+	} else if len(estate.Resources) > 0 {
+		addCheck("Ownership metadata", "warning", fmt.Sprintf("%d of %d resources lack owner or environment tags.", untagged, len(estate.Resources)), 2)
+	} else {
+		addCheck("Ownership metadata", "gap", "No resources were available for ownership metadata checks.", -6)
+	}
+
+	contextGaps := collectDeepResearchQualityGaps(checks, systemImprovement)
+	nextData := buildDeepResearchNextDataToCollect(checks, systemImprovement, entrypoints)
+	if score < 0 {
+		score = 0
+	}
+	if score > 100 {
+		score = 100
+	}
+
+	confidence := "low"
+	switch {
+	case score >= 78:
+		confidence = "high"
+	case score >= 55:
+		confidence = "medium"
+	}
+
+	return &deepResearchQuality{
+		Score:             score,
+		Confidence:        confidence,
+		Summary:           fmt.Sprintf("%s confidence with %d quality checks, %d findings, and %d evidence items.", strings.Title(confidence), len(checks), len(findings), deepResearchEvidenceMixTotal(evidenceMix)),
+		EvidenceMix:       evidenceMix,
+		Checks:            checks,
+		ContextGaps:       contextGaps,
+		NextDataToCollect: nextData,
+	}
+}
+
+func buildDeepResearchAdvisorBenchmarks(estate deepResearchEstateSnapshot, findings []deepResearchFinding, providers []deepResearchProviderRoll, systemImprovement *deepResearchSystemImprovement, quality *deepResearchQuality) *deepResearchAdvisorBenchmarks {
+	pillars := buildDeepResearchAdvisorPillars(estate, findings, systemImprovement, quality)
+	lessons := []deepResearchAdvisorLesson{
+		{
+			Product:   "AWS Trusted Advisor, Azure Advisor, and Google Active Assist",
+			Lesson:    "Mature cloud advisors organize recommendations by durable operational pillars and make the remediation path reviewable.",
+			AppliedAs: "Adds advisor pillars with scores, statuses, evidence, and next actions for cost, performance, reliability, security, and operations.",
+		},
+		{
+			Product:   "Google Active Assist",
+			Lesson:    "Recommendations need human assessment before apply or dismiss decisions because changes can affect performance, reliability, and permissions.",
+			AppliedAs: "Keeps the workflow human-in-the-loop and separates evidence review from remediation and completion.",
+		},
+		{
+			Product:   "Datadog Bits AI SRE, Dynatrace Davis, and New Relic iRCA",
+			Lesson:    "RCA products earn trust by grounding conclusions in topology, causal paths, source evidence, and visible investigation traces.",
+			AppliedAs: "Carries critical path candidates, evidence mix, research confidence, and live progress notes into the report.",
+		},
+		{
+			Product:   "CloudZero and Harness Cloud Cost Management",
+			Lesson:    "Cost optimization gets safer when spend is tied to unit metrics, business dimensions, anomalies, budgets, and owners.",
+			AppliedAs: "Highlights cost-to-traffic candidates and missing unit-economics data before recommending rightsizing.",
+		},
+	}
+	workflow := buildDeepResearchAdvisorWorkflow(pillars, systemImprovement, quality)
+
+	summary := "Advisor benchmark output compares this scan against cloud-advisor, observability-RCA, and FinOps product patterns."
+	if len(pillars) > 0 {
+		top := deepResearchAdvisorPriorityLabels(pillars, 2)
+		if len(top) > 0 {
+			summary = fmt.Sprintf("Advisor benchmark output prioritizes %s using cloud-advisor pillars, topology evidence, and FinOps-style unit metrics.", strings.Join(top, " and "))
+		}
+	}
+	if len(providers) > 0 {
+		summary = fmt.Sprintf("%s Largest observed provider by spend is %s at %.1f%%.", summary, strings.ToUpper(providers[0].Provider), providers[0].ShareOfCost)
+	}
+
+	return &deepResearchAdvisorBenchmarks{
+		Summary:  summary,
+		Pillars:  pillars,
+		Lessons:  lessons,
+		Workflow: workflow,
+	}
+}
+
+func buildDeepResearchAdvisorPillars(estate deepResearchEstateSnapshot, findings []deepResearchFinding, systemImprovement *deepResearchSystemImprovement, quality *deepResearchQuality) []deepResearchAdvisorPillar {
+	type pillarSpec struct {
+		id                string
+		label             string
+		categories        []string
+		recommendationIDs []string
+		fallbackAction    string
+	}
+	specs := []pillarSpec{
+		{
+			id:                "cost-efficiency",
+			label:             "Cost efficiency",
+			categories:        []string{"cost", "hygiene"},
+			recommendationIDs: []string{"cost-and-capacity-loop"},
+			fallbackAction:    "Collect unit metrics and validate top spend before rightsizing.",
+		},
+		{
+			id:                "performance",
+			label:             "Performance",
+			categories:        []string{"bottleneck"},
+			recommendationIDs: []string{"traffic-observability", "dependency-map"},
+			fallbackAction:    "Measure latency, request volume, saturation, and path fan-in on entrypoints.",
+		},
+		{
+			id:                "reliability",
+			label:             "Reliability",
+			categories:        []string{"resilience"},
+			recommendationIDs: []string{"resilience-hardening", "dependency-map"},
+			fallbackAction:    "Validate redundancy, backups, restore paths, and failover on critical paths.",
+		},
+		{
+			id:                "security",
+			label:             "Security",
+			categories:        []string{"misconfiguration"},
+			recommendationIDs: []string{"resilience-hardening"},
+			fallbackAction:    "Review public exposure, encryption, IAM, and private networking gaps.",
+		},
+		{
+			id:                "operational-excellence",
+			label:             "Operational excellence",
+			recommendationIDs: []string{"code-to-infra-ownership", "dependency-map", "baseline-improvement-loop", "traffic-observability"},
+			fallbackAction:    "Route recommendations to owners and track review, ticket, validation, and completion states.",
+		},
+	}
+
+	pillars := make([]deepResearchAdvisorPillar, 0, len(specs))
+	for _, spec := range specs {
+		matchedFindings := deepResearchFindingsByCategories(findings, spec.categories...)
+		recommendations := deepResearchRecommendationsByIDs(systemImprovement, spec.recommendationIDs...)
+		gapCount := deepResearchAdvisorGapCount(spec.id, estate, systemImprovement, quality)
+		score := deepResearchAdvisorPillarScore(matchedFindings, len(recommendations), gapCount)
+		status := deepResearchAdvisorPillarStatus(score, matchedFindings, gapCount)
+		evidence := deepResearchAdvisorPillarEvidence(spec.id, estate, matchedFindings, recommendations, systemImprovement, quality)
+		nextAction := deepResearchAdvisorNextAction(recommendations, quality, spec.fallbackAction)
+		pillars = append(pillars, deepResearchAdvisorPillar{
+			ID:                  spec.id,
+			Label:               spec.label,
+			Status:              status,
+			Score:               score,
+			Summary:             deepResearchAdvisorPillarSummary(spec.label, status, matchedFindings, recommendations, gapCount),
+			FindingCount:        len(matchedFindings),
+			RecommendationCount: len(recommendations),
+			Evidence:            evidence,
+			NextAction:          nextAction,
+		})
+	}
+	sort.SliceStable(pillars, func(i, j int) bool {
+		if pillars[i].Score != pillars[j].Score {
+			return pillars[i].Score < pillars[j].Score
+		}
+		return pillars[i].Label < pillars[j].Label
+	})
+	return pillars
+}
+
+func buildDeepResearchAdvisorWorkflow(pillars []deepResearchAdvisorPillar, systemImprovement *deepResearchSystemImprovement, quality *deepResearchQuality) []deepResearchAdvisorWorkflowStep {
+	topPillars := deepResearchAdvisorPriorityLabels(pillars, 3)
+	nextData := []string(nil)
+	if quality != nil {
+		nextData = append(nextData, quality.NextDataToCollect...)
+	}
+	recommendationTitles := []string(nil)
+	if systemImprovement != nil {
+		for _, recommendation := range systemImprovement.Recommendations {
+			recommendationTitles = append(recommendationTitles, recommendation.Title)
+		}
+	}
+	return []deepResearchAdvisorWorkflowStep{
+		{
+			ID:      "review",
+			Label:   "Review and accept",
+			Summary: "Review pillar status, evidence mix, and confidence before accepting or dismissing recommendations.",
+			Inputs:  deepResearchLimitStrings(append(topPillars, deepResearchAdvisorQualityLabel(quality)), 4),
+			Outputs: []string{"Accepted recommendations", "Dismissed recommendations with rationale"},
+		},
+		{
+			ID:      "instrument",
+			Label:   "Fill evidence gaps",
+			Summary: "Collect missing telemetry, topology, ownership, and unit-economics inputs before risky optimization.",
+			Inputs:  deepResearchLimitStrings(uniqueNonEmptyStrings(nextData), 4),
+			Outputs: []string{"Request and latency metrics", "Typed dependencies", "Owner and repo tags"},
+		},
+		{
+			ID:      "triage",
+			Label:   "Route work",
+			Summary: "Convert accepted advisor items into tickets or runbook tasks owned by platform, app, security, or finance teams.",
+			Inputs:  deepResearchLimitStrings(uniqueNonEmptyStrings(recommendationTitles), 4),
+			Outputs: []string{"Owner-assigned tickets", "Runbook tasks", "Rollback criteria"},
+		},
+		{
+			ID:      "validate",
+			Label:   "Validate and complete",
+			Summary: "Rerun deep research after remediation and mark items complete only when telemetry or provider checks confirm the outcome.",
+			Inputs:  []string{"Post-change scan", "Provider evidence", "Cost and traffic deltas"},
+			Outputs: []string{"Completed recommendations", "Updated baseline score"},
+		},
+	}
+}
+
+func deepResearchFindingsByCategories(findings []deepResearchFinding, categories ...string) []deepResearchFinding {
+	wanted := make(map[string]struct{}, len(categories))
+	for _, category := range categories {
+		category = strings.ToLower(strings.TrimSpace(category))
+		if category != "" {
+			wanted[category] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	matched := make([]deepResearchFinding, 0)
+	for _, finding := range findings {
+		category := strings.ToLower(strings.TrimSpace(finding.Category))
+		if _, ok := wanted[category]; ok {
+			matched = append(matched, finding)
+		}
+	}
+	return matched
+}
+
+func deepResearchRecommendationsByIDs(systemImprovement *deepResearchSystemImprovement, ids ...string) []deepResearchSystemRecommendation {
+	if systemImprovement == nil || len(ids) == 0 {
+		return nil
+	}
+	wanted := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.ToLower(strings.TrimSpace(id))
+		if id != "" {
+			wanted[id] = struct{}{}
+		}
+	}
+	matched := make([]deepResearchSystemRecommendation, 0)
+	for _, recommendation := range systemImprovement.Recommendations {
+		id := strings.ToLower(strings.TrimSpace(recommendation.ID))
+		if _, ok := wanted[id]; ok {
+			matched = append(matched, recommendation)
+		}
+	}
+	return matched
+}
+
+func deepResearchAdvisorPillarScore(findings []deepResearchFinding, recommendationCount int, gapCount int) int {
+	score := 100 - recommendationCount*6 - gapCount*5
+	for _, finding := range findings {
+		switch deepResearchSeverityRank(finding.Severity) {
+		case 4:
+			score -= 28
+		case 3:
+			score -= 18
+		case 2:
+			score -= 10
+		case 1:
+			score -= 5
+		default:
+			score -= 4
+		}
+	}
+	if score < 0 {
+		return 0
+	}
+	if score > 100 {
+		return 100
+	}
+	return score
+}
+
+func deepResearchAdvisorPillarStatus(score int, findings []deepResearchFinding, gapCount int) string {
+	for _, finding := range findings {
+		if deepResearchSeverityRank(finding.Severity) >= 4 {
+			return "critical"
+		}
+	}
+	switch {
+	case score < 50:
+		return "critical"
+	case score < 75:
+		return "action"
+	case score < 92 || gapCount > 0:
+		return "watch"
+	default:
+		return "ok"
+	}
+}
+
+func deepResearchAdvisorPillarSummary(label string, status string, findings []deepResearchFinding, recommendations []deepResearchSystemRecommendation, gapCount int) string {
+	switch {
+	case len(findings) > 0:
+		return fmt.Sprintf("%s has %d ranked findings, %d advisor actions, and %d evidence gaps.", label, len(findings), len(recommendations), gapCount)
+	case len(recommendations) > 0:
+		return fmt.Sprintf("%s has %d advisor actions driven by context gaps rather than direct findings.", label, len(recommendations))
+	case status == "ok":
+		return fmt.Sprintf("%s has no direct findings in the current scan; keep it in the baseline review loop.", label)
+	default:
+		return fmt.Sprintf("%s needs more evidence before it can be marked healthy.", label)
+	}
+}
+
+func deepResearchAdvisorPillarEvidence(id string, estate deepResearchEstateSnapshot, findings []deepResearchFinding, recommendations []deepResearchSystemRecommendation, systemImprovement *deepResearchSystemImprovement, quality *deepResearchQuality) []string {
+	evidence := deepResearchTopFindingTitles(findings, 3)
+	for _, recommendation := range recommendations {
+		evidence = append(evidence, recommendation.Title)
+	}
+	switch id {
+	case "cost-efficiency":
+		evidence = append(evidence, collectDeepResearchCostTrafficSignals(estate.Resources, 2)...)
+	case "performance":
+		if systemImprovement != nil {
+			evidence = append(evidence, systemImprovement.Traffic.Evidence...)
+		}
+		evidence = append(evidence, collectDeepResearchTrafficHotspots(estate.Resources, 2)...)
+	case "reliability":
+		evidence = append(evidence, collectDeepResearchCriticalPaths(estate.Resources, 2)...)
+	case "security":
+		if systemImprovement != nil {
+			evidence = append(evidence, systemImprovement.Architecture.Gaps...)
+		}
+	case "operational-excellence":
+		if quality != nil {
+			evidence = append(evidence, quality.ContextGaps...)
+		}
+		if systemImprovement != nil {
+			evidence = append(evidence, systemImprovement.Codebase.Evidence...)
+		}
+	}
+	return deepResearchLimitStrings(uniqueNonEmptyStrings(evidence), 5)
+}
+
+func deepResearchAdvisorGapCount(id string, estate deepResearchEstateSnapshot, systemImprovement *deepResearchSystemImprovement, quality *deepResearchQuality) int {
+	count := 0
+	if systemImprovement != nil {
+		switch id {
+		case "cost-efficiency":
+			if estate.TotalCost > 0 && len(collectDeepResearchCostTrafficSignals(estate.Resources, 1)) == 0 {
+				count++
+			}
+		case "performance":
+			count += len(systemImprovement.Traffic.Gaps)
+		case "reliability", "security":
+			count += len(systemImprovement.Architecture.Gaps)
+		case "operational-excellence":
+			count += len(systemImprovement.Codebase.Gaps)
+		}
+	}
+	if quality != nil && id == "operational-excellence" {
+		for _, check := range quality.Checks {
+			status := strings.ToLower(strings.TrimSpace(check.Status))
+			if status == "gap" || status == "warning" {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func deepResearchAdvisorNextAction(recommendations []deepResearchSystemRecommendation, quality *deepResearchQuality, fallback string) string {
+	for _, recommendation := range recommendations {
+		if len(recommendation.Actions) > 0 {
+			return recommendation.Actions[0]
+		}
+		if strings.TrimSpace(recommendation.Summary) != "" {
+			return recommendation.Summary
+		}
+	}
+	if quality != nil && len(quality.NextDataToCollect) > 0 {
+		return quality.NextDataToCollect[0]
+	}
+	return fallback
+}
+
+func deepResearchAdvisorPriorityLabels(pillars []deepResearchAdvisorPillar, maxCount int) []string {
+	labels := make([]string, 0, maxCount)
+	for _, pillar := range pillars {
+		if pillar.Status == "ok" {
+			continue
+		}
+		labels = append(labels, strings.ToLower(pillar.Label))
+		if len(labels) >= maxCount {
+			break
+		}
+	}
+	if len(labels) == 0 {
+		for _, pillar := range pillars {
+			labels = append(labels, strings.ToLower(pillar.Label))
+			if len(labels) >= maxCount {
+				break
+			}
+		}
+	}
+	return labels
+}
+
+func deepResearchAdvisorQualityLabel(quality *deepResearchQuality) string {
+	if quality == nil {
+		return ""
+	}
+	return fmt.Sprintf("Research confidence: %s (%d/100)", quality.Confidence, quality.Score)
+}
+
+func deepResearchTopologyCounts(resources []deepResearchResource) (edges int, typedEdges int, entrypoints int) {
+	for _, resource := range resources {
+		seen := make(map[string]struct{})
+		for _, target := range resource.Connections {
+			target = strings.TrimSpace(target)
+			if target == "" {
+				continue
+			}
+			seen[target] = struct{}{}
+		}
+		for _, connection := range resource.TypedConnections {
+			target := strings.TrimSpace(connection.TargetID)
+			if target == "" {
+				continue
+			}
+			seen[target] = struct{}{}
+			typedEdges++
+		}
+		edges += len(seen)
+		if isDeepResearchEntryPointType(resource.Type) || deepResearchHasTrafficRole(resource) {
+			entrypoints++
+		}
+	}
+	return edges, typedEdges, entrypoints
+}
+
+func collectDeepResearchTrafficSignals(resources []deepResearchResource, maxCount int) []string {
+	signals := make([]string, 0)
+	for _, resource := range resources {
+		for _, signal := range deepResearchTrafficSignalLabels(resource) {
+			signals = append(signals, fmt.Sprintf("%s traffic signal: %s", deepResearchResourceLabel(resource), signal))
+			if maxCount > 0 && len(signals) >= maxCount {
+				return signals
+			}
+		}
+	}
+	return signals
+}
+
+func collectDeepResearchTrafficHotspots(resources []deepResearchResource, maxCount int) []string {
+	if maxCount <= 0 {
+		return nil
+	}
+	inbound := make(map[string]int)
+	outbound := make(map[string]int)
+	for _, resource := range resources {
+		seen := make(map[string]struct{})
+		for _, target := range resource.Connections {
+			target = strings.TrimSpace(target)
+			if target == "" {
+				continue
+			}
+			seen[target] = struct{}{}
+		}
+		for _, connection := range resource.TypedConnections {
+			target := strings.TrimSpace(connection.TargetID)
+			if target == "" {
+				continue
+			}
+			seen[target] = struct{}{}
+		}
+		outbound[resource.ID] = len(seen)
+		for target := range seen {
+			inbound[target]++
+		}
+	}
+
+	type candidate struct {
+		resource deepResearchResource
+		inbound  int
+		outbound int
+		score    int
+	}
+	candidates := make([]candidate, 0, len(resources))
+	for _, resource := range resources {
+		score := inbound[resource.ID]*3 + outbound[resource.ID]
+		if score < 3 && !isDeepResearchEntryPointType(resource.Type) {
+			continue
+		}
+		candidates = append(candidates, candidate{resource: resource, inbound: inbound[resource.ID], outbound: outbound[resource.ID], score: score})
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].score != candidates[j].score {
+			return candidates[i].score > candidates[j].score
+		}
+		return deepResearchResourceLabel(candidates[i].resource) < deepResearchResourceLabel(candidates[j].resource)
+	})
+
+	hotspots := make([]string, 0, maxCount)
+	for _, candidate := range candidates {
+		hotspots = append(hotspots, fmt.Sprintf("%s has %d inbound and %d outbound modeled dependencies.", deepResearchResourceLabel(candidate.resource), candidate.inbound, candidate.outbound))
+		if len(hotspots) >= maxCount {
+			break
+		}
+	}
+	return hotspots
+}
+
+func collectDeepResearchCostTrafficSignals(resources []deepResearchResource, maxCount int) []string {
+	type candidate struct {
+		resource deepResearchResource
+		key      string
+		value    float64
+		score    float64
+	}
+	candidates := make([]candidate, 0, len(resources))
+	for _, resource := range resources {
+		if resource.MonthlyPrice <= 0 {
+			continue
+		}
+		key, value, ok := deepResearchPrimaryTrafficMetric(resource)
+		if !ok || value <= 0 {
+			continue
+		}
+		score := resource.MonthlyPrice / value
+		if value >= 1000 {
+			score = resource.MonthlyPrice / (value / 1000)
+		}
+		candidates = append(candidates, candidate{resource: resource, key: key, value: value, score: score})
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].score != candidates[j].score {
+			return candidates[i].score > candidates[j].score
+		}
+		return candidates[i].resource.MonthlyPrice > candidates[j].resource.MonthlyPrice
+	})
+	if maxCount <= 0 {
+		maxCount = len(candidates)
+	}
+	signals := make([]string, 0, minInt(maxCount, len(candidates)))
+	for _, candidate := range candidates {
+		signals = append(signals, fmt.Sprintf("%s costs $%.2f/mo with traffic metric %s=%.2f.", deepResearchResourceLabel(candidate.resource), candidate.resource.MonthlyPrice, candidate.key, candidate.value))
+		if len(signals) >= maxCount {
+			break
+		}
+	}
+	return signals
+}
+
+func collectDeepResearchCriticalPaths(resources []deepResearchResource, maxCount int) []string {
+	if maxCount <= 0 || len(resources) == 0 {
+		return nil
+	}
+	byID := make(map[string]deepResearchResource, len(resources))
+	adjacency := make(map[string][]string, len(resources))
+	entrypoints := make([]deepResearchResource, 0)
+	for _, resource := range resources {
+		byID[resource.ID] = resource
+	}
+	for _, resource := range resources {
+		seen := make(map[string]struct{})
+		for _, target := range resource.Connections {
+			target = strings.TrimSpace(target)
+			if target != "" {
+				seen[target] = struct{}{}
+			}
+		}
+		for _, connection := range resource.TypedConnections {
+			target := strings.TrimSpace(connection.TargetID)
+			if target != "" {
+				seen[target] = struct{}{}
+			}
+		}
+		for target := range seen {
+			if _, ok := byID[target]; ok {
+				adjacency[resource.ID] = append(adjacency[resource.ID], target)
+			}
+		}
+		if isDeepResearchEntryPointType(resource.Type) || deepResearchHasTrafficRole(resource) {
+			entrypoints = append(entrypoints, resource)
+		}
+	}
+	sort.SliceStable(entrypoints, func(i, j int) bool {
+		if entrypoints[i].MonthlyPrice != entrypoints[j].MonthlyPrice {
+			return entrypoints[i].MonthlyPrice > entrypoints[j].MonthlyPrice
+		}
+		return deepResearchResourceLabel(entrypoints[i]) < deepResearchResourceLabel(entrypoints[j])
+	})
+
+	type pathCandidate struct {
+		ids   []string
+		score float64
+	}
+	candidates := make([]pathCandidate, 0, maxCount)
+	var walk func(start string, current string, visited map[string]struct{}, path []string, depth int)
+	walk = func(start string, current string, visited map[string]struct{}, path []string, depth int) {
+		if depth >= 4 || len(candidates) >= maxCount*4 {
+			return
+		}
+		for _, target := range adjacency[current] {
+			if _, exists := visited[target]; exists {
+				continue
+			}
+			targetResource, ok := byID[target]
+			if !ok {
+				continue
+			}
+			nextPath := append(append([]string(nil), path...), target)
+			score := float64(len(nextPath))*4 + targetResource.MonthlyPrice
+			if isDeepResearchBottleneckType(targetResource.Type) || deepResearchCriticalType(targetResource.Type) != "" {
+				score += 120
+			}
+			if len(nextPath) >= 2 && score >= 30 {
+				candidates = append(candidates, pathCandidate{ids: nextPath, score: score})
+			}
+			nextVisited := make(map[string]struct{}, len(visited)+1)
+			for id := range visited {
+				nextVisited[id] = struct{}{}
+			}
+			nextVisited[target] = struct{}{}
+			walk(start, target, nextVisited, nextPath, depth+1)
+		}
+		_ = start
+	}
+	for _, entrypoint := range entrypoints {
+		walk(entrypoint.ID, entrypoint.ID, map[string]struct{}{entrypoint.ID: {}}, []string{entrypoint.ID}, 0)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].score != candidates[j].score {
+			return candidates[i].score > candidates[j].score
+		}
+		return strings.Join(candidates[i].ids, ">") < strings.Join(candidates[j].ids, ">")
+	})
+
+	paths := make([]string, 0, maxCount)
+	seen := make(map[string]struct{}, maxCount)
+	for _, candidate := range candidates {
+		labels := make([]string, 0, len(candidate.ids))
+		for _, id := range candidate.ids {
+			resource := byID[id]
+			labels = append(labels, deepResearchResourceLabel(resource))
+		}
+		path := strings.Join(labels, " -> ")
+		if _, ok := seen[path]; ok || path == "" {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, "Critical path candidate: "+path)
+		if len(paths) >= maxCount {
+			break
+		}
+	}
+	return paths
+}
+
+func collectDeepResearchCodebaseSignals(resources []deepResearchResource, maxCount int) []string {
+	signals := make([]string, 0)
+	for _, resource := range resources {
+		if !deepResearchHasCodebaseSignal(resource) {
+			continue
+		}
+		label := deepResearchResourceLabel(resource)
+		repo := deepResearchFirstNonEmptyAttr(resource.Attributes, "repository", "repo", "githubRepo", "repoFullName", "sourceRepo", "gitRepository")
+		if repo != "" {
+			signals = append(signals, fmt.Sprintf("%s links to repo %s.", label, repo))
+		} else {
+			signals = append(signals, fmt.Sprintf("%s is a code or repository-linked resource.", label))
+		}
+		if maxCount > 0 && len(signals) >= maxCount {
+			break
+		}
+	}
+	return signals
+}
+
+func collectDeepResearchDeploySignals(resources []deepResearchResource, maxCount int) []string {
+	signals := make([]string, 0)
+	for _, resource := range resources {
+		if !deepResearchHasDeploySignal(resource) {
+			continue
+		}
+		label := deepResearchResourceLabel(resource)
+		branch := deepResearchFirstNonEmptyAttr(resource.Attributes, "branch", "gitBranch", "productionBranch")
+		commit := deepResearchFirstNonEmptyAttr(resource.Attributes, "commit", "commitSha", "gitCommit", "deploymentCommit")
+		detail := "deployment or runtime service"
+		if branch != "" || commit != "" {
+			parts := make([]string, 0, 2)
+			if branch != "" {
+				parts = append(parts, "branch "+branch)
+			}
+			if commit != "" {
+				parts = append(parts, "commit "+commit)
+			}
+			detail = strings.Join(parts, ", ")
+		}
+		signals = append(signals, fmt.Sprintf("%s exposes %s.", label, detail))
+		if maxCount > 0 && len(signals) >= maxCount {
+			break
+		}
+	}
+	return signals
+}
+
+func buildDeepResearchEvidenceMix(findings []deepResearchFinding) []deepResearchEvidenceMix {
+	counts := map[string]int{}
+	for _, finding := range findings {
+		if len(finding.EvidenceDetails) == 0 {
+			if len(finding.Evidence) > 0 {
+				counts["heuristic"] += len(finding.Evidence)
+			}
+			continue
+		}
+		for _, evidence := range finding.EvidenceDetails {
+			source := strings.ToLower(strings.TrimSpace(evidence.Source))
+			if source == "" {
+				source = "heuristic"
+			}
+			counts[source]++
+		}
+	}
+	order := []string{"provider-drilldown", "provider-scout", "heuristic"}
+	mix := make([]deepResearchEvidenceMix, 0, len(counts))
+	for _, source := range order {
+		if counts[source] == 0 {
+			continue
+		}
+		mix = append(mix, deepResearchEvidenceMix{Source: source, Label: deepResearchEvidenceSourceLabel(source), Count: counts[source]})
+		delete(counts, source)
+	}
+	remaining := make([]string, 0, len(counts))
+	for source := range counts {
+		remaining = append(remaining, source)
+	}
+	sort.Strings(remaining)
+	for _, source := range remaining {
+		mix = append(mix, deepResearchEvidenceMix{Source: source, Label: deepResearchEvidenceSourceLabel(source), Count: counts[source]})
+	}
+	return mix
+}
+
+func deepResearchEvidenceSourceLabel(source string) string {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "provider-drilldown":
+		return "Live drilldown"
+	case "provider-scout":
+		return "Provider scout"
+	case "heuristic":
+		return "Heuristic"
+	default:
+		return strings.Title(strings.ReplaceAll(strings.TrimSpace(source), "-", " "))
+	}
+}
+
+func deepResearchEvidenceMixTotal(mix []deepResearchEvidenceMix) int {
+	total := 0
+	for _, item := range mix {
+		total += item.Count
+	}
+	return total
+}
+
+func collectDeepResearchQualityGaps(checks []deepResearchQualityCheck, systemImprovement *deepResearchSystemImprovement) []string {
+	gaps := make([]string, 0, 10)
+	for _, check := range checks {
+		switch strings.ToLower(strings.TrimSpace(check.Status)) {
+		case "gap", "warning":
+			gaps = append(gaps, check.Summary)
+		}
+	}
+	if systemImprovement != nil {
+		gaps = append(gaps, systemImprovement.Traffic.Gaps...)
+		gaps = append(gaps, systemImprovement.Codebase.Gaps...)
+		gaps = append(gaps, systemImprovement.Architecture.Gaps...)
+	}
+	return deepResearchLimitStrings(uniqueNonEmptyStrings(gaps), 8)
+}
+
+func buildDeepResearchNextDataToCollect(checks []deepResearchQualityCheck, systemImprovement *deepResearchSystemImprovement, entrypoints int) []string {
+	actions := make([]string, 0, 8)
+	for _, check := range checks {
+		name := strings.ToLower(strings.TrimSpace(check.Name))
+		status := strings.ToLower(strings.TrimSpace(check.Status))
+		if status == "ok" {
+			continue
+		}
+		switch name {
+		case "traffic telemetry":
+			actions = append(actions, "Add request-rate, latency percentile, error-rate, throughput, and bandwidth metrics to entrypoints and bottlenecks.")
+		case "service topology":
+			actions = append(actions, "Emit typed dependency edges for request, data, auth, event, deploy, and monitoring paths.")
+		case "provider evidence":
+			actions = append(actions, "Enable provider credentials or scopes that allow live scouts and drilldowns to attach direct evidence.")
+		case "code context":
+			actions = append(actions, "Link scanned services to GitHub repos, deployment pipelines, owners, and production branches.")
+		case "cost-performance correlation":
+			actions = append(actions, "Put cost, utilization, and traffic metrics on the same resources so savings can be validated safely.")
+		case "ownership metadata":
+			actions = append(actions, "Add owner, service, environment, criticality, and repo tags to long-lived resources.")
+		}
+	}
+	if entrypoints == 0 {
+		actions = append(actions, "Mark production ingress, edge, and public API resources explicitly.")
+	}
+	if systemImprovement != nil && len(systemImprovement.Recommendations) > 0 {
+		for _, recommendation := range systemImprovement.Recommendations {
+			if len(recommendation.Actions) == 0 {
+				continue
+			}
+			actions = append(actions, recommendation.Actions[0])
+			if len(actions) >= 8 {
+				break
+			}
+		}
+	}
+	return deepResearchLimitStrings(uniqueNonEmptyStrings(actions), 8)
+}
+
+func deepResearchTrafficSignalLabels(resource deepResearchResource) []string {
+	if len(resource.Attributes) == 0 {
+		return nil
+	}
+	keywords := []string{"request", "traffic", "throughput", "rps", "qps", "latency", "duration", "p95", "p99", "error", "bandwidth", "bytes", "networkin", "networkout", "invocation", "hit", "miss", "connection"}
+	signals := make([]string, 0, 4)
+	keys := make([]string, 0, len(resource.Attributes))
+	for key := range resource.Attributes {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		normalizedKey := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "_", ""), "-", ""))
+		if !deepResearchContainsAny(normalizedKey, keywords...) {
+			continue
+		}
+		value := deepResearchFormatAttributeValue(resource.Attributes[key])
+		if value == "" {
+			continue
+		}
+		signals = append(signals, fmt.Sprintf("%s=%s", key, value))
+		if len(signals) >= 4 {
+			break
+		}
+	}
+	return signals
+}
+
+func deepResearchPrimaryTrafficMetric(resource deepResearchResource) (string, float64, bool) {
+	if len(resource.Attributes) == 0 {
+		return "", 0, false
+	}
+	preferred := []string{
+		"requestsPerSecond",
+		"rps",
+		"qps",
+		"requestRate",
+		"totalRequests",
+		"requests",
+		"invocations",
+		"invocationCount",
+		"throughput",
+		"bytesOut",
+		"bandwidth",
+	}
+	for _, key := range preferred {
+		if value, ok := deepResearchFloatAttr(resource.Attributes, key); ok && value > 0 {
+			return key, value, true
+		}
+	}
+	keys := make([]string, 0, len(resource.Attributes))
+	for key := range resource.Attributes {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		normalizedKey := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "_", ""), "-", ""))
+		if !deepResearchContainsAny(normalizedKey, "request", "traffic", "throughput", "rps", "qps", "invocation", "bandwidth", "bytes") {
+			continue
+		}
+		if value, ok := deepResearchFloatAttr(resource.Attributes, key); ok && value > 0 {
+			return key, value, true
+		}
+	}
+	return "", 0, false
+}
+
+func deepResearchHasTrafficRole(resource deepResearchResource) bool {
+	if role := strings.ToLower(deepResearchFirstNonEmptyAttr(resource.Attributes, "role", "trafficRole", "tier", "serviceRole")); role != "" {
+		return deepResearchContainsAny(role, "edge", "ingress", "api", "gateway", "frontend", "public")
+	}
+	return false
+}
+
+func deepResearchHasCodebaseSignal(resource deepResearchResource) bool {
+	typeLower := strings.ToLower(strings.TrimSpace(resource.Type))
+	if deepResearchContainsAny(typeLower, "github", "repository", "repo", "workflow", "action", "vercel", "railway", "cloudflare_worker", "pages", "deployment") {
+		return true
+	}
+	return deepResearchFirstNonEmptyAttr(resource.Attributes, "repository", "repo", "githubRepo", "repoFullName", "sourceRepo", "gitRepository", "commit", "branch") != ""
+}
+
+func deepResearchHasDeploySignal(resource deepResearchResource) bool {
+	typeLower := strings.ToLower(strings.TrimSpace(resource.Type))
+	if deepResearchContainsAny(typeLower, "deploy", "deployment", "workflow", "action", "pipeline", "build", "release", "vercel", "railway", "fly", "cloudflare_worker", "pages", "service") {
+		return true
+	}
+	return deepResearchFirstNonEmptyAttr(resource.Attributes, "deploymentId", "deployId", "buildId", "workflow", "pipeline", "commit", "branch", "productionBranch") != ""
+}
+
+func isDeepResearchEntryPointType(resourceType string) bool {
+	resourceType = strings.ToLower(strings.TrimSpace(resourceType))
+	return deepResearchContainsAny(resourceType, "load_balancer", "loadbalancer", "alb", "elb", "nlb", "gateway", "ingress", "cloudfront", "cdn", "route53", "dns", "api_gateway", "apigateway", "cloudflare", "worker", "pages", "vercel", "railway", "fly", "frontend")
+}
+
+func deepResearchFindingsByCategory(findings []deepResearchFinding, category string) []deepResearchFinding {
+	category = strings.ToLower(strings.TrimSpace(category))
+	out := make([]deepResearchFinding, 0)
+	for _, finding := range findings {
+		if strings.EqualFold(strings.TrimSpace(finding.Category), category) {
+			out = append(out, finding)
+		}
+	}
+	return out
+}
+
+func deepResearchTopFindingTitles(findings []deepResearchFinding, maxCount int) []string {
+	titles := make([]string, 0, maxCount)
+	for _, finding := range findings {
+		title := strings.TrimSpace(finding.Title)
+		if title == "" {
+			continue
+		}
+		titles = append(titles, title)
+		if len(titles) >= maxCount {
+			break
+		}
+	}
+	return titles
+}
+
+func loadDeepResearchTrackedRepos() []string {
+	raw := strings.TrimSpace(os.Getenv(runtimeGitHubTrackedReposEnv))
+	if raw == "" {
+		return nil
+	}
+	var repos []string
+	if err := json.Unmarshal([]byte(raw), &repos); err != nil {
+		return nil
+	}
+	normalized := make([]string, 0, len(repos))
+	seen := make(map[string]struct{}, len(repos))
+	for _, repo := range repos {
+		repo = strings.TrimSpace(repo)
+		if repo == "" {
+			continue
+		}
+		if _, ok := seen[repo]; ok {
+			continue
+		}
+		seen[repo] = struct{}{}
+		normalized = append(normalized, repo)
+	}
+	sort.Strings(normalized)
+	return normalized
+}
+
+func deepResearchFormatAttributeValue(value interface{}) string {
+	switch typed := value.(type) {
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return ""
+		}
+		if len(trimmed) > 80 {
+			return trimmed[:77] + "..."
+		}
+		return trimmed
+	case float64:
+		return fmt.Sprintf("%.2f", typed)
+	case float32:
+		return fmt.Sprintf("%.2f", typed)
+	case int:
+		return fmt.Sprintf("%d", typed)
+	case int64:
+		return fmt.Sprintf("%d", typed)
+	case int32:
+		return fmt.Sprintf("%d", typed)
+	case bool:
+		if typed {
+			return "true"
+		}
+		return "false"
+	default:
+		return ""
+	}
+}
+
 func buildDeepResearchSummary(estate deepResearchEstateSnapshot, findings []deepResearchFinding) deepResearchSummary {
 	summary := deepResearchSummary{
 		TotalResources:          len(estate.Resources),
@@ -2888,6 +4378,37 @@ func deepResearchBoolAttr(attrs map[string]interface{}, key string) (bool, bool)
 		}
 	}
 	return false, false
+}
+
+func deepResearchFloatAttr(attrs map[string]interface{}, key string) (float64, bool) {
+	value, ok := attrs[key]
+	if !ok {
+		return 0, false
+	}
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case float32:
+		return float64(typed), true
+	case int:
+		return float64(typed), true
+	case int32:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case json.Number:
+		parsed, err := typed.Float64()
+		return parsed, err == nil
+	case string:
+		trimmed := strings.TrimSpace(strings.TrimSuffix(typed, "%"))
+		if trimmed == "" {
+			return 0, false
+		}
+		parsed, err := strconv.ParseFloat(trimmed, 64)
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
 }
 
 func deepResearchIntAttr(attrs map[string]interface{}, key string) (int64, bool) {
