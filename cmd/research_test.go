@@ -153,6 +153,19 @@ func TestBuildDeepResearchSystemImprovementUsesTrafficAndCodeSignals(t *testing.
 	if !containsAnyJoined(expertTeam.Consensus, "cost is one dimension") {
 		t.Fatalf("expected consensus to avoid cost-only framing, got %+v", expertTeam.Consensus)
 	}
+	if len(expertTeam.AgentRuns) < len(expertTeam.Personas) {
+		t.Fatalf("expected each expert persona to produce an agent run, got personas=%d runs=%d", len(expertTeam.Personas), len(expertTeam.AgentRuns))
+	}
+	if !containsExpertAgentRun(expertTeam.AgentRuns, "expert-agent-systems-architect") {
+		t.Fatalf("expected systems architect agent run, got %+v", expertTeam.AgentRuns)
+	}
+	if !containsTeamDialogue(expertTeam.Dialogues, "provider-coverage") {
+		t.Fatalf("expected provider coverage team dialogue, got %+v", expertTeam.Dialogues)
+	}
+	subagentRuns := buildDeepResearchExpertSubagentRuns(expertTeam)
+	if !containsSubagentRun(subagentRuns, "expert-dialogue-provider-coverage") {
+		t.Fatalf("expected expert dialogue to be represented as a subagent run, got %+v", subagentRuns)
+	}
 }
 
 func TestBuildDeepResearchSystemImprovementSurfacesTelemetryAndCodebaseGaps(t *testing.T) {
@@ -263,6 +276,58 @@ func TestDeepResearchProviderInferenceDoesNotDefaultToAWS(t *testing.T) {
 	}
 }
 
+func TestDeepResearchBillingSummaryOverridesResourcePricingAndNormalizesProviders(t *testing.T) {
+	t.Setenv(runtimeDeepResearchEstateEnv, `{
+		"resources": [
+			{"id":"i-123","type":"ec2","name":"eval-dev","region":"us-east-1","monthlyPrice":121.47},
+			{"id":"eks-main","type":"eks","name":"clanker-cluster","region":"us-east-1","monthlyPrice":73.00},
+			{"id":"api","type":"service","name":"api","region":"us-east-1","monthlyPrice":75.63}
+		],
+		"totalCost": 270.10,
+		"costSummary": {
+			"totalCost": 579.12,
+			"providerCosts": [
+				{
+					"provider": "Linux/Unix",
+					"totalCost": 579.12,
+					"serviceBreakdown": [
+						{"service":"Amazon Elastic Compute Cloud - Compute","cost":421.12,"resourceCount":2},
+						{"service":"Amazon Relational Database Service","cost":158.00,"resourceCount":1}
+					]
+				}
+			]
+		}
+	}`)
+
+	estate, warnings := loadDeepResearchEstateSnapshot()
+	if len(warnings) > 0 {
+		t.Fatalf("did not expect warnings, got %+v", warnings)
+	}
+	if estate.TotalCost != 579.12 {
+		t.Fatalf("expected billing total to override resource total, got %.2f", estate.TotalCost)
+	}
+	providers := buildDeepResearchProviderRollupFromEstate(estate)
+	if !containsProviderRollup(providers, "aws") {
+		t.Fatalf("expected Linux/Unix billing provider to normalize to aws, got %+v", providers)
+	}
+	if containsProviderRollup(providers, "linux/unix") {
+		t.Fatalf("did not expect raw Linux/Unix provider bucket, got %+v", providers)
+	}
+	if len(providers) == 0 || providers[0].MonthlyCost != 579.12 {
+		t.Fatalf("expected provider cost from billing summary, got %+v", providers)
+	}
+	if _, ok := buildDeepResearchProviderSet(estate)["aws"]; !ok {
+		t.Fatalf("expected billing provider to be available for scout selection")
+	}
+	findings := buildCostFindings(estate, providers)
+	if !containsFindingWithPrefix(findings, "billing-coverage-gap") {
+		t.Fatalf("expected billing coverage gap finding, got %+v", findings)
+	}
+	if !containsFindingWithPrefix(findings, "billing-service-driver") {
+		t.Fatalf("expected billing service driver finding, got %+v", findings)
+	}
+}
+
 func TestDeepResearchPrimaryFocusBalancesArchitectureRisks(t *testing.T) {
 	findings := []deepResearchFinding{
 		{Category: "cost", Severity: "critical", Score: 400, Title: "Large instance is expensive"},
@@ -320,6 +385,42 @@ func containsExpertPersona(personas []deepResearchExpertPersona, id string) bool
 func containsTeamConclusion(conclusions []deepResearchTeamConclusion, id string) bool {
 	for _, conclusion := range conclusions {
 		if conclusion.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func containsExpertAgentRun(runs []deepResearchExpertAgentRun, id string) bool {
+	for _, run := range runs {
+		if run.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func containsTeamDialogue(dialogues []deepResearchTeamDialogue, id string) bool {
+	for _, dialogue := range dialogues {
+		if dialogue.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSubagentRun(runs []deepResearchSubagentRun, name string) bool {
+	for _, run := range runs {
+		if run.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func containsFindingWithPrefix(findings []deepResearchFinding, prefix string) bool {
+	for _, finding := range findings {
+		if strings.HasPrefix(finding.ID, prefix) {
 			return true
 		}
 	}

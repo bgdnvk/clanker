@@ -36,10 +36,11 @@ const (
 )
 
 type deepResearchEstateSnapshot struct {
-	Resources   []deepResearchResource `json:"resources"`
-	TotalCost   float64                `json:"totalCost"`
-	LastUpdated string                 `json:"lastUpdated,omitempty"`
-	TerraformOK bool                   `json:"terraformOk,omitempty"`
+	Resources   []deepResearchResource   `json:"resources"`
+	TotalCost   float64                  `json:"totalCost"`
+	LastUpdated string                   `json:"lastUpdated,omitempty"`
+	TerraformOK bool                     `json:"terraformOk,omitempty"`
+	CostSummary *deepResearchCostSummary `json:"costSummary,omitempty"`
 }
 
 type deepResearchResource struct {
@@ -63,6 +64,31 @@ type deepResearchResourceConnection struct {
 	TargetID       string `json:"targetId"`
 	ConnectionType string `json:"connectionType,omitempty"`
 	Label          string `json:"label,omitempty"`
+}
+
+type deepResearchCostSummary struct {
+	TotalCost     float64                    `json:"totalCost,omitempty"`
+	LastMonthCost float64                    `json:"lastMonthCost,omitempty"`
+	Currency      string                     `json:"currency,omitempty"`
+	ProviderCosts []deepResearchProviderCost `json:"providerCosts,omitempty"`
+	TopServices   []deepResearchServiceCost  `json:"topServices,omitempty"`
+	LastUpdated   string                     `json:"lastUpdated,omitempty"`
+}
+
+type deepResearchProviderCost struct {
+	Provider         string                    `json:"provider"`
+	TotalCost        float64                   `json:"totalCost"`
+	Currency         string                    `json:"currency,omitempty"`
+	ServiceBreakdown []deepResearchServiceCost `json:"serviceBreakdown,omitempty"`
+	Change           float64                   `json:"change,omitempty"`
+}
+
+type deepResearchServiceCost struct {
+	Service       string  `json:"service"`
+	Cost          float64 `json:"cost"`
+	UsageQuantity float64 `json:"usageQuantity,omitempty"`
+	UsageUnit     string  `json:"usageUnit,omitempty"`
+	ResourceCount int     `json:"resourceCount,omitempty"`
 }
 
 type deepResearchResult struct {
@@ -186,6 +212,8 @@ type deepResearchExpertTeam struct {
 	Summary     string                       `json:"summary,omitempty"`
 	Personas    []deepResearchExpertPersona  `json:"personas,omitempty"`
 	Conclusions []deepResearchTeamConclusion `json:"conclusions,omitempty"`
+	AgentRuns   []deepResearchExpertAgentRun `json:"agentRuns,omitempty"`
+	Dialogues   []deepResearchTeamDialogue   `json:"dialogues,omitempty"`
 	Consensus   []string                     `json:"consensus,omitempty"`
 }
 
@@ -207,6 +235,23 @@ type deepResearchTeamConclusion struct {
 	Summary     string   `json:"summary,omitempty"`
 	Owners      []string `json:"owners,omitempty"`
 	NextActions []string `json:"nextActions,omitempty"`
+}
+
+type deepResearchExpertAgentRun struct {
+	ID      string   `json:"id"`
+	Title   string   `json:"title"`
+	Status  string   `json:"status"`
+	Summary string   `json:"summary,omitempty"`
+	Inputs  []string `json:"inputs,omitempty"`
+	Outputs []string `json:"outputs,omitempty"`
+}
+
+type deepResearchTeamDialogue struct {
+	ID       string   `json:"id"`
+	Topic    string   `json:"topic"`
+	Agents   []string `json:"agents,omitempty"`
+	Exchange string   `json:"exchange,omitempty"`
+	Decision string   `json:"decision,omitempty"`
 }
 
 type deepResearchFinding struct {
@@ -361,11 +406,12 @@ emits a final structured JSON payload that clanker-cloud can render into a repor
 		}
 
 		fmt.Printf("[research] starting deep research query=%q resources=%d\n", question, len(estate.Resources))
+		fmt.Printf("[research][coverage] reconciling %d resources, %d billing provider groups, and $%.2f/mo observed spend\n", len(estate.Resources), len(deepResearchBillingProviderNames(estate)), estate.TotalCost)
 
 		findings, subagents, subagentWarnings := runDeepResearchSubagents(context.Background(), question, estate, options)
 		warnings = append(warnings, subagentWarnings...)
 
-		providers := buildDeepResearchProviderRollup(estate.Resources, estate.TotalCost)
+		providers := buildDeepResearchProviderRollupFromEstate(estate)
 		findings = sortAndCapDeepResearchFindings(findings)
 		narrative := buildDeterministicNarrative(findings, providers)
 		systemImprovement := buildDeepResearchSystemImprovement(estate, findings, providers, buildDeepResearchQuestionPlan(question, estate))
@@ -373,6 +419,7 @@ emits a final structured JSON payload that clanker-cloud can render into a repor
 		advisorBenchmarks := buildDeepResearchAdvisorBenchmarks(estate, findings, providers, systemImprovement, researchQuality)
 		fmt.Printf("[research][expert-team] synthesizing systems, cloud, SRE, DevOps, FinOps, security, data, and product reviews\n")
 		expertTeam := buildDeepResearchExpertTeam(estate, findings, providers, systemImprovement, researchQuality, advisorBenchmarks)
+		subagents = append(subagents, buildDeepResearchExpertSubagentRuns(expertTeam)...)
 
 		result := deepResearchResult{
 			Query:             question,
@@ -439,13 +486,17 @@ func loadDeepResearchEstateSnapshot() (deepResearchEstateSnapshot, []string) {
 	}
 
 	estate.Resources = normalizeDeepResearchResources(estate.Resources)
+	estate.CostSummary = normalizeDeepResearchCostSummary(estate.CostSummary)
 	if estate.TotalCost < 0 {
 		estate.TotalCost = 0
 	}
-	if estate.TotalCost == 0 {
-		for _, resource := range estate.Resources {
-			estate.TotalCost += safeDeepResearchCost(resource.MonthlyPrice)
-		}
+	resourceTotal := deepResearchResourceMonthlyTotal(estate.Resources)
+	billingTotal := deepResearchBillingTotal(estate.CostSummary)
+	switch {
+	case billingTotal > 0 && billingTotal > estate.TotalCost:
+		estate.TotalCost = billingTotal
+	case estate.TotalCost == 0:
+		estate.TotalCost = resourceTotal
 	}
 	return estate, nil
 }
@@ -478,6 +529,94 @@ func safeDeepResearchCost(value float64) float64 {
 	return value
 }
 
+func normalizeDeepResearchCostSummary(summary *deepResearchCostSummary) *deepResearchCostSummary {
+	if summary == nil {
+		return nil
+	}
+	summary.TotalCost = safeDeepResearchCost(summary.TotalCost)
+	summary.LastMonthCost = safeDeepResearchCost(summary.LastMonthCost)
+	summary.Currency = strings.TrimSpace(summary.Currency)
+	summary.LastUpdated = strings.TrimSpace(summary.LastUpdated)
+	providers := make([]deepResearchProviderCost, 0, len(summary.ProviderCosts))
+	for _, provider := range summary.ProviderCosts {
+		provider.Provider = normalizeDeepResearchProvider(provider.Provider)
+		if provider.Provider == "" {
+			provider.Provider = "unknown"
+		}
+		provider.TotalCost = safeDeepResearchCost(provider.TotalCost)
+		provider.Currency = strings.TrimSpace(provider.Currency)
+		provider.ServiceBreakdown = normalizeDeepResearchServiceCosts(provider.ServiceBreakdown)
+		if provider.TotalCost == 0 {
+			for _, service := range provider.ServiceBreakdown {
+				provider.TotalCost += safeDeepResearchCost(service.Cost)
+			}
+		}
+		if provider.TotalCost > 0 || len(provider.ServiceBreakdown) > 0 {
+			providers = append(providers, provider)
+		}
+	}
+	summary.ProviderCosts = providers
+	summary.TopServices = normalizeDeepResearchServiceCosts(summary.TopServices)
+	if summary.TotalCost == 0 {
+		for _, provider := range summary.ProviderCosts {
+			summary.TotalCost += safeDeepResearchCost(provider.TotalCost)
+		}
+	}
+	if summary.TotalCost == 0 && len(summary.TopServices) > 0 {
+		for _, service := range summary.TopServices {
+			summary.TotalCost += safeDeepResearchCost(service.Cost)
+		}
+	}
+	return summary
+}
+
+func normalizeDeepResearchServiceCosts(services []deepResearchServiceCost) []deepResearchServiceCost {
+	normalized := make([]deepResearchServiceCost, 0, len(services))
+	for _, service := range services {
+		service.Service = strings.TrimSpace(service.Service)
+		service.Cost = safeDeepResearchCost(service.Cost)
+		if service.UsageQuantity < 0 {
+			service.UsageQuantity = 0
+		}
+		service.UsageUnit = strings.TrimSpace(service.UsageUnit)
+		if service.ResourceCount < 0 {
+			service.ResourceCount = 0
+		}
+		if service.Service != "" || service.Cost > 0 {
+			normalized = append(normalized, service)
+		}
+	}
+	sort.SliceStable(normalized, func(i, j int) bool {
+		if normalized[i].Cost != normalized[j].Cost {
+			return normalized[i].Cost > normalized[j].Cost
+		}
+		return normalized[i].Service < normalized[j].Service
+	})
+	return normalized
+}
+
+func deepResearchResourceMonthlyTotal(resources []deepResearchResource) float64 {
+	total := 0.0
+	for _, resource := range resources {
+		total += safeDeepResearchCost(resource.MonthlyPrice)
+	}
+	return total
+}
+
+func deepResearchBillingTotal(summary *deepResearchCostSummary) float64 {
+	if summary == nil {
+		return 0
+	}
+	if summary.TotalCost > 0 {
+		return safeDeepResearchCost(summary.TotalCost)
+	}
+	total := 0.0
+	for _, provider := range summary.ProviderCosts {
+		total += safeDeepResearchCost(provider.TotalCost)
+	}
+	return total
+}
+
 func runDeepResearchSubagents(ctx context.Context, question string, estate deepResearchEstateSnapshot, options deepResearchRunOptions) ([]deepResearchFinding, []deepResearchSubagentRun, []string) {
 	plan := buildDeepResearchQuestionPlan(question, estate)
 	subagents := []deepResearchSubagent{
@@ -494,7 +633,7 @@ func runDeepResearchSubagents(ctx context.Context, question string, estate deepR
 		{
 			Name: "estate-overview",
 			Run: func(context.Context) ([]deepResearchFinding, deepResearchSubagentRun, []string) {
-				providers := buildDeepResearchProviderRollup(estate.Resources, estate.TotalCost)
+				providers := buildDeepResearchProviderRollupFromEstate(estate)
 				details := make([]string, 0, len(providers))
 				for _, provider := range providers {
 					details = append(details, fmt.Sprintf("%s: %d resources, $%.2f/mo", provider.Provider, provider.ResourceCount, provider.MonthlyCost))
@@ -511,7 +650,7 @@ func runDeepResearchSubagents(ctx context.Context, question string, estate deepR
 		{
 			Name: "cost-analyst",
 			Run: func(context.Context) ([]deepResearchFinding, deepResearchSubagentRun, []string) {
-				findings := buildCostFindings(estate.Resources, estate.TotalCost)
+				findings := buildCostFindings(estate, buildDeepResearchProviderRollupFromEstate(estate))
 				savings := 0.0
 				for _, finding := range findings {
 					savings += finding.EstimatedMonthlySavings
@@ -653,13 +792,7 @@ func executeDeepResearchPatchSubagentBatch(ctx context.Context, subagents []deep
 }
 
 func buildDeepResearchProviderPatchSubagents(question string, plan deepResearchQuestionPlan, findings []deepResearchFinding, estate deepResearchEstateSnapshot, options deepResearchRunOptions) []deepResearchPatchSubagent {
-	providerSet := make(map[string]struct{})
-	for _, resource := range estate.Resources {
-		providerSet[inferDeepResearchProvider(resource)] = struct{}{}
-		if isDeepResearchKubernetesType(resource.Type) {
-			providerSet["k8s"] = struct{}{}
-		}
-	}
+	providerSet := buildDeepResearchProviderSet(estate)
 	prioritized := append([]deepResearchFinding(nil), findings...)
 	prioritized = sortAndCapDeepResearchFindings(prioritized)
 	subagents := make([]deepResearchPatchSubagent, 0, 9)
@@ -738,10 +871,7 @@ func runDeepResearchProviderPatchScout(ctx context.Context, provider string, que
 }
 
 func buildLiveProviderSubagents(estate deepResearchEstateSnapshot, options deepResearchRunOptions) []deepResearchSubagent {
-	providerSet := make(map[string]struct{})
-	for _, resource := range estate.Resources {
-		providerSet[inferDeepResearchProvider(resource)] = struct{}{}
-	}
+	providerSet := buildDeepResearchProviderSet(estate)
 
 	subagents := make([]deepResearchSubagent, 0, 6)
 	if shouldRunDeepResearchProvider(providerSet, "aws", hasAWSDomainAccess() || options.Profile != "") {
@@ -797,6 +927,43 @@ func shouldRunDeepResearchProvider(providerSet map[string]struct{}, provider str
 	}
 	_, ok := providerSet[provider]
 	return ok
+}
+
+func buildDeepResearchProviderSet(estate deepResearchEstateSnapshot) map[string]struct{} {
+	providerSet := make(map[string]struct{})
+	for _, resource := range estate.Resources {
+		if provider := inferDeepResearchProvider(resource); provider != "" {
+			providerSet[provider] = struct{}{}
+		}
+		if isDeepResearchKubernetesType(resource.Type) {
+			providerSet["k8s"] = struct{}{}
+		}
+	}
+	for _, provider := range deepResearchBillingProviderNames(estate) {
+		providerSet[provider] = struct{}{}
+	}
+	return providerSet
+}
+
+func deepResearchBillingProviderNames(estate deepResearchEstateSnapshot) []string {
+	if estate.CostSummary == nil {
+		return nil
+	}
+	providers := make([]string, 0, len(estate.CostSummary.ProviderCosts))
+	seen := make(map[string]struct{})
+	for _, providerCost := range estate.CostSummary.ProviderCosts {
+		provider := normalizeDeepResearchProvider(providerCost.Provider)
+		if provider == "" {
+			provider = "unknown"
+		}
+		if _, ok := seen[provider]; ok {
+			continue
+		}
+		seen[provider] = struct{}{}
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	return providers
 }
 
 func runAWSDeepResearchScout(ctx context.Context, options deepResearchRunOptions) deepResearchSubagentRun {
@@ -1765,9 +1932,11 @@ func buildAWSDeepResearchFindingPrompt(question string, plan deepResearchQuestio
 	return fmt.Sprintf("%s %s. Investigate AWS resource %s type %s in %s. Finding: %s. Summary: %s. Original question: %s.", serviceHint, strings.Join(uniqueNonEmptyStrings(focusTerms), " "), resourceLabel, deepResearchNonEmpty(finding.ResourceType, "resource"), region, finding.Title, finding.Summary, strings.TrimSpace(question))
 }
 
-func buildCostFindings(resources []deepResearchResource, totalCost float64) []deepResearchFinding {
+func buildCostFindings(estate deepResearchEstateSnapshot, providerRolls []deepResearchProviderRoll) []deepResearchFinding {
+	resources := estate.Resources
+	totalCost := estate.TotalCost
 	findings := make([]deepResearchFinding, 0, 8)
-	if len(resources) == 0 {
+	if len(resources) == 0 && estate.CostSummary == nil {
 		return findings
 	}
 
@@ -1872,7 +2041,6 @@ func buildCostFindings(resources []deepResearchResource, totalCost float64) []de
 		})
 	}
 
-	providerRolls := buildDeepResearchProviderRollup(resources, totalCost)
 	if len(providerRolls) > 0 && providerRolls[0].ShareOfCost >= 70 {
 		primary := providerRolls[0]
 		findings = append(findings, deepResearchFinding{
@@ -1896,7 +2064,145 @@ func buildCostFindings(resources []deepResearchResource, totalCost float64) []de
 		})
 	}
 
+	findings = append(findings, buildDeepResearchBillingFindings(estate, providerRolls)...)
+
 	return findings
+}
+
+func buildDeepResearchBillingFindings(estate deepResearchEstateSnapshot, providerRolls []deepResearchProviderRoll) []deepResearchFinding {
+	if estate.CostSummary == nil {
+		return nil
+	}
+	findings := make([]deepResearchFinding, 0, 4)
+	resourceTotal := deepResearchResourceMonthlyTotal(estate.Resources)
+	billingTotal := deepResearchBillingTotal(estate.CostSummary)
+	if billingTotal > 0 && resourceTotal > 0 && billingTotal > resourceTotal*1.15 {
+		delta := billingTotal - resourceTotal
+		findings = append(findings, deepResearchFinding{
+			ID:          buildDeepResearchFindingID("billing-coverage-gap", "resource-prices"),
+			Severity:    "high",
+			Category:    "cost",
+			Title:       "Billing telemetry is higher than resource inventory pricing",
+			Summary:     fmt.Sprintf("The billing view reports $%.2f/mo while scanned resources add up to $%.2f/mo. Treat billing as authoritative, then use the delta to find unpriced services, usage fees, marketplace spend, support, taxes, or missing per-resource prices.", billingTotal, resourceTotal),
+			MonthlyCost: delta,
+			Risk:        "Inventory-only pricing can understate the real operating cost and mis-rank optimization work.",
+			Score:       delta + 180,
+			Evidence: []string{
+				fmt.Sprintf("Billing total: $%.2f/mo", billingTotal),
+				fmt.Sprintf("Resource inventory total: $%.2f/mo", resourceTotal),
+				fmt.Sprintf("Unallocated billing delta: $%.2f/mo", delta),
+			},
+			Questions: []string{
+				"Which provider services explain the gap between billing and resource inventory?",
+				"Which resources or usage dimensions are missing monthly prices in the scan?",
+			},
+		})
+	}
+
+	for _, provider := range providerRolls {
+		if provider.MonthlyCost < 50 {
+			continue
+		}
+		resourceProviderTotal := 0.0
+		for _, resource := range estate.Resources {
+			if inferDeepResearchProvider(resource) == provider.Provider {
+				resourceProviderTotal += safeDeepResearchCost(resource.MonthlyPrice)
+			}
+		}
+		if resourceProviderTotal == 0 || provider.MonthlyCost <= resourceProviderTotal*1.25 {
+			continue
+		}
+		delta := provider.MonthlyCost - resourceProviderTotal
+		findings = append(findings, deepResearchFinding{
+			ID:          buildDeepResearchFindingID("provider-billing-gap", provider.Provider),
+			Severity:    "medium",
+			Category:    "cost",
+			Title:       fmt.Sprintf("%s billing is not fully tied to priced resources", deepResearchProviderDisplayName(provider.Provider)),
+			Summary:     fmt.Sprintf("%s billing is $%.2f/mo while priced resources from that provider add up to $%.2f/mo. Attach billing dimensions and service costs to resources before treating the visible inventory as complete.", deepResearchProviderDisplayName(provider.Provider), provider.MonthlyCost, resourceProviderTotal),
+			Provider:    provider.Provider,
+			MonthlyCost: delta,
+			Risk:        "Provider spend can be hidden in usage, managed services, support, or resources without pricing metadata.",
+			Score:       delta + provider.ShareOfCost,
+			Evidence: []string{
+				fmt.Sprintf("%s billing total: $%.2f/mo", deepResearchProviderDisplayName(provider.Provider), provider.MonthlyCost),
+				fmt.Sprintf("%s priced resource total: $%.2f/mo", deepResearchProviderDisplayName(provider.Provider), resourceProviderTotal),
+			},
+			Questions: []string{
+				fmt.Sprintf("Which %s services or usage dimensions are not mapped to resources?", deepResearchProviderDisplayName(provider.Provider)),
+				"Which tags or provider APIs can connect billing line items back to owners and systems?",
+			},
+		})
+	}
+
+	for _, service := range deepResearchTopBillingServices(estate.CostSummary, 3) {
+		if service.provider == "" || service.cost < 50 {
+			continue
+		}
+		findings = append(findings, deepResearchFinding{
+			ID:          buildDeepResearchFindingID("billing-service-driver", service.provider, service.service),
+			Severity:    deepResearchSeverityForCost(service.cost),
+			Category:    "cost",
+			Title:       fmt.Sprintf("%s spend is concentrated in %s", deepResearchProviderDisplayName(service.provider), service.service),
+			Summary:     fmt.Sprintf("Billing telemetry shows $%.2f/mo in %s for %s. Review the service owner, usage driver, traffic relationship, and resource mapping before making capacity changes.", service.cost, service.service, deepResearchProviderDisplayName(service.provider)),
+			Provider:    service.provider,
+			MonthlyCost: service.cost,
+			Risk:        "Service-level cost concentration can hide optimization targets that are not visible as individual resource prices.",
+			Score:       service.cost + 80,
+			Evidence: []string{
+				fmt.Sprintf("Billing service: %s", service.service),
+				fmt.Sprintf("Service cost: $%.2f/mo", service.cost),
+			},
+			Questions: []string{
+				fmt.Sprintf("Which systems or resources are generating %s spend?", service.service),
+				"Is this service spend tied to user traffic, background work, storage growth, or idle capacity?",
+			},
+		})
+	}
+	return findings
+}
+
+type deepResearchBillingService struct {
+	provider string
+	service  string
+	cost     float64
+}
+
+func deepResearchTopBillingServices(summary *deepResearchCostSummary, maxCount int) []deepResearchBillingService {
+	if summary == nil || maxCount <= 0 {
+		return nil
+	}
+	services := make([]deepResearchBillingService, 0)
+	for _, provider := range summary.ProviderCosts {
+		for _, service := range provider.ServiceBreakdown {
+			name := strings.TrimSpace(service.Service)
+			if name == "" || service.Cost <= 0 {
+				continue
+			}
+			services = append(services, deepResearchBillingService{provider: provider.Provider, service: name, cost: safeDeepResearchCost(service.Cost)})
+		}
+	}
+	if len(services) == 0 {
+		for _, service := range summary.TopServices {
+			name := strings.TrimSpace(service.Service)
+			if name == "" || service.Cost <= 0 {
+				continue
+			}
+			services = append(services, deepResearchBillingService{provider: "unknown", service: name, cost: safeDeepResearchCost(service.Cost)})
+		}
+	}
+	sort.SliceStable(services, func(i, j int) bool {
+		if services[i].cost != services[j].cost {
+			return services[i].cost > services[j].cost
+		}
+		if services[i].provider != services[j].provider {
+			return services[i].provider < services[j].provider
+		}
+		return services[i].service < services[j].service
+	})
+	if len(services) > maxCount {
+		return append([]deepResearchBillingService(nil), services[:maxCount]...)
+	}
+	return append([]deepResearchBillingService(nil), services...)
 }
 
 func buildTopologyFindings(resources []deepResearchResource) []deepResearchFinding {
@@ -2266,6 +2572,60 @@ func buildDeepResearchProviderRollup(resources []deepResearchResource, totalCost
 	for _, roll := range byProvider {
 		if totalCost > 0 {
 			roll.ShareOfCost = (roll.MonthlyCost / totalCost) * 100
+		}
+		providers = append(providers, *roll)
+	}
+	sort.Slice(providers, func(i, j int) bool {
+		if providers[i].MonthlyCost == providers[j].MonthlyCost {
+			return providers[i].Provider < providers[j].Provider
+		}
+		return providers[i].MonthlyCost > providers[j].MonthlyCost
+	})
+	return providers
+}
+
+func buildDeepResearchProviderRollupFromEstate(estate deepResearchEstateSnapshot) []deepResearchProviderRoll {
+	resourceRolls := buildDeepResearchProviderRollup(estate.Resources, estate.TotalCost)
+	if estate.CostSummary == nil || len(estate.CostSummary.ProviderCosts) == 0 {
+		return resourceRolls
+	}
+
+	byProvider := make(map[string]*deepResearchProviderRoll)
+	for _, roll := range resourceRolls {
+		current := roll
+		byProvider[current.Provider] = &current
+	}
+	for _, providerCost := range estate.CostSummary.ProviderCosts {
+		provider := normalizeDeepResearchProvider(providerCost.Provider)
+		if provider == "" {
+			provider = "unknown"
+		}
+		roll, ok := byProvider[provider]
+		if !ok {
+			roll = &deepResearchProviderRoll{Provider: provider}
+			byProvider[provider] = roll
+		}
+		roll.MonthlyCost = safeDeepResearchCost(providerCost.TotalCost)
+		if roll.ResourceCount == 0 {
+			for _, service := range providerCost.ServiceBreakdown {
+				roll.ResourceCount += service.ResourceCount
+			}
+		}
+	}
+	totalCost := estate.TotalCost
+	if billingTotal := deepResearchBillingTotal(estate.CostSummary); billingTotal > totalCost {
+		totalCost = billingTotal
+	}
+	if totalCost == 0 {
+		for _, roll := range byProvider {
+			totalCost += safeDeepResearchCost(roll.MonthlyCost)
+		}
+	}
+
+	providers := make([]deepResearchProviderRoll, 0, len(byProvider))
+	for _, roll := range byProvider {
+		if totalCost > 0 {
+			roll.ShareOfCost = (safeDeepResearchCost(roll.MonthlyCost) / totalCost) * 100
 		}
 		providers = append(providers, *roll)
 	}
@@ -3019,6 +3379,8 @@ func buildDeepResearchExpertTeam(estate deepResearchEstateSnapshot, findings []d
 	}
 
 	conclusions := buildDeepResearchTeamConclusions(status, estate, findings, providers, systemImprovement, quality, personas)
+	agentRuns := buildDeepResearchExpertAgentRuns(personas, conclusions, systemImprovement, quality)
+	dialogues := buildDeepResearchTeamDialogues(conclusions, personas, providers, quality)
 	consensus := buildDeepResearchExpertConsensus(status, findings, providers, systemImprovement, quality)
 
 	return &deepResearchExpertTeam{
@@ -3026,8 +3388,145 @@ func buildDeepResearchExpertTeam(estate deepResearchEstateSnapshot, findings []d
 		Summary:     buildDeepResearchExpertTeamSummary(status, estate, findings, providers, quality),
 		Personas:    personas,
 		Conclusions: conclusions,
+		AgentRuns:   agentRuns,
+		Dialogues:   dialogues,
 		Consensus:   consensus,
 	}
+}
+
+func buildDeepResearchExpertAgentRuns(personas []deepResearchExpertPersona, conclusions []deepResearchTeamConclusion, systemImprovement *deepResearchSystemImprovement, quality *deepResearchQuality) []deepResearchExpertAgentRun {
+	runs := make([]deepResearchExpertAgentRun, 0, len(personas))
+	qualityLabel := deepResearchAdvisorQualityLabel(quality)
+	for _, persona := range personas {
+		inputs := []string{persona.Discipline}
+		inputs = append(inputs, persona.Evidence...)
+		if qualityLabel != "" {
+			inputs = append(inputs, qualityLabel)
+		}
+		outputs := append([]string(nil), persona.Concerns...)
+		outputs = append(outputs, persona.Recommendations...)
+		if len(outputs) == 0 {
+			for _, conclusion := range conclusions {
+				if deepResearchStringSliceContains(conclusion.Owners, persona.Title) {
+					outputs = append(outputs, conclusion.Title+": "+conclusion.Summary)
+				}
+			}
+		}
+		if len(outputs) == 0 && systemImprovement != nil {
+			outputs = deepResearchSystemRecommendationLines(systemImprovement, 2)
+		}
+		runs = append(runs, deepResearchExpertAgentRun{
+			ID:      "expert-agent-" + persona.ID,
+			Title:   persona.Title,
+			Status:  persona.Status,
+			Summary: fmt.Sprintf("%s reviewed the estate independently and contributed to the shared conclusions.", persona.Title),
+			Inputs:  deepResearchLimitStrings(uniqueNonEmptyStrings(inputs), 5),
+			Outputs: deepResearchLimitStrings(uniqueNonEmptyStrings(outputs), 5),
+		})
+	}
+	return runs
+}
+
+func buildDeepResearchTeamDialogues(conclusions []deepResearchTeamConclusion, personas []deepResearchExpertPersona, providers []deepResearchProviderRoll, quality *deepResearchQuality) []deepResearchTeamDialogue {
+	lookupTitle := func(id string) string {
+		for _, persona := range personas {
+			if persona.ID == id {
+				return persona.Title
+			}
+		}
+		return id
+	}
+	providerContext := "provider coverage"
+	if len(providers) > 0 {
+		providerContext = fmt.Sprintf("%s leads observed spend at %.1f%%", deepResearchProviderDisplayName(providers[0].Provider), providers[0].ShareOfCost)
+	}
+	qualityContext := "confidence was not scored"
+	if quality != nil {
+		qualityContext = fmt.Sprintf("research confidence is %s (%d/100)", quality.Confidence, quality.Score)
+	}
+
+	dialogues := []deepResearchTeamDialogue{
+		{
+			ID:       "traffic-before-rightsizing",
+			Topic:    "Safe optimization order",
+			Agents:   []string{lookupTitle("site-reliability-engineer"), lookupTitle("finops-analyst"), lookupTitle("systems-architect")},
+			Exchange: "SRE and Systems Architecture compare traffic/topology evidence against FinOps cost candidates before approving capacity changes.",
+			Decision: "Right-size only after request volume, latency, error rate, saturation, owner intent, and rollback criteria are visible.",
+		},
+		{
+			ID:       "provider-coverage",
+			Topic:    "Provider and billing coverage",
+			Agents:   []string{lookupTitle("cloud-architect"), lookupTitle("finops-analyst"), lookupTitle("devops-engineer")},
+			Exchange: fmt.Sprintf("Cloud Architecture checks every provider group while FinOps reconciles billing totals and DevOps checks whether owners/repos are attached; %s.", providerContext),
+			Decision: "Treat billing totals as authoritative, keep unknown providers explicit, and add ownership/repo links where spend is not resource-mapped.",
+		},
+		{
+			ID:       "risk-before-cost",
+			Topic:    "Risk versus savings",
+			Agents:   []string{lookupTitle("security-engineer"), lookupTitle("data-platform-engineer"), lookupTitle("product-manager")},
+			Exchange: fmt.Sprintf("Security, Data, and Product weigh public exposure, backups, encryption, user impact, and confidence before prioritizing savings; %s.", qualityContext),
+			Decision: "Reliability, data protection, and user-facing risk can outrank pure savings even when cost findings are numerous.",
+		},
+	}
+	for _, conclusion := range conclusions {
+		if conclusion.ID == "system-status" || conclusion.ID == "what-is-wrong" {
+			dialogues = append(dialogues, deepResearchTeamDialogue{
+				ID:       "conclusion-" + conclusion.ID,
+				Topic:    conclusion.Title,
+				Agents:   deepResearchLimitStrings(conclusion.Owners, 4),
+				Exchange: conclusion.Summary,
+				Decision: strings.Join(deepResearchLimitStrings(conclusion.NextActions, 2), " "),
+			})
+		}
+	}
+	return deepResearchLimitDialogues(dialogues, 5)
+}
+
+func buildDeepResearchExpertSubagentRuns(team *deepResearchExpertTeam) []deepResearchSubagentRun {
+	if team == nil {
+		return nil
+	}
+	runs := make([]deepResearchSubagentRun, 0, len(team.AgentRuns))
+	for _, agentRun := range team.AgentRuns {
+		details := append([]string(nil), agentRun.Inputs...)
+		for _, output := range agentRun.Outputs {
+			details = append(details, "Output: "+output)
+		}
+		runs = append(runs, deepResearchSubagentRun{
+			Name:    agentRun.ID,
+			Status:  agentRun.Status,
+			Summary: agentRun.Summary,
+			Details: deepResearchLimitStrings(uniqueNonEmptyStrings(details), 6),
+		})
+	}
+	for _, dialogue := range team.Dialogues {
+		runs = append(runs, deepResearchSubagentRun{
+			Name:    "expert-dialogue-" + dialogue.ID,
+			Status:  "ok",
+			Summary: fmt.Sprintf("%s: %s", dialogue.Topic, dialogue.Decision),
+			Details: uniqueNonEmptyStrings([]string{
+				"Agents: " + strings.Join(dialogue.Agents, ", "),
+				dialogue.Exchange,
+			}),
+		})
+	}
+	return runs
+}
+
+func deepResearchLimitDialogues(dialogues []deepResearchTeamDialogue, maxCount int) []deepResearchTeamDialogue {
+	if maxCount <= 0 || len(dialogues) <= maxCount {
+		return append([]deepResearchTeamDialogue(nil), dialogues...)
+	}
+	return append([]deepResearchTeamDialogue(nil), dialogues[:maxCount]...)
+}
+
+func deepResearchStringSliceContains(values []string, needle string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(needle)) {
+			return true
+		}
+	}
+	return false
 }
 
 func deepResearchSystemBlock(systemImprovement *deepResearchSystemImprovement, id string) deepResearchSystemImprovementBlock {
@@ -4469,7 +4968,7 @@ func buildDeepResearchQuestionPlan(question string, estate deepResearchEstateSna
 	}
 
 	if len(plan.ProviderPriorities) == 0 {
-		for _, provider := range buildDeepResearchProviderRollup(estate.Resources, estate.TotalCost) {
+		for _, provider := range buildDeepResearchProviderRollupFromEstate(estate) {
 			plan.ProviderPriorities = append(plan.ProviderPriorities, provider.Provider)
 			if len(plan.ProviderPriorities) >= 3 {
 				break
@@ -4862,7 +5361,7 @@ func normalizeDeepResearchProvider(provider string) string {
 	switch provider {
 	case "", "<nil>":
 		return ""
-	case "amazon", "amazon web services", "aws":
+	case "amazon", "amazon web services", "aws", "ec2", "amazon ec2", "linux/unix", "linux/unix usage", "linux unix":
 		return "aws"
 	case "google", "google cloud", "google cloud platform", "gcp":
 		return "gcp"
