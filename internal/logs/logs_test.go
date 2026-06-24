@@ -103,3 +103,19 @@ func TestClusterAndContext(t *testing.T) {
 		t.Fatalf("empty context block")
 	}
 }
+
+func TestProvidersRegistered(t *testing.T) {
+	want := []string{"aws", "k8s", "flyio", "vercel", "railway", "gcp", "azure", "cloudflare", "digitalocean"}
+	have := map[string]bool{}
+	for _, p := range Providers() {
+		have[p] = true
+	}
+	for _, w := range want {
+		if !have[w] {
+			t.Errorf("provider %q not registered (have: %v)", w, Providers())
+		}
+		if _, err := Get(w); err != nil {
+			t.Errorf("Get(%q) failed: %v", w, err)
+		}
+	}
+}
