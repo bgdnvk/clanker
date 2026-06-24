@@ -123,9 +123,20 @@ func (c *awsCollector) Query(ctx context.Context, opts Options, emit Emit) error
 
 func (c *awsCollector) Tail(ctx context.Context, opts Options, emit Emit) error {
 	matcher := newMatcher(opts)
-	// Backfill the requested window, then poll for new events.
-	lastMs := opts.Since.UnixMilli()
-	backfill, err := c.fetch(ctx, opts, lastMs, time.Now().UnixMilli(), 1000)
+	// Backfill, then poll for new events. CloudWatch has no count-based "last N";
+	// in count mode (no time floor) fall back to a 1h lookback so an active group
+	// shows recent activity instead of scanning from the epoch.
+	var lastMs int64
+	if opts.Since.IsZero() {
+		lastMs = time.Now().Add(-1 * time.Hour).UnixMilli()
+	} else {
+		lastMs = opts.Since.UnixMilli()
+	}
+	backfillLimit := opts.Limit
+	if backfillLimit <= 0 {
+		backfillLimit = 1000
+	}
+	backfill, err := c.fetch(ctx, opts, lastMs, time.Now().UnixMilli(), backfillLimit)
 	if err != nil {
 		return err
 	}
