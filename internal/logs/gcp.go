@@ -93,12 +93,16 @@ func (c *gcpCollector) freshness(opts Options) string {
 	return fmt.Sprintf("%ds", int64(d.Seconds())+60)
 }
 
-func (c *gcpCollector) fetch(ctx context.Context, opts Options, limit int) ([]gcpEntry, error) {
+// read runs `gcloud logging read` with an explicit filter/order/freshness.
+func (c *gcpCollector) read(ctx context.Context, opts Options, filter, order string, limit int, freshness string) ([]gcpEntry, error) {
 	args := c.projectArgs(opts, "logging", "read")
-	if f := strings.TrimSpace(opts.Resource); f != "" {
+	if f := strings.TrimSpace(filter); f != "" {
 		args = append(args, f)
 	}
-	args = append(args, "--format=json", "--order=desc", fmt.Sprintf("--limit=%d", limit), "--freshness="+c.freshness(opts))
+	args = append(args, "--format=json", "--order="+order, fmt.Sprintf("--limit=%d", limit))
+	if freshness != "" {
+		args = append(args, "--freshness="+freshness)
+	}
 	out, err := runJSON(ctx, "gcloud", args, opts.Env)
 	if err != nil {
 		return nil, err
@@ -157,7 +161,7 @@ func (c *gcpCollector) Query(ctx context.Context, opts Options, emit Emit) error
 	if limit <= 0 {
 		limit = 1000
 	}
-	rows, err := c.fetch(ctx, opts, limit)
+	rows, err := c.read(ctx, opts, opts.Resource, "desc", limit, c.freshness(opts))
 	if err != nil {
 		return err
 	}
@@ -181,14 +185,13 @@ func (c *gcpCollector) Tail(ctx context.Context, opts Options, emit Emit) error 
 	if limit <= 0 {
 		limit = 200
 	}
-	poll := func(n int) error {
-		rows, err := c.fetch(ctx, opts, n)
-		if err != nil {
-			return err
-		}
-		// gcloud returns newest-first; emit oldest-first so the merged view orders right.
-		for i := len(rows) - 1; i >= 0; i-- {
-			e := c.toEntry(opts, rows[i])
+	var lastSeenMs int64
+	emitRows := func(rows []gcpEntry) error {
+		for _, ge := range rows {
+			e := c.toEntry(opts, ge)
+			if e.EpochMs > lastSeenMs {
+				lastSeenMs = e.EpochMs
+			}
 			if !seen.add(e.Ref, e.EpochMs) {
 				continue
 			}
@@ -201,9 +204,22 @@ func (c *gcpCollector) Tail(ctx context.Context, opts Options, emit Emit) error 
 		}
 		return nil
 	}
-	if err := poll(limit); err != nil {
+
+	// Backfill: newest N (desc), emitted oldest-first.
+	backfill, err := c.read(ctx, opts, opts.Resource, "desc", limit, c.freshness(opts))
+	if err != nil {
 		return err
 	}
+	for i, j := 0, len(backfill)-1; i < j; i, j = i+1, j-1 {
+		backfill[i], backfill[j] = backfill[j], backfill[i]
+	}
+	if err := emitRows(backfill); err != nil {
+		return err
+	}
+	if lastSeenMs == 0 {
+		lastSeenMs = time.Now().Add(-1 * time.Minute).UnixMilli()
+	}
+
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	fails := 0
@@ -212,7 +228,15 @@ func (c *gcpCollector) Tail(ctx context.Context, opts Options, emit Emit) error 
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := poll(100); err != nil {
+			// Incremental: only entries strictly newer than the last seen, asc.
+			// Bounds cost (no full-window rescan) and never skips a busy burst.
+			tsFilter := fmt.Sprintf("timestamp>%q", time.UnixMilli(lastSeenMs).UTC().Format(time.RFC3339Nano))
+			filter := tsFilter
+			if r := strings.TrimSpace(opts.Resource); r != "" {
+				filter = "(" + r + ") AND " + tsFilter
+			}
+			rows, err := c.read(ctx, opts, filter, "asc", 1000, "1h")
+			if err != nil {
 				if fails++; fails >= maxConsecutivePollErrors {
 					return err
 				}
@@ -220,6 +244,9 @@ func (c *gcpCollector) Tail(ctx context.Context, opts Options, emit Emit) error 
 				continue
 			}
 			fails = 0
+			if err := emitRows(rows); err != nil {
+				return err
+			}
 		}
 	}
 }

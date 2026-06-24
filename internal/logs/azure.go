@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -58,6 +59,8 @@ func (c *azureCollector) Sources(ctx context.Context, opts Options) ([]Source, e
 
 type azEvent struct {
 	EventTimestamp string `json:"eventTimestamp"`
+	EventDataID    string `json:"eventDataId"`
+	CorrelationID  string `json:"correlationId"`
 	Level          string `json:"level"`
 	ResourceID     string `json:"resourceId"`
 	OperationName  struct {
@@ -68,17 +71,26 @@ type azEvent struct {
 	} `json:"status"`
 }
 
-func (c *azureCollector) fetch(ctx context.Context, opts Options, limit int) ([]azEvent, error) {
-	offset := "1h"
-	if !opts.Since.IsZero() {
-		if d := time.Since(opts.Since); d > 0 {
-			offset = fmt.Sprintf("%dm", int64(d.Minutes())+1)
-		}
+// fetch lists activity-log events. When startTime is non-empty it requests
+// events since that instant (incremental poll); otherwise it uses an --offset
+// window. Results are sorted newest-first regardless of CLI default ordering.
+func (c *azureCollector) fetch(ctx context.Context, opts Options, limit int, startTime string) ([]azEvent, error) {
+	var extra []string
+	if startTime != "" {
+		extra = []string{"--start-time", startTime}
 	} else {
-		offset = "24h" // count mode: wider lookback, capped by --max-events
+		offset := "1h"
+		if !opts.Since.IsZero() {
+			if d := time.Since(opts.Since); d > 0 {
+				offset = fmt.Sprintf("%dm", int64(d.Minutes())+1)
+			}
+		} else {
+			offset = "24h" // count mode: wider lookback, capped by --max-events
+		}
+		extra = []string{"--offset", offset}
 	}
-	args := c.baseArgs(opts, "--offset", offset, "--max-events", fmt.Sprintf("%d", limit))
-	out, err := runJSON(ctx, "az", args, opts.Env)
+	extra = append(extra, "--max-events", fmt.Sprintf("%d", limit))
+	out, err := runJSON(ctx, "az", c.baseArgs(opts, extra...), opts.Env)
 	if err != nil {
 		return nil, err
 	}
@@ -86,6 +98,8 @@ func (c *azureCollector) fetch(ctx context.Context, opts Options, limit int) ([]
 	if err := json.Unmarshal(out, &rows); err != nil {
 		return nil, fmt.Errorf("parse azure activity log: %w", err)
 	}
+	// Don't rely on the CLI's default ordering for "last N".
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].EventTimestamp > rows[j].EventTimestamp })
 	return rows, nil
 }
 
@@ -98,7 +112,13 @@ func (c *azureCollector) toEntry(opts Options, ev azEvent) Entry {
 	if ev.Status.LocalizedValue != "" {
 		msg = strings.TrimSpace(msg + " — " + ev.Status.LocalizedValue)
 	}
-	e := NewEntry("azure", ev.ResourceID, opts.Resource, msg, ts)
+	// Use the unique event id as the stream so the citation ref is unique even
+	// for same-millisecond events with identical operation+status.
+	streamID := ev.EventDataID
+	if streamID == "" {
+		streamID = ev.CorrelationID
+	}
+	e := NewEntry("azure", ev.ResourceID, streamID, msg, ts)
 	if ev.Level != "" {
 		// Azure levels: Informational/Warning/Error/Critical → normalized.
 		e.SetLevel(ev.Level)
@@ -112,7 +132,7 @@ func (c *azureCollector) Query(ctx context.Context, opts Options, emit Emit) err
 	if limit <= 0 {
 		limit = 1000
 	}
-	rows, err := c.fetch(ctx, opts, limit)
+	rows, err := c.fetch(ctx, opts, limit, "")
 	if err != nil {
 		return err
 	}
@@ -136,13 +156,14 @@ func (c *azureCollector) Tail(ctx context.Context, opts Options, emit Emit) erro
 	if limit <= 0 {
 		limit = 200
 	}
-	poll := func(n int) error {
-		rows, err := c.fetch(ctx, opts, n)
-		if err != nil {
-			return err
-		}
-		for i := len(rows) - 1; i >= 0; i-- { // oldest-first
+	var lastSeenMs int64
+	emitRows := func(rows []azEvent) error {
+		// rows are newest-first; emit oldest-first for correct merge ordering.
+		for i := len(rows) - 1; i >= 0; i-- {
 			e := c.toEntry(opts, rows[i])
+			if e.EpochMs > lastSeenMs {
+				lastSeenMs = e.EpochMs
+			}
 			if !seen.add(e.Ref, e.EpochMs) {
 				continue
 			}
@@ -155,9 +176,18 @@ func (c *azureCollector) Tail(ctx context.Context, opts Options, emit Emit) erro
 		}
 		return nil
 	}
-	if err := poll(limit); err != nil {
+
+	backfill, err := c.fetch(ctx, opts, limit, "")
+	if err != nil {
 		return err
 	}
+	if err := emitRows(backfill); err != nil {
+		return err
+	}
+	if lastSeenMs == 0 {
+		lastSeenMs = time.Now().Add(-1 * time.Minute).UnixMilli()
+	}
+
 	ticker := time.NewTicker(10 * time.Second) // activity-log is low-frequency + billed
 	defer ticker.Stop()
 	fails := 0
@@ -166,7 +196,10 @@ func (c *azureCollector) Tail(ctx context.Context, opts Options, emit Emit) erro
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := poll(100); err != nil {
+			// Incremental: only events since the last seen (no full-window rescan).
+			start := time.UnixMilli(lastSeenMs + 1).UTC().Format(time.RFC3339)
+			rows, err := c.fetch(ctx, opts, 1000, start)
+			if err != nil {
 				if fails++; fails >= maxConsecutivePollErrors {
 					return err
 				}
@@ -174,6 +207,9 @@ func (c *azureCollector) Tail(ctx context.Context, opts Options, emit Emit) erro
 				continue
 			}
 			fails = 0
+			if err := emitRows(rows); err != nil {
+				return err
+			}
 		}
 	}
 }

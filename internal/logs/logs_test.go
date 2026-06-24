@@ -119,3 +119,16 @@ func TestProvidersRegistered(t *testing.T) {
 		}
 	}
 }
+
+func TestSeverityEdgeCases(t *testing.T) {
+	// GCP "DEFAULT" means unspecified, not debug.
+	e := NewEntry("gcp", "g", "i", `{"severity":"DEFAULT","message":"x"}`, time.Now())
+	if e.Level != LevelUnknown {
+		t.Errorf("DEFAULT severity = %q, want unknown", e.Level)
+	}
+	// Cloudflare console.log level "log" → info.
+	e2 := NewEntry("cloudflare", "w", "w", `{"level":"log","message":"hi"}`, time.Now())
+	if e2.Level != LevelInfo {
+		t.Errorf("log level = %q, want info", e2.Level)
+	}
+}
