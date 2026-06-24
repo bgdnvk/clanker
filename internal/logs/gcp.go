@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -22,12 +23,7 @@ type gcpCollector struct{}
 func (c *gcpCollector) Provider() string { return "gcp" }
 
 func (c *gcpCollector) project(opts Options) string {
-	for _, k := range []string{"GCP_PROJECT_ID", "GOOGLE_CLOUD_PROJECT", "CLOUDSDK_CORE_PROJECT"} {
-		if v := strings.TrimSpace(opts.Env[k]); v != "" {
-			return v
-		}
-	}
-	return ""
+	return opts.EnvValue("GCP_PROJECT_ID", "GOOGLE_CLOUD_PROJECT", "CLOUDSDK_CORE_PROJECT")
 }
 
 func (c *gcpCollector) projectArgs(opts Options, base ...string) []string {
@@ -43,21 +39,24 @@ func (c *gcpCollector) Sources(ctx context.Context, opts Options) ([]Source, err
 	if err != nil {
 		return nil, err
 	}
-	var rows []struct {
-		Name string `json:"name"` // projects/<p>/logs/<id>
-	}
-	if err := json.Unmarshal(out, &rows); err != nil {
+	// `gcloud logging logs list --format=json` returns an array of (URL-encoded)
+	// log-name strings, e.g. "projects/<p>/logs/run.googleapis.com%2Fstdout".
+	var names []string
+	if err := json.Unmarshal(out, &names); err != nil {
 		return nil, fmt.Errorf("parse gcp logs: %w", err)
 	}
-	sources := make([]Source, 0, len(rows))
-	for _, r := range rows {
-		id := r.Name
-		// Present a readable log id but keep a usable filter as the source id.
-		short := id
-		if i := strings.Index(id, "/logs/"); i >= 0 {
-			short = id[i+len("/logs/"):]
+	sources := make([]Source, 0, len(names))
+	for _, raw := range names {
+		name := raw
+		if d, derr := url.PathUnescape(raw); derr == nil {
+			name = d
 		}
-		sources = append(sources, Source{ID: fmt.Sprintf("logName=%q", id), Kind: "log", Service: short})
+		short := name
+		if i := strings.Index(name, "/logs/"); i >= 0 {
+			short = name[i+len("/logs/"):]
+		}
+		// The source id is a ready-to-use Cloud Logging filter.
+		sources = append(sources, Source{ID: fmt.Sprintf("logName=%q", name), Kind: "log", Service: short})
 	}
 	return sources, nil
 }
@@ -73,7 +72,14 @@ type gcpEntry struct {
 		Type   string            `json:"type"`
 		Labels map[string]string `json:"labels"`
 	} `json:"resource"`
-	Trace string `json:"trace"`
+	HTTPRequest struct {
+		RequestMethod string `json:"requestMethod"`
+		RequestURL    string `json:"requestUrl"`
+		Status        int    `json:"status"`
+		Latency       string `json:"latency"`
+	} `json:"httpRequest"`
+	ProtoPayload map[string]any `json:"protoPayload"`
+	Trace        string         `json:"trace"`
 }
 
 func (c *gcpCollector) freshness(opts Options) string {
@@ -114,6 +120,19 @@ func (c *gcpCollector) toEntry(opts Options, ge gcpEntry) Entry {
 		if m, ok := ge.JSONPayload["message"].(string); ok && m != "" {
 			msg = m
 		} else if b, err := json.Marshal(ge.JSONPayload); err == nil {
+			msg = string(b)
+		}
+	}
+	// Request logs (Cloud Run / API Gateway) carry no payload — synthesize from
+	// httpRequest; audit logs from protoPayload.methodName.
+	if msg == "" && ge.HTTPRequest.RequestMethod != "" {
+		msg = strings.TrimSpace(fmt.Sprintf("%s %s %d %s",
+			ge.HTTPRequest.RequestMethod, ge.HTTPRequest.RequestURL, ge.HTTPRequest.Status, ge.HTTPRequest.Latency))
+	}
+	if msg == "" && ge.ProtoPayload != nil {
+		if mn, ok := ge.ProtoPayload["methodName"].(string); ok && mn != "" {
+			msg = mn
+		} else if b, err := json.Marshal(ge.ProtoPayload); err == nil {
 			msg = string(b)
 		}
 	}
