@@ -42,3 +42,23 @@ func TestBuildCheckResultStatus(t *testing.T) {
 		t.Fatalf("ok status = %q, want ok", ok.Status)
 	}
 }
+
+func TestDetectProvidersUsesTencentAndSentryCLIs(t *testing.T) {
+	providers := detectProviders(map[string]ToolStatus{
+		"tccli":      {Name: "tccli", Available: true},
+		"sentry-cli": {Name: "sentry-cli", Available: true},
+	})
+	seen := map[string]ProviderStatus{}
+	for _, provider := range providers {
+		seen[provider.ID] = provider
+	}
+	if !seen["tencent"].Available {
+		t.Fatalf("tencent provider was not available from tccli: %#v", seen["tencent"])
+	}
+	if !seen["sentry"].Available {
+		t.Fatalf("sentry provider was not available from sentry-cli: %#v", seen["sentry"])
+	}
+	if !toolAvailable([]ToolStatus{{Name: "sentry", Available: true}}, "sentry-cli", "sentry") {
+		t.Fatal("sentry alias was not treated as available")
+	}
+}
