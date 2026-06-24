@@ -322,6 +322,10 @@ func PostHeartbeat(ctx context.Context, discovery Discovery, observations map[st
 		"observations":      observations,
 		"findings":          BuildFindings(discovery, observations),
 		"category":          "sre.discovery",
+		"brainKind":         "state",
+		"brainStatus":       "active",
+		"brainTitle":        fmt.Sprintf("%s SRE heartbeat from %s", strings.ToUpper(provider), discovery.Hostname),
+		"brainTags":         []string{"sre", "heartbeat", provider, normalizeTarget(opts.Target)},
 	}
 
 	_, _, _ = flushQueuedHeartbeats(ctx, baseURL, token)
