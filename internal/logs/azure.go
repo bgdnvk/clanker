@@ -98,9 +98,17 @@ func (c *azureCollector) fetch(ctx context.Context, opts Options, limit int, sta
 	if err := json.Unmarshal(out, &rows); err != nil {
 		return nil, fmt.Errorf("parse azure activity log: %w", err)
 	}
-	// Don't rely on the CLI's default ordering for "last N".
-	sort.SliceStable(rows, func(i, j int) bool { return rows[i].EventTimestamp > rows[j].EventTimestamp })
+	// Don't rely on the CLI's default ordering for "last N". Compare parsed
+	// instants, not strings (mixed fractional precision sorts wrong lexically).
+	sort.SliceStable(rows, func(i, j int) bool { return azEpochMs(rows[i].EventTimestamp) > azEpochMs(rows[j].EventTimestamp) })
 	return rows, nil
+}
+
+func azEpochMs(ts string) int64 {
+	if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+		return t.UnixMilli()
+	}
+	return 0
 }
 
 func (c *azureCollector) toEntry(opts Options, ev azEvent) Entry {
@@ -196,8 +204,10 @@ func (c *azureCollector) Tail(ctx context.Context, opts Options, emit Emit) erro
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			// Incremental: only events since the last seen (no full-window rescan).
-			start := time.UnixMilli(lastSeenMs + 1).UTC().Format(time.RFC3339)
+			// Incremental: events since the last seen (no full-window rescan).
+			// RFC3339 truncates to seconds (re-fetching the current second);
+			// refDedup drops the re-included events, so no +1 nudge is needed.
+			start := time.UnixMilli(lastSeenMs).UTC().Format(time.RFC3339)
 			rows, err := c.fetch(ctx, opts, 1000, start)
 			if err != nil {
 				if fails++; fails >= maxConsecutivePollErrors {
