@@ -77,6 +77,7 @@ type deepResearchResult struct {
 	SystemImprovement *deepResearchSystemImprovement `json:"systemImprovement,omitempty"`
 	ResearchQuality   *deepResearchQuality           `json:"researchQuality,omitempty"`
 	AdvisorBenchmarks *deepResearchAdvisorBenchmarks `json:"advisorBenchmarks,omitempty"`
+	ExpertTeam        *deepResearchExpertTeam        `json:"expertTeam,omitempty"`
 }
 
 type deepResearchSummary struct {
@@ -178,6 +179,34 @@ type deepResearchAdvisorWorkflowStep struct {
 	Summary string   `json:"summary"`
 	Inputs  []string `json:"inputs,omitempty"`
 	Outputs []string `json:"outputs,omitempty"`
+}
+
+type deepResearchExpertTeam struct {
+	Status      string                       `json:"status"`
+	Summary     string                       `json:"summary,omitempty"`
+	Personas    []deepResearchExpertPersona  `json:"personas,omitempty"`
+	Conclusions []deepResearchTeamConclusion `json:"conclusions,omitempty"`
+	Consensus   []string                     `json:"consensus,omitempty"`
+}
+
+type deepResearchExpertPersona struct {
+	ID              string   `json:"id"`
+	Title           string   `json:"title"`
+	Discipline      string   `json:"discipline,omitempty"`
+	Status          string   `json:"status"`
+	Summary         string   `json:"summary,omitempty"`
+	Evidence        []string `json:"evidence,omitempty"`
+	Concerns        []string `json:"concerns,omitempty"`
+	Recommendations []string `json:"recommendations,omitempty"`
+}
+
+type deepResearchTeamConclusion struct {
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Status      string   `json:"status"`
+	Summary     string   `json:"summary,omitempty"`
+	Owners      []string `json:"owners,omitempty"`
+	NextActions []string `json:"nextActions,omitempty"`
 }
 
 type deepResearchFinding struct {
@@ -286,8 +315,9 @@ var researchCmd = &cobra.Command{
 	Short: "Run deep infrastructure research across the current estate",
 	Long: `Run a multi-pass deep research analysis across the current infrastructure estate.
 
-The command fans out across several analysis subagents, prioritizes cost findings,
-and emits a final structured JSON payload that clanker-cloud can render into a report.`,
+The command fans out across several analysis subagents, weighs architecture,
+reliability, security, operations, provider coverage, and cost signals, then
+emits a final structured JSON payload that clanker-cloud can render into a report.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		question := defaultDeepResearchQuestion
@@ -341,6 +371,8 @@ and emits a final structured JSON payload that clanker-cloud can render into a r
 		systemImprovement := buildDeepResearchSystemImprovement(estate, findings, providers, buildDeepResearchQuestionPlan(question, estate))
 		researchQuality := buildDeepResearchQuality(estate, findings, providers, systemImprovement)
 		advisorBenchmarks := buildDeepResearchAdvisorBenchmarks(estate, findings, providers, systemImprovement, researchQuality)
+		fmt.Printf("[research][expert-team] synthesizing systems, cloud, SRE, DevOps, FinOps, security, data, and product reviews\n")
+		expertTeam := buildDeepResearchExpertTeam(estate, findings, providers, systemImprovement, researchQuality, advisorBenchmarks)
 
 		result := deepResearchResult{
 			Query:             question,
@@ -354,6 +386,7 @@ and emits a final structured JSON payload that clanker-cloud can render into a r
 			SystemImprovement: systemImprovement,
 			ResearchQuality:   researchQuality,
 			AdvisorBenchmarks: advisorBenchmarks,
+			ExpertTeam:        expertTeam,
 		}
 
 		if enriched, err := enrichDeepResearchNarrative(context.Background(), result, debug); err == nil && len(enriched) > 0 {
@@ -2857,6 +2890,574 @@ func buildDeepResearchAdvisorWorkflow(pillars []deepResearchAdvisorPillar, syste
 			Outputs: []string{"Completed recommendations", "Updated baseline score"},
 		},
 	}
+}
+
+func buildDeepResearchExpertTeam(estate deepResearchEstateSnapshot, findings []deepResearchFinding, providers []deepResearchProviderRoll, systemImprovement *deepResearchSystemImprovement, quality *deepResearchQuality, advisorBenchmarks *deepResearchAdvisorBenchmarks) *deepResearchExpertTeam {
+	costFindings := deepResearchFindingsByCategory(findings, "cost")
+	bottleneckFindings := deepResearchFindingsByCategory(findings, "bottleneck")
+	resilienceFindings := deepResearchFindingsByCategory(findings, "resilience")
+	misconfigFindings := deepResearchFindingsByCategory(findings, "misconfiguration")
+	hygieneFindings := deepResearchFindingsByCategory(findings, "hygiene")
+	databaseFindings := deepResearchDatabaseFindings(findings)
+	status := deepResearchExpertTeamStatus(findings, systemImprovement, quality, advisorBenchmarks)
+
+	traffic := deepResearchSystemBlock(systemImprovement, "traffic")
+	codebase := deepResearchSystemBlock(systemImprovement, "codebase")
+	architecture := deepResearchSystemBlock(systemImprovement, "architecture")
+	providerEvidence := deepResearchProviderRollupEvidence(providers, 5)
+	topRecommendations := deepResearchSystemRecommendationLines(systemImprovement, 5)
+	criticalPaths := collectDeepResearchCriticalPaths(estate.Resources, 3)
+
+	personas := []deepResearchExpertPersona{
+		{
+			ID:         "systems-architect",
+			Title:      "Systems Architect",
+			Discipline: "Architecture and dependency design",
+			Status:     deepResearchExpertPersonaStatus(append(append([]deepResearchFinding(nil), bottleneckFindings...), resilienceFindings...), architecture.Status, len(architecture.Gaps)),
+			Summary:    fmt.Sprintf("Reviewed topology, dependency fan-in, critical paths, region spread, and system-level recommendations across %d resources.", len(estate.Resources)),
+			Evidence:   deepResearchLimitStrings(uniqueNonEmptyStrings(append(architecture.Evidence, criticalPaths...)), 5),
+			Concerns:   deepResearchLimitStrings(uniqueNonEmptyStrings(append(architecture.Gaps, deepResearchTopFindingTitles(append(bottleneckFindings, resilienceFindings...), 4)...)), 5),
+			Recommendations: deepResearchLimitStrings(uniqueNonEmptyStrings(append(
+				deepResearchRecommendationSummaries(systemImprovement, "dependency-map", "resilience-hardening", "baseline-improvement-loop"),
+				"Use typed dependency edges plus traffic to separate critical request paths from incidental inventory.",
+			)), 4),
+		},
+		{
+			ID:         "cloud-architect",
+			Title:      "Cloud Architect",
+			Discipline: "Provider coverage and platform design",
+			Status:     deepResearchCloudArchitectStatus(providers, architecture, quality),
+			Summary:    fmt.Sprintf("Reviewed %d provider groups, %d regions, and whether each platform has enough evidence to support architectural recommendations.", len(providers), len(deepResearchRegions(estate.Resources))),
+			Evidence:   deepResearchLimitStrings(uniqueNonEmptyStrings(append(providerEvidence, architecture.Evidence...)), 5),
+			Concerns:   deepResearchCloudArchitectConcerns(providers, architecture, quality),
+			Recommendations: []string{
+				"Keep every visible provider in the report, even when one platform dominates spend.",
+				"Label unknown provider buckets instead of folding them into AWS or another default provider.",
+				"Review regional placement, egress, service ownership, and failover boundaries together.",
+			},
+		},
+		{
+			ID:         "site-reliability-engineer",
+			Title:      "Site Reliability Engineer",
+			Discipline: "Reliability, traffic, incidents, and safe change",
+			Status:     deepResearchExpertPersonaStatus(append(append([]deepResearchFinding(nil), bottleneckFindings...), resilienceFindings...), traffic.Status, len(traffic.Gaps)),
+			Summary:    "Reviewed traffic telemetry, topology hotspots, degraded-state findings, and what must be measured before risky changes.",
+			Evidence:   deepResearchLimitStrings(uniqueNonEmptyStrings(append(traffic.Evidence, criticalPaths...)), 5),
+			Concerns:   deepResearchLimitStrings(uniqueNonEmptyStrings(append(append(traffic.Gaps, deepResearchTopFindingTitles(bottleneckFindings, 3)...), deepResearchTopFindingTitles(resilienceFindings, 3)...)), 5),
+			Recommendations: deepResearchLimitStrings(uniqueNonEmptyStrings(append(
+				deepResearchRecommendationSummaries(systemImprovement, "traffic-observability", "resilience-hardening"),
+				"Validate latency, error rate, saturation, and rollback criteria before rightsizing production paths.",
+			)), 4),
+		},
+		{
+			ID:         "devops-engineer",
+			Title:      "DevOps Engineer",
+			Discipline: "Delivery, ownership, and remediation flow",
+			Status:     deepResearchExpertPersonaStatus(hygieneFindings, codebase.Status, len(codebase.Gaps)),
+			Summary:    "Reviewed repo links, deployment signals, ownership metadata, and whether findings can be routed to the right team.",
+			Evidence:   deepResearchLimitStrings(codebase.Evidence, 5),
+			Concerns:   deepResearchLimitStrings(uniqueNonEmptyStrings(append(codebase.Gaps, deepResearchTopFindingTitles(hygieneFindings, 4)...)), 5),
+			Recommendations: deepResearchLimitStrings(uniqueNonEmptyStrings(append(
+				deepResearchRecommendationSummaries(systemImprovement, "code-to-infra-ownership", "baseline-improvement-loop"),
+				"Turn accepted findings into owner-assigned tickets with validation and rollback notes.",
+			)), 4),
+		},
+		{
+			ID:         "finops-analyst",
+			Title:      "FinOps Analyst",
+			Discipline: "Cost, utilization, unit metrics, and accountability",
+			Status:     deepResearchFinOpsStatus(costFindings, providers, quality),
+			Summary:    fmt.Sprintf("Reviewed %.2f monthly observed spend, provider concentration, cost findings, and whether savings can be validated against demand.", estate.TotalCost),
+			Evidence:   deepResearchLimitStrings(uniqueNonEmptyStrings(append(append(providerEvidence, deepResearchTopFindingTitles(costFindings, 4)...), collectDeepResearchCostTrafficSignals(estate.Resources, 3)...)), 5),
+			Concerns:   deepResearchFinOpsConcerns(costFindings, providers, quality),
+			Recommendations: deepResearchLimitStrings(uniqueNonEmptyStrings(append(
+				deepResearchRecommendationSummaries(systemImprovement, "cost-and-capacity-loop"),
+				"Handle idle and orphaned resources first; right-size hot paths only after traffic and utilization support the change.",
+			)), 4),
+		},
+		{
+			ID:         "security-engineer",
+			Title:      "Security Engineer",
+			Discipline: "Exposure, data protection, and hardening",
+			Status:     deepResearchExpertPersonaStatus(misconfigFindings, architecture.Status, len(misconfigFindings)),
+			Summary:    "Reviewed public exposure, encryption, backups, IAM-adjacent signals, and security-sensitive architecture gaps.",
+			Evidence:   deepResearchLimitStrings(uniqueNonEmptyStrings(append(deepResearchTopFindingTitles(misconfigFindings, 5), architecture.Evidence...)), 5),
+			Concerns:   deepResearchLimitStrings(uniqueNonEmptyStrings(append(architecture.Gaps, deepResearchTopFindingTitles(misconfigFindings, 5)...)), 5),
+			Recommendations: deepResearchLimitStrings(uniqueNonEmptyStrings(append(
+				deepResearchRecommendationSummaries(systemImprovement, "resilience-hardening"),
+				"Prioritize public data planes, missing backups, missing encryption, and private-networking gaps before capacity cuts.",
+			)), 4),
+		},
+		{
+			ID:         "data-platform-engineer",
+			Title:      "Data Platform Engineer",
+			Discipline: "Databases, stateful systems, and recovery",
+			Status:     deepResearchExpertPersonaStatus(databaseFindings, architecture.Status, len(databaseFindings)),
+			Summary:    fmt.Sprintf("Reviewed %d stateful or database findings plus backup, encryption, public exposure, and single-instance risk.", len(databaseFindings)),
+			Evidence:   deepResearchLimitStrings(uniqueNonEmptyStrings(append(deepResearchTopFindingTitles(databaseFindings, 5), collectDeepResearchCriticalPaths(estate.Resources, 2)...)), 5),
+			Concerns:   deepResearchLimitStrings(deepResearchTopFindingTitles(databaseFindings, 5), 5),
+			Recommendations: []string{
+				"Verify backup retention, restore time, encryption, and private access for every production datastore.",
+				"Treat databases, queues, caches, and stateful clusters as critical-path resources in the next scan.",
+				"Add redundancy or failover before removing spare capacity from stateful paths.",
+			},
+		},
+		{
+			ID:         "product-manager",
+			Title:      "Product Manager",
+			Discipline: "User impact, prioritization, and delivery sequencing",
+			Status:     deepResearchProductStatus(findings, quality),
+			Summary:    "Reviewed which findings can affect users, which evidence gaps block confident decisions, and how to sequence work into an executable roadmap.",
+			Evidence:   deepResearchLimitStrings(uniqueNonEmptyStrings(append(deepResearchTopFindingTitles(findings, 4), topRecommendations...)), 5),
+			Concerns:   deepResearchLimitStrings(deepResearchProductConcerns(findings, quality), 5),
+			Recommendations: []string{
+				"Lead the roadmap with user-facing reliability, exposure, and bottleneck risk before pure savings work.",
+				"Make each accepted finding ownable: expected impact, validation signal, owner, due date, and rollback condition.",
+				"Rerun deep research after remediation so the report becomes a closed-loop operating artifact.",
+			},
+		},
+	}
+
+	conclusions := buildDeepResearchTeamConclusions(status, estate, findings, providers, systemImprovement, quality, personas)
+	consensus := buildDeepResearchExpertConsensus(status, findings, providers, systemImprovement, quality)
+
+	return &deepResearchExpertTeam{
+		Status:      status,
+		Summary:     buildDeepResearchExpertTeamSummary(status, estate, findings, providers, quality),
+		Personas:    personas,
+		Conclusions: conclusions,
+		Consensus:   consensus,
+	}
+}
+
+func deepResearchSystemBlock(systemImprovement *deepResearchSystemImprovement, id string) deepResearchSystemImprovementBlock {
+	if systemImprovement == nil {
+		return deepResearchSystemImprovementBlock{Status: "gap", Summary: "No system improvement analysis was available."}
+	}
+	switch strings.ToLower(strings.TrimSpace(id)) {
+	case "traffic":
+		return systemImprovement.Traffic
+	case "codebase":
+		return systemImprovement.Codebase
+	case "architecture":
+		return systemImprovement.Architecture
+	default:
+		return deepResearchSystemImprovementBlock{Status: "gap"}
+	}
+}
+
+func deepResearchExpertTeamStatus(findings []deepResearchFinding, systemImprovement *deepResearchSystemImprovement, quality *deepResearchQuality, advisorBenchmarks *deepResearchAdvisorBenchmarks) string {
+	critical := 0
+	high := 0
+	for _, finding := range findings {
+		switch deepResearchSeverityRank(finding.Severity) {
+		case 4:
+			critical++
+		case 3:
+			high++
+		}
+	}
+	if critical > 0 || deepResearchHasAdvisorStatus(advisorBenchmarks, "critical") {
+		return "critical"
+	}
+	if high > 0 || deepResearchHasSystemBlockStatus(systemImprovement, "gap") || (quality != nil && quality.Score < 55) {
+		return "action"
+	}
+	if len(findings) > 0 || deepResearchHasSystemBlockStatus(systemImprovement, "warning") || (quality != nil && quality.Score < 78) {
+		return "watch"
+	}
+	return "ok"
+}
+
+func deepResearchExpertPersonaStatus(findings []deepResearchFinding, blockStatus string, gapCount int) string {
+	for _, finding := range findings {
+		if deepResearchSeverityRank(finding.Severity) >= 4 {
+			return "critical"
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(blockStatus)) {
+	case "gap":
+		return "gap"
+	case "critical", "error":
+		return "critical"
+	case "warning", "action":
+		return "action"
+	}
+	for _, finding := range findings {
+		if deepResearchSeverityRank(finding.Severity) >= 3 {
+			return "action"
+		}
+	}
+	if gapCount > 0 {
+		return "action"
+	}
+	if len(findings) > 0 {
+		return "watch"
+	}
+	return "ok"
+}
+
+func deepResearchCloudArchitectStatus(providers []deepResearchProviderRoll, architecture deepResearchSystemImprovementBlock, quality *deepResearchQuality) string {
+	if architecture.Status == "gap" {
+		return "gap"
+	}
+	if len(providers) == 0 || deepResearchProviderRollupHasUnknown(providers) {
+		return "action"
+	}
+	if len(providers) > 0 && providers[0].ShareOfCost >= 70 {
+		return "watch"
+	}
+	if quality != nil && quality.Score < 55 {
+		return "action"
+	}
+	return deepResearchExpertPersonaStatus(nil, architecture.Status, len(architecture.Gaps))
+}
+
+func deepResearchFinOpsStatus(costFindings []deepResearchFinding, providers []deepResearchProviderRoll, quality *deepResearchQuality) string {
+	if status := deepResearchExpertPersonaStatus(costFindings, "", 0); status == "critical" || status == "action" {
+		return status
+	}
+	if len(providers) > 0 && providers[0].ShareOfCost >= 70 {
+		return "watch"
+	}
+	if quality != nil {
+		for _, gap := range quality.NextDataToCollect {
+			if strings.Contains(strings.ToLower(gap), "cost") || strings.Contains(strings.ToLower(gap), "traffic") || strings.Contains(strings.ToLower(gap), "utilization") {
+				return "watch"
+			}
+		}
+	}
+	if len(costFindings) > 0 {
+		return "watch"
+	}
+	return "ok"
+}
+
+func deepResearchProductStatus(findings []deepResearchFinding, quality *deepResearchQuality) string {
+	if status := deepResearchExpertPersonaStatus(findings, "", 0); status == "critical" || status == "action" {
+		return status
+	}
+	if quality != nil && quality.Score < 78 {
+		return "watch"
+	}
+	if len(findings) > 0 {
+		return "watch"
+	}
+	return "ok"
+}
+
+func deepResearchHasAdvisorStatus(advisorBenchmarks *deepResearchAdvisorBenchmarks, status string) bool {
+	if advisorBenchmarks == nil {
+		return false
+	}
+	for _, pillar := range advisorBenchmarks.Pillars {
+		if strings.EqualFold(strings.TrimSpace(pillar.Status), status) {
+			return true
+		}
+	}
+	return false
+}
+
+func deepResearchHasSystemBlockStatus(systemImprovement *deepResearchSystemImprovement, status string) bool {
+	if systemImprovement == nil {
+		return false
+	}
+	status = strings.ToLower(strings.TrimSpace(status))
+	return strings.ToLower(strings.TrimSpace(systemImprovement.Traffic.Status)) == status ||
+		strings.ToLower(strings.TrimSpace(systemImprovement.Codebase.Status)) == status ||
+		strings.ToLower(strings.TrimSpace(systemImprovement.Architecture.Status)) == status
+}
+
+func deepResearchProviderRollupEvidence(providers []deepResearchProviderRoll, maxCount int) []string {
+	evidence := make([]string, 0, maxCount)
+	for _, provider := range providers {
+		label := deepResearchProviderDisplayName(provider.Provider)
+		if label == "" {
+			label = "Unknown"
+		}
+		evidence = append(evidence, fmt.Sprintf("%s has %d resources, $%.2f/mo observed spend, and %.1f%% of observed cost.", label, provider.ResourceCount, provider.MonthlyCost, provider.ShareOfCost))
+		if maxCount > 0 && len(evidence) >= maxCount {
+			break
+		}
+	}
+	return evidence
+}
+
+func deepResearchProviderRollupHasUnknown(providers []deepResearchProviderRoll) bool {
+	for _, provider := range providers {
+		if strings.EqualFold(strings.TrimSpace(provider.Provider), "unknown") {
+			return true
+		}
+	}
+	return false
+}
+
+func deepResearchCloudArchitectConcerns(providers []deepResearchProviderRoll, architecture deepResearchSystemImprovementBlock, quality *deepResearchQuality) []string {
+	concerns := append([]string(nil), architecture.Gaps...)
+	if len(providers) == 0 {
+		concerns = append(concerns, "No provider rollup was available, so platform coverage cannot be verified.")
+	} else if providers[0].ShareOfCost >= 70 {
+		concerns = append(concerns, fmt.Sprintf("%s carries %.1f%% of observed spend, so provider concentration deserves architecture review.", deepResearchProviderDisplayName(providers[0].Provider), providers[0].ShareOfCost))
+	}
+	if deepResearchProviderRollupHasUnknown(providers) {
+		concerns = append(concerns, "Some resources are in an unknown provider bucket and should be classified before provider-specific recommendations are trusted.")
+	}
+	if quality != nil {
+		for _, gap := range quality.ContextGaps {
+			if strings.Contains(strings.ToLower(gap), "provider") {
+				concerns = append(concerns, gap)
+			}
+		}
+	}
+	return deepResearchLimitStrings(uniqueNonEmptyStrings(concerns), 5)
+}
+
+func deepResearchFinOpsConcerns(costFindings []deepResearchFinding, providers []deepResearchProviderRoll, quality *deepResearchQuality) []string {
+	concerns := deepResearchTopFindingTitles(costFindings, 4)
+	if len(providers) > 0 && providers[0].ShareOfCost >= 60 {
+		concerns = append(concerns, fmt.Sprintf("%s represents %.1f%% of observed spend.", deepResearchProviderDisplayName(providers[0].Provider), providers[0].ShareOfCost))
+	}
+	if quality != nil {
+		for _, gap := range quality.NextDataToCollect {
+			lower := strings.ToLower(gap)
+			if strings.Contains(lower, "cost") || strings.Contains(lower, "traffic") || strings.Contains(lower, "utilization") || strings.Contains(lower, "unit") {
+				concerns = append(concerns, gap)
+			}
+		}
+	}
+	return deepResearchLimitStrings(uniqueNonEmptyStrings(concerns), 5)
+}
+
+func deepResearchProductConcerns(findings []deepResearchFinding, quality *deepResearchQuality) []string {
+	concerns := deepResearchTopFindingTitles(findings, 4)
+	if quality != nil && quality.Confidence != "high" {
+		concerns = append(concerns, fmt.Sprintf("Research confidence is %s (%d/100), so roadmap commitments should call out missing evidence.", quality.Confidence, quality.Score))
+	}
+	return deepResearchLimitStrings(uniqueNonEmptyStrings(concerns), 5)
+}
+
+func deepResearchRecommendationSummaries(systemImprovement *deepResearchSystemImprovement, ids ...string) []string {
+	recommendations := deepResearchRecommendationsByIDs(systemImprovement, ids...)
+	lines := make([]string, 0, len(recommendations))
+	for _, recommendation := range recommendations {
+		line := strings.TrimSpace(recommendation.Title)
+		if len(recommendation.Actions) > 0 && strings.TrimSpace(recommendation.Actions[0]) != "" {
+			line = fmt.Sprintf("%s: %s", line, strings.TrimSpace(recommendation.Actions[0]))
+		} else if strings.TrimSpace(recommendation.Summary) != "" {
+			line = fmt.Sprintf("%s: %s", line, strings.TrimSpace(recommendation.Summary))
+		}
+		lines = append(lines, line)
+	}
+	return uniqueNonEmptyStrings(lines)
+}
+
+func deepResearchSystemRecommendationLines(systemImprovement *deepResearchSystemImprovement, maxCount int) []string {
+	if systemImprovement == nil {
+		return nil
+	}
+	lines := make([]string, 0, maxCount)
+	for _, recommendation := range systemImprovement.Recommendations {
+		line := strings.TrimSpace(recommendation.Title)
+		if strings.TrimSpace(recommendation.Priority) != "" {
+			line = fmt.Sprintf("%s priority: %s", strings.Title(strings.TrimSpace(recommendation.Priority)), line)
+		}
+		lines = append(lines, line)
+		if maxCount > 0 && len(lines) >= maxCount {
+			break
+		}
+	}
+	return uniqueNonEmptyStrings(lines)
+}
+
+func deepResearchDatabaseFindings(findings []deepResearchFinding) []deepResearchFinding {
+	out := make([]deepResearchFinding, 0)
+	for _, finding := range findings {
+		lower := strings.ToLower(strings.Join([]string{finding.ID, finding.Category, finding.ResourceType, finding.Title, finding.Summary}, " "))
+		if deepResearchContainsAny(lower, "database", "db", "rds", "postgres", "mysql", "redis", "cache", "dynamodb", "aurora", "supabase", "backup", "encrypt", "data plane") {
+			out = append(out, finding)
+		}
+	}
+	return out
+}
+
+func buildDeepResearchTeamConclusions(status string, estate deepResearchEstateSnapshot, findings []deepResearchFinding, providers []deepResearchProviderRoll, systemImprovement *deepResearchSystemImprovement, quality *deepResearchQuality, personas []deepResearchExpertPersona) []deepResearchTeamConclusion {
+	criticalCount := deepResearchSeverityCount(findings, "critical")
+	highCount := deepResearchSeverityCount(findings, "high")
+	topRisks := deepResearchTopFindingTitles(findings, 3)
+	systemActions := deepResearchSystemRecommendationLines(systemImprovement, 4)
+	costFindings := deepResearchFindingsByCategory(findings, "cost")
+	nonCostFindings := deepResearchNonCostFindings(findings)
+	ownersByPersona := func(ids ...string) []string {
+		wanted := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			wanted[id] = struct{}{}
+		}
+		owners := make([]string, 0, len(ids))
+		for _, persona := range personas {
+			if _, ok := wanted[persona.ID]; ok {
+				owners = append(owners, persona.Title)
+			}
+		}
+		return owners
+	}
+
+	providerLine := "No provider mix was available."
+	if len(providers) > 0 {
+		providerLine = fmt.Sprintf("Largest observed provider is %s at %.1f%% of observed spend.", deepResearchProviderDisplayName(providers[0].Provider), providers[0].ShareOfCost)
+	}
+	qualityLine := "Research confidence was not scored."
+	if quality != nil {
+		qualityLine = fmt.Sprintf("Research confidence is %s at %d/100.", quality.Confidence, quality.Score)
+	}
+
+	conclusions := []deepResearchTeamConclusion{
+		{
+			ID:      "system-status",
+			Title:   "System status",
+			Status:  status,
+			Summary: fmt.Sprintf("The team reviewed %d resources across %d provider groups and found %d critical plus %d high findings. %s %s", len(estate.Resources), len(providers), criticalCount, highCount, providerLine, qualityLine),
+			Owners:  ownersByPersona("systems-architect", "cloud-architect", "site-reliability-engineer"),
+			NextActions: deepResearchLimitStrings(uniqueNonEmptyStrings(append(
+				[]string{"Review the critical and high findings before accepting optimization work."},
+				systemActions...,
+			)), 4),
+		},
+		{
+			ID:      "what-is-wrong",
+			Title:   "What is wrong",
+			Status:  deepResearchWrongnessStatus(nonCostFindings, systemImprovement, quality),
+			Summary: deepResearchWrongnessSummary(nonCostFindings, topRisks, systemImprovement, quality),
+			Owners:  ownersByPersona("systems-architect", "site-reliability-engineer", "security-engineer", "data-platform-engineer"),
+			NextActions: deepResearchLimitStrings(uniqueNonEmptyStrings(append(
+				deepResearchRecommendationSummaries(systemImprovement, "dependency-map", "resilience-hardening", "traffic-observability"),
+				topRisks...,
+			)), 4),
+		},
+		{
+			ID:      "system-optimization",
+			Title:   "How to optimize the system",
+			Status:  deepResearchExpertTeamStatus(nonCostFindings, systemImprovement, quality, nil),
+			Summary: "Optimize architecture by tightening dependency maps, adding traffic and saturation metrics, assigning code ownership, and hardening critical paths before changing capacity.",
+			Owners:  ownersByPersona("systems-architect", "site-reliability-engineer", "devops-engineer"),
+			NextActions: deepResearchLimitStrings(uniqueNonEmptyStrings(append(
+				deepResearchRecommendationSummaries(systemImprovement, "traffic-observability", "dependency-map", "code-to-infra-ownership", "resilience-hardening"),
+				"Run another scan after typed topology, ownership, and metrics are present.",
+			)), 5),
+		},
+		{
+			ID:      "cost-optimization",
+			Title:   "How to optimize costs",
+			Status:  deepResearchFinOpsStatus(costFindings, providers, quality),
+			Summary: "Treat cost as a measured capacity loop: remove idle or orphaned resources first, then right-size active paths only after utilization, traffic, owner intent, and rollback criteria are clear.",
+			Owners:  ownersByPersona("finops-analyst", "site-reliability-engineer", "product-manager"),
+			NextActions: deepResearchLimitStrings(uniqueNonEmptyStrings(append(
+				deepResearchRecommendationSummaries(systemImprovement, "cost-and-capacity-loop"),
+				deepResearchTopFindingTitles(costFindings, 3)...,
+			)), 4),
+		},
+		{
+			ID:      "resource-and-architecture-recommendations",
+			Title:   "Resource and architecture recommendations",
+			Status:  status,
+			Summary: "Prioritize resources on user-facing request paths, data stores, edge services, queues, caches, deployment pipelines, and any high-spend resource whose owner or demand signal is missing.",
+			Owners:  ownersByPersona("cloud-architect", "data-platform-engineer", "devops-engineer", "security-engineer"),
+			NextActions: deepResearchLimitStrings(uniqueNonEmptyStrings(append(
+				systemActions,
+				"Classify unknown providers and add owner, service, repo, environment, and criticality tags.",
+			)), 5),
+		},
+	}
+
+	return conclusions
+}
+
+func deepResearchWrongnessStatus(nonCostFindings []deepResearchFinding, systemImprovement *deepResearchSystemImprovement, quality *deepResearchQuality) string {
+	if len(nonCostFindings) > 0 {
+		return deepResearchExpertPersonaStatus(nonCostFindings, "", 0)
+	}
+	if systemImprovement != nil {
+		gapCount := len(systemImprovement.Traffic.Gaps) + len(systemImprovement.Codebase.Gaps) + len(systemImprovement.Architecture.Gaps)
+		if gapCount > 0 || deepResearchHasSystemBlockStatus(systemImprovement, "gap") {
+			return "gap"
+		}
+		if deepResearchHasSystemBlockStatus(systemImprovement, "warning") {
+			return "watch"
+		}
+	}
+	if quality != nil && len(quality.ContextGaps) > 0 {
+		return "gap"
+	}
+	return "ok"
+}
+
+func deepResearchWrongnessSummary(nonCostFindings []deepResearchFinding, topRisks []string, systemImprovement *deepResearchSystemImprovement, quality *deepResearchQuality) string {
+	if len(nonCostFindings) > 0 {
+		return fmt.Sprintf("The strongest non-cost problems are architecture, reliability, security, hygiene, or bottleneck risks: %s.", strings.Join(deepResearchLimitStrings(deepResearchTopFindingTitles(nonCostFindings, 3), 3), "; "))
+	}
+	if systemImprovement != nil {
+		gaps := uniqueNonEmptyStrings(append(append(systemImprovement.Traffic.Gaps, systemImprovement.Codebase.Gaps...), systemImprovement.Architecture.Gaps...))
+		if len(gaps) > 0 {
+			return fmt.Sprintf("The main problem is incomplete evidence: %s", strings.Join(deepResearchLimitStrings(gaps, 3), "; "))
+		}
+	}
+	if quality != nil && len(quality.ContextGaps) > 0 {
+		return fmt.Sprintf("The main problem is that confidence is limited by missing context: %s", strings.Join(deepResearchLimitStrings(quality.ContextGaps, 3), "; "))
+	}
+	if len(topRisks) > 0 {
+		return fmt.Sprintf("The main problems are the top ranked risks: %s.", strings.Join(topRisks, "; "))
+	}
+	return "No dominant fault pattern was detected; keep improving telemetry, topology, ownership, and provider evidence so the next review is sharper."
+}
+
+func deepResearchSeverityCount(findings []deepResearchFinding, severity string) int {
+	count := 0
+	for _, finding := range findings {
+		if strings.EqualFold(strings.TrimSpace(finding.Severity), severity) {
+			count++
+		}
+	}
+	return count
+}
+
+func deepResearchNonCostFindings(findings []deepResearchFinding) []deepResearchFinding {
+	out := make([]deepResearchFinding, 0, len(findings))
+	for _, finding := range findings {
+		if !strings.EqualFold(strings.TrimSpace(finding.Category), "cost") {
+			out = append(out, finding)
+		}
+	}
+	return out
+}
+
+func buildDeepResearchExpertConsensus(status string, findings []deepResearchFinding, providers []deepResearchProviderRoll, systemImprovement *deepResearchSystemImprovement, quality *deepResearchQuality) []string {
+	consensus := []string{
+		"Use the report as an architecture and operations review first; cost is one dimension of system health, not the whole objective.",
+		"Do not optimize capacity on production paths until traffic, latency, error, saturation, owner, and rollback evidence exists.",
+	}
+	if len(providers) > 1 {
+		consensus = append(consensus, "Cross-provider coverage matters; smaller providers should stay visible when they own edge, deploy, data, or auth surfaces.")
+	}
+	if deepResearchProviderRollupHasUnknown(providers) {
+		consensus = append(consensus, "Unknown provider buckets must stay explicit until classified; silently defaulting them to a major cloud would hide risk.")
+	}
+	if systemImprovement != nil && len(systemImprovement.Recommendations) > 0 {
+		consensus = append(consensus, fmt.Sprintf("The immediate improvement loop is %s.", strings.Join(deepResearchLimitStrings(deepResearchSystemRecommendationLines(systemImprovement, 3), 3), "; ")))
+	}
+	if quality != nil && quality.Confidence != "high" {
+		consensus = append(consensus, fmt.Sprintf("Confidence is %s, so recommendations should include evidence gaps and validation steps.", quality.Confidence))
+	}
+	if status == "critical" || deepResearchSeverityCount(findings, "critical") > 0 {
+		consensus = append(consensus, "Critical findings should block broad cost-cutting until reliability, security, and data-plane risk are reviewed.")
+	}
+	return deepResearchLimitStrings(uniqueNonEmptyStrings(consensus), 6)
+}
+
+func buildDeepResearchExpertTeamSummary(status string, estate deepResearchEstateSnapshot, findings []deepResearchFinding, providers []deepResearchProviderRoll, quality *deepResearchQuality) string {
+	qualityLabel := "unscored confidence"
+	if quality != nil {
+		qualityLabel = fmt.Sprintf("%s confidence (%d/100)", quality.Confidence, quality.Score)
+	}
+	return fmt.Sprintf("A simulated senior software and cloud team reviewed %d resources across %d provider groups with %s. Overall status is %s with %d ranked findings.", len(estate.Resources), len(providers), qualityLabel, status, len(findings))
 }
 
 func deepResearchFindingsByCategories(findings []deepResearchFinding, categories ...string) []deepResearchFinding {

@@ -117,6 +117,42 @@ func TestBuildDeepResearchSystemImprovementUsesTrafficAndCodeSignals(t *testing.
 	if len(benchmarks.Lessons) == 0 || len(benchmarks.Workflow) == 0 {
 		t.Fatalf("expected product lessons and workflow, got %+v", benchmarks)
 	}
+
+	expertTeam := buildDeepResearchExpertTeam(estate, []deepResearchFinding{
+		{
+			ID:       "topology-bottleneck-db",
+			Category: "bottleneck",
+			Severity: "high",
+			Title:    "primary-db is a concentration point",
+		},
+		{
+			ID:       "public-database-db",
+			Category: "misconfiguration",
+			Severity: "critical",
+			Title:    "primary-db is publicly reachable",
+		},
+	}, buildDeepResearchProviderRollup(estate.Resources, estate.TotalCost), section, quality, benchmarks)
+	if expertTeam == nil {
+		t.Fatal("expected expert team synthesis")
+	}
+	if !containsExpertPersona(expertTeam.Personas, "systems-architect") {
+		t.Fatalf("expected systems architect persona, got %+v", expertTeam.Personas)
+	}
+	if !containsExpertPersona(expertTeam.Personas, "site-reliability-engineer") {
+		t.Fatalf("expected SRE persona, got %+v", expertTeam.Personas)
+	}
+	if !containsExpertPersona(expertTeam.Personas, "finops-analyst") {
+		t.Fatalf("expected FinOps persona, got %+v", expertTeam.Personas)
+	}
+	if !containsTeamConclusion(expertTeam.Conclusions, "system-optimization") {
+		t.Fatalf("expected system optimization conclusion, got %+v", expertTeam.Conclusions)
+	}
+	if !containsTeamConclusion(expertTeam.Conclusions, "cost-optimization") {
+		t.Fatalf("expected cost optimization conclusion, got %+v", expertTeam.Conclusions)
+	}
+	if !containsAnyJoined(expertTeam.Consensus, "cost is one dimension") {
+		t.Fatalf("expected consensus to avoid cost-only framing, got %+v", expertTeam.Consensus)
+	}
 }
 
 func TestBuildDeepResearchSystemImprovementSurfacesTelemetryAndCodebaseGaps(t *testing.T) {
@@ -176,6 +212,23 @@ func TestBuildDeepResearchSystemImprovementSurfacesTelemetryAndCodebaseGaps(t *t
 	}
 	if !containsAnyJoined(benchmarks.Workflow[1].Inputs, "request-rate") {
 		t.Fatalf("expected workflow to carry missing telemetry guidance, got %+v", benchmarks.Workflow)
+	}
+
+	expertTeam := buildDeepResearchExpertTeam(estate, nil, buildDeepResearchProviderRollup(estate.Resources, estate.TotalCost), section, quality, benchmarks)
+	if expertTeam == nil {
+		t.Fatal("expected expert team synthesis")
+	}
+	if !containsExpertPersona(expertTeam.Personas, "cloud-architect") {
+		t.Fatalf("expected cloud architect persona, got %+v", expertTeam.Personas)
+	}
+	if !containsTeamConclusion(expertTeam.Conclusions, "what-is-wrong") {
+		t.Fatalf("expected what-is-wrong conclusion, got %+v", expertTeam.Conclusions)
+	}
+	if expertTeam.Conclusions[1].Status == "ok" {
+		t.Fatalf("expected evidence gaps to keep what-is-wrong out of ok status, got %+v", expertTeam.Conclusions[1])
+	}
+	if !containsAnyJoined(expertTeam.Conclusions[1].NextActions, "request-rate") && !strings.Contains(expertTeam.Conclusions[1].Summary, "incomplete evidence") {
+		t.Fatalf("expected team conclusion to surface evidence gaps, got %+v", expertTeam.Conclusions[1])
 	}
 }
 
@@ -249,6 +302,24 @@ func containsAdvisorPillar(pillars []deepResearchAdvisorPillar, id string) bool 
 func containsProviderRollup(providers []deepResearchProviderRoll, provider string) bool {
 	for _, roll := range providers {
 		if roll.Provider == provider {
+			return true
+		}
+	}
+	return false
+}
+
+func containsExpertPersona(personas []deepResearchExpertPersona, id string) bool {
+	for _, persona := range personas {
+		if persona.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func containsTeamConclusion(conclusions []deepResearchTeamConclusion, id string) bool {
+	for _, conclusion := range conclusions {
+		if conclusion.ID == id {
 			return true
 		}
 	}
