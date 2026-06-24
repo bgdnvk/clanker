@@ -44,14 +44,18 @@ func TestBuildDeepResearchSystemImprovementUsesTrafficAndCodeSignals(t *testing.
 				Name:         "primary-db",
 				Region:       "us-east-1",
 				MonthlyPrice: 300,
-				Tags:         map[string]string{"owner": "data"},
+				Attributes: map[string]interface{}{
+					"storageEncrypted":      false,
+					"backupRetentionPeriod": float64(0),
+				},
+				Tags: map[string]string{"owner": "data"},
 			},
 		},
 		TotalCost: 500,
 	}
 	findings := []deepResearchFinding{
-		{ID: "topology-bottleneck-db", Category: "bottleneck", Title: "primary-db is a concentration point"},
-		{ID: "single-point-database", Category: "resilience", Title: "Only one database resource is visible"},
+		{ID: "topology-bottleneck-db", Category: "bottleneck", Severity: "high", Title: "primary-db is a concentration point", ResourceID: "db", Provider: "aws"},
+		{ID: "single-point-database", Category: "resilience", Severity: "high", Title: "Only one database resource is visible", ResourceID: "db", Provider: "aws"},
 	}
 
 	section := buildDeepResearchSystemImprovement(estate, findings, buildDeepResearchProviderRollup(estate.Resources, estate.TotalCost), buildDeepResearchQuestionPlan("optimize traffic and architecture", estate))
@@ -64,8 +68,17 @@ func TestBuildDeepResearchSystemImprovementUsesTrafficAndCodeSignals(t *testing.
 	if !containsAnyJoined(section.Traffic.Evidence, "requestsPerSecond") {
 		t.Fatalf("traffic evidence missing request metric: %+v", section.Traffic.Evidence)
 	}
+	if !containsAnyJoined(section.Traffic.Evidence, "traffic, latency, error, saturation") {
+		t.Fatalf("traffic evidence missing signal coverage count: %+v", section.Traffic.Evidence)
+	}
 	if section.Codebase.Status == "gap" {
 		t.Fatalf("codebase should not be a gap with tracked repos and repo attributes: %+v", section.Codebase)
+	}
+	if !containsAnyJoined(section.Codebase.Evidence, "Ownership coverage") {
+		t.Fatalf("codebase evidence missing ownership coverage: %+v", section.Codebase.Evidence)
+	}
+	if !containsAnyJoined(section.Architecture.Evidence, "Finding mix") {
+		t.Fatalf("architecture evidence missing finding mix: %+v", section.Architecture.Evidence)
 	}
 	if !containsRecommendation(section.Recommendations, "dependency-map") {
 		t.Fatalf("expected dependency-map recommendation, got %+v", section.Recommendations)
@@ -77,6 +90,26 @@ func TestBuildDeepResearchSystemImprovementUsesTrafficAndCodeSignals(t *testing.
 	costTraffic := collectDeepResearchCostTrafficSignals(estate.Resources, 3)
 	if !containsAnyJoined(costTraffic, "requestsPerSecond") {
 		t.Fatalf("expected cost-traffic correlation signal, got %+v", costTraffic)
+	}
+	verifierPatches, verifierRun := buildDeepResearchVerifierPatches(estate, findings, buildDeepResearchQuestionPlan("optimize traffic and architecture", estate))
+	if verifierRun.Name != "finding-verifier" || verifierRun.Status != "ok" {
+		t.Fatalf("expected ok verifier run, got %+v", verifierRun)
+	}
+	if len(verifierPatches) != len(findings) {
+		t.Fatalf("expected verifier patch per finding, got patches=%d findings=%d", len(verifierPatches), len(findings))
+	}
+	if !containsFindingPatchEvidence(verifierPatches, "SRE lens") {
+		t.Fatalf("expected SRE lens verifier evidence, got %+v", verifierPatches)
+	}
+	if !containsFindingPatchEvidence(verifierPatches, "Security-relevant fields") {
+		t.Fatalf("expected security posture verifier evidence, got %+v", verifierPatches)
+	}
+	if !containsFindingPatchQuestions(verifierPatches, "latency") {
+		t.Fatalf("expected verifier questions to request golden-signal proof, got %+v", verifierPatches)
+	}
+	verifiedFindings := applyDeepResearchFindingPatches(findings, verifierPatches)
+	if !containsEvidenceMix(buildDeepResearchEvidenceMix(verifiedFindings), "verifier") {
+		t.Fatalf("expected verifier source in evidence mix, got %+v", buildDeepResearchEvidenceMix(verifiedFindings))
 	}
 
 	quality := buildDeepResearchQuality(estate, []deepResearchFinding{{
@@ -412,6 +445,38 @@ func containsTeamDialogue(dialogues []deepResearchTeamDialogue, id string) bool 
 func containsSubagentRun(runs []deepResearchSubagentRun, name string) bool {
 	for _, run := range runs {
 		if run.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func containsFindingPatchEvidence(patches []deepResearchFindingPatch, needle string) bool {
+	for _, patch := range patches {
+		if containsAnyJoined(patch.Evidence, needle) {
+			return true
+		}
+		for _, detail := range patch.EvidenceDetails {
+			if strings.Contains(detail.Detail, needle) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsFindingPatchQuestions(patches []deepResearchFindingPatch, needle string) bool {
+	for _, patch := range patches {
+		if containsAnyJoined(patch.Questions, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsEvidenceMix(mix []deepResearchEvidenceMix, source string) bool {
+	for _, item := range mix {
+		if item.Source == source {
 			return true
 		}
 	}

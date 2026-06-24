@@ -729,10 +729,383 @@ func runDeepResearchSubagents(ctx context.Context, question string, estate deepR
 		warnings = append(warnings, drilldownWarnings...)
 	}
 
+	verifierPatches, verifierRun := buildDeepResearchVerifierPatches(estate, findings, plan)
+	if len(verifierPatches) > 0 {
+		findings = applyDeepResearchFindingPatches(findings, verifierPatches)
+		runs = append(runs, verifierRun)
+	}
+
 	sort.Slice(runs, func(i, j int) bool {
 		return runs[i].Name < runs[j].Name
 	})
 	return dedupeDeepResearchFindings(findings), runs, uniqueNonEmptyStrings(warnings)
+}
+
+func buildDeepResearchVerifierPatches(estate deepResearchEstateSnapshot, findings []deepResearchFinding, plan deepResearchQuestionPlan) ([]deepResearchFindingPatch, deepResearchSubagentRun) {
+	if len(findings) == 0 {
+		return nil, deepResearchSubagentRun{
+			Name:    "finding-verifier",
+			Status:  "warning",
+			Summary: "No findings were available for verifier review.",
+		}
+	}
+
+	resourcesByID := make(map[string]deepResearchResource, len(estate.Resources))
+	for _, resource := range estate.Resources {
+		if strings.TrimSpace(resource.ID) != "" {
+			resourcesByID[resource.ID] = resource
+		}
+	}
+
+	patches := make([]deepResearchFindingPatch, 0, len(findings))
+	lensCounts := make(map[string]int)
+	missingResource := 0
+	for _, finding := range findings {
+		patch, foundResource, lens := buildDeepResearchVerifierPatch(estate, finding, resourcesByID, plan)
+		if len(patch.EvidenceDetails) == 0 && len(patch.Questions) == 0 {
+			continue
+		}
+		patches = append(patches, patch)
+		lensCounts[lens]++
+		if !foundResource && strings.TrimSpace(finding.ResourceID) != "" {
+			missingResource++
+		}
+	}
+
+	status := "ok"
+	if len(patches) == 0 || missingResource > 0 {
+		status = "warning"
+	}
+	details := []string{
+		fmt.Sprintf("Verified %d findings against SRE, security, FinOps, DevOps, and architecture review lenses.", len(patches)),
+	}
+	if len(lensCounts) > 0 {
+		lenses := make([]string, 0, len(lensCounts))
+		for lens, count := range lensCounts {
+			lenses = append(lenses, fmt.Sprintf("%s: %d", lens, count))
+		}
+		sort.Strings(lenses)
+		details = append(details, "Lens coverage: "+strings.Join(lenses, ", "))
+	}
+	if missingResource > 0 {
+		details = append(details, fmt.Sprintf("%d findings referenced resources that were not present in the estate snapshot.", missingResource))
+	}
+	if plan.WantsLogs {
+		details = append(details, "Verifier emphasized live logs, alerts, latency, traffic, errors, and saturation because the query requested operational evidence.")
+	}
+
+	return patches, deepResearchSubagentRun{
+		Name:    "finding-verifier",
+		Status:  status,
+		Summary: fmt.Sprintf("Verifier attached first-principles evidence to %d findings.", len(patches)),
+		Details: uniqueNonEmptyStrings(details),
+	}
+}
+
+func buildDeepResearchVerifierPatch(estate deepResearchEstateSnapshot, finding deepResearchFinding, resourcesByID map[string]deepResearchResource, plan deepResearchQuestionPlan) (deepResearchFindingPatch, bool, string) {
+	lens := deepResearchVerifierLens(finding)
+	provider := strings.TrimSpace(finding.Provider)
+	resource, foundResource := resourcesByID[strings.TrimSpace(finding.ResourceID)]
+	if foundResource && provider == "" {
+		provider = inferDeepResearchProvider(resource)
+	}
+
+	details := make([]deepResearchEvidenceDetail, 0, 8)
+	addDetail := func(section string, detail string) {
+		detail = strings.TrimSpace(detail)
+		if detail == "" {
+			return
+		}
+		details = append(details, deepResearchEvidenceDetail{
+			Detail:   detail,
+			Source:   "verifier",
+			Provider: provider,
+			Section:  section,
+		})
+	}
+
+	addDetail("Review lens", deepResearchVerifierLensDetail(lens, finding))
+	if foundResource {
+		inbound, outbound := deepResearchResourceDependencyCounts(resource, estate.Resources)
+		trafficSignals := deepResearchTrafficSignalLabels(resource)
+		ownership := "missing"
+		if deepResearchHasOwnershipTags(resource.Tags) {
+			ownership = "present"
+		}
+		addDetail("Resource facts", fmt.Sprintf("%s is %s in %s/%s, state=%s, cost=$%.2f/mo, dependencies=%d inbound/%d outbound, ownership tags=%s.",
+			deepResearchResourceLabel(resource),
+			deepResearchNonEmpty(resource.Type, "unknown type"),
+			deepResearchNonEmpty(provider, "unknown provider"),
+			deepResearchNonEmpty(resource.Region, "unknown region"),
+			deepResearchNonEmpty(resource.State, "unknown"),
+			resource.MonthlyPrice,
+			inbound,
+			outbound,
+			ownership,
+		))
+		if len(trafficSignals) > 0 {
+			addDetail("SRE signals", fmt.Sprintf("Visible golden-signal inputs: %s.", strings.Join(trafficSignals, "; ")))
+		} else if finding.Category == "cost" || finding.Category == "bottleneck" || finding.Category == "resilience" {
+			addDetail("SRE gap", "Latency, traffic, error-rate, and saturation metrics are not attached to this resource, so scaling and rightsizing need another validation pass.")
+		}
+		if metric, value, ok := deepResearchPrimaryTrafficMetric(resource); ok {
+			addDetail("Unit economics", fmt.Sprintf("Primary demand metric candidate for cost/performance review: %s=%.2f.", metric, value))
+		}
+		if !deepResearchHasOwnershipTags(resource.Tags) {
+			addDetail("Ownership gap", "Owner, service, team, project, or environment tags are missing, which weakens repo-to-infra accountability and cleanup approval.")
+		}
+		addDetail("Security posture", deepResearchSecurityVerifierDetail(resource))
+		addDetail("Delivery posture", deepResearchDeliveryVerifierDetail(resource))
+	} else {
+		addDetail("Scope", "Verifier treated this as an estate-level issue because no single resource record was attached.")
+		if len(estate.Resources) > 0 {
+			addDetail("Estate facts", fmt.Sprintf("Estate context includes %d resources across %d regions and %d provider groups.",
+				len(estate.Resources),
+				len(deepResearchRegions(estate.Resources)),
+				len(buildDeepResearchProviderRollupFromEstate(estate)),
+			))
+		}
+	}
+	addDetail("Required proof", deepResearchVerifierRequiredProof(finding, plan))
+
+	return deepResearchFindingPatch{
+		FindingID:       finding.ID,
+		Evidence:        deepResearchEvidenceStrings(details),
+		EvidenceDetails: deepResearchLimitEvidenceDetails(uniqueDeepResearchEvidenceDetails(details), 7),
+		Questions:       buildDeepResearchVerifierQuestions(finding, foundResource, resource),
+		ScoreDelta:      deepResearchVerifierScoreDelta(finding, foundResource),
+	}, foundResource, lens
+}
+
+func deepResearchVerifierLens(finding deepResearchFinding) string {
+	switch strings.ToLower(strings.TrimSpace(finding.Category)) {
+	case "cost":
+		return "FinOps"
+	case "misconfiguration":
+		return "Security"
+	case "resilience":
+		return "Reliability"
+	case "bottleneck":
+		return "SRE"
+	case "hygiene":
+		return "DevOps"
+	default:
+		return "Architecture"
+	}
+}
+
+func deepResearchVerifierLensDetail(lens string, finding deepResearchFinding) string {
+	switch lens {
+	case "FinOps":
+		return "FinOps lens: tie spend to owner, service, demand metric, utilization, and rollback criteria before rightsizing."
+	case "Security":
+		return "Security lens: validate threat boundary, public exposure, identity permissions, encryption, backup posture, and least-privilege controls."
+	case "Reliability":
+		return "Reliability lens: prove blast radius, failover, backup/restore, degraded-state impact, and recovery objective before accepting risk."
+	case "SRE":
+		return "SRE lens: evaluate latency, traffic, errors, saturation, dependency fan-in, and capacity ceiling before recommending scale changes."
+	case "DevOps":
+		return "DevOps lens: confirm owner, repo/deploy source, recent activity, runbook, and rollback path before cleanup or migration."
+	default:
+		return "Architecture lens: map provider, region, dependency path, shared state, bottleneck, and future growth risk before changing the system."
+	}
+}
+
+func deepResearchVerifierRequiredProof(finding deepResearchFinding, plan deepResearchQuestionPlan) string {
+	switch strings.ToLower(strings.TrimSpace(finding.Category)) {
+	case "cost":
+		return "Required proof: show the cost driver, traffic or utilization denominator, owner approval, expected unit-cost impact, and rollback plan."
+	case "misconfiguration":
+		return "Required proof: show the exposed control, affected data or identity boundary, compensating control, remediation command/change, and validation step."
+	case "resilience":
+		return "Required proof: show current redundancy, backup/restore path, failover behavior, alert coverage, and user-facing blast radius."
+	case "bottleneck":
+		return "Required proof: show request path, fan-in/fan-out, latency, error-rate, saturation, and projected growth before scaling or decomposing."
+	case "hygiene":
+		return "Required proof: show last activity, owner, dependencies, access path, cost/security impact, and a reversible retirement plan."
+	default:
+		if plan.WantsTopology {
+			return "Required proof: show dependency path, owner, provider data, traffic evidence, failure mode, and the exact next architecture change."
+		}
+		return "Required proof: show resource facts, owner, dependency path, operational impact, and a validation step for the recommendation."
+	}
+}
+
+func deepResearchSecurityVerifierDetail(resource deepResearchResource) string {
+	signals := make([]string, 0, 4)
+	if deepResearchHasExternalAddress(resource) {
+		signals = append(signals, "public network address present")
+	}
+	if encrypted, ok := deepResearchBoolAttr(resource.Attributes, "storageEncrypted"); ok {
+		if encrypted {
+			signals = append(signals, "storageEncrypted=true")
+		} else {
+			signals = append(signals, "storageEncrypted=false")
+		}
+	}
+	if backupRetention, ok := deepResearchIntAttr(resource.Attributes, "backupRetentionPeriod"); ok {
+		signals = append(signals, fmt.Sprintf("backupRetentionPeriod=%d", backupRetention))
+	}
+	if len(resource.IAMPolicies) > 0 {
+		signals = append(signals, fmt.Sprintf("%d IAM policies attached", len(resource.IAMPolicies)))
+	}
+	if len(signals) == 0 {
+		return "No explicit public exposure, encryption, backup, or IAM policy fields were present in the snapshot for this resource."
+	}
+	return "Security-relevant fields: " + strings.Join(signals, "; ") + "."
+}
+
+func deepResearchDeliveryVerifierDetail(resource deepResearchResource) string {
+	signals := make([]string, 0, 4)
+	for _, key := range []string{"repository", "repo", "githubRepo", "repoFullName", "sourceRepo", "gitRepository"} {
+		if value := deepResearchFirstNonEmptyAttr(resource.Attributes, key); value != "" {
+			signals = append(signals, fmt.Sprintf("%s=%s", key, value))
+			break
+		}
+	}
+	for _, key := range []string{"deployment", "deploymentId", "release", "branch", "commit", "commitSha", "gitCommit", "deploymentCommit"} {
+		if value := deepResearchFirstNonEmptyAttr(resource.Attributes, key); value != "" {
+			signals = append(signals, fmt.Sprintf("%s=%s", key, value))
+			if len(signals) >= 4 {
+				break
+			}
+		}
+	}
+	if len(signals) == 0 {
+		return "No repo, deployment, branch, or commit signal was visible, so change ownership and rollback readiness remain unverified."
+	}
+	return "Delivery linkage fields: " + strings.Join(signals, "; ") + "."
+}
+
+func buildDeepResearchVerifierQuestions(finding deepResearchFinding, foundResource bool, resource deepResearchResource) []string {
+	label := deepResearchResourceLabelFromFinding(finding)
+	if foundResource {
+		label = deepResearchResourceLabel(resource)
+	}
+	questions := []string{
+		fmt.Sprintf("What exact evidence proves the recommendation for %s is safe to apply?", label),
+	}
+	switch strings.ToLower(strings.TrimSpace(finding.Category)) {
+	case "cost":
+		questions = append(questions,
+			fmt.Sprintf("What traffic, utilization, or unit metric should gate any cost change on %s?", label),
+			fmt.Sprintf("Who owns %s and what rollback would restore capacity if demand spikes?", label),
+		)
+	case "misconfiguration":
+		questions = append(questions,
+			fmt.Sprintf("What boundary, data class, or identity path is exposed by %s?", label),
+			fmt.Sprintf("How do I verify %s is hardened after the change?", label),
+		)
+	case "resilience":
+		questions = append(questions,
+			fmt.Sprintf("What is the user-facing blast radius if %s fails?", label),
+			fmt.Sprintf("Which restore, failover, or rollback test should run for %s?", label),
+		)
+	case "bottleneck":
+		questions = append(questions,
+			fmt.Sprintf("Which requests flow through %s and what are their latency/error/saturation limits?", label),
+			fmt.Sprintf("What future traffic level makes %s a scaling incident?", label),
+		)
+	case "hygiene":
+		questions = append(questions,
+			fmt.Sprintf("What last-activity signal proves %s is unused?", label),
+			fmt.Sprintf("Which dependency or access path would break if %s is retired?", label),
+		)
+	default:
+		questions = append(questions,
+			fmt.Sprintf("Which architecture path, owner, and provider signal explain %s?", label),
+			fmt.Sprintf("What future scaling or operational problem does %s create if left unchanged?", label),
+		)
+	}
+	return deepResearchLimitStrings(uniqueNonEmptyStrings(questions), 4)
+}
+
+func deepResearchVerifierScoreDelta(finding deepResearchFinding, foundResource bool) float64 {
+	delta := 5.0
+	if foundResource {
+		delta += 4
+	}
+	switch strings.ToLower(strings.TrimSpace(finding.Severity)) {
+	case "critical":
+		delta += 10
+	case "high":
+		delta += 7
+	case "medium":
+		delta += 4
+	}
+	switch strings.ToLower(strings.TrimSpace(finding.Category)) {
+	case "misconfiguration", "resilience", "bottleneck":
+		delta += 3
+	}
+	return delta
+}
+
+func deepResearchResourceDependencyCounts(resource deepResearchResource, resources []deepResearchResource) (int, int) {
+	outboundSeen := make(map[string]struct{})
+	for _, target := range resource.Connections {
+		target = strings.TrimSpace(target)
+		if target != "" {
+			outboundSeen[target] = struct{}{}
+		}
+	}
+	for _, connection := range resource.TypedConnections {
+		target := strings.TrimSpace(connection.TargetID)
+		if target != "" {
+			outboundSeen[target] = struct{}{}
+		}
+	}
+
+	inboundSeen := make(map[string]struct{})
+	for _, candidate := range resources {
+		if strings.TrimSpace(candidate.ID) == "" || candidate.ID == resource.ID {
+			continue
+		}
+		targets := make(map[string]struct{})
+		for _, target := range candidate.Connections {
+			target = strings.TrimSpace(target)
+			if target != "" {
+				targets[target] = struct{}{}
+			}
+		}
+		for _, connection := range candidate.TypedConnections {
+			target := strings.TrimSpace(connection.TargetID)
+			if target != "" {
+				targets[target] = struct{}{}
+			}
+		}
+		if _, ok := targets[resource.ID]; ok {
+			inboundSeen[candidate.ID] = struct{}{}
+		}
+	}
+	return len(inboundSeen), len(outboundSeen)
+}
+
+func uniqueDeepResearchEvidenceDetails(details []deepResearchEvidenceDetail) []deepResearchEvidenceDetail {
+	seen := make(map[string]struct{}, len(details))
+	unique := make([]deepResearchEvidenceDetail, 0, len(details))
+	for _, detail := range details {
+		detail.Detail = strings.TrimSpace(detail.Detail)
+		detail.Source = strings.TrimSpace(detail.Source)
+		detail.Provider = strings.TrimSpace(detail.Provider)
+		detail.Section = strings.TrimSpace(detail.Section)
+		if detail.Detail == "" {
+			continue
+		}
+		key := strings.Join([]string{strings.ToLower(detail.Source), strings.ToLower(detail.Provider), strings.ToLower(detail.Section), detail.Detail}, "|")
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, detail)
+	}
+	return unique
+}
+
+func deepResearchLimitEvidenceDetails(details []deepResearchEvidenceDetail, maxCount int) []deepResearchEvidenceDetail {
+	if maxCount <= 0 || len(details) <= maxCount {
+		return details
+	}
+	return append([]deepResearchEvidenceDetail(nil), details[:maxCount]...)
 }
 
 func executeDeepResearchSubagentBatch(ctx context.Context, subagents []deepResearchSubagent) ([]deepResearchFinding, []deepResearchSubagentRun, []string) {
@@ -1778,10 +2151,59 @@ func deepResearchProviderPromptTerms(provider string, plan deepResearchQuestionP
 	if plan.WantsTopology {
 		terms = append(terms, "dependency", "bottleneck", "hotspot", "scaling")
 	}
+	terms = append(terms, deepResearchFirstPrinciplesPromptTerms(plan, targets)...)
 	for _, finding := range targets {
 		terms = append(terms, deepResearchProviderFocusTerms(provider, finding, plan)...)
 	}
 	return uniqueNonEmptyStrings(terms)
+}
+
+func deepResearchFirstPrinciplesPromptTerms(plan deepResearchQuestionPlan, targets []deepResearchFinding) []string {
+	terms := []string{
+		"systems architect",
+		"cloud architect",
+		"first principles",
+		"verify evidence",
+		"critical bugs",
+		"misconfiguration",
+		"future scaling risk",
+		"sre golden signals latency traffic errors saturation",
+		"blast radius failover backup restore rollback",
+		"security threat model public exposure identity permissions encryption secrets data protection least privilege",
+		"finops unit economics owner allocation utilization rightsizing idle waste anomaly budget",
+		"devops ownership deployment frequency lead time change failure rate time to restore runbook rollback",
+		"software architecture dependencies critical path queue cache database rate limit capacity ceiling",
+	}
+	if plan.WantsCICD {
+		terms = append(terms, "ci cd pipeline deploy provenance release health")
+	}
+	if plan.WantsDatabase {
+		terms = append(terms, "database durability backups encryption private networking connection saturation")
+	}
+	if plan.WantsNetwork {
+		terms = append(terms, "ingress egress dns load balancer firewall private network")
+	}
+	if plan.WantsKubernetes {
+		terms = append(terms, "kubernetes requests limits hpa restarts events node saturation")
+	}
+	if plan.WantsTerraform {
+		terms = append(terms, "terraform drift plan state ownership lifecycle")
+	}
+	for _, finding := range targets {
+		switch strings.ToLower(strings.TrimSpace(finding.Category)) {
+		case "cost":
+			terms = append(terms, "cost driver demand denominator unit metric utilization commitment savings risk")
+		case "misconfiguration":
+			terms = append(terms, "attack surface exposure encryption backup iam firewall secrets compliance")
+		case "resilience":
+			terms = append(terms, "single point of failure redundancy restore objective failover incident response")
+		case "bottleneck":
+			terms = append(terms, "fan in fan out throughput saturation latency critical path scale ceiling")
+		case "hygiene":
+			terms = append(terms, "stale unused ownership last activity dependency cleanup reversible retirement")
+		}
+	}
+	return terms
 }
 
 func buildDeepResearchProviderScoutQuestions(provider string, finding deepResearchFinding, plan deepResearchQuestionPlan) []string {
@@ -2664,14 +3086,27 @@ func buildDeepResearchSystemImprovement(estate deepResearchEstateSnapshot, findi
 
 func buildDeepResearchTrafficAssessment(resources []deepResearchResource, findings []deepResearchFinding, plan deepResearchQuestionPlan) deepResearchSystemImprovementBlock {
 	edges, typedEdges, entrypoints := deepResearchTopologyCounts(resources)
-	trafficSignals := collectDeepResearchTrafficSignals(resources, 6)
-	hotspots := collectDeepResearchTrafficHotspots(resources, 4)
-	costTraffic := collectDeepResearchCostTrafficSignals(resources, 3)
+	allTrafficSignals := collectDeepResearchTrafficSignals(resources, 0)
+	trafficSignals := deepResearchLimitStrings(allTrafficSignals, 8)
+	hotspots := collectDeepResearchTrafficHotspots(resources, 6)
+	allCostTraffic := collectDeepResearchCostTrafficSignals(resources, 0)
+	costTraffic := deepResearchLimitStrings(allCostTraffic, 6)
 	bottlenecks := deepResearchFindingsByCategory(findings, "bottleneck")
+	trafficResourceCount := 0
+	for _, resource := range resources {
+		if len(deepResearchTrafficSignalLabels(resource)) > 0 {
+			trafficResourceCount++
+		}
+	}
 
 	evidence := []string{
+		fmt.Sprintf("%d resources expose %d traffic, latency, error, saturation, throughput, or bandwidth fields.", trafficResourceCount, len(allTrafficSignals)),
 		fmt.Sprintf("Topology model contains %d dependency edges, including %d typed edges.", edges, typedEdges),
 		fmt.Sprintf("Detected %d likely ingress, edge, or entrypoint resources.", entrypoints),
+		fmt.Sprintf("%d topology bottleneck findings are ranked in the current report.", len(bottlenecks)),
+	}
+	if len(allCostTraffic) > 0 {
+		evidence = append(evidence, fmt.Sprintf("%d resources have both cost and demand metrics for unit-economics review.", len(allCostTraffic)))
 	}
 	evidence = append(evidence, trafficSignals...)
 	evidence = append(evidence, hotspots...)
@@ -2680,7 +3115,7 @@ func buildDeepResearchTrafficAssessment(resources []deepResearchResource, findin
 
 	gaps := make([]string, 0, 3)
 	status := "ok"
-	if len(trafficSignals) == 0 {
+	if len(allTrafficSignals) == 0 {
 		status = "gap"
 		gaps = append(gaps, "No direct request, latency, throughput, error-rate, or bandwidth metrics were present in the estate snapshot.")
 	}
@@ -2694,13 +3129,13 @@ func buildDeepResearchTrafficAssessment(resources []deepResearchResource, findin
 		status = "warning"
 	}
 
-	summary := "Traffic analysis used topology, edge resources, and available metrics to identify where requests probably concentrate."
-	if len(trafficSignals) == 0 {
+	summary := fmt.Sprintf("Traffic review found %d measured signal fields across %d resources, %d entrypoints, and %d topology hotspot candidates.", len(allTrafficSignals), trafficResourceCount, entrypoints, len(hotspots))
+	if len(allTrafficSignals) == 0 {
 		summary = "Traffic analysis is mostly inferential because the snapshot does not include live request or latency metrics."
 	} else if len(bottlenecks) > 0 {
-		summary = fmt.Sprintf("Traffic analysis found %d measured signals and %d topology bottleneck candidates.", len(trafficSignals), len(bottlenecks))
+		summary = fmt.Sprintf("Traffic review found %d measured signal fields, %d topology bottleneck candidates, and %d entrypoints.", len(allTrafficSignals), len(bottlenecks), entrypoints)
 	} else if len(costTraffic) > 0 {
-		summary = fmt.Sprintf("Traffic analysis found %d measured signals and %d cost-versus-traffic correlation candidates.", len(trafficSignals), len(costTraffic))
+		summary = fmt.Sprintf("Traffic review found %d measured signal fields and %d cost-versus-traffic correlation candidates.", len(allTrafficSignals), len(allCostTraffic))
 	}
 	if plan.WantsLogs {
 		summary += " Recent logs and alerts were prioritized for live provider drilldowns."
@@ -2709,23 +3144,30 @@ func buildDeepResearchTrafficAssessment(resources []deepResearchResource, findin
 	return deepResearchSystemImprovementBlock{
 		Status:   status,
 		Summary:  summary,
-		Evidence: deepResearchLimitStrings(evidence, 8),
+		Evidence: deepResearchLimitStrings(evidence, 12),
 		Gaps:     uniqueNonEmptyStrings(gaps),
 	}
 }
 
 func buildDeepResearchCodebaseAssessment(resources []deepResearchResource) deepResearchSystemImprovementBlock {
 	trackedRepos := loadDeepResearchTrackedRepos()
-	codeSignals := collectDeepResearchCodebaseSignals(resources, 6)
-	deploySignals := collectDeepResearchDeploySignals(resources, 5)
+	allCodeSignals := collectDeepResearchCodebaseSignals(resources, 0)
+	codeSignals := deepResearchLimitStrings(allCodeSignals, 8)
+	allDeploySignals := collectDeepResearchDeploySignals(resources, 0)
+	deploySignals := deepResearchLimitStrings(allDeploySignals, 6)
 	untagged := 0
+	owned := 0
 	for _, resource := range resources {
 		if !deepResearchHasOwnershipTags(resource.Tags) {
 			untagged++
+		} else {
+			owned++
 		}
 	}
 
-	evidence := make([]string, 0, 8)
+	evidence := make([]string, 0, 12)
+	evidence = append(evidence, fmt.Sprintf("Ownership coverage: %d/%d resources expose owner, team, service, project, environment, or env tags.", owned, len(resources)))
+	evidence = append(evidence, fmt.Sprintf("Code visibility: %d tracked repos, %d repo-linked resources, and %d deploy/runtime signals.", len(trackedRepos), len(allCodeSignals), len(allDeploySignals)))
 	if len(trackedRepos) > 0 {
 		for _, repo := range deepResearchLimitStrings(trackedRepos, 4) {
 			evidence = append(evidence, "Tracked repo: "+repo)
@@ -2739,11 +3181,11 @@ func buildDeepResearchCodebaseAssessment(resources []deepResearchResource) deepR
 
 	gaps := make([]string, 0, 3)
 	status := "ok"
-	if len(trackedRepos) == 0 && len(codeSignals) == 0 {
+	if len(trackedRepos) == 0 && len(allCodeSignals) == 0 {
 		status = "gap"
 		gaps = append(gaps, "No tracked repositories or repository-linked resources were visible to this run.")
 	}
-	if len(deploySignals) == 0 {
+	if len(allDeploySignals) == 0 {
 		gaps = append(gaps, "No deployment pipeline, build, or release resources were visible in the snapshot.")
 	}
 	if untagged > len(resources)/3 && len(resources) > 0 {
@@ -2753,17 +3195,17 @@ func buildDeepResearchCodebaseAssessment(resources []deepResearchResource) deepR
 		}
 	}
 
-	summary := "Codebase understanding used tracked GitHub repos, repository-linked resources, deployment resources, and ownership tags."
+	summary := fmt.Sprintf("Codebase review mapped %d tracked repos, %d repo-linked resources, %d deploy/runtime signals, and %d unowned resources.", len(trackedRepos), len(allCodeSignals), len(allDeploySignals), untagged)
 	if status == "gap" {
 		summary = "Codebase understanding is limited because no repo or deployment-system context was available in this run."
 	} else if len(trackedRepos) > 0 {
-		summary = fmt.Sprintf("Codebase understanding includes %d tracked repos plus %d resource-level code or deploy signals.", len(trackedRepos), len(codeSignals)+len(deploySignals))
+		summary = fmt.Sprintf("Codebase review includes %d tracked repos plus %d resource-level code or deploy signals; %d resources still lack ownership tags.", len(trackedRepos), len(allCodeSignals)+len(allDeploySignals), untagged)
 	}
 
 	return deepResearchSystemImprovementBlock{
 		Status:   status,
 		Summary:  summary,
-		Evidence: deepResearchLimitStrings(uniqueNonEmptyStrings(evidence), 8),
+		Evidence: deepResearchLimitStrings(uniqueNonEmptyStrings(evidence), 12),
 		Gaps:     uniqueNonEmptyStrings(gaps),
 	}
 }
@@ -2775,13 +3217,16 @@ func buildDeepResearchArchitectureAssessment(estate deepResearchEstateSnapshot, 
 	resilienceFindings := deepResearchFindingsByCategory(findings, "resilience")
 	misconfigFindings := deepResearchFindingsByCategory(findings, "misconfiguration")
 	costFindings := deepResearchFindingsByCategory(findings, "cost")
+	bottleneckFindings := deepResearchFindingsByCategory(findings, "bottleneck")
+	hygieneFindings := deepResearchFindingsByCategory(findings, "hygiene")
 
 	evidence := []string{
 		fmt.Sprintf("%d resources across %d regions and %d provider groups.", len(estate.Resources), len(regions), len(providers)),
 		fmt.Sprintf("%d dependency edges, %d typed edges, %d likely entrypoints.", edges, typedEdges, entrypoints),
+		fmt.Sprintf("Finding mix: %d cost, %d bottleneck, %d resilience, %d misconfiguration, and %d hygiene findings.", len(costFindings), len(bottleneckFindings), len(resilienceFindings), len(misconfigFindings), len(hygieneFindings)),
 	}
 	if len(providers) > 0 {
-		evidence = append(evidence, fmt.Sprintf("%s is the largest observed provider by spend at %.1f%%.", strings.ToUpper(providers[0].Provider), providers[0].ShareOfCost))
+		evidence = append(evidence, fmt.Sprintf("%s is the largest observed provider with %d resources, $%.2f/mo, and %.1f%% of observed spend.", strings.ToUpper(providers[0].Provider), providers[0].ResourceCount, providers[0].MonthlyCost, providers[0].ShareOfCost))
 	}
 	evidence = append(evidence, criticalPaths...)
 	if len(resilienceFindings) > 0 {
@@ -2816,17 +3261,17 @@ func buildDeepResearchArchitectureAssessment(estate deepResearchEstateSnapshot, 
 		status = "warning"
 	}
 
-	summary := "Architecture review combined provider mix, regions, dependency graph density, entrypoints, and ranked findings."
+	summary := fmt.Sprintf("Architecture review mapped %d resources, %d regions, %d provider groups, %d typed dependency edges, and %d likely entrypoints.", len(estate.Resources), len(regions), len(providers), typedEdges, entrypoints)
 	if status == "gap" {
 		summary = "Architecture review is inventory-heavy because dependency relationships are missing from the snapshot."
 	} else if len(resilienceFindings) > 0 || len(costFindings) > 0 {
-		summary = fmt.Sprintf("Architecture review found %d resilience and %d cost signals that should drive the improvement roadmap.", len(resilienceFindings), len(costFindings))
+		summary = fmt.Sprintf("Architecture review found %d resilience, %d bottleneck, %d security/configuration, and %d cost signals that should drive the roadmap.", len(resilienceFindings), len(bottleneckFindings), len(misconfigFindings), len(costFindings))
 	}
 
 	return deepResearchSystemImprovementBlock{
 		Status:   status,
 		Summary:  summary,
-		Evidence: deepResearchLimitStrings(uniqueNonEmptyStrings(evidence), 8),
+		Evidence: deepResearchLimitStrings(uniqueNonEmptyStrings(evidence), 12),
 		Gaps:     uniqueNonEmptyStrings(gaps),
 	}
 }
@@ -4468,7 +4913,7 @@ func buildDeepResearchEvidenceMix(findings []deepResearchFinding) []deepResearch
 			counts[source]++
 		}
 	}
-	order := []string{"provider-drilldown", "provider-scout", "heuristic"}
+	order := []string{"provider-drilldown", "provider-scout", "verifier", "heuristic"}
 	mix := make([]deepResearchEvidenceMix, 0, len(counts))
 	for _, source := range order {
 		if counts[source] == 0 {
@@ -4494,6 +4939,8 @@ func deepResearchEvidenceSourceLabel(source string) string {
 		return "Live drilldown"
 	case "provider-scout":
 		return "Provider scout"
+	case "verifier":
+		return "Verifier"
 	case "heuristic":
 		return "Heuristic"
 	default:
@@ -5495,61 +5942,73 @@ func buildDeepResearchQuestions(kind string, resource deepResearchResource) []st
 		return []string{
 			fmt.Sprintf("Why does %s cost so much right now?", label),
 			fmt.Sprintf("How can I reduce the monthly cost of %s safely?", label),
+			fmt.Sprintf("Which traffic, utilization, or unit metric explains the spend on %s?", label),
 		}
 	case "idle-cost":
 		return []string{
 			fmt.Sprintf("Can I delete or hibernate %s without breaking anything?", label),
 			fmt.Sprintf("What still depends on %s?", label),
+			fmt.Sprintf("What last activity, owner approval, and rollback plan prove %s is safe to retire?", label),
 		}
 	case "untagged-cost":
 		return []string{
 			fmt.Sprintf("Who owns %s and which environment is it part of?", label),
 			fmt.Sprintf("What tags should I add to %s for cost attribution?", label),
+			fmt.Sprintf("Which repo, deploy pipeline, or service map should own %s?", label),
 		}
 	case "topology-bottleneck":
 		return []string{
 			fmt.Sprintf("How risky is %s as a bottleneck on the current request path?", label),
 			fmt.Sprintf("What scaling or redundancy changes would reduce risk around %s?", label),
+			fmt.Sprintf("What are latency, traffic, error-rate, and saturation values around %s?", label),
 		}
 	case "orphan-cost":
 		return []string{
 			fmt.Sprintf("Is %s still serving production traffic?", label),
 			fmt.Sprintf("Why does %s have no visible connections in the estate graph?", label),
+			fmt.Sprintf("Which owner, logs, or access events prove whether %s is real workload or waste?", label),
 		}
 	case "single-point":
 		return []string{
 			fmt.Sprintf("How do I remove %s as a single point of failure?", label),
 			fmt.Sprintf("What is the blast radius if %s fails?", label),
+			fmt.Sprintf("What backup, failover, restore, and alert evidence exists for %s?", label),
 		}
 	case "degraded-state":
 		return []string{
 			fmt.Sprintf("Why is %s currently %s?", label, strings.TrimSpace(resource.State)),
 			fmt.Sprintf("What should I inspect first on %s?", label),
+			fmt.Sprintf("Which recent logs, events, deploys, or saturation changes explain %s?", label),
 		}
 	case "public-database":
 		return []string{
 			fmt.Sprintf("Why does %s still have a public database address?", label),
 			fmt.Sprintf("How do I move %s onto private networking without breaking clients?", label),
+			fmt.Sprintf("Which clients, security groups, IAM identities, and backup paths touch %s?", label),
 		}
 	case "disabled-backups":
 		return []string{
 			fmt.Sprintf("What is the backup and restore path for %s today?", label),
 			fmt.Sprintf("How do I enable backups on %s safely?", label),
+			fmt.Sprintf("What restore test and recovery objective should %s satisfy?", label),
 		}
 	case "unencrypted-data":
 		return []string{
 			fmt.Sprintf("How do I enable encryption at rest on %s?", label),
 			fmt.Sprintf("What migration or downtime risk comes with encrypting %s?", label),
+			fmt.Sprintf("Which data class, key policy, and verification step apply to %s?", label),
 		}
 	case "public-compute":
 		return []string{
 			fmt.Sprintf("Should %s really be reachable from the public internet?", label),
 			fmt.Sprintf("What is the safest edge pattern for %s?", label),
+			fmt.Sprintf("Which firewall, identity, logging, and owner controls prove %s is intentionally public?", label),
 		}
 	case "stale-resource":
 		return []string{
 			fmt.Sprintf("Is %s still serving anything real?", label),
 			fmt.Sprintf("Who owns %s and can I retire it safely?", label),
+			fmt.Sprintf("What dependency, access, billing, or deploy signal would block removing %s?", label),
 		}
 	default:
 		return []string{fmt.Sprintf("Explain the issue around %s in more detail.", label)}
