@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -26,7 +27,7 @@ import (
 )
 
 const (
-	defaultDeepResearchQuestion     = "Analyze the current infrastructure for bottlenecks, resilience risks, cost optimization opportunities, misconfigurations, stale or unused resources, and recent log signals. Prioritize cost and identify the clearest next actions."
+	defaultDeepResearchQuestion     = "Analyze the current infrastructure from the perspective of an experienced systems architect and cloud architect. Assess system status, architecture, provider coverage, bottlenecks, reliability, security, operational hygiene, optimization opportunities, and cost efficiency. Recommend concrete next actions for resources and systems."
 	deepResearchResultMarker        = "::clanker-deep-research-result::"
 	runtimeDeepResearchEstateEnv    = "CLANKER_RUNTIME_DEEP_RESEARCH_ESTATE_JSON"
 	maxDeepResearchNarrativeBullets = 4
@@ -3667,18 +3668,71 @@ func buildDeepResearchSummary(estate deepResearchEstateSnapshot, findings []deep
 			summary.TopRisks = append(summary.TopRisks, finding.Title)
 		}
 	}
-	if summary.CostFindings > 0 {
-		summary.PrimaryFocus = "cost"
-	} else if summary.BottleneckFindings > 0 {
-		summary.PrimaryFocus = "bottleneck"
-	} else if deepResearchHasCategory(findings, "misconfiguration") {
-		summary.PrimaryFocus = "misconfiguration"
-	} else if deepResearchHasCategory(findings, "hygiene") {
-		summary.PrimaryFocus = "hygiene"
-	} else {
-		summary.PrimaryFocus = "estate-overview"
-	}
+	summary.PrimaryFocus = deepResearchPrimaryFocus(findings)
 	return summary
+}
+
+func deepResearchPrimaryFocus(findings []deepResearchFinding) string {
+	if len(findings) == 0 {
+		return "estate-overview"
+	}
+
+	categoryScores := make(map[string]float64)
+	severeNonCost := 0
+	highSignalCategories := make(map[string]struct{})
+	for _, finding := range findings {
+		category := strings.ToLower(strings.TrimSpace(finding.Category))
+		if category == "" {
+			category = "estate-overview"
+		}
+		severity := deepResearchSeverityRank(finding.Severity)
+		categoryScores[category] += deepResearchCategoryArchitectureWeight(category) + float64(severity*12) + math.Min(finding.Score/100, 8)
+		if category != "cost" && severity >= 3 {
+			severeNonCost++
+			highSignalCategories[category] = struct{}{}
+		}
+	}
+
+	bestCategory := "estate-overview"
+	bestScore := -1.0
+	for category, score := range categoryScores {
+		if score > bestScore || (score == bestScore && category < bestCategory) {
+			bestCategory = category
+			bestScore = score
+		}
+	}
+	if len(highSignalCategories) >= 3 {
+		return "system-architecture"
+	}
+	if bestCategory == "cost" && severeNonCost > 0 {
+		nonCostScore := 0.0
+		for category, score := range categoryScores {
+			if category != "cost" {
+				nonCostScore += score
+			}
+		}
+		if len(highSignalCategories) >= 2 || nonCostScore >= categoryScores["cost"]*0.72 {
+			return "system-architecture"
+		}
+	}
+	return bestCategory
+}
+
+func deepResearchCategoryArchitectureWeight(category string) float64 {
+	switch strings.ToLower(strings.TrimSpace(category)) {
+	case "misconfiguration":
+		return 18
+	case "resilience":
+		return 16
+	case "bottleneck":
+		return 14
+	case "cost":
+		return 8
+	case "hygiene":
+		return 6
+	default:
+		return 4
+	}
 }
 
 func enrichDeepResearchNarrative(ctx context.Context, result deepResearchResult, debug bool) ([]string, error) {
@@ -3718,7 +3772,9 @@ func buildDeepResearchNarrativePrompt(result deepResearchResult) string {
 	return fmt.Sprintf(`You are Clanker's deep research synthesis agent.
 
 Summarize the infrastructure research results into 2 to 4 concise bullets.
-Put cost first, then bottlenecks/resilience, then the sharpest next action.
+Write from the point of view of an experienced systems architect and cloud architect.
+Lead with system status, architecture risk, reliability/security/performance posture, provider coverage, and the sharpest next action.
+Include cost optimization only as one operating dimension, not as the default headline unless it is clearly the dominant risk.
 
 Return strict JSON only in this shape:
 {"narrative":["bullet 1","bullet 2"]}
@@ -3730,8 +3786,14 @@ Input:
 func buildDeterministicNarrative(findings []deepResearchFinding, providers []deepResearchProviderRoll) []string {
 	lines := make([]string, 0, maxDeepResearchNarrativeBullets)
 	if len(providers) > 0 {
-		primary := providers[0]
-		lines = append(lines, fmt.Sprintf("%s currently drives the largest observed cost share at %.1f%% of the estate.", strings.ToUpper(primary.Provider), primary.ShareOfCost))
+		providerLabels := make([]string, 0, minInt(3, len(providers)))
+		for _, provider := range providers {
+			providerLabels = append(providerLabels, fmt.Sprintf("%s (%d resources)", strings.ToUpper(provider.Provider), provider.ResourceCount))
+			if len(providerLabels) >= 3 {
+				break
+			}
+		}
+		lines = append(lines, fmt.Sprintf("Reviewed %d provider groups across the estate: %s.", len(providers), strings.Join(providerLabels, ", ")))
 	}
 	for _, finding := range findings {
 		if len(lines) >= maxDeepResearchNarrativeBullets {
@@ -4136,36 +4198,91 @@ func deepResearchSeverityForCost(cost float64) string {
 }
 
 func inferDeepResearchProvider(resource deepResearchResource) string {
-	if provider, ok := resource.Attributes["provider"].(string); ok {
-		normalized := strings.ToLower(strings.TrimSpace(provider))
-		if normalized != "" {
+	for _, provider := range []string{
+		deepResearchFirstNonEmptyAttr(resource.Attributes, "provider", "cloudProvider", "platform", "sourceProvider", "serviceProvider"),
+		deepResearchTagValue(resource.Tags, "provider", "cloudProvider", "platform", "sourceProvider"),
+	} {
+		if normalized := normalizeDeepResearchProvider(provider); normalized != "" {
 			return normalized
 		}
 	}
 	typeLower := strings.ToLower(strings.TrimSpace(resource.Type))
+	haystack := strings.ToLower(strings.Join([]string{
+		resource.Type,
+		resource.ID,
+		resource.Name,
+		resource.Region,
+		deepResearchFirstNonEmptyAttr(resource.Attributes, "arn", "resourceArn", "providerId", "resourceId", "selfLink", "url", "account", "project", "subscription"),
+	}, " "))
 	switch {
-	case strings.Contains(typeLower, "azure") || strings.HasPrefix(typeLower, "azure_"):
+	case strings.Contains(haystack, "arn:aws:") || deepResearchAWSServiceType(typeLower):
+		return "aws"
+	case strings.Contains(typeLower, "azure") || strings.Contains(haystack, "microsoft.compute") || strings.Contains(haystack, "microsoft.") || strings.HasPrefix(typeLower, "azure_"):
 		return "azure"
-	case strings.Contains(typeLower, "gcp") || strings.Contains(typeLower, "google"):
+	case strings.Contains(typeLower, "gcp") || strings.Contains(typeLower, "google") || strings.Contains(haystack, "googleapis.com") || strings.Contains(haystack, "projects/"):
 		return "gcp"
 	case strings.Contains(typeLower, "kubernetes") || strings.Contains(typeLower, "k8s"):
 		return "k8s"
 	case strings.Contains(typeLower, "cloudflare") || strings.HasPrefix(typeLower, "cf_"):
 		return "cloudflare"
-	case strings.Contains(typeLower, "digitalocean") || strings.HasPrefix(typeLower, "do_"):
+	case strings.Contains(typeLower, "digitalocean") || strings.HasPrefix(typeLower, "do_") || strings.Contains(typeLower, "droplet"):
 		return "digitalocean"
 	case strings.Contains(typeLower, "github"):
 		return "github"
-	case strings.Contains(typeLower, "hetzner") || strings.HasPrefix(typeLower, "hz_"):
+	case strings.Contains(typeLower, "hetzner") || strings.Contains(typeLower, "hcloud") || strings.HasPrefix(typeLower, "hz_"):
 		return "hetzner"
+	case strings.Contains(typeLower, "flyio") || strings.Contains(typeLower, "fly.io") || strings.HasPrefix(typeLower, "fly_"):
+		return "flyio"
+	case strings.Contains(typeLower, "railway"):
+		return "railway"
 	case strings.Contains(typeLower, "supabase"):
 		return "supabase"
+	case strings.Contains(typeLower, "tencent"):
+		return "tencent"
 	case strings.Contains(typeLower, "verda"):
 		return "verda"
 	case strings.Contains(typeLower, "vercel"):
 		return "vercel"
+	case strings.Contains(typeLower, "terraform"):
+		return "terraform"
+	case strings.Contains(typeLower, "sentry"):
+		return "sentry"
+	case strings.Contains(typeLower, "linear"):
+		return "linear"
+	case strings.Contains(typeLower, "notion"):
+		return "notion"
 	default:
+		return "unknown"
+	}
+}
+
+func normalizeDeepResearchProvider(provider string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	switch provider {
+	case "", "<nil>":
+		return ""
+	case "amazon", "amazon web services", "aws":
 		return "aws"
+	case "google", "google cloud", "google cloud platform", "gcp":
+		return "gcp"
+	case "microsoft", "microsoft azure", "azure":
+		return "azure"
+	case "kubernetes", "k8s":
+		return "k8s"
+	case "cloudflare", "digitalocean", "hetzner", "flyio", "fly.io", "railway", "supabase", "vercel", "verda", "tencent", "terraform", "github", "sentry", "linear", "notion":
+		return strings.ReplaceAll(provider, "fly.io", "flyio")
+	default:
+		return provider
+	}
+}
+
+func deepResearchAWSServiceType(resourceType string) bool {
+	resourceType = strings.ToLower(strings.TrimSpace(resourceType))
+	switch resourceType {
+	case "apigateway", "apigateway_vpc_link", "apprunner", "appsync", "athena", "backup", "batch", "bedrock", "cloudfront", "cloudtrail", "cloudwatch", "codebuild", "codecommit", "codepipeline", "config", "documentdb", "dynamodb", "ebs", "ec2", "ecr", "ecs", "eks", "elasticache", "elb", "emr", "eventbridge", "fsx", "glue", "iam_policy", "iam_role", "kinesis", "kms", "lambda", "memorydb", "neptune", "opensearch", "pipes", "rds", "route53", "s3", "scheduler", "secretsmanager", "security-group", "securitygroup", "securitylake", "sfn", "sns", "sqs", "stepfunctions", "timestream", "verifiedpermissions", "vpc", "waf":
+		return true
+	default:
+		return strings.HasPrefix(resourceType, "aws_") || strings.HasPrefix(resourceType, "aws-")
 	}
 }
 
@@ -4354,6 +4471,20 @@ func deepResearchFirstNonEmptyAttr(attrs map[string]interface{}, keys ...string)
 		if value, ok := attrs[key]; ok {
 			if text := strings.TrimSpace(fmt.Sprint(value)); text != "" && text != "<nil>" {
 				return text
+			}
+		}
+	}
+	return ""
+}
+
+func deepResearchTagValue(tags map[string]string, keys ...string) string {
+	if len(tags) == 0 {
+		return ""
+	}
+	for _, key := range keys {
+		for tagKey, value := range tags {
+			if strings.EqualFold(strings.TrimSpace(tagKey), strings.TrimSpace(key)) {
+				return strings.TrimSpace(value)
 			}
 		}
 	}

@@ -179,6 +179,51 @@ func TestBuildDeepResearchSystemImprovementSurfacesTelemetryAndCodebaseGaps(t *t
 	}
 }
 
+func TestDeepResearchProviderInferenceDoesNotDefaultToAWS(t *testing.T) {
+	resources := []deepResearchResource{
+		{ID: "gcp-run", Type: "gcp_cloudrun_service", MonthlyPrice: 40},
+		{ID: "cf-worker", Type: "cf_worker", MonthlyPrice: 20},
+		{ID: "railway-api", Type: "railway_service", MonthlyPrice: 15},
+		{ID: "generic-service", Type: "service", MonthlyPrice: 10},
+		{ID: "arn:aws:rds:us-east-1:123:db:prod", Type: "database", MonthlyPrice: 30},
+	}
+
+	if provider := inferDeepResearchProvider(resources[0]); provider != "gcp" {
+		t.Fatalf("expected gcp provider, got %q", provider)
+	}
+	if provider := inferDeepResearchProvider(resources[1]); provider != "cloudflare" {
+		t.Fatalf("expected cloudflare provider, got %q", provider)
+	}
+	if provider := inferDeepResearchProvider(resources[2]); provider != "railway" {
+		t.Fatalf("expected railway provider, got %q", provider)
+	}
+	if provider := inferDeepResearchProvider(resources[3]); provider != "unknown" {
+		t.Fatalf("generic resource should not default to aws, got %q", provider)
+	}
+	if provider := inferDeepResearchProvider(resources[4]); provider != "aws" {
+		t.Fatalf("arn-backed resource should infer aws, got %q", provider)
+	}
+
+	rollup := buildDeepResearchProviderRollup(resources, 115)
+	if !containsProviderRollup(rollup, "unknown") {
+		t.Fatalf("expected unknown provider bucket for generic resources, got %+v", rollup)
+	}
+}
+
+func TestDeepResearchPrimaryFocusBalancesArchitectureRisks(t *testing.T) {
+	findings := []deepResearchFinding{
+		{Category: "cost", Severity: "critical", Score: 400, Title: "Large instance is expensive"},
+		{Category: "misconfiguration", Severity: "critical", Score: 260, Title: "Database is public"},
+		{Category: "resilience", Severity: "high", Score: 220, Title: "Only one database is visible"},
+		{Category: "bottleneck", Severity: "high", Score: 190, Title: "API gateway is saturated"},
+	}
+
+	focus := deepResearchPrimaryFocus(findings)
+	if focus != "system-architecture" {
+		t.Fatalf("expected mixed high-risk estate to produce system-architecture focus, got %q", focus)
+	}
+}
+
 func containsAnyJoined(values []string, needle string) bool {
 	return strings.Contains(strings.Join(values, "\n"), needle)
 }
@@ -195,6 +240,15 @@ func containsRecommendation(recommendations []deepResearchSystemRecommendation, 
 func containsAdvisorPillar(pillars []deepResearchAdvisorPillar, id string) bool {
 	for _, pillar := range pillars {
 		if pillar.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func containsProviderRollup(providers []deepResearchProviderRoll, provider string) bool {
+	for _, roll := range providers {
+		if roll.Provider == provider {
 			return true
 		}
 	}
