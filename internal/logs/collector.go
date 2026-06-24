@@ -174,13 +174,21 @@ func (d *refDedup) add(ref string, epochMs int64) bool {
 		return false
 	}
 	d.seen[ref] = epochMs
-	if epochMs > d.maxTs {
+	// Advance the high-water mark, but clamp against clock-skewed/garbage future
+	// timestamps so a single bad entry can't push the prune cutoff far ahead and
+	// empty the whole map (which would re-emit the next poll's overlap as dups).
+	nowMs := time.Now().UnixMilli() + int64(time.Minute/time.Millisecond)
+	if epochMs > d.maxTs && epochMs <= nowMs {
 		d.maxTs = epochMs
 	}
 	// Prune entries older than the retention window relative to the newest seen
 	// (not the just-added entry, which could be out-of-order/older).
 	if len(d.seen) > 4096 {
-		cutoff := d.maxTs - d.windowMs
+		base := d.maxTs
+		if base == 0 {
+			base = time.Now().UnixMilli()
+		}
+		cutoff := base - d.windowMs
 		for k, ts := range d.seen {
 			if ts < cutoff {
 				delete(d.seen, k)
