@@ -161,9 +161,9 @@ func normalizeLevel(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "trace":
 		return LevelTrace
-	case "debug", "dbg", "fine", "finer", "finest", "verbose", "default":
+	case "debug", "dbg", "fine", "finer", "finest", "verbose":
 		return LevelDebug
-	case "info", "information", "informational", "notice", "i":
+	case "log", "info", "information", "informational", "notice", "i":
 		return LevelInfo
 	case "warn", "warning", "w":
 		return LevelWarn

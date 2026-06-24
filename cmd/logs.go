@@ -20,6 +20,9 @@ import (
 // early exit, distinct from a cancelled context).
 var errCollectLimit = errors.New("collect limit reached")
 
+// liveOnlyProviders have no historical query; chat samples their live stream.
+var liveOnlyProviders = map[string]bool{"cloudflare": true, "cf": true}
+
 // newLogsCmd builds `clanker logs`, the provider-agnostic log surface the cloud
 // app drives. `query`/`tail` stream normalized JSON-lines on stdout (progress
 // on stderr); `chat` runs the agentic talk-to-logs flow; `sources` discovers
@@ -206,18 +209,30 @@ func runLogsChat(ctx context.Context, opts logs.Options, question, aiProfile str
 
 	logs.EmitProgress("collect", fmt.Sprintf("collecting %s logs for analysis", opts.Provider))
 	var entries []logs.Entry
-	cap := opts.Limit
-	if cap <= 0 {
-		cap = 2000
+	capN := opts.Limit
+	if capN <= 0 {
+		capN = 2000
 	}
-	collectErr := collector.Query(ctx, opts, func(e logs.Entry) error {
+	collect := func(e logs.Entry) error {
 		entries = append(entries, e)
-		if len(entries) >= cap {
+		if len(entries) >= capN {
 			return errCollectLimit // stop once we hit the cap
 		}
 		return nil
-	})
-	if collectErr != nil && !errors.Is(collectErr, errCollectLimit) {
+	}
+	var collectErr error
+	if liveOnlyProviders[strings.ToLower(opts.Provider)] {
+		// Live-only providers (e.g. cloudflare) have no historical query — sample
+		// the live stream for a bounded window so chat has real context instead
+		// of always seeing zero logs.
+		logs.EmitProgress("collect", "sampling live logs (up to 8s) for analysis")
+		cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		collectErr = collector.Tail(cctx, opts, collect)
+		cancel()
+	} else {
+		collectErr = collector.Query(ctx, opts, collect)
+	}
+	if collectErr != nil && !errors.Is(collectErr, errCollectLimit) && !errors.Is(collectErr, context.DeadlineExceeded) {
 		return collectErr
 	}
 
@@ -259,7 +274,11 @@ func buildLogsChatPrompt(opts logs.Options, question, contextBlock string, patte
 	if opts.Grep != "" {
 		fmt.Fprintf(&b, " grep=%q", opts.Grep)
 	}
-	fmt.Fprintf(&b, " window-from=%s\n", opts.Since.UTC().Format(time.RFC3339))
+	if opts.Since.IsZero() {
+		fmt.Fprintf(&b, " window=last %d entries\n", total)
+	} else {
+		fmt.Fprintf(&b, " window-from=%s\n", opts.Since.UTC().Format(time.RFC3339))
+	}
 	fmt.Fprintf(&b, "Signal counts: %d errors, %d timeouts, %d connection failures across %d lines.\n",
 		patterns["errors"], patterns["timeouts"], patterns["connection_failures"], total)
 	if truncated {

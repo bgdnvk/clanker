@@ -53,7 +53,20 @@ func (c *doCollector) args(opts Options, follow bool) []string {
 }
 
 func (c *doCollector) toEntry(opts Options, line string) Entry {
-	e := NewEntry("digitalocean", opts.Resource, opts.Service, line, time.Now())
+	// doctl App Platform run logs are prefixed with an RFC3339 timestamp on most
+	// components; parse it when present so ordering/time-filtering work, else now.
+	ts := time.Now()
+	msg := line
+	if idx := strings.IndexByte(line, ' '); idx > 0 {
+		if t, err := time.Parse(time.RFC3339Nano, line[:idx]); err == nil {
+			ts = t
+			msg = line[idx+1:]
+		} else if t, err := time.Parse(time.RFC3339, line[:idx]); err == nil {
+			ts = t
+			msg = line[idx+1:]
+		}
+	}
+	e := NewEntry("digitalocean", opts.Resource, opts.Service, msg, ts)
 	e.Service = opts.Service
 	return e
 }

@@ -161,6 +161,7 @@ const maxConsecutivePollErrors = 5
 type refDedup struct {
 	seen     map[string]int64
 	windowMs int64
+	maxTs    int64
 }
 
 func newRefDedup(window time.Duration) *refDedup {
@@ -173,9 +174,13 @@ func (d *refDedup) add(ref string, epochMs int64) bool {
 		return false
 	}
 	d.seen[ref] = epochMs
-	// Prune entries older than the retention window relative to this one.
+	if epochMs > d.maxTs {
+		d.maxTs = epochMs
+	}
+	// Prune entries older than the retention window relative to the newest seen
+	// (not the just-added entry, which could be out-of-order/older).
 	if len(d.seen) > 4096 {
-		cutoff := epochMs - d.windowMs
+		cutoff := d.maxTs - d.windowMs
 		for k, ts := range d.seen {
 			if ts < cutoff {
 				delete(d.seen, k)

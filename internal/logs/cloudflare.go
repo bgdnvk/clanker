@@ -38,18 +38,18 @@ func (c *cfCollector) Query(ctx context.Context, opts Options, emit Emit) error 
 
 // cfTailEvent is one `wrangler tail --format json` record (a Worker invocation).
 type cfTailEvent struct {
-	ScriptName     string `json:"scriptName"`
-	Outcome        string `json:"outcome"`
-	EventTimestamp int64  `json:"eventTimestamp"`
+	ScriptName     string  `json:"scriptName"`
+	Outcome        string  `json:"outcome"`
+	EventTimestamp float64 `json:"eventTimestamp"`
 	Logs           []struct {
-		Message   []any  `json:"message"`
-		Level     string `json:"level"`
-		Timestamp int64  `json:"timestamp"`
+		Message   []any   `json:"message"`
+		Level     string  `json:"level"`
+		Timestamp float64 `json:"timestamp"`
 	} `json:"logs"`
 	Exceptions []struct {
-		Name      string `json:"name"`
-		Message   string `json:"message"`
-		Timestamp int64  `json:"timestamp"`
+		Name      string  `json:"name"`
+		Message   string  `json:"message"`
+		Timestamp float64 `json:"timestamp"`
 	} `json:"exceptions"`
 	Event struct {
 		Request struct {
@@ -79,13 +79,13 @@ func (c *cfCollector) Tail(ctx context.Context, opts Options, emit Emit) error {
 		return fmt.Errorf("cloudflare logs require --resource <worker-name>")
 	}
 	matcher := newMatcher(opts)
-	emitEntry := func(level, msg string, tsMs int64) error {
+	emitEntry := func(level, msg string, tsMs float64) error {
 		if strings.TrimSpace(msg) == "" {
 			return nil
 		}
 		ts := time.Now()
 		if tsMs > 0 {
-			ts = time.UnixMilli(tsMs)
+			ts = time.UnixMilli(int64(tsMs))
 		}
 		e := NewEntry("cloudflare", opts.Resource, opts.Resource, msg, ts)
 		if level != "" {
