@@ -108,7 +108,7 @@ type RunOptions struct {
 func Discover(ctx context.Context) Discovery {
 	_ = ctx
 	hostname, _ := os.Hostname()
-	tools := detectTools([]string{"docker", "kubectl", "helm", "otelcol", "otelcol-contrib", "prometheus", "loki", "aws", "gcloud", "az", "doctl", "hcloud", "vercel", "railway", "verda", "terraform", "tofu", "pulumi", "cdk", "crossplane", "git"})
+	tools := detectTools([]string{"docker", "kubectl", "helm", "otelcol", "otelcol-contrib", "prometheus", "loki", "aws", "gcloud", "az", "doctl", "hcloud", "vercel", "railway", "flyctl", "fly", "tccli", "sentry-cli", "sentry", "verda", "terraform", "tofu", "pulumi", "cdk", "crossplane", "git"})
 	toolMap := make(map[string]ToolStatus, len(tools))
 	for _, tool := range tools {
 		toolMap[tool.Name] = tool
@@ -568,6 +568,33 @@ func CollectObservations(ctx context.Context, discovery Discovery) map[string]an
 			accounts["cloudflare"] = map[string]any{"tokenLength": strings.TrimSpace(output)}
 		}
 	}
+	if hasProvider(discovery.Providers, "flyio") {
+		accounts["flyio"] = map[string]any{
+			"tokenConfigured": hasAnyEnv("FLY_API_TOKEN", "FLY_ACCESS_TOKEN") || viper.GetString("flyio.api_token") != "",
+			"org":             firstNonEmpty(os.Getenv("FLY_ORG"), os.Getenv("FLY_ORG_SLUG"), viper.GetString("flyio.org_slug")),
+		}
+	}
+	if hasProvider(discovery.Providers, "tencent") {
+		accounts["tencent"] = map[string]any{
+			"secretIDConfigured":  hasAnyEnv("TENCENTCLOUD_SECRET_ID", "TENCENT_SECRET_ID") || viper.GetString("tencent.secret_id") != "",
+			"secretKeyConfigured": hasAnyEnv("TENCENTCLOUD_SECRET_KEY", "TENCENT_SECRET_KEY") || viper.GetString("tencent.secret_key") != "",
+			"region":              firstNonEmpty(os.Getenv("TENCENT_REGION"), os.Getenv("TENCENTCLOUD_REGION"), viper.GetString("tencent.region")),
+			"cliConfigured":       toolAvailable(discovery.Tools, "tccli"),
+		}
+	}
+	if hasProvider(discovery.Providers, "supabase") {
+		accounts["supabase"] = map[string]any{
+			"tokenConfigured": hasAnyEnv("SUPABASE_ACCESS_TOKEN", "SUPABASE_API_TOKEN", "SUPABASE_TOKEN") || viper.GetString("supabase.api_token") != "",
+		}
+	}
+	if hasProvider(discovery.Providers, "sentry") {
+		accounts["sentry"] = map[string]any{
+			"tokenConfigured": hasAnyEnv("SENTRY_AUTH_TOKEN") || viper.GetString("sentry.auth_token") != "",
+			"org":             firstNonEmpty(os.Getenv("SENTRY_ORG"), viper.GetString("sentry.org")),
+			"host":            firstNonEmpty(os.Getenv("SENTRY_HOST"), viper.GetString("sentry.host")),
+			"cliConfigured":   toolAvailable(discovery.Tools, "sentry-cli", "sentry"),
+		}
+	}
 	if len(accounts) > 0 {
 		observations["providerAccounts"] = accounts
 	}
@@ -786,6 +813,22 @@ func detectTools(names []string) []ToolStatus {
 	return tools
 }
 
+func toolAvailable(tools []ToolStatus, names ...string) bool {
+	wanted := map[string]bool{}
+	for _, name := range names {
+		name = strings.TrimSpace(strings.ToLower(name))
+		if name != "" {
+			wanted[name] = true
+		}
+	}
+	for _, tool := range tools {
+		if wanted[strings.TrimSpace(strings.ToLower(tool.Name))] && tool.Available {
+			return true
+		}
+	}
+	return false
+}
+
 func hasProvider(providers []ProviderStatus, id string) bool {
 	id = strings.TrimSpace(strings.ToLower(id))
 	if id == "" {
@@ -852,7 +895,11 @@ func detectProviders(tools map[string]ToolStatus) []ProviderStatus {
 		provider("hetzner", "Hetzner", tools["hcloud"].Available || hasAnyEnv("HCLOUD_TOKEN", "HETZNER_API_TOKEN") || viper.GetString("hetzner.api_token") != "", "hcloud/token/config detected"),
 		provider("vercel", "Vercel", tools["vercel"].Available || hasAnyEnv("VERCEL_TOKEN") || viper.GetString("vercel.token") != "", "vercel cli/token/config detected"),
 		provider("railway", "Railway", tools["railway"].Available || hasAnyEnv("RAILWAY_TOKEN") || viper.GetString("railway.token") != "", "railway cli/token/config detected"),
+		provider("flyio", "Fly.io", tools["flyctl"].Available || tools["fly"].Available || hasAnyEnv("FLY_API_TOKEN", "FLY_ACCESS_TOKEN") || viper.GetString("flyio.api_token") != "", "fly cli/token/config detected"),
 		provider("verda", "Verda", tools["verda"].Available || hasAnyEnv("VERDA_CLIENT_ID", "VERDA_CLIENT_SECRET", "VERDA_PROJECT_ID") || viper.GetString("verda.client_id") != "", "verda cli/config/env detected"),
+		provider("tencent", "Tencent Cloud", tools["tccli"].Available || hasAnyEnv("TENCENTCLOUD_SECRET_ID", "TENCENT_SECRET_ID") || viper.GetString("tencent.secret_id") != "", "tccli/config/env detected"),
+		provider("supabase", "Supabase", hasAnyEnv("SUPABASE_ACCESS_TOKEN", "SUPABASE_API_TOKEN", "SUPABASE_TOKEN") || viper.GetString("supabase.api_token") != "", "supabase token/config detected"),
+		provider("sentry", "Sentry", tools["sentry-cli"].Available || tools["sentry"].Available || hasAnyEnv("SENTRY_AUTH_TOKEN") || viper.GetString("sentry.auth_token") != "", "sentry cli/token/config detected"),
 	}
 	return providers
 }

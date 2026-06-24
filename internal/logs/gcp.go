@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	gcplogging "google.golang.org/api/logging/v2"
 )
 
 func init() {
@@ -14,146 +16,212 @@ func init() {
 	register("gcloud", func() Collector { return &gcpCollector{} }) // alias
 }
 
-// gcpCollector reads Cloud Logging via the `gcloud logging` CLI. The generic
+// gcpCollector reads Cloud Logging through Google's API client. The generic
 // Resource is a Cloud Logging filter (e.g. `resource.type="k8s_container"` or
-// `logName=...`); empty reads all logs. Tail is poll-based (gcloud's native
-// tail needs the alpha component).
+// `logName=...`); empty reads all logs.
 type gcpCollector struct{}
 
 func (c *gcpCollector) Provider() string { return "gcp" }
 
 func (c *gcpCollector) project(opts Options) string {
-	return opts.EnvValue("GCP_PROJECT_ID", "GOOGLE_CLOUD_PROJECT", "CLOUDSDK_CORE_PROJECT")
+	return opts.EnvValue("GCP_PROJECT_ID", "GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT", "CLOUDSDK_CORE_PROJECT")
 }
 
-func (c *gcpCollector) projectArgs(opts Options, base ...string) []string {
-	args := append([]string{}, base...)
-	if p := c.project(opts); p != "" {
-		args = append(args, "--project", p)
+func (c *gcpCollector) client(ctx context.Context, opts Options) (*gcplogging.Service, string, error) {
+	project := c.project(opts)
+	if project == "" {
+		return nil, "", fmt.Errorf("gcp project is required; set GCP_PROJECT_ID or GOOGLE_CLOUD_PROJECT")
 	}
-	return args
+	client, err := gcplogging.NewService(ctx)
+	if err != nil {
+		return nil, "", fmt.Errorf("open gcp logging client for project %s: %w", project, err)
+	}
+	return client, project, nil
 }
 
 func (c *gcpCollector) Sources(ctx context.Context, opts Options) ([]Source, error) {
-	out, err := runJSON(ctx, "gcloud", c.projectArgs(opts, "logging", "logs", "list", "--format=json", "--limit=200"), opts.Env)
+	client, project, err := c.client(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
-	// `gcloud logging logs list --format=json` returns an array of (URL-encoded)
-	// log-name strings, e.g. "projects/<p>/logs/run.googleapis.com%2Fstdout".
-	var names []string
-	if err := json.Unmarshal(out, &names); err != nil {
-		return nil, fmt.Errorf("parse gcp logs: %w", err)
+
+	const maxSources = 200
+	sources := make([]Source, 0, maxSources)
+	parent := "projects/" + project
+	resp, err := client.Projects.Logs.List(parent).PageSize(maxSources).Context(ctx).Do()
+	if err != nil {
+		return nil, fmt.Errorf("list gcp logs: %w", err)
 	}
-	sources := make([]Source, 0, len(names))
-	for _, raw := range names {
-		name := raw
-		if d, derr := url.PathUnescape(raw); derr == nil {
-			name = d
+	for _, name := range resp.LogNames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
 		}
-		short := name
-		if i := strings.Index(name, "/logs/"); i >= 0 {
-			short = name[i+len("/logs/"):]
-		}
-		// The source id is a ready-to-use Cloud Logging filter.
-		sources = append(sources, Source{ID: fmt.Sprintf("logName=%q", name), Kind: "log", Service: short})
+		sources = append(sources, Source{
+			ID:      fmt.Sprintf("logName=%q", name),
+			Kind:    "log",
+			Service: gcpLogIDFromName(name),
+		})
 	}
 	return sources, nil
 }
 
-type gcpEntry struct {
-	Timestamp   string         `json:"timestamp"`
-	Severity    string         `json:"severity"`
-	TextPayload string         `json:"textPayload"`
-	JSONPayload map[string]any `json:"jsonPayload"`
-	LogName     string         `json:"logName"`
-	InsertID    string         `json:"insertId"`
-	Resource    struct {
-		Type   string            `json:"type"`
-		Labels map[string]string `json:"labels"`
-	} `json:"resource"`
-	HTTPRequest struct {
-		RequestMethod string `json:"requestMethod"`
-		RequestURL    string `json:"requestUrl"`
-		Status        int    `json:"status"`
-		Latency       string `json:"latency"`
-	} `json:"httpRequest"`
-	ProtoPayload map[string]any `json:"protoPayload"`
-	Trace        string         `json:"trace"`
+func gcpLogIDFromName(name string) string {
+	logID := strings.TrimSpace(name)
+	if i := strings.Index(logID, "/logs/"); i >= 0 {
+		logID = logID[i+len("/logs/"):]
+	}
+	if decoded, err := url.PathUnescape(logID); err == nil {
+		logID = decoded
+	}
+	return logID
 }
 
-func (c *gcpCollector) freshness(opts Options) string {
-	if opts.Since.IsZero() {
-		return "30d" // count mode: look back far; --limit caps to the last N
+func gcpSeverityFloor(level string) string {
+	switch normalizeLevel(level) {
+	case LevelDebug:
+		return "DEBUG"
+	case LevelInfo:
+		return "INFO"
+	case LevelWarn:
+		return "WARNING"
+	case LevelError:
+		return "ERROR"
+	case LevelFatal:
+		return "CRITICAL"
+	default:
+		return ""
 	}
-	d := time.Since(opts.Since)
-	if d <= 0 {
-		return "1h"
-	}
-	return fmt.Sprintf("%ds", int64(d.Seconds())+60)
 }
 
-// read runs `gcloud logging read` with an explicit filter/order/freshness.
-func (c *gcpCollector) read(ctx context.Context, opts Options, filter, order string, limit int, freshness string) ([]gcpEntry, error) {
-	args := c.projectArgs(opts, "logging", "read")
-	if f := strings.TrimSpace(filter); f != "" {
-		args = append(args, f)
+func gcpEntryFilter(opts Options, includeSince bool, extra ...string) string {
+	parts := make([]string, 0, 5+len(extra))
+	if resource := strings.TrimSpace(opts.Resource); resource != "" {
+		parts = append(parts, "("+resource+")")
 	}
-	args = append(args, "--format=json", "--order="+order, fmt.Sprintf("--limit=%d", limit))
-	if freshness != "" {
-		args = append(args, "--freshness="+freshness)
+	if includeSince && !opts.Since.IsZero() {
+		parts = append(parts, fmt.Sprintf(`timestamp >= "%s"`, opts.Since.UTC().Format(time.RFC3339Nano)))
 	}
-	out, err := runJSON(ctx, "gcloud", args, opts.Env)
-	if err != nil {
-		return nil, err
+	if !opts.Until.IsZero() {
+		parts = append(parts, fmt.Sprintf(`timestamp <= "%s"`, opts.Until.UTC().Format(time.RFC3339Nano)))
 	}
-	var rows []gcpEntry
-	if err := json.Unmarshal(out, &rows); err != nil {
-		return nil, fmt.Errorf("parse gcp log entries: %w", err)
+	if severity := gcpSeverityFloor(opts.Level); severity != "" {
+		parts = append(parts, "severity >= "+severity)
+	}
+	for _, part := range extra {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+	return strings.Join(parts, " AND ")
+}
+
+func (c *gcpCollector) read(ctx context.Context, client *gcplogging.Service, project, filter, order string, limit int) ([]*gcplogging.LogEntry, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	req := &gcplogging.ListLogEntriesRequest{
+		ResourceNames: []string{"projects/" + project},
+		PageSize:      int64(limit),
+	}
+	if filter := strings.TrimSpace(filter); filter != "" {
+		req.Filter = filter
+	}
+	if strings.EqualFold(strings.TrimSpace(order), "desc") {
+		req.OrderBy = "timestamp desc"
+	} else {
+		req.OrderBy = "timestamp asc"
+	}
+	rows := make([]*gcplogging.LogEntry, 0, limit)
+	for len(rows) < limit {
+		resp, err := client.Entries.List(req).Context(ctx).Do()
+		if err != nil {
+			return nil, fmt.Errorf("read gcp log entries: %w", err)
+		}
+		for _, entry := range resp.Entries {
+			rows = append(rows, entry)
+			if len(rows) >= limit {
+				break
+			}
+		}
+		if len(rows) >= limit || strings.TrimSpace(resp.NextPageToken) == "" {
+			break
+		}
+		req.PageToken = resp.NextPageToken
 	}
 	return rows, nil
 }
 
-func (c *gcpCollector) toEntry(opts Options, ge gcpEntry) Entry {
+func (c *gcpCollector) toEntry(opts Options, ge *gcplogging.LogEntry) Entry {
 	ts := time.Now()
-	if t, err := time.Parse(time.RFC3339Nano, ge.Timestamp); err == nil {
-		ts = t
+	if parsed, err := time.Parse(time.RFC3339Nano, ge.Timestamp); err == nil {
+		ts = parsed
+	} else if parsed, err := time.Parse(time.RFC3339, ge.Timestamp); err == nil {
+		ts = parsed
+	} else if strings.TrimSpace(ge.Timestamp) == "" {
+		ts = time.Now()
 	}
-	msg := ge.TextPayload
-	if msg == "" && ge.JSONPayload != nil {
-		if m, ok := ge.JSONPayload["message"].(string); ok && m != "" {
-			msg = m
-		} else if b, err := json.Marshal(ge.JSONPayload); err == nil {
-			msg = string(b)
-		}
+	msg := gcpPayloadMessage(ge.TextPayload, ge.JsonPayload, ge.ProtoPayload)
+	if msg == "" && ge.HttpRequest != nil {
+		msg = strings.TrimSpace(fmt.Sprintf("%s %s %d %s", ge.HttpRequest.RequestMethod, ge.HttpRequest.RequestUrl, ge.HttpRequest.Status, ge.HttpRequest.Latency))
 	}
-	// Request logs (Cloud Run / API Gateway) carry no payload — synthesize from
-	// httpRequest; audit logs from protoPayload.methodName.
-	if msg == "" && ge.HTTPRequest.RequestMethod != "" {
-		msg = strings.TrimSpace(fmt.Sprintf("%s %s %d %s",
-			ge.HTTPRequest.RequestMethod, ge.HTTPRequest.RequestURL, ge.HTTPRequest.Status, ge.HTTPRequest.Latency))
-	}
-	if msg == "" && ge.ProtoPayload != nil {
-		if mn, ok := ge.ProtoPayload["methodName"].(string); ok && mn != "" {
-			msg = mn
-		} else if b, err := json.Marshal(ge.ProtoPayload); err == nil {
-			msg = string(b)
-		}
+	if msg == "" {
+		msg = ge.InsertId
 	}
 	// Use the unique insertId as the stream so the citation ref is unique even
 	// for identical messages (avoids dedup dropping distinct entries).
-	e := NewEntry("gcp", ge.LogName, ge.InsertID, msg, ts)
+	e := NewEntry("gcp", ge.LogName, ge.InsertId, msg, ts)
 	if sev := strings.TrimSpace(ge.Severity); sev != "" && !strings.EqualFold(sev, "DEFAULT") {
 		e.SetLevel(sev)
 	}
-	if ge.Resource.Type != "" {
+	if ge.Resource != nil && ge.Resource.Type != "" {
 		e.AddLabel("resourceType", ge.Resource.Type)
+		for _, key := range []string{"project_id", "location", "zone", "region", "service_name", "revision_name", "cluster_name", "namespace_name", "pod_name", "container_name", "function_name", "job_name"} {
+			if value := strings.TrimSpace(ge.Resource.Labels[key]); value != "" {
+				e.AddLabel("resource."+key, value)
+				if e.Service == "" && strings.HasSuffix(key, "_name") {
+					e.Service = value
+				}
+			}
+		}
 	}
 	if ge.Trace != "" {
 		e.AddLabel("trace", ge.Trace)
 	}
-	e.Service = opts.Service
+	if e.Service == "" {
+		e.Service = opts.Service
+	}
 	return e
+}
+
+func gcpPayloadMessage(text string, jsonPayload []byte, protoPayload []byte) string {
+	if text = strings.TrimSpace(text); text != "" {
+		return text
+	}
+	if msg := gcpRawPayloadMessage(jsonPayload); msg != "" {
+		return msg
+	}
+	return gcpRawPayloadMessage(protoPayload)
+}
+
+func gcpRawPayloadMessage(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		for _, key := range []string{"message", "msg", "text", "event", "methodName", "status"} {
+			if value, ok := obj[key]; ok {
+				if msg := strings.TrimSpace(fmt.Sprint(value)); msg != "" {
+					return msg
+				}
+			}
+		}
+		if b, err := json.Marshal(obj); err == nil {
+			return string(b)
+		}
+	}
+	return string(raw)
 }
 
 func (c *gcpCollector) Query(ctx context.Context, opts Options, emit Emit) error {
@@ -161,7 +229,12 @@ func (c *gcpCollector) Query(ctx context.Context, opts Options, emit Emit) error
 	if limit <= 0 {
 		limit = 1000
 	}
-	rows, err := c.read(ctx, opts, opts.Resource, "desc", limit, c.freshness(opts))
+	client, project, err := c.client(ctx, opts)
+	if err != nil {
+		return err
+	}
+
+	rows, err := c.read(ctx, client, project, gcpEntryFilter(opts, true), "desc", limit)
 	if err != nil {
 		return err
 	}
@@ -185,8 +258,13 @@ func (c *gcpCollector) Tail(ctx context.Context, opts Options, emit Emit) error 
 	if limit <= 0 {
 		limit = 200
 	}
+	client, project, err := c.client(ctx, opts)
+	if err != nil {
+		return err
+	}
+
 	var lastSeenMs int64
-	emitRows := func(rows []gcpEntry) error {
+	emitRows := func(rows []*gcplogging.LogEntry) error {
 		for _, ge := range rows {
 			e := c.toEntry(opts, ge)
 			if e.EpochMs > lastSeenMs {
@@ -206,7 +284,7 @@ func (c *gcpCollector) Tail(ctx context.Context, opts Options, emit Emit) error 
 	}
 
 	// Backfill: newest N (desc), emitted oldest-first.
-	backfill, err := c.read(ctx, opts, opts.Resource, "desc", limit, c.freshness(opts))
+	backfill, err := c.read(ctx, client, project, gcpEntryFilter(opts, true), "desc", limit)
 	if err != nil {
 		return err
 	}
@@ -228,17 +306,11 @@ func (c *gcpCollector) Tail(ctx context.Context, opts Options, emit Emit) error 
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			// Incremental: only entries strictly newer than the last seen, asc.
-			// Bounds cost (no full-window rescan) and never skips a busy burst.
-			// >= (not >) so an entry exactly at the last-seen ms boundary isn't
-			// skipped; refDedup drops the re-included boundary rows. freshness=1d
-			// tolerates ingestion lag for backdated entries.
+			// Incremental: include the last seen timestamp boundary so late
+			// entries at the same millisecond are not skipped; refDedup drops
+			// the already-emitted boundary rows.
 			tsFilter := fmt.Sprintf("timestamp>=%q", time.UnixMilli(lastSeenMs).UTC().Format(time.RFC3339Nano))
-			filter := tsFilter
-			if r := strings.TrimSpace(opts.Resource); r != "" {
-				filter = "(" + r + ") AND " + tsFilter
-			}
-			rows, err := c.read(ctx, opts, filter, "asc", 1000, "1d")
+			rows, err := c.read(ctx, client, project, gcpEntryFilter(opts, false, tsFilter), "asc", 1000)
 			if err != nil {
 				if fails++; fails >= maxConsecutivePollErrors {
 					return err

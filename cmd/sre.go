@@ -124,6 +124,50 @@ var sreRunCmd = &cobra.Command{
 	},
 }
 
+var sreCheckCmd = &cobra.Command{
+	Use:   "check",
+	Short: "Run one bounded read-only SRE check",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		format, _ := cmd.Flags().GetString("format")
+		timeout, err := durationFlag(cmd, "timeout", 20*time.Second)
+		if err != nil {
+			return err
+		}
+		ctx := cmd.Context()
+		if timeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+			defer cancel()
+		}
+		result := sre.Check(ctx)
+		if strings.EqualFold(format, "json") {
+			encoder := json.NewEncoder(os.Stdout)
+			encoder.SetIndent("", "  ")
+			return encoder.Encode(result)
+		}
+		fmt.Printf("Clanker SRE live check\n")
+		fmt.Printf("Status: %s\n", result.Status)
+		fmt.Printf("Summary: %s\n", result.Summary)
+		if len(result.Issues) > 0 {
+			fmt.Printf("\nIssues:\n")
+			for _, issue := range result.Issues {
+				if issue.Provider != "" {
+					fmt.Printf("- [%s] %s/%s: %s\n", issue.Severity, issue.Provider, issue.Category, issue.Message)
+					continue
+				}
+				fmt.Printf("- [%s] %s: %s\n", issue.Severity, issue.Category, issue.Message)
+			}
+		}
+		if len(result.Findings) > 0 {
+			fmt.Printf("\nFindings:\n")
+			for _, finding := range result.Findings {
+				fmt.Printf("- %s\n", finding)
+			}
+		}
+		return nil
+	},
+}
+
 var sreStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show local SRE install status and adaptive target recommendation",
@@ -169,7 +213,7 @@ var sreDoctorCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(sreCmd)
 	sreCmd.PersistentFlags().Bool("sre", false, "mark this command as running through the Clanker SRE path")
-	sreCmd.AddCommand(sreDiscoverCmd, srePlanCmd, sreInstallCmd, sreRunCmd, sreStatusCmd, sreDoctorCmd)
+	sreCmd.AddCommand(sreDiscoverCmd, srePlanCmd, sreInstallCmd, sreRunCmd, sreCheckCmd, sreStatusCmd, sreDoctorCmd)
 
 	sreDiscoverCmd.Flags().String("format", "text", "Output format: text or json")
 	addSREPlanFlags(srePlanCmd)
@@ -177,6 +221,10 @@ func init() {
 	sreInstallCmd.Flags().Bool("apply", false, "Write generated install assets to disk")
 	sreInstallCmd.Flags().String("output-dir", "", "Directory for generated install assets (default ~/.clanker/sre/install)")
 	addSRERunFlags(sreRunCmd)
+	sreCheckCmd.Flags().String("format", "text", "Output format: text or json")
+	sreCheckCmd.Flags().String("timeout", "20s", "Maximum duration for a single SRE check (0 disables the command timeout)")
+	sreCheckCmd.Flags().String("provider", os.Getenv("CLANKER_SRE_PROVIDER"), "Cloud provider name for check metadata")
+	sreCheckCmd.Flags().String("deploy-id", os.Getenv("CLANKER_SRE_DEPLOY_ID"), "Stable SRE deployment ID for check metadata")
 	addSREPlanFlags(sreDoctorCmd)
 }
 

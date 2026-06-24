@@ -18,6 +18,7 @@ type ToolGuide struct {
 	ID              string              `json:"id"`
 	Tool            string              `json:"tool"`
 	Binary          string              `json:"binary"`
+	Aliases         []string            `json:"aliases,omitempty"`
 	Providers       []string            `json:"providers,omitempty"`
 	VerifyCommand   string              `json:"verifyCommand"`
 	InstallCommands map[string][]string `json:"installCommands"`
@@ -28,6 +29,7 @@ type ToolStatus struct {
 	ID              string              `json:"id"`
 	Tool            string              `json:"tool"`
 	Binary          string              `json:"binary"`
+	Aliases         []string            `json:"aliases,omitempty"`
 	Providers       []string            `json:"providers,omitempty"`
 	Installed       bool                `json:"installed"`
 	Path            string              `json:"path,omitempty"`
@@ -320,6 +322,33 @@ func Guides() map[string]ToolGuide {
 			},
 			DocsURL: "https://fly.io/docs/flyctl/install/",
 		},
+		"tccli": {
+			ID:            "tccli",
+			Tool:          "Tencent Cloud CLI",
+			Binary:        "tccli",
+			Providers:     []string{"Tencent Cloud"},
+			VerifyCommand: "tccli --version",
+			InstallCommands: map[string][]string{
+				"darwin":  {"python3 -m pip install tccli-intl-en"},
+				"linux":   {"python3 -m pip install tccli-intl-en"},
+				"windows": {"py -m pip install tccli-intl-en"},
+			},
+			DocsURL: "https://www.tencentcloud.com/document/product/1013/33464",
+		},
+		"sentry-cli": {
+			ID:            "sentry-cli",
+			Tool:          "Sentry CLI",
+			Binary:        "sentry-cli",
+			Aliases:       []string{"sentry"},
+			Providers:     []string{"Sentry"},
+			VerifyCommand: "sentry-cli --version",
+			InstallCommands: map[string][]string{
+				"darwin":  {"brew install getsentry/tools/sentry-cli"},
+				"linux":   {"curl -sL https://sentry.io/get-cli/ | bash"},
+				"windows": {"npm install -g @sentry/cli"},
+			},
+			DocsURL: "https://docs.sentry.io/cli/installation/",
+		},
 	}
 }
 
@@ -410,7 +439,7 @@ func Install(ctx context.Context, opts InstallOptions) InstallResult {
 				break
 			}
 		}
-		if _, err := exec.LookPath(guide.Binary); err == nil {
+		if _, err := findToolGuideBinary(guide); err == nil {
 			toolResult.Installed = true
 		}
 		result.Results = append(result.Results, toolResult)
@@ -591,8 +620,8 @@ func AuthGuides() map[string]AuthGuide {
 		"tencent": {
 			ID:            "tencent",
 			Provider:      "Tencent Cloud",
-			Purpose:       "Create a Tencent Cloud SecretId/SecretKey pair for direct Tencent API access. Prefer sub-user credentials scoped to the services Clanker should inspect.",
-			LoginCommands: []string{},
+			Purpose:       "Install tccli, then configure a Tencent Cloud SecretId/SecretKey pair. Prefer sub-user credentials scoped to the services Clanker should inspect.",
+			LoginCommands: []string{"tccli configure"},
 			EnvVars:       []string{"TENCENTCLOUD_SECRET_ID", "TENCENTCLOUD_SECRET_KEY", "TENCENTCLOUD_REGION", "TENCENT_SECRET_ID", "TENCENT_SECRET_KEY", "TENCENT_REGION"},
 			DocsURL:       "https://www.tencentcloud.com/document/product/214/1526",
 			TokenURL:      "https://www.tencentcloud.com/document/product/598/32675",
@@ -609,8 +638,8 @@ func AuthGuides() map[string]AuthGuide {
 		"sentry": {
 			ID:            "sentry",
 			Provider:      "Sentry",
-			Purpose:       "Create an official Sentry auth token and provide the org slug for issues, releases, monitors, and alert management.",
-			LoginCommands: []string{},
+			Purpose:       "Install the official Sentry CLI or create an auth token, then provide the org slug for issues, releases, monitors, and alert management.",
+			LoginCommands: []string{"sentry-cli login", "sentry auth login"},
 			EnvVars:       []string{"SENTRY_AUTH_TOKEN", "SENTRY_ORG", "SENTRY_HOST"},
 			DocsURL:       "https://docs.sentry.io/api/auth/",
 			TokenURL:      "https://docs.sentry.io/api/guides/create-auth-token/",
@@ -650,22 +679,20 @@ func scanTools(ctx context.Context) map[string]ToolStatus {
 			ID:              guide.ID,
 			Tool:            guide.Tool,
 			Binary:          guide.Binary,
+			Aliases:         append([]string(nil), guide.Aliases...),
 			Providers:       append([]string(nil), guide.Providers...),
 			VerifyCommand:   guide.VerifyCommand,
 			InstallCommands: installCommandsForOS(guide),
 			AllCommands:     guide.InstallCommands,
 			DocsURL:         guide.DocsURL,
 		}
-		path, err := exec.LookPath(guide.Binary)
-		if key == "flyctl" && err != nil {
-			path, err = exec.LookPath("flyctl")
-		}
+		path, err := findToolGuideBinary(guide)
 		if err == nil {
 			status.Installed = true
 			status.Path = path
-			status.Version = detectVersion(ctx, guide)
+			status.Version = detectVersion(ctx, guide, path)
 		} else {
-			status.Message = guide.Binary + " not found in PATH"
+			status.Message = strings.Join(toolGuideBinaries(guide), " or ") + " not found in PATH"
 		}
 		result[key] = status
 	}
@@ -821,7 +848,7 @@ func providerGuides() []providerGuide {
 			}
 			return len(notes) > 0, len(notes) > 0, notes
 		}},
-		{ID: "tencent", Name: "Tencent Cloud", RequiredTools: []string{}, Detect: func() (bool, bool, []string) {
+		{ID: "tencent", Name: "Tencent Cloud", RequiredTools: []string{"tccli"}, Detect: func() (bool, bool, []string) {
 			notes := []string{}
 			if hasAnyEnv("TENCENTCLOUD_SECRET_ID", "TENCENTCLOUD_SECRET_KEY", "TENCENT_SECRET_ID", "TENCENT_SECRET_KEY") {
 				notes = append(notes, "tencent env")
@@ -838,7 +865,7 @@ func providerGuides() []providerGuide {
 			}
 			return len(notes) > 0, len(notes) > 0, notes
 		}},
-		{ID: "sentry", Name: "Sentry", RequiredTools: []string{}, Detect: func() (bool, bool, []string) {
+		{ID: "sentry", Name: "Sentry", RequiredTools: []string{"sentry-cli"}, Detect: func() (bool, bool, []string) {
 			notes := []string{}
 			if hasAnyEnv("SENTRY_AUTH_TOKEN", "SENTRY_ORG", "SENTRY_HOST") {
 				notes = append(notes, "sentry env")
@@ -941,6 +968,10 @@ func normalizeToolID(raw string) string {
 		return "gh"
 	case "fly", "flyio", "fly.io":
 		return "flyctl"
+	case "tencent", "tencent cloud", "tencent-cloud", "tencentcloud", "tccli":
+		return "tccli"
+	case "sentry", "sentry-cli", "sentrycli":
+		return "sentry-cli"
 	default:
 		return value
 	}
@@ -960,17 +991,13 @@ func normalizeSet(values []string) map[string]bool {
 	return result
 }
 
-func detectVersion(ctx context.Context, guide ToolGuide) string {
+func detectVersion(ctx context.Context, guide ToolGuide, binaryPath string) string {
 	parts := strings.Fields(guide.VerifyCommand)
 	if len(parts) == 0 {
 		return ""
 	}
-	if guide.ID == "flyctl" {
-		if _, err := exec.LookPath(parts[0]); err != nil {
-			if _, fallbackErr := exec.LookPath("flyctl"); fallbackErr == nil {
-				parts[0] = "flyctl"
-			}
-		}
+	if strings.TrimSpace(binaryPath) != "" {
+		parts[0] = binaryPath
 	}
 	versionCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -984,6 +1011,32 @@ func detectVersion(ctx context.Context, guide ToolGuide) string {
 		return ""
 	}
 	return strings.TrimSpace(lines[0])
+}
+
+func findToolGuideBinary(guide ToolGuide) (string, error) {
+	for _, binary := range toolGuideBinaries(guide) {
+		if path, err := exec.LookPath(binary); err == nil {
+			return path, nil
+		}
+	}
+	return "", exec.ErrNotFound
+}
+
+func toolGuideBinaries(guide ToolGuide) []string {
+	binaries := []string{}
+	seen := map[string]bool{}
+	for _, binary := range append([]string{guide.Binary}, guide.Aliases...) {
+		binary = strings.TrimSpace(binary)
+		if binary == "" || seen[binary] {
+			continue
+		}
+		seen[binary] = true
+		binaries = append(binaries, binary)
+	}
+	if guide.ID == "flyctl" && !seen["flyctl"] {
+		binaries = append(binaries, "flyctl")
+	}
+	return binaries
 }
 
 func installCommandsForOS(guide ToolGuide) []string {

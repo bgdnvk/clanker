@@ -40,13 +40,15 @@ func TestGuidesPreferOfficialVendorDocs(t *testing.T) {
 	guides := Guides()
 
 	checks := map[string]string{
-		"aws":      "https://docs.aws.amazon.com/",
-		"gcloud":   "https://docs.cloud.google.com/",
-		"az":       "https://learn.microsoft.com/",
-		"doctl":    "https://docs.digitalocean.com/",
-		"railway":  "https://docs.railway.com/",
-		"supabase": "https://supabase.com/docs/",
-		"flyctl":   "https://fly.io/docs/",
+		"aws":        "https://docs.aws.amazon.com/",
+		"gcloud":     "https://docs.cloud.google.com/",
+		"az":         "https://learn.microsoft.com/",
+		"doctl":      "https://docs.digitalocean.com/",
+		"railway":    "https://docs.railway.com/",
+		"supabase":   "https://supabase.com/docs/",
+		"flyctl":     "https://fly.io/docs/",
+		"tccli":      "https://www.tencentcloud.com/",
+		"sentry-cli": "https://docs.sentry.io/",
 	}
 	for id, prefix := range checks {
 		guide, ok := guides[id]
@@ -56,5 +58,24 @@ func TestGuidesPreferOfficialVendorDocs(t *testing.T) {
 		if !strings.HasPrefix(guide.DocsURL, prefix) {
 			t.Fatalf("%s docs URL = %q, want prefix %q", id, guide.DocsURL, prefix)
 		}
+	}
+}
+
+func TestProviderGuidesRequireOfficialTencentAndSentryCLIs(t *testing.T) {
+	found := map[string][]string{}
+	for _, guide := range providerGuides() {
+		found[guide.ID] = guide.RequiredTools
+	}
+	for id, want := range map[string]string{"tencent": "tccli", "sentry": "sentry-cli"} {
+		tools := found[id]
+		if len(tools) != 1 || tools[0] != want {
+			t.Fatalf("%s required tools = %#v, want [%s]", id, tools, want)
+		}
+	}
+	if normalizeToolID("tencent cloud") != "tccli" {
+		t.Fatal("tencent cloud alias did not normalize to tccli")
+	}
+	if normalizeToolID("sentry") != "sentry-cli" {
+		t.Fatal("sentry alias did not normalize to sentry-cli")
 	}
 }
