@@ -230,12 +230,15 @@ func (c *gcpCollector) Tail(ctx context.Context, opts Options, emit Emit) error 
 		case <-ticker.C:
 			// Incremental: only entries strictly newer than the last seen, asc.
 			// Bounds cost (no full-window rescan) and never skips a busy burst.
-			tsFilter := fmt.Sprintf("timestamp>%q", time.UnixMilli(lastSeenMs).UTC().Format(time.RFC3339Nano))
+			// >= (not >) so an entry exactly at the last-seen ms boundary isn't
+			// skipped; refDedup drops the re-included boundary rows. freshness=1d
+			// tolerates ingestion lag for backdated entries.
+			tsFilter := fmt.Sprintf("timestamp>=%q", time.UnixMilli(lastSeenMs).UTC().Format(time.RFC3339Nano))
 			filter := tsFilter
 			if r := strings.TrimSpace(opts.Resource); r != "" {
 				filter = "(" + r + ") AND " + tsFilter
 			}
-			rows, err := c.read(ctx, opts, filter, "asc", 1000, "1h")
+			rows, err := c.read(ctx, opts, filter, "asc", 1000, "1d")
 			if err != nil {
 				if fails++; fails >= maxConsecutivePollErrors {
 					return err
