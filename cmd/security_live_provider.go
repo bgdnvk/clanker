@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -405,7 +406,7 @@ func buildSecurityProviderContextCandidates(provider string, lines []securityPro
 	candidates := []securitySurfaceCandidate{}
 
 	for _, entry := range lines {
-		for _, rawTarget := range extractSecurityProviderCandidateTargets(entry) {
+		for _, rawTarget := range extractSecurityProviderCandidateTargets(provider, entry) {
 			for _, endpoint := range normalizeSecurityEndpoints(rawTarget, "") {
 				key := strings.ToLower(strings.TrimSpace(provider + "|" + endpoint))
 				if _, ok := seen[key]; ok {
@@ -450,7 +451,7 @@ func buildSecurityProviderLineFindings(provider string, entry securityProviderCo
 	resourceType := securityProviderSectionResourceType(provider, entry.Section)
 	endpoint := ""
 	if !strings.EqualFold(strings.TrimSpace(provider), "github") {
-		if targets := extractSecurityProviderCandidateTargets(entry); len(targets) > 0 {
+		if targets := extractSecurityProviderCandidateTargets(provider, entry); len(targets) > 0 {
 			if endpoints := normalizeSecurityEndpoints(targets[0], ""); len(endpoints) > 0 {
 				endpoint = endpoints[0]
 			}
@@ -1139,6 +1140,359 @@ func buildSecurityDetectiveControlFindings(resources []deepResearchResource) []s
 	return findings
 }
 
+func buildSecurityAgenticSurfaceFindings(resources []deepResearchResource) []securityFinding {
+	findings := []securityFinding{}
+	for _, resource := range resources {
+		text := securityResourceSearchText(resource)
+		if !securityTextHasAny(text, securityAgenticMarkers()) {
+			continue
+		}
+
+		toolExecution := securityTextHasAny(text, securityToolExecutionMarkers())
+		untrustedInputs := securityTextHasAny(text, securityUntrustedInputMarkers())
+		persistentContext := securityTextHasAny(text, []string{"memory", "conversation history", "session history", "rag", "retrieval", "vector", "embedding", "knowledge base", "long-term"})
+		privilegedIdentity := securityResourceHasPrivilegedIdentity(resource)
+		endpoint := securityResourcePrimaryEndpoint(resource)
+		evidence := securityResourceEvidenceForMarkers(resource, append(append(securityAgenticMarkers(), securityToolExecutionMarkers()...), securityUntrustedInputMarkers()...), 8)
+
+		if toolExecution && untrustedInputs {
+			severity := "high"
+			if privilegedIdentity || endpoint != "" {
+				severity = "critical"
+			}
+			findings = append(findings, securityFinding{
+				ID:           buildDeepResearchFindingID("security-agentic-tool-misuse", resource.ID),
+				Severity:     severity,
+				Category:     "agentic-risk",
+				Title:        fmt.Sprintf("%s can pair untrusted content with agent tool use", deepResearchResourceLabel(resource)),
+				Summary:      "This resource looks like an agent or LLM workflow that can consume untrusted content and invoke tools. Treat prompt injection here as a path to tool misuse, data exposure, or code execution rather than only bad model output.",
+				Confidence:   "medium",
+				BlastRadius:  securityAgenticBlastRadius(resource, "tool-misuse", endpoint),
+				ResourceID:   resource.ID,
+				ResourceName: resource.Name,
+				ResourceType: resource.Type,
+				Provider:     inferDeepResearchProvider(resource),
+				Region:       resource.Region,
+				Endpoint:     endpoint,
+				Frameworks:   []string{"OWASP ASI01 Agent Goal Hijack", "OWASP ASI02 Tool Misuse and Exploitation", "OWASP ASI05 Unexpected Code Execution"},
+				Threats:      []string{"indirect prompt injection", "tool misuse", "unsafe delegation"},
+				Evidence:     evidence,
+				Questions:    buildSecurityQuestions("agentic-risk", resource.Name, endpoint, false),
+			})
+		}
+
+		if persistentContext && untrustedInputs {
+			findings = append(findings, securityFinding{
+				ID:           buildDeepResearchFindingID("security-agentic-context-poisoning", resource.ID),
+				Severity:     ternaryString(privilegedIdentity || endpoint != "", "high", "medium"),
+				Category:     "agentic-risk",
+				Title:        fmt.Sprintf("%s has memory or RAG context poisoning exposure", deepResearchResourceLabel(resource)),
+				Summary:      "The resource mixes persistent memory, vector/RAG context, or session history with external content. Poisoned context can persist beyond one request and quietly steer future agent decisions.",
+				Confidence:   "medium",
+				BlastRadius:  securityAgenticBlastRadius(resource, "context-poisoning", endpoint),
+				ResourceID:   resource.ID,
+				ResourceName: resource.Name,
+				ResourceType: resource.Type,
+				Provider:     inferDeepResearchProvider(resource),
+				Region:       resource.Region,
+				Endpoint:     endpoint,
+				Frameworks:   []string{"OWASP ASI06 Memory and Context Poisoning", "OWASP ASI01 Agent Goal Hijack"},
+				Threats:      []string{"memory poisoning", "retrieval poisoning", "goal drift"},
+				Evidence:     securityResourceEvidenceForMarkers(resource, []string{"memory", "conversation", "session", "rag", "retrieval", "vector", "embedding", "document", "upload", "web", "email", "issue", "pull_request"}, 8),
+				Questions:    buildSecurityQuestions("agentic-risk", resource.Name, endpoint, false),
+			})
+		}
+
+		if privilegedIdentity && (toolExecution || untrustedInputs) {
+			findings = append(findings, securityFinding{
+				ID:           buildDeepResearchFindingID("security-agentic-privilege-abuse", resource.ID),
+				Severity:     ternaryString(endpoint != "", "critical", "high"),
+				Category:     "identity-pivot",
+				Title:        fmt.Sprintf("%s gives an agent-shaped workload meaningful privileges", deepResearchResourceLabel(resource)),
+				Summary:      "This agent-shaped workload appears to carry IAM, invoke, or downstream trust edges. Treat the agent identity as a non-human identity that needs least privilege, auditability, and a kill-switch.",
+				Confidence:   "medium",
+				BlastRadius:  securityAgenticBlastRadius(resource, "privilege-abuse", endpoint),
+				ResourceID:   resource.ID,
+				ResourceName: resource.Name,
+				ResourceType: resource.Type,
+				Provider:     inferDeepResearchProvider(resource),
+				Region:       resource.Region,
+				Endpoint:     endpoint,
+				Frameworks:   []string{"OWASP ASI03 Identity and Privilege Abuse", "OWASP ASI10 Rogue Agents"},
+				Threats:      []string{"agent identity abuse", "least-agency violation", "privileged tool execution"},
+				Evidence:     securityResourceIdentityEvidence(resource, 8),
+				Questions:    buildSecurityQuestions("identity-pivot", resource.Name, endpoint, false),
+			})
+		}
+	}
+	return dedupeSecurityFindings(findings)
+}
+
+func buildSecurityMCPToolingFindings(resources []deepResearchResource) []securityFinding {
+	findings := []securityFinding{}
+	for _, resource := range resources {
+		text := securityResourceSearchText(resource)
+		if !securityTextHasAny(text, securityMCPMarkers()) {
+			continue
+		}
+		endpoint := securityResourcePrimaryEndpoint(resource)
+		publicOrPrivileged := endpoint != "" || securityResourceHasPrivilegedIdentity(resource) || securityTextHasAny(text, []string{"public", "internet", "remote", "gateway", "websocket", "sse", "stdio", "tool", "sampling"})
+		severity := "medium"
+		if publicOrPrivileged {
+			severity = "high"
+		}
+		if endpoint != "" && securityResourceHasPrivilegedIdentity(resource) {
+			severity = "critical"
+		}
+		findings = append(findings, securityFinding{
+			ID:           buildDeepResearchFindingID("security-mcp-tooling-boundary", resource.ID),
+			Severity:     severity,
+			Category:     "mcp-tooling",
+			Title:        fmt.Sprintf("%s exposes an MCP/tool or inter-agent trust boundary", deepResearchResourceLabel(resource)),
+			Summary:      "MCP, tool gateways, and cross-agent protocols make tool descriptors, schemas, peer messages, and sampling flows part of the security boundary. Validate tool provenance, runtime auth, and user-visible activity before trusting this surface.",
+			Confidence:   "medium",
+			BlastRadius:  securityAgenticBlastRadius(resource, "mcp-tooling", endpoint),
+			ResourceID:   resource.ID,
+			ResourceName: resource.Name,
+			ResourceType: resource.Type,
+			Provider:     inferDeepResearchProvider(resource),
+			Region:       resource.Region,
+			Endpoint:     endpoint,
+			Frameworks:   []string{"OWASP ASI02 Tool Misuse and Exploitation", "OWASP ASI04 Agentic Supply Chain Vulnerabilities", "OWASP ASI07 Insecure Inter-Agent Communication"},
+			Threats:      []string{"tool poisoning", "dynamic tool manipulation", "agent session smuggling"},
+			Evidence:     securityResourceEvidenceForMarkers(resource, append(securityMCPMarkers(), []string{"tool", "schema", "sampling", "a2a", "agentcard", "remote", "stdio", "websocket", "sse"}...), 8),
+			Questions:    buildSecurityQuestions("mcp-tooling", resource.Name, endpoint, false),
+		})
+	}
+	return dedupeSecurityFindings(findings)
+}
+
+func buildSecurityAgentSupplyChainFindings(resources []deepResearchResource) []securityFinding {
+	findings := []securityFinding{}
+	for _, resource := range resources {
+		text := securityResourceSearchText(resource)
+		hasAgentDependency := securityTextHasAny(text, securityAgenticMarkers()) && securityTextHasAny(text, securityAgentSupplyChainMarkers())
+		hasUnpinnedRuntime := securityTextHasAny(text, []string{":latest", "image=latest", "tag=latest", "version=latest", "unpinned", "floating version", "main branch", "master branch"})
+		if !hasAgentDependency && !hasUnpinnedRuntime {
+			continue
+		}
+		endpoint := securityResourcePrimaryEndpoint(resource)
+		severity := "medium"
+		if securityResourceHasPrivilegedIdentity(resource) || securityTextHasAny(text, []string{"shell", "exec", "command", "terminal", "credential", "secret"}) {
+			severity = "high"
+		}
+		findings = append(findings, securityFinding{
+			ID:           buildDeepResearchFindingID("security-agent-supply-chain", resource.ID),
+			Severity:     severity,
+			Category:     "agent-supply-chain",
+			Title:        fmt.Sprintf("%s has agent supply-chain integrity signals", deepResearchResourceLabel(resource)),
+			Summary:      "Agent skills, MCP servers, models, plugins, and unpinned images behave like privileged dependencies. Inventory and verify what they declare, what they execute, and what credentials or files they can reach before production use.",
+			Confidence:   "medium",
+			BlastRadius:  securityAgenticBlastRadius(resource, "supply-chain", endpoint),
+			ResourceID:   resource.ID,
+			ResourceName: resource.Name,
+			ResourceType: resource.Type,
+			Provider:     inferDeepResearchProvider(resource),
+			Region:       resource.Region,
+			Endpoint:     endpoint,
+			Frameworks:   []string{"OWASP ASI04 Agentic Supply Chain Vulnerabilities", "OWASP ASI05 Unexpected Code Execution"},
+			Threats:      []string{"skill integrity drift", "MCP rug pull", "model or image supply-chain compromise"},
+			Evidence:     securityResourceEvidenceForMarkers(resource, append(securityAgentSupplyChainMarkers(), []string{":latest", "unpinned", "github.com", "npm", "pip", "docker", "image", "model"}...), 8),
+			Questions:    buildSecurityQuestions("agent-supply-chain", resource.Name, endpoint, false),
+		})
+	}
+	return dedupeSecurityFindings(findings)
+}
+
+func securityAgenticMarkers() []string {
+	return []string{"agent", "agentic", "assistant", "llm", "large language model", "copilot", "codex", "claude", "openai", "gemini", "autogen", "langchain", "crewai", "planner", "reasoner", "tool calling", "function calling", "rag", "retrieval", "vector", "embedding"}
+}
+
+func securityToolExecutionMarkers() []string {
+	return []string{"tool", "tools", "function", "plugin", "skill", "shell", "exec", "command", "terminal", "browser", "crawler", "scraper", "deploy", "apply", "write", "delete", "database", "sql", "kubernetes", "kubectl", "terraform", "workflow", "runner", "code interpreter"}
+}
+
+func securityUntrustedInputMarkers() []string {
+	return []string{"public", "internet", "webhook", "browser", "web page", "crawler", "scraper", "search", "url", "upload", "document", "pdf", "email", "slack", "discord", "ticket", "issue", "pull_request", "pull request", "comment", "repository", "rag", "retrieval", "vector", "embedding", "external content", "third-party"}
+}
+
+func securityMCPMarkers() []string {
+	return []string{"mcp", "model context protocol", "tool gateway", "tool server", "tool descriptor", "tool schema", "dynamic tool", "sampling", "a2a", "agent2agent", "agent card", "agentcard", "inter-agent", "peer agent", "remote agent"}
+}
+
+func securityAgentSupplyChainMarkers() []string {
+	return []string{"skill", "plugin", "extension", "mcp server", "tool server", "model file", "model weights", "huggingface", "ollama", "openclaw", "registry", "package", "dependency", "container image", "docker image", "github.com", "npm", "pip", "pypi", "version", "tag", "latest"}
+}
+
+func securityTextHasAny(text string, markers []string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" {
+		return false
+	}
+	for _, marker := range markers {
+		if strings.Contains(lower, strings.ToLower(strings.TrimSpace(marker))) {
+			return true
+		}
+	}
+	return false
+}
+
+func securityResourceSearchText(resource deepResearchResource) string {
+	parts := []string{
+		resource.ID,
+		resource.Type,
+		resource.Name,
+		resource.Region,
+		resource.State,
+		resource.IAMRole,
+		strings.Join(resource.IAMPolicies, " "),
+		strings.Join(resource.CanInvokeResources, " "),
+		strings.Join(resource.Connections, " "),
+	}
+	tagKeys := make([]string, 0, len(resource.Tags))
+	for key := range resource.Tags {
+		tagKeys = append(tagKeys, key)
+	}
+	sort.Strings(tagKeys)
+	for _, key := range tagKeys {
+		parts = append(parts, key, resource.Tags[key])
+	}
+	for _, connection := range resource.TypedConnections {
+		parts = append(parts, connection.TargetID, connection.ConnectionType, connection.Label)
+	}
+	for _, signal := range securityResourceAttributeSignals(resource.Attributes) {
+		parts = append(parts, signal.Path, signal.Value)
+	}
+	return strings.ToLower(strings.Join(parts, " "))
+}
+
+func securityResourcePrimaryEndpoint(resource deepResearchResource) string {
+	value := deepResearchFirstNonEmptyAttr(resource.Attributes,
+		"url", "urls", "endpoint", "endpoints", "publicUrl", "publicURL", "functionUrl", "functionURL",
+		"invokeUrl", "invokeURL", "apiUrl", "apiURL", "domain", "domains", "dnsName", "dns_name",
+		"hostname", "host", "publicIp", "publicIpAddress", "ipAddress", "natIP", "loadBalancerDns", "loadBalancerDNS")
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	endpoints := normalizeSecurityEndpoints(value, "")
+	if len(endpoints) == 0 {
+		return ""
+	}
+	return endpoints[0]
+}
+
+func securityResourceHasPrivilegedIdentity(resource deepResearchResource) bool {
+	if strings.TrimSpace(resource.IAMRole) != "" || len(resource.CanInvokeResources) > 0 || len(resource.Connections) > 0 || len(resource.TypedConnections) > 0 {
+		return true
+	}
+	for _, policy := range resource.IAMPolicies {
+		lower := strings.ToLower(strings.TrimSpace(policy))
+		if lower == "" {
+			continue
+		}
+		if strings.Contains(lower, "*") || strings.Contains(lower, "administratoraccess") || strings.Contains(lower, "roles/owner") || strings.Contains(lower, "owner") || strings.Contains(lower, "fullaccess") || strings.Contains(lower, "poweruser") || strings.Contains(lower, "passrole") || strings.Contains(lower, "assumerole") || strings.Contains(lower, "serviceaccountuser") || strings.Contains(lower, "tokencreator") || strings.Contains(lower, "workloadidentityuser") || strings.Contains(lower, "cluster-admin") {
+			return true
+		}
+	}
+	return false
+}
+
+func securityResourceIdentityEvidence(resource deepResearchResource, limit int) []string {
+	evidence := []string{}
+	if strings.TrimSpace(resource.IAMRole) != "" {
+		evidence = append(evidence, fmt.Sprintf("IAM role: %s", strings.TrimSpace(resource.IAMRole)))
+	}
+	if len(resource.IAMPolicies) > 0 {
+		policies := uniqueNonEmptyStrings(resource.IAMPolicies)
+		if len(policies) > 4 {
+			policies = policies[:4]
+		}
+		evidence = append(evidence, fmt.Sprintf("IAM policies: %s", strings.Join(policies, ", ")))
+	}
+	if len(resource.CanInvokeResources) > 0 {
+		evidence = append(evidence, fmt.Sprintf("Can invoke %d resources", len(resource.CanInvokeResources)))
+	}
+	if len(resource.Connections) > 0 || len(resource.TypedConnections) > 0 {
+		evidence = append(evidence, fmt.Sprintf("Downstream connections: %d", len(resource.Connections)+len(resource.TypedConnections)))
+	}
+	evidence = append(evidence, securityResourceEvidenceForMarkers(resource, append(securityAgenticMarkers(), securityToolExecutionMarkers()...), limit)...)
+	return limitStrings(uniqueNonEmptyStrings(evidence), limit)
+}
+
+func securityResourceEvidenceForMarkers(resource deepResearchResource, markers []string, limit int) []string {
+	evidence := []string{
+		fmt.Sprintf("Resource type: %s", coalesceSecurityName(resource.Type, "unknown")),
+	}
+	if strings.TrimSpace(resource.Name) != "" {
+		evidence = append(evidence, fmt.Sprintf("Resource name: %s", strings.TrimSpace(resource.Name)))
+	}
+	for _, signal := range securityResourceAttributeSignals(resource.Attributes) {
+		combined := strings.ToLower(signal.Path + " " + signal.Value)
+		if !securityTextHasAny(combined, markers) {
+			continue
+		}
+		evidence = append(evidence, securitySafeSignalEvidence(signal))
+		if limit > 0 && len(evidence) >= limit {
+			break
+		}
+	}
+	return limitStrings(uniqueNonEmptyStrings(evidence), limit)
+}
+
+func securitySafeSignalEvidence(signal securityAttributeSignal) string {
+	path := strings.TrimSpace(signal.Path)
+	if path == "" {
+		path = "attribute"
+	}
+	if securityPathLooksSecretLike(path) {
+		return fmt.Sprintf("%s=<redacted>", path)
+	}
+	value := strings.TrimSpace(signal.Value)
+	if len(value) > 140 {
+		value = value[:140] + "..."
+	}
+	return fmt.Sprintf("%s=%s", path, value)
+}
+
+func securityPathLooksSecretLike(path string) bool {
+	lower := strings.ToLower(strings.TrimSpace(path))
+	for _, marker := range []string{"secret", "token", "password", "passwd", "credential", "apikey", "api_key", "privatekey", "private_key", "client_secret", "access_key", "session"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func securityAgenticBlastRadius(resource deepResearchResource, riskKind string, endpoint string) string {
+	resourceLabel := deepResearchResourceLabel(resource)
+	base := fmt.Sprintf("%s, its configured tools, and the data those tools can reach.", resourceLabel)
+	if endpoint != "" {
+		base = fmt.Sprintf("Public or reachable agent surface %s plus %s", endpoint, base)
+	}
+	switch riskKind {
+	case "tool-misuse":
+		return base + " A successful prompt injection could turn approved tools into unintended read, write, deploy, or shell actions."
+	case "context-poisoning":
+		return base + " Poisoned memory or retrieval context can persist and influence later decisions after the original input is gone."
+	case "privilege-abuse":
+		return base + " The agent identity can become a privileged non-human actor if its permissions are not bounded and observable."
+	case "mcp-tooling":
+		return base + " Tool descriptors, schemas, peer-agent messages, and MCP server provenance can redirect the agent across trust boundaries."
+	case "supply-chain":
+		return base + " A compromised skill, model, MCP server, plugin, or image can inherit the agent's file, credential, and tool reach."
+	default:
+		return base
+	}
+}
+
+func limitStrings(values []string, limit int) []string {
+	if limit <= 0 || len(values) <= limit {
+		return values
+	}
+	return values[:limit]
+}
+
 func securityProviderLabel(provider string) string {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "aws":
@@ -1190,8 +1544,8 @@ func summarizeSecurityFindingHeadlines(findings []securityFinding, limit int) []
 	return lines
 }
 
-func extractSecurityProviderCandidateTargets(entry securityProviderContextLine) []string {
-	targets := extractSecurityURLs(entry.Line)
+func extractSecurityProviderCandidateTargets(provider string, entry securityProviderContextLine) []string {
+	targets := filterSecurityProviderCandidateTargets(provider, entry, extractSecurityURLs(entry.Line))
 	if len(targets) > 0 {
 		return targets
 	}
@@ -1214,6 +1568,83 @@ func extractSecurityURLs(line string) []string {
 		urls = append(urls, clean)
 	}
 	return uniqueNonEmptyStrings(urls)
+}
+
+func filterSecurityProviderCandidateTargets(provider string, entry securityProviderContextLine, targets []string) []string {
+	if len(targets) == 0 {
+		return nil
+	}
+	filtered := []string{}
+	for _, target := range targets {
+		if securityProviderURLLooksLikeDocumentation(provider, entry, target) {
+			continue
+		}
+		filtered = append(filtered, target)
+	}
+	return uniqueNonEmptyStrings(filtered)
+}
+
+func securityProviderURLLooksLikeDocumentation(provider string, entry securityProviderContextLine, rawURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
+	path := strings.ToLower(strings.TrimSpace(parsed.Path))
+	line := strings.ToLower(strings.TrimSpace(entry.Section + " " + entry.Line))
+
+	if strings.Contains(line, "warning") || strings.Contains(line, "error") || strings.Contains(line, "failed") || strings.Contains(line, "permission") || strings.Contains(line, "forbidden") || strings.Contains(line, "enable it by visiting") || strings.Contains(line, "learn more") || strings.Contains(line, "documentation") {
+		if securityURLHostIsKnownProviderHelpHost(provider, host) {
+			return true
+		}
+	}
+	if securityURLHostIsKnownProviderHelpHost(provider, host) {
+		if strings.Contains(path, "/docs/") || strings.Contains(path, "/documentation") || strings.Contains(path, "/apis/api/") || strings.Contains(path, "/console/") || strings.Contains(path, "/learn/") || strings.Contains(path, "/help/") {
+			return true
+		}
+	}
+	return false
+}
+
+func securityURLHostIsKnownProviderHelpHost(provider string, host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return false
+	}
+	commonHelpHosts := []string{
+		"docs.aws.amazon.com",
+		"console.aws.amazon.com",
+		"aws.amazon.com",
+		"cloud.google.com",
+		"docs.cloud.google.com",
+		"console.cloud.google.com",
+		"console.developers.google.com",
+		"learn.microsoft.com",
+		"portal.azure.com",
+		"docs.microsoft.com",
+		"developers.cloudflare.com",
+		"dash.cloudflare.com",
+		"docs.digitalocean.com",
+		"cloud.digitalocean.com",
+		"docs.github.com",
+		"github.com",
+		"vercel.com",
+		"docs.vercel.com",
+	}
+	for _, candidate := range commonHelpHosts {
+		if host == candidate || strings.HasSuffix(host, "."+candidate) {
+			return true
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "gcp":
+		return strings.Contains(host, "google.com")
+	case "aws":
+		return strings.Contains(host, "amazon.com") || strings.Contains(host, "aws.amazon.com")
+	case "azure":
+		return strings.Contains(host, "microsoft.com") || strings.Contains(host, "azure.com")
+	}
+	return false
 }
 
 func extractSecurityIPAddresses(line string) []string {
