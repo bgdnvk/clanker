@@ -3,11 +3,30 @@ package logs
 import (
 	"context"
 	"fmt"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
 )
+
+// EnvValue resolves a config value (project, subscription, token, …) from the
+// first of the given keys found in Options.Env, then the process environment.
+// Both the direct CLI (shell env) and the cloud backend (which sets the spawned
+// CLI's process env) land here, so collectors must check os.Getenv too.
+func (o Options) EnvValue(keys ...string) string {
+	for _, k := range keys {
+		if o.Env != nil {
+			if v := strings.TrimSpace(o.Env[k]); v != "" {
+				return v
+			}
+		}
+		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
 
 // Options are the normalized filters every collector understands. Collectors
 // push down what the provider API supports (time window, grep) and the caller

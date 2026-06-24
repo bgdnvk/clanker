@@ -26,7 +26,7 @@ func (c *azureCollector) baseArgs(opts Options, extra ...string) []string {
 	if rg := strings.TrimSpace(opts.Resource); rg != "" {
 		args = append(args, "--resource-group", rg)
 	}
-	if sub := strings.TrimSpace(opts.Env["AZURE_SUBSCRIPTION_ID"]); sub != "" {
+	if sub := opts.EnvValue("AZURE_SUBSCRIPTION_ID"); sub != "" {
 		args = append(args, "--subscription", sub)
 	}
 	return args
@@ -36,7 +36,7 @@ func (c *azureCollector) Sources(ctx context.Context, opts Options) ([]Source, e
 	// Activity log is subscription/resource-group scoped; surface resource groups
 	// as selectable "sources" so the UI can scope by RG.
 	args := []string{"group", "list", "-o", "json"}
-	if sub := strings.TrimSpace(opts.Env["AZURE_SUBSCRIPTION_ID"]); sub != "" {
+	if sub := opts.EnvValue("AZURE_SUBSCRIPTION_ID"); sub != "" {
 		args = append(args, "--subscription", sub)
 	}
 	out, err := runJSON(ctx, "az", args, opts.Env)
