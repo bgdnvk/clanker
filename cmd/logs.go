@@ -35,28 +35,36 @@ func newLogsCmd() *cobra.Command {
 		level     string
 		grep      string
 		limit     int
+		tailLines int
 		format    string
 		profile   string
 		aiProfile string
 	)
 
 	buildOpts := func() (logs.Options, error) {
-		now := time.Now()
-		sinceT, err := logs.ParseSince(since, now)
-		if err != nil {
-			return logs.Options{}, err
-		}
 		opts := logs.Options{
 			Provider: provider,
 			Resource: resource,
 			Service:  service,
 			Region:   region,
-			Since:    sinceT,
 			Level:    level,
 			Grep:     grep,
-			Limit:    limit,
 			Profile:  profile,
 		}
+		if tailLines > 0 {
+			// Count-based "latest N" mode: show the last N entries regardless of
+			// age (no time floor) then follow. Avoids the empty/looks-broken view
+			// that a time window gives for a quiet source.
+			opts.Limit = tailLines
+			return opts, nil
+		}
+		now := time.Now()
+		sinceT, err := logs.ParseSince(since, now)
+		if err != nil {
+			return logs.Options{}, err
+		}
+		opts.Since = sinceT
+		opts.Limit = limit
 		if strings.TrimSpace(until) != "" {
 			t, err := time.Parse(time.RFC3339, until)
 			if err != nil {
@@ -82,6 +90,7 @@ the talk-to-logs agent.`,
 	persistent.StringVar(&region, "region", "", "region (also kube context for k8s)")
 	persistent.StringVar(&since, "since", "15m", "window start: 15m, 2h, 3d, or RFC3339")
 	persistent.StringVar(&until, "until", "", "window end (RFC3339, default now)")
+	persistent.IntVar(&tailLines, "tail", 0, "count-based: show the last N entries (no time floor) then follow; overrides --since")
 	persistent.StringVar(&level, "level", "", "minimum level: debug|info|warn|error")
 	persistent.StringVar(&grep, "grep", "", "message filter (substring, or /regex/)")
 	persistent.IntVar(&limit, "limit", 1000, "max entries for bounded queries")

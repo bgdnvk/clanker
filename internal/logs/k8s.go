@@ -82,11 +82,13 @@ func (c *k8sCollector) logArgs(opts Options, follow bool) []string {
 			args = append(args, fmt.Sprintf("--since=%ds", int64(d.Seconds())))
 		}
 	}
-	if opts.Limit > 0 && !follow {
-		args = append(args, fmt.Sprintf("--tail=%d", opts.Limit))
-	} else if follow {
-		args = append(args, "--tail=200")
+	// Count-based backfill: --tail=N returns the last N lines regardless of age
+	// (for both one-shot query and the initial follow backfill).
+	tail := opts.Limit
+	if tail <= 0 {
+		tail = 200
 	}
+	args = append(args, fmt.Sprintf("--tail=%d", tail))
 	if follow {
 		args = append(args, "-f")
 	}
