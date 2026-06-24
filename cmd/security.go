@@ -23,10 +23,10 @@ import (
 )
 
 const (
-	defaultSecurityScanQuestion     = "Analyze the current infrastructure for public or reachable APIs, internet-facing surfaces, credential leaks, auth gaps, exploitable misconfigurations, and plausible attack paths. Prioritize externally reachable services and concrete attack vectors."
+	defaultSecurityScanQuestion     = "Analyze the current infrastructure for public or reachable APIs, internet-facing surfaces, credential leaks, auth gaps, exploitable misconfigurations, weak HTTP security headers, unsafe CORS, cookie/session flag gaps, risky HTTP methods, exposed documentation or sensitive paths, TLS posture, host/header trust, cache policy, API rate-limit/resource controls, agent/tool misuse, MCP and agent supply-chain exposure, prompt-injection paths, identity abuse, and plausible attack paths. Prioritize externally reachable services, agentic control planes, and concrete attack vectors."
 	securityScanResultMarker        = "::clanker-security-result::"
 	maxSecurityProbeEndpoints       = 24
-	maxSecurityAttackVectors        = 10
+	maxSecurityAttackVectors        = 18
 	securityProbeTimeout            = 3 * time.Second
 	runtimeSecurityBearerTokenEnv   = "CLANKER_RUNTIME_SECURITY_BEARER_TOKEN"
 	runtimeSecurityBasicUsernameEnv = "CLANKER_RUNTIME_SECURITY_BASIC_USERNAME"
@@ -54,36 +54,49 @@ type securityScanSummary struct {
 	CriticalFindings   int    `json:"criticalFindings"`
 	HighFindings       int    `json:"highFindings"`
 	CredentialRisks    int    `json:"credentialRisks"`
+	AgenticRisks       int    `json:"agenticRisks"`
+	MCPRisks           int    `json:"mcpRisks"`
+	SupplyChainRisks   int    `json:"supplyChainRisks"`
+	PrivilegeRisks     int    `json:"privilegeRisks"`
+	WebPostureRisks    int    `json:"webPostureRisks"`
+	SensitivePathRisks int    `json:"sensitivePathRisks"`
+	CORSRisks          int    `json:"corsRisks"`
+	TLSRisks           int    `json:"tlsRisks"`
 	AttackVectorCount  int    `json:"attackVectorCount"`
 	AuthSignals        int    `json:"authSignals"`
 	PrimaryFocus       string `json:"primaryFocus,omitempty"`
 }
 
 type securityFinding struct {
-	ID           string   `json:"id"`
-	Severity     string   `json:"severity"`
-	Category     string   `json:"category"`
-	Title        string   `json:"title"`
-	Summary      string   `json:"summary"`
-	Confidence   string   `json:"confidence,omitempty"`
-	BlastRadius  string   `json:"blastRadius,omitempty"`
-	ResourceID   string   `json:"resourceId,omitempty"`
-	ResourceName string   `json:"resourceName,omitempty"`
-	ResourceType string   `json:"resourceType,omitempty"`
-	Provider     string   `json:"provider,omitempty"`
-	Region       string   `json:"region,omitempty"`
-	Endpoint     string   `json:"endpoint,omitempty"`
-	Reachable    bool     `json:"reachable,omitempty"`
-	StatusCode   int      `json:"statusCode,omitempty"`
-	RequiresAuth bool     `json:"requiresAuth,omitempty"`
-	Evidence     []string `json:"evidence,omitempty"`
-	Questions    []string `json:"questions,omitempty"`
-	Containment  []string `json:"containment,omitempty"`
-	Remediation  []string `json:"remediation,omitempty"`
-	Verification []string `json:"verification,omitempty"`
-	Priority     string   `json:"priority,omitempty"`
-	Owner        string   `json:"owner,omitempty"`
-	Status       string   `json:"status,omitempty"`
+	ID              string   `json:"id"`
+	Severity        string   `json:"severity"`
+	Category        string   `json:"category"`
+	Title           string   `json:"title"`
+	Summary         string   `json:"summary"`
+	Confidence      string   `json:"confidence,omitempty"`
+	BlastRadius     string   `json:"blastRadius,omitempty"`
+	ResourceID      string   `json:"resourceId,omitempty"`
+	ResourceName    string   `json:"resourceName,omitempty"`
+	ResourceType    string   `json:"resourceType,omitempty"`
+	Provider        string   `json:"provider,omitempty"`
+	Region          string   `json:"region,omitempty"`
+	Endpoint        string   `json:"endpoint,omitempty"`
+	Reachable       bool     `json:"reachable,omitempty"`
+	StatusCode      int      `json:"statusCode,omitempty"`
+	RequiresAuth    bool     `json:"requiresAuth,omitempty"`
+	Frameworks      []string `json:"frameworks,omitempty"`
+	Threats         []string `json:"threats,omitempty"`
+	AttackerView    string   `json:"attackerView,omitempty"`
+	DefenderView    string   `json:"defenderView,omitempty"`
+	Evidence        []string `json:"evidence,omitempty"`
+	Questions       []string `json:"questions,omitempty"`
+	Containment     []string `json:"containment,omitempty"`
+	Remediation     []string `json:"remediation,omitempty"`
+	Verification    []string `json:"verification,omitempty"`
+	RegressionTests []string `json:"regressionTests,omitempty"`
+	Priority        string   `json:"priority,omitempty"`
+	Owner           string   `json:"owner,omitempty"`
+	Status          string   `json:"status,omitempty"`
 }
 
 type securityAttackVector struct {
@@ -105,6 +118,11 @@ type securityAttackVector struct {
 	DetectionSignals []string `json:"detectionSignals,omitempty"`
 	RequiresAuth     bool     `json:"requiresAuth,omitempty"`
 	AuthKinds        []string `json:"authKinds,omitempty"`
+	Frameworks       []string `json:"frameworks,omitempty"`
+	Threats          []string `json:"threats,omitempty"`
+	AttackerView     string   `json:"attackerView,omitempty"`
+	DefenderView     string   `json:"defenderView,omitempty"`
+	RegressionTests  []string `json:"regressionTests,omitempty"`
 	Evidence         []string `json:"evidence,omitempty"`
 }
 
@@ -138,24 +156,33 @@ type securitySurfaceCandidate struct {
 }
 
 type securityProbeObservation struct {
-	Endpoint         string
-	ResourceID       string
-	Scheme           string
-	Port             string
-	StatusCode       int
-	Reachable        bool
-	RequiresAuth     bool
-	Authenticated    bool
-	AllowsCORS       bool
-	Server           string
-	Banner           string
-	TLSEnabled       bool
-	TLSVersion       string
-	ContentType      string
-	Location         string
-	Method           string
-	InterestingPaths []string
-	Notes            []string
+	Endpoint          string
+	ResourceID        string
+	Scheme            string
+	Port              string
+	StatusCode        int
+	Reachable         bool
+	RequiresAuth      bool
+	Authenticated     bool
+	AllowsCORS        bool
+	Server            string
+	Banner            string
+	TLSEnabled        bool
+	TLSVersion        string
+	ContentType       string
+	Location          string
+	Method            string
+	InterestingPaths  []string
+	MissingHeaders    []string
+	WeakHeaders       []string
+	CookieIssues      []string
+	CORSIssues        []string
+	TLSIssues         []string
+	MethodIssues      []string
+	HeaderTrustIssues []string
+	CacheIssues       []string
+	RateLimitIssues   []string
+	Notes             []string
 }
 
 type securityScanContext struct {
@@ -175,8 +202,11 @@ var securityCmd = &cobra.Command{
 	Long: `Run a staged security scan across the current infrastructure estate.
 
 The scan inventories internet-facing surfaces, safely probes likely APIs,
-checks for exploitable misconfigurations and secret leaks, and builds attack
-vectors that an operator can validate manually.`,
+checks for exploitable misconfigurations, secret leaks, HTTP header, CORS,
+cookie, TLS, risky-method, sensitive-path, host/header trust, cache-policy,
+and API resource-control posture, agent/tool misuse,
+MCP and supply-chain risk, and builds attack vectors that an operator can
+validate manually.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		question := defaultSecurityScanQuestion
@@ -382,6 +412,39 @@ func runSecurityScan(ctx context.Context, scanCtx securityScanContext) (security
 			},
 		},
 		{
+			name: "agentic-surface-analyst",
+			run: func() ([]securityFinding, securitySubagentRun, []string) {
+				findings := buildSecurityAgenticSurfaceFindings(scanCtx.Estate.Resources)
+				summary := fmt.Sprintf("Flagged %d agent/tool, prompt-injection, or agent identity risks.", len(findings))
+				if len(findings) == 0 {
+					summary = "No obvious agent/tool execution, prompt-injection, or agent identity risks were inferred from the estate snapshot."
+				}
+				return findings, securitySubagentRun{Name: "agentic-surface-analyst", Status: "ok", Summary: summary}, nil
+			},
+		},
+		{
+			name: "mcp-tooling-analyst",
+			run: func() ([]securityFinding, securitySubagentRun, []string) {
+				findings := buildSecurityMCPToolingFindings(scanCtx.Estate.Resources)
+				summary := fmt.Sprintf("Flagged %d MCP, tool gateway, or inter-agent trust findings.", len(findings))
+				if len(findings) == 0 {
+					summary = "No obvious MCP, tool gateway, or cross-agent trust findings were inferred from the estate snapshot."
+				}
+				return findings, securitySubagentRun{Name: "mcp-tooling-analyst", Status: "ok", Summary: summary}, nil
+			},
+		},
+		{
+			name: "agent-supply-chain-analyst",
+			run: func() ([]securityFinding, securitySubagentRun, []string) {
+				findings := buildSecurityAgentSupplyChainFindings(scanCtx.Estate.Resources)
+				summary := fmt.Sprintf("Flagged %d agent supply-chain or dependency integrity findings.", len(findings))
+				if len(findings) == 0 {
+					summary = "No obvious agent skill, MCP server, model, image, or workflow integrity gaps were inferred from the estate snapshot."
+				}
+				return findings, securitySubagentRun{Name: "agent-supply-chain-analyst", Status: "ok", Summary: summary}, nil
+			},
+		},
+		{
 			name: "storage-hygiene-analyst",
 			run: func() ([]securityFinding, securitySubagentRun, []string) {
 				findings := buildSecurityStorageExposureFindings(scanCtx.Estate.Resources)
@@ -412,6 +475,17 @@ func runSecurityScan(ctx context.Context, scanCtx securityScanContext) (security
 					summary = "No reachable API surfaces were confirmed from the current candidate list."
 				}
 				return findings, securitySubagentRun{Name: "surface-exposure-analyst", Status: "ok", Summary: summary}, nil
+			},
+		},
+		{
+			name: "web-posture-analyst",
+			run: func() ([]securityFinding, securitySubagentRun, []string) {
+				findings := buildSecurityHTTPPostureFindings(scanCtx.Candidates, scanCtx.Probes)
+				summary := fmt.Sprintf("Flagged %d HTTP header, CORS, TLS, method, cookie, sensitive-path, header-trust, cache, or API resource-control findings.", len(findings))
+				if len(findings) == 0 {
+					summary = "No HTTP header, CORS, TLS, risky-method, cookie, sensitive-path, header-trust, cache, or API resource-control gaps were confirmed by live probes."
+				}
+				return findings, securitySubagentRun{Name: "web-posture-analyst", Status: "ok", Summary: summary}, nil
 			},
 		},
 	}
@@ -1331,9 +1405,11 @@ func probeSecurityEndpoint(parent context.Context, candidate securitySurfaceCand
 		Method:     "HEAD",
 	}
 
-	status, headers, location, err := doSecurityHTTPProbe(ctx, client, candidate.Endpoint, "HEAD", nil)
+	result, err := doSecurityHTTPProbeDetailed(ctx, client, candidate.Endpoint, "HEAD", nil)
+	status, headers, location := result.StatusCode, result.Headers, result.Location
 	if err != nil || status == 405 || status == 400 {
-		status, headers, location, err = doSecurityHTTPProbe(ctx, client, candidate.Endpoint, "GET", nil)
+		result, err = doSecurityHTTPProbeDetailed(ctx, client, candidate.Endpoint, "GET", nil)
+		status, headers, location = result.StatusCode, result.Headers, result.Location
 		observation.Method = "GET"
 	}
 	if err != nil {
@@ -1346,18 +1422,35 @@ func probeSecurityEndpoint(parent context.Context, candidate securitySurfaceCand
 	observation.AllowsCORS = strings.TrimSpace(headers.Get("Access-Control-Allow-Origin")) != ""
 	observation.Server = strings.TrimSpace(headers.Get("Server"))
 	observation.ContentType = strings.TrimSpace(headers.Get("Content-Type"))
-	observation.Notes = buildSecurityProbeNotes(observation)
+	if strings.TrimSpace(result.TLSVersion) != "" {
+		observation.TLSEnabled = true
+		observation.TLSVersion = strings.TrimSpace(result.TLSVersion)
+	}
+	observation.MissingHeaders, observation.WeakHeaders, observation.CookieIssues, observation.TLSIssues = analyzeSecurityHTTPPosture(candidate.Endpoint, headers, observation)
+	observation.CORSIssues = probeSecurityCORS(ctx, client, candidate.Endpoint, observation.RequiresAuth)
+	observation.MethodIssues = probeSecurityRiskyMethods(ctx, client, candidate.Endpoint, observation.RequiresAuth)
+	observation.HeaderTrustIssues = probeSecurityHeaderTrust(ctx, client, candidate.Endpoint, observation.StatusCode)
+	observation.CacheIssues = analyzeSecurityCachePolicy(headers, observation)
 
+	authNotes := []string{}
 	if authPack.HasAuth() && observation.RequiresAuth {
 		authHeaders := buildSecurityAuthHeaders(authPack)
-		authStatus, authRespHeaders, _, authErr := doSecurityHTTPProbe(ctx, client, candidate.Endpoint, "GET", authHeaders)
+		authResult, authErr := doSecurityHTTPProbeDetailed(ctx, client, candidate.Endpoint, "GET", authHeaders)
+		authStatus := authResult.StatusCode
+		authRespHeaders := authResult.Headers
 		if authErr == nil && authStatus > 0 {
 			if authStatus != http.StatusUnauthorized && authStatus != http.StatusForbidden {
 				observation.Authenticated = true
-				observation.Notes = append(observation.Notes, fmt.Sprintf("User-supplied auth changed the response to %d.", authStatus))
+				authNotes = append(authNotes, fmt.Sprintf("User-supplied auth changed the response to %d.", authStatus))
 				if observation.ContentType == "" {
 					observation.ContentType = strings.TrimSpace(authRespHeaders.Get("Content-Type"))
 				}
+				authObservation := observation
+				authObservation.StatusCode = authStatus
+				authObservation.Authenticated = true
+				authObservation.ContentType = coalesceSecurityName(strings.TrimSpace(authRespHeaders.Get("Content-Type")), observation.ContentType)
+				observation.CacheIssues = uniqueNonEmptyStrings(append(observation.CacheIssues, analyzeSecurityCachePolicy(authRespHeaders, authObservation)...))
+				observation.RateLimitIssues = uniqueNonEmptyStrings(append(observation.RateLimitIssues, analyzeSecurityRateLimitControls(candidate.Endpoint, authRespHeaders, authObservation)...))
 			}
 		}
 	}
@@ -1369,6 +1462,9 @@ func probeSecurityEndpoint(parent context.Context, candidate securitySurfaceCand
 		}
 		observation.InterestingPaths = discoverInterestingSecurityPaths(ctx, client, candidate.Endpoint, pathHeaders)
 	}
+
+	observation.RateLimitIssues = uniqueNonEmptyStrings(append(observation.RateLimitIssues, analyzeSecurityRateLimitControls(candidate.Endpoint, headers, observation)...))
+	observation.Notes = uniqueNonEmptyStrings(append(buildSecurityProbeNotes(observation), authNotes...))
 
 	return observation, nil
 }
@@ -1480,10 +1576,17 @@ func securitySanitizeProbeBanner(data []byte) string {
 	return sanitized
 }
 
-func doSecurityHTTPProbe(ctx context.Context, client *http.Client, endpoint string, method string, headers map[string]string) (int, http.Header, string, error) {
+type securityHTTPProbeResult struct {
+	StatusCode int
+	Headers    http.Header
+	Location   string
+	TLSVersion string
+}
+
+func doSecurityHTTPProbeDetailed(ctx context.Context, client *http.Client, endpoint string, method string, headers map[string]string) (securityHTTPProbeResult, error) {
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, nil)
 	if err != nil {
-		return 0, nil, "", err
+		return securityHTTPProbeResult{}, err
 	}
 	req.Header.Set("User-Agent", "clanker-security-scan/1.0")
 	req.Header.Set("Accept", "application/json, text/plain;q=0.9, */*;q=0.8")
@@ -1491,15 +1594,307 @@ func doSecurityHTTPProbe(ctx context.Context, client *http.Client, endpoint stri
 		if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
 			continue
 		}
+		if strings.EqualFold(strings.TrimSpace(key), "Host") {
+			req.Host = strings.TrimSpace(value)
+			continue
+		}
 		req.Header.Set(key, value)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, nil, "", err
+		return securityHTTPProbeResult{}, err
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 2048))
-	return resp.StatusCode, resp.Header.Clone(), strings.TrimSpace(resp.Header.Get("Location")), nil
+	result := securityHTTPProbeResult{
+		StatusCode: resp.StatusCode,
+		Headers:    resp.Header.Clone(),
+		Location:   strings.TrimSpace(resp.Header.Get("Location")),
+	}
+	if resp.TLS != nil {
+		result.TLSVersion = securityTLSVersionLabel(resp.TLS.Version)
+	}
+	return result, nil
+}
+
+func doSecurityHTTPProbe(ctx context.Context, client *http.Client, endpoint string, method string, headers map[string]string) (int, http.Header, string, error) {
+	result, err := doSecurityHTTPProbeDetailed(ctx, client, endpoint, method, headers)
+	if err != nil {
+		return 0, nil, "", err
+	}
+	return result.StatusCode, result.Headers, result.Location, nil
+}
+
+func analyzeSecurityHTTPPosture(endpoint string, headers http.Header, observation securityProbeObservation) ([]string, []string, []string, []string) {
+	missingHeaders := []string{}
+	weakHeaders := []string{}
+	cookieIssues := []string{}
+	tlsIssues := []string{}
+
+	scheme := strings.ToLower(strings.TrimSpace(securityEndpointScheme(endpoint)))
+	contentType := strings.ToLower(strings.TrimSpace(observation.ContentType))
+	browserSurface := contentType == "" || strings.Contains(contentType, "text/html")
+	if scheme == "https" {
+		if strings.TrimSpace(headers.Get("Strict-Transport-Security")) == "" {
+			missingHeaders = append(missingHeaders, "Strict-Transport-Security is missing on an HTTPS surface")
+		}
+	} else if scheme == "http" && observation.StatusCode > 0 {
+		location := strings.ToLower(strings.TrimSpace(observation.Location))
+		if !strings.HasPrefix(location, "https://") {
+			tlsIssues = append(tlsIssues, "Plain HTTP endpoint is reachable without an observed HTTPS redirect")
+		}
+	}
+	if strings.EqualFold(observation.TLSVersion, "TLS1.0") || strings.EqualFold(observation.TLSVersion, "TLS1.1") {
+		tlsIssues = append(tlsIssues, fmt.Sprintf("Weak TLS protocol negotiated: %s", observation.TLSVersion))
+	}
+	if strings.TrimSpace(headers.Get("X-Content-Type-Options")) == "" {
+		missingHeaders = append(missingHeaders, "X-Content-Type-Options is missing")
+	} else if !strings.EqualFold(strings.TrimSpace(headers.Get("X-Content-Type-Options")), "nosniff") {
+		weakHeaders = append(weakHeaders, fmt.Sprintf("X-Content-Type-Options is not nosniff: %s", strings.TrimSpace(headers.Get("X-Content-Type-Options"))))
+	}
+	if browserSurface {
+		csp := strings.TrimSpace(headers.Get("Content-Security-Policy"))
+		xfo := strings.TrimSpace(headers.Get("X-Frame-Options"))
+		if csp == "" {
+			missingHeaders = append(missingHeaders, "Content-Security-Policy is missing on a browser-facing response")
+		}
+		if xfo == "" && !strings.Contains(strings.ToLower(csp), "frame-ancestors") {
+			missingHeaders = append(missingHeaders, "No X-Frame-Options or CSP frame-ancestors clickjacking control was observed")
+		}
+	}
+	if strings.TrimSpace(headers.Get("Referrer-Policy")) == "" {
+		missingHeaders = append(missingHeaders, "Referrer-Policy is missing")
+	}
+	for _, cookie := range headers.Values("Set-Cookie") {
+		trimmed := strings.TrimSpace(cookie)
+		if trimmed == "" {
+			continue
+		}
+		lower := strings.ToLower(trimmed)
+		name := strings.TrimSpace(strings.SplitN(trimmed, "=", 2)[0])
+		if name == "" {
+			name = "cookie"
+		}
+		if !strings.Contains(lower, "secure") && scheme == "https" {
+			cookieIssues = append(cookieIssues, fmt.Sprintf("%s cookie is missing Secure", name))
+		}
+		if !strings.Contains(lower, "httponly") {
+			cookieIssues = append(cookieIssues, fmt.Sprintf("%s cookie is missing HttpOnly", name))
+		}
+		if !strings.Contains(lower, "samesite=") {
+			cookieIssues = append(cookieIssues, fmt.Sprintf("%s cookie is missing SameSite", name))
+		}
+	}
+	return uniqueNonEmptyStrings(missingHeaders), uniqueNonEmptyStrings(weakHeaders), uniqueNonEmptyStrings(cookieIssues), uniqueNonEmptyStrings(tlsIssues)
+}
+
+func probeSecurityCORS(ctx context.Context, client *http.Client, endpoint string, requiresAuth bool) []string {
+	headers := map[string]string{
+		"Origin":                         "https://clanker-security.invalid",
+		"Access-Control-Request-Method":  "GET",
+		"Access-Control-Request-Headers": "Authorization, Content-Type",
+	}
+	status, respHeaders, _, err := doSecurityHTTPProbe(ctx, client, endpoint, "OPTIONS", headers)
+	if err != nil || status == 0 {
+		return nil
+	}
+	return analyzeSecurityCORSHeaders(respHeaders, requiresAuth)
+}
+
+func analyzeSecurityCORSHeaders(headers http.Header, requiresAuth bool) []string {
+	issues := []string{}
+	allowOrigin := strings.TrimSpace(headers.Get("Access-Control-Allow-Origin"))
+	allowCredentials := strings.EqualFold(strings.TrimSpace(headers.Get("Access-Control-Allow-Credentials")), "true")
+	if allowOrigin == "" {
+		return nil
+	}
+	allowOriginLower := strings.ToLower(allowOrigin)
+	if allowOrigin == "*" {
+		issues = append(issues, "Access-Control-Allow-Origin permits every origin")
+	}
+	if allowOriginLower == "https://clanker-security.invalid" {
+		issues = append(issues, "Access-Control-Allow-Origin reflects an untrusted test origin")
+	}
+	if allowCredentials {
+		issues = append(issues, "Access-Control-Allow-Credentials is true")
+	}
+	if allowCredentials && (allowOrigin == "*" || allowOriginLower == "https://clanker-security.invalid" || requiresAuth) {
+		issues = append(issues, "Credentialed CORS can expose authenticated browser context if sensitive routes share this policy")
+	}
+	return uniqueNonEmptyStrings(issues)
+}
+
+func probeSecurityRiskyMethods(ctx context.Context, client *http.Client, endpoint string, requiresAuth bool) []string {
+	status, headers, _, err := doSecurityHTTPProbe(ctx, client, endpoint, "OPTIONS", nil)
+	if err != nil || status == 0 {
+		return nil
+	}
+	values := []string{headers.Get("Allow"), headers.Get("Access-Control-Allow-Methods")}
+	risky := []string{}
+	for _, value := range values {
+		lower := strings.ToUpper(value)
+		for _, method := range []string{"PUT", "PATCH", "DELETE", "TRACE", "CONNECT"} {
+			if strings.Contains(lower, method) {
+				risky = append(risky, method)
+			}
+		}
+	}
+	risky = uniqueNonEmptyStrings(risky)
+	if len(risky) == 0 {
+		return nil
+	}
+	prefix := "Risky HTTP methods advertised"
+	if !requiresAuth {
+		prefix = "Risky HTTP methods advertised before an auth challenge"
+	}
+	return []string{fmt.Sprintf("%s: %s", prefix, strings.Join(risky, ", "))}
+}
+
+func probeSecurityHeaderTrust(ctx context.Context, client *http.Client, endpoint string, baselineStatus int) []string {
+	injectedHost := "clanker-security.invalid"
+	issues := []string{}
+
+	hostHeaders := map[string]string{
+		"Host":              injectedHost,
+		"X-Forwarded-Host":  injectedHost,
+		"X-Forwarded-Proto": "http",
+	}
+	status, _, location, err := doSecurityHTTPProbe(ctx, client, endpoint, "GET", hostHeaders)
+	if err == nil && status > 0 {
+		if securityLocationUsesHost(location, injectedHost) {
+			issues = append(issues, fmt.Sprintf("Host/X-Forwarded-Host probe redirected to attacker-controlled host: %s", location))
+		}
+		if securityStatusBypassedAuth(baselineStatus, status) {
+			issues = append(issues, fmt.Sprintf("Host/X-Forwarded-Host probe changed an auth challenge into HTTP %d", status))
+		}
+	}
+
+	rewriteHeaders := map[string]string{
+		"X-Forwarded-For": "127.0.0.1",
+		"X-Original-URL":  "/admin",
+		"X-Rewrite-URL":   "/admin",
+	}
+	status, _, _, err = doSecurityHTTPProbe(ctx, client, endpoint, "GET", rewriteHeaders)
+	if err == nil && status > 0 && securityStatusBypassedAuth(baselineStatus, status) {
+		issues = append(issues, fmt.Sprintf("Proxy rewrite header probe changed an auth challenge into HTTP %d", status))
+	}
+
+	return uniqueNonEmptyStrings(issues)
+}
+
+func securityLocationUsesHost(location string, host string) bool {
+	location = strings.TrimSpace(location)
+	host = strings.ToLower(strings.TrimSpace(host))
+	if location == "" || host == "" {
+		return false
+	}
+	parsed, err := url.Parse(location)
+	if err == nil && strings.EqualFold(strings.TrimSpace(parsed.Hostname()), host) {
+		return true
+	}
+	lower := strings.ToLower(location)
+	return strings.Contains(lower, "//"+host) || strings.HasPrefix(lower, host+"/") || lower == host
+}
+
+func securityStatusBypassedAuth(baselineStatus int, probeStatus int) bool {
+	if baselineStatus != http.StatusUnauthorized && baselineStatus != http.StatusForbidden {
+		return false
+	}
+	return probeStatus >= 200 && probeStatus < 400
+}
+
+func analyzeSecurityCachePolicy(headers http.Header, observation securityProbeObservation) []string {
+	cacheControl := strings.ToLower(strings.TrimSpace(headers.Get("Cache-Control")))
+	pragma := strings.ToLower(strings.TrimSpace(headers.Get("Pragma")))
+	setCookie := len(headers.Values("Set-Cookie")) > 0
+	authLike := observation.RequiresAuth || observation.Authenticated || setCookie
+	if !authLike {
+		return nil
+	}
+
+	issues := []string{}
+	if cacheControl == "" && !strings.Contains(pragma, "no-cache") {
+		issues = append(issues, "Auth, session, or cookie-like response did not set Cache-Control")
+	}
+	if strings.Contains(cacheControl, "public") {
+		issues = append(issues, fmt.Sprintf("Cache-Control permits public caching on auth/session-like content: %s", headers.Get("Cache-Control")))
+	}
+	if setCookie && !securityCacheControlIsSessionSafe(cacheControl) && !strings.Contains(pragma, "no-cache") {
+		issues = append(issues, "Set-Cookie response lacks private, no-store, or no-cache cache directives")
+	}
+	return uniqueNonEmptyStrings(issues)
+}
+
+func securityCacheControlIsSessionSafe(cacheControl string) bool {
+	cacheControl = strings.ToLower(strings.TrimSpace(cacheControl))
+	if cacheControl == "" {
+		return false
+	}
+	return strings.Contains(cacheControl, "no-store") || strings.Contains(cacheControl, "private") || strings.Contains(cacheControl, "no-cache")
+}
+
+func analyzeSecurityRateLimitControls(endpoint string, headers http.Header, observation securityProbeObservation) []string {
+	if observation.StatusCode < 200 || observation.StatusCode >= 400 {
+		return nil
+	}
+	if observation.RequiresAuth && !observation.Authenticated {
+		return nil
+	}
+	if !securityLooksAPILike(endpoint, observation) {
+		return nil
+	}
+	if securityHasRateLimitSignal(headers) {
+		return nil
+	}
+	responseKind := "public API-like response"
+	if observation.Authenticated {
+		responseKind = "authenticated API-like response"
+	}
+	return []string{fmt.Sprintf("No RateLimit, X-RateLimit, or Retry-After headers observed on %s", responseKind)}
+}
+
+func securityLooksAPILike(endpoint string, observation securityProbeObservation) bool {
+	contentType := strings.ToLower(strings.TrimSpace(observation.ContentType))
+	for _, marker := range []string{"json", "graphql", "grpc", "protobuf", "problem+", "ndjson", "event-stream"} {
+		if strings.Contains(contentType, marker) {
+			return true
+		}
+	}
+	parsed, err := url.Parse(strings.TrimSpace(endpoint))
+	if err == nil {
+		path := strings.ToLower(strings.TrimSpace(parsed.Path))
+		for _, marker := range []string{"/api", "/graphql", ".json", "openapi", "swagger"} {
+			if strings.Contains(path, marker) {
+				return true
+			}
+		}
+	}
+	for _, path := range observation.InterestingPaths {
+		lower := strings.ToLower(path)
+		if strings.Contains(lower, "/graphql") || strings.Contains(lower, "openapi") || strings.Contains(lower, "swagger") || strings.Contains(lower, "api-docs") {
+			return true
+		}
+	}
+	return false
+}
+
+func securityHasRateLimitSignal(headers http.Header) bool {
+	for _, header := range []string{
+		"RateLimit-Limit",
+		"RateLimit-Remaining",
+		"RateLimit-Reset",
+		"X-RateLimit-Limit",
+		"X-RateLimit-Remaining",
+		"X-RateLimit-Reset",
+		"Retry-After",
+		"X-Rate-Limit-Limit",
+		"X-Rate-Limit-Remaining",
+	} {
+		if strings.TrimSpace(headers.Get(header)) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func buildSecurityAuthHeaders(pack securityRuntimeAuthPack) map[string]string {
@@ -1549,6 +1944,33 @@ func buildSecurityProbeNotes(observation securityProbeObservation) []string {
 	if observation.AllowsCORS {
 		notes = append(notes, "CORS headers are present.")
 	}
+	for _, issue := range observation.CORSIssues {
+		notes = append(notes, "CORS issue: "+issue)
+	}
+	for _, issue := range observation.MissingHeaders {
+		notes = append(notes, "Missing header: "+issue)
+	}
+	for _, issue := range observation.WeakHeaders {
+		notes = append(notes, "Weak header: "+issue)
+	}
+	for _, issue := range observation.CookieIssues {
+		notes = append(notes, "Cookie issue: "+issue)
+	}
+	for _, issue := range observation.TLSIssues {
+		notes = append(notes, "TLS issue: "+issue)
+	}
+	for _, issue := range observation.MethodIssues {
+		notes = append(notes, "Method issue: "+issue)
+	}
+	for _, issue := range observation.HeaderTrustIssues {
+		notes = append(notes, "Header trust issue: "+issue)
+	}
+	for _, issue := range observation.CacheIssues {
+		notes = append(notes, "Cache policy issue: "+issue)
+	}
+	for _, issue := range observation.RateLimitIssues {
+		notes = append(notes, "API resource-control issue: "+issue)
+	}
 	if observation.RequiresAuth {
 		notes = append(notes, "The endpoint signaled authentication or authorization checks.")
 	}
@@ -1556,7 +1978,28 @@ func buildSecurityProbeNotes(observation securityProbeObservation) []string {
 }
 
 func discoverInterestingSecurityPaths(ctx context.Context, client *http.Client, endpoint string, headers map[string]string) []string {
-	commonPaths := []string{"/health", "/healthz", "/openapi.json", "/swagger.json", "/docs", "/swagger/index.html", "/.well-known/openid-configuration"}
+	commonPaths := []string{
+		"/health",
+		"/healthz",
+		"/ready",
+		"/live",
+		"/metrics",
+		"/debug/vars",
+		"/server-status",
+		"/admin",
+		"/graphql",
+		"/openapi.json",
+		"/swagger.json",
+		"/swagger/index.html",
+		"/api-docs",
+		"/docs",
+		"/.well-known/openid-configuration",
+		"/.env",
+		"/.git/config",
+		"/config.json",
+		"/actuator/env",
+		"/actuator/heapdump",
+	}
 	baseURL, err := url.Parse(endpoint)
 	if err != nil {
 		return nil
@@ -1564,7 +2007,7 @@ func discoverInterestingSecurityPaths(ctx context.Context, client *http.Client, 
 	baseURL.Path = ""
 	baseURL.RawQuery = ""
 	baseURL.Fragment = ""
-	results := make([]string, 0, 3)
+	results := make([]string, 0, 8)
 	for _, path := range commonPaths {
 		checkURL := *baseURL
 		checkURL.Path = path
@@ -1575,7 +2018,7 @@ func discoverInterestingSecurityPaths(ctx context.Context, client *http.Client, 
 		if status >= 200 && status < 400 {
 			results = append(results, fmt.Sprintf("%s (%d)", path, status))
 		}
-		if len(results) >= 3 {
+		if len(results) >= 8 {
 			break
 		}
 	}
@@ -1655,6 +2098,300 @@ func buildSecurityReachabilityFindings(candidates []securitySurfaceCandidate, pr
 		})
 	}
 	return findings
+}
+
+func buildSecurityHTTPPostureFindings(candidates []securitySurfaceCandidate, probes []securityProbeObservation) []securityFinding {
+	candidateByEndpoint := map[string]securitySurfaceCandidate{}
+	for _, candidate := range candidates {
+		candidateByEndpoint[candidate.Endpoint] = candidate
+	}
+	findings := []securityFinding{}
+	for _, probe := range probes {
+		candidate, ok := candidateByEndpoint[probe.Endpoint]
+		if !ok || !probe.Reachable || probe.StatusCode == 0 {
+			continue
+		}
+		resourceLabel := coalesceSecurityName(candidate.ResourceName, candidate.ResourceID, probe.Endpoint, "this endpoint")
+		baseEvidence := []string{
+			fmt.Sprintf("Endpoint: %s", probe.Endpoint),
+			fmt.Sprintf("HTTP status: %d", probe.StatusCode),
+		}
+		if strings.TrimSpace(probe.ContentType) != "" {
+			baseEvidence = append(baseEvidence, fmt.Sprintf("Content-Type: %s", probe.ContentType))
+		}
+
+		headerEvidence := uniqueNonEmptyStrings(append(append([]string{}, probe.MissingHeaders...), probe.WeakHeaders...))
+		headerEvidence = append(headerEvidence, probe.CookieIssues...)
+		if len(headerEvidence) > 0 {
+			severity := "medium"
+			if len(probe.CookieIssues) > 0 && (probe.RequiresAuth || probe.Authenticated) {
+				severity = "high"
+			}
+			findings = append(findings, securityFinding{
+				ID:           buildDeepResearchFindingID("security-http-hardening", candidate.ResourceID+"|"+probe.Endpoint),
+				Severity:     severity,
+				Category:     "http-hardening",
+				Title:        fmt.Sprintf("%s has HTTP response hardening gaps", resourceLabel),
+				Summary:      "The endpoint responded to normal HTTP probes but is missing or weakening browser, content-sniffing, referrer, session cookie, or transport-hardening controls. These issues often become useful when chained with XSS, clickjacking, credential theft, or information disclosure.",
+				Confidence:   "high",
+				BlastRadius:  fmt.Sprintf("%s and any browser, API client, or session context that trusts it.", resourceLabel),
+				ResourceID:   candidate.ResourceID,
+				ResourceName: candidate.ResourceName,
+				ResourceType: candidate.ResourceType,
+				Provider:     candidate.Provider,
+				Region:       candidate.Region,
+				Endpoint:     probe.Endpoint,
+				Reachable:    true,
+				StatusCode:   probe.StatusCode,
+				Frameworks:   []string{"OWASP WSTG-CONF-14 HTTP Security Header Misconfigurations", "OWASP A05 Security Misconfiguration"},
+				Threats:      []string{"clickjacking", "content sniffing", "session cookie theft", "browser hardening gap"},
+				Evidence:     uniqueNonEmptyStrings(append(baseEvidence, headerEvidence...)),
+				Questions:    buildSecurityQuestions("http-hardening", candidate.ResourceName, probe.Endpoint, probe.Authenticated),
+			})
+		}
+
+		if len(probe.CORSIssues) > 0 {
+			severity := "high"
+			if !probe.RequiresAuth && !probe.Authenticated {
+				severity = "medium"
+			}
+			findings = append(findings, securityFinding{
+				ID:           buildDeepResearchFindingID("security-cors", candidate.ResourceID+"|"+probe.Endpoint),
+				Severity:     severity,
+				Category:     "cors-misconfiguration",
+				Title:        fmt.Sprintf("%s has unsafe CORS behavior", resourceLabel),
+				Summary:      "The endpoint responded to an untrusted Origin probe with permissive or credential-relevant CORS behavior. If sensitive data or authenticated routes share this policy, browser-based exfiltration becomes plausible.",
+				Confidence:   "high",
+				BlastRadius:  fmt.Sprintf("Browser clients, authenticated sessions, and any API responses reachable from %s.", resourceLabel),
+				ResourceID:   candidate.ResourceID,
+				ResourceName: candidate.ResourceName,
+				ResourceType: candidate.ResourceType,
+				Provider:     candidate.Provider,
+				Region:       candidate.Region,
+				Endpoint:     probe.Endpoint,
+				Reachable:    true,
+				StatusCode:   probe.StatusCode,
+				RequiresAuth: probe.RequiresAuth,
+				Frameworks:   []string{"OWASP WSTG-CLNT-07 Cross Origin Resource Sharing", "OWASP A05 Security Misconfiguration"},
+				Threats:      []string{"CORS data exfiltration", "credentialed cross-origin request", "origin reflection"},
+				Evidence:     uniqueNonEmptyStrings(append(baseEvidence, probe.CORSIssues...)),
+				Questions:    buildSecurityQuestions("cors-misconfiguration", candidate.ResourceName, probe.Endpoint, probe.Authenticated),
+			})
+		}
+
+		if len(probe.TLSIssues) > 0 {
+			findings = append(findings, securityFinding{
+				ID:           buildDeepResearchFindingID("security-tls-posture", candidate.ResourceID+"|"+probe.Endpoint),
+				Severity:     ternaryString(strings.Contains(strings.Join(probe.TLSIssues, " "), "TLS1.0") || strings.Contains(strings.Join(probe.TLSIssues, " "), "TLS1.1"), "high", "medium"),
+				Category:     "tls-posture",
+				Title:        fmt.Sprintf("%s has weak transport posture", resourceLabel),
+				Summary:      "The endpoint's transport behavior leaves room for downgrade, interception, or cleartext access. Confirm whether the service should force HTTPS with modern TLS and HSTS.",
+				Confidence:   "high",
+				BlastRadius:  fmt.Sprintf("Traffic, sessions, tokens, and API data exchanged with %s.", resourceLabel),
+				ResourceID:   candidate.ResourceID,
+				ResourceName: candidate.ResourceName,
+				ResourceType: candidate.ResourceType,
+				Provider:     candidate.Provider,
+				Region:       candidate.Region,
+				Endpoint:     probe.Endpoint,
+				Reachable:    true,
+				StatusCode:   probe.StatusCode,
+				Frameworks:   []string{"OWASP WSTG-CRYP Transport Layer Protection", "OWASP A02 Cryptographic Failures"},
+				Threats:      []string{"cleartext transport", "TLS downgrade", "session interception"},
+				Evidence:     uniqueNonEmptyStrings(append(baseEvidence, probe.TLSIssues...)),
+				Questions:    buildSecurityQuestions("tls-posture", candidate.ResourceName, probe.Endpoint, probe.Authenticated),
+			})
+		}
+
+		if len(probe.MethodIssues) > 0 {
+			findings = append(findings, securityFinding{
+				ID:           buildDeepResearchFindingID("security-risky-methods", candidate.ResourceID+"|"+probe.Endpoint),
+				Severity:     ternaryString(probe.RequiresAuth || probe.Authenticated, "medium", "high"),
+				Category:     "risky-methods",
+				Title:        fmt.Sprintf("%s advertises risky HTTP methods", resourceLabel),
+				Summary:      "The endpoint advertises write-capable or tunneling HTTP methods during a read-only OPTIONS probe. These methods should be intentional, authenticated, and constrained to specific routes.",
+				Confidence:   "medium",
+				BlastRadius:  fmt.Sprintf("Routes on %s that share the same method policy.", resourceLabel),
+				ResourceID:   candidate.ResourceID,
+				ResourceName: candidate.ResourceName,
+				ResourceType: candidate.ResourceType,
+				Provider:     candidate.Provider,
+				Region:       candidate.Region,
+				Endpoint:     probe.Endpoint,
+				Reachable:    true,
+				StatusCode:   probe.StatusCode,
+				RequiresAuth: probe.RequiresAuth,
+				Frameworks:   []string{"OWASP WSTG-CONF Web Server Configuration", "OWASP A05 Security Misconfiguration"},
+				Threats:      []string{"unexpected write method", "verb tampering", "route mutation"},
+				Evidence:     uniqueNonEmptyStrings(append(baseEvidence, probe.MethodIssues...)),
+				Questions:    buildSecurityQuestions("risky-methods", candidate.ResourceName, probe.Endpoint, probe.Authenticated),
+			})
+		}
+
+		if len(probe.HeaderTrustIssues) > 0 {
+			findings = append(findings, securityFinding{
+				ID:           buildDeepResearchFindingID("security-header-trust", candidate.ResourceID+"|"+probe.Endpoint),
+				Severity:     "high",
+				Category:     "header-trust",
+				Title:        fmt.Sprintf("%s trusts spoofable host or proxy headers", resourceLabel),
+				Summary:      "Host, forwarded-host, or proxy rewrite probes changed routing, redirects, or the auth boundary. This can enable host-header injection, password-reset poisoning, cache poisoning, direct-origin confusion, or edge/auth bypass depending on where the header is trusted.",
+				Confidence:   "high",
+				BlastRadius:  fmt.Sprintf("Routing, redirects, authentication decisions, and cache behavior on %s and any upstream proxy that trusts it.", resourceLabel),
+				ResourceID:   candidate.ResourceID,
+				ResourceName: candidate.ResourceName,
+				ResourceType: candidate.ResourceType,
+				Provider:     candidate.Provider,
+				Region:       candidate.Region,
+				Endpoint:     probe.Endpoint,
+				Reachable:    true,
+				StatusCode:   probe.StatusCode,
+				RequiresAuth: probe.RequiresAuth,
+				Frameworks:   []string{"OWASP WSTG-INPV-17 Host Header Injection", "OWASP A05 Security Misconfiguration"},
+				Threats:      []string{"host header injection", "proxy header trust", "web cache poisoning", "auth bypass"},
+				Evidence:     uniqueNonEmptyStrings(append(baseEvidence, probe.HeaderTrustIssues...)),
+				Questions:    buildSecurityQuestions("header-trust", candidate.ResourceName, probe.Endpoint, probe.Authenticated),
+			})
+		}
+
+		if len(probe.CacheIssues) > 0 {
+			severity := "medium"
+			if probe.RequiresAuth || probe.Authenticated {
+				severity = "high"
+			}
+			findings = append(findings, securityFinding{
+				ID:           buildDeepResearchFindingID("security-cache-policy", candidate.ResourceID+"|"+probe.Endpoint),
+				Severity:     severity,
+				Category:     "cache-policy",
+				Title:        fmt.Sprintf("%s has unsafe cache policy for session-like content", resourceLabel),
+				Summary:      "Cookie, auth, or session-like responses were served without cache directives that clearly prevent shared-cache retention. That can turn otherwise valid responses into replayable or cross-user exposure when CDNs, proxies, browsers, or service workers cache the content.",
+				Confidence:   "medium",
+				BlastRadius:  fmt.Sprintf("Session-bearing responses, browser caches, CDN/proxy layers, and API clients that consume %s.", resourceLabel),
+				ResourceID:   candidate.ResourceID,
+				ResourceName: candidate.ResourceName,
+				ResourceType: candidate.ResourceType,
+				Provider:     candidate.Provider,
+				Region:       candidate.Region,
+				Endpoint:     probe.Endpoint,
+				Reachable:    true,
+				StatusCode:   probe.StatusCode,
+				RequiresAuth: probe.RequiresAuth,
+				Frameworks:   []string{"OWASP WSTG-CONF Cache Control", "OWASP A05 Security Misconfiguration"},
+				Threats:      []string{"shared cache data exposure", "session response replay", "browser cache leakage"},
+				Evidence:     uniqueNonEmptyStrings(append(baseEvidence, probe.CacheIssues...)),
+				Questions:    buildSecurityQuestions("cache-policy", candidate.ResourceName, probe.Endpoint, probe.Authenticated),
+			})
+		}
+
+		if len(probe.RateLimitIssues) > 0 {
+			severity := "medium"
+			if strings.Contains(strings.ToLower(strings.Join(append(probe.InterestingPaths, probe.Endpoint), " ")), "graphql") {
+				severity = "high"
+			}
+			findings = append(findings, securityFinding{
+				ID:           buildDeepResearchFindingID("security-api-resource-controls", candidate.ResourceID+"|"+probe.Endpoint),
+				Severity:     severity,
+				Category:     "api-resource-controls",
+				Title:        fmt.Sprintf("%s lacks visible API abuse controls", resourceLabel),
+				Summary:      "The endpoint looks API-like and answered a bounded probe without visible rate-limit or backoff signals. This is not proof that rate limiting is absent, but it is a strong validation target for brute force, scraping, expensive GraphQL/query patterns, third-party API cost amplification, and denial-of-wallet/resource-consumption risks.",
+				Confidence:   "medium",
+				BlastRadius:  fmt.Sprintf("API routes, expensive handlers, backing services, third-party quotas, and cloud spend reachable through %s.", resourceLabel),
+				ResourceID:   candidate.ResourceID,
+				ResourceName: candidate.ResourceName,
+				ResourceType: candidate.ResourceType,
+				Provider:     candidate.Provider,
+				Region:       candidate.Region,
+				Endpoint:     probe.Endpoint,
+				Reachable:    true,
+				StatusCode:   probe.StatusCode,
+				RequiresAuth: probe.RequiresAuth,
+				Frameworks:   []string{"OWASP API4:2023 Unrestricted Resource Consumption", "OWASP API Security Top 10"},
+				Threats:      []string{"resource exhaustion", "credential stuffing", "scraping", "cloud cost amplification"},
+				Evidence:     uniqueNonEmptyStrings(append(baseEvidence, probe.RateLimitIssues...)),
+				Questions:    buildSecurityQuestions("api-resource-controls", candidate.ResourceName, probe.Endpoint, probe.Authenticated),
+			})
+		}
+
+		sensitivePaths := filterSensitiveSecurityPaths(probe.InterestingPaths)
+		if len(sensitivePaths) > 0 {
+			severity := "high"
+			if onlyLowSignalSecurityPaths(sensitivePaths) {
+				severity = "medium"
+			}
+			findings = append(findings, securityFinding{
+				ID:           buildDeepResearchFindingID("security-sensitive-paths", candidate.ResourceID+"|"+probe.Endpoint),
+				Severity:     severity,
+				Category:     "sensitive-path",
+				Title:        fmt.Sprintf("%s exposes discovery or sensitive paths", resourceLabel),
+				Summary:      "Forced-browsing probes found paths that commonly reveal admin surfaces, debug state, API schemas, metrics, configuration, or source metadata. Even read-only exposure can accelerate exploitation and auth bypass testing.",
+				Confidence:   "high",
+				BlastRadius:  fmt.Sprintf("Reconnaissance and forced-browsing surface under %s.", resourceLabel),
+				ResourceID:   candidate.ResourceID,
+				ResourceName: candidate.ResourceName,
+				ResourceType: candidate.ResourceType,
+				Provider:     candidate.Provider,
+				Region:       candidate.Region,
+				Endpoint:     probe.Endpoint,
+				Reachable:    true,
+				StatusCode:   probe.StatusCode,
+				Frameworks:   []string{"OWASP WSTG-INFO Information Gathering", "OWASP WSTG-ATHZ-02 Authorization Bypass", "OWASP A01 Broken Access Control"},
+				Threats:      []string{"forced browsing", "API schema exposure", "debug endpoint exposure", "information disclosure"},
+				Evidence:     uniqueNonEmptyStrings(append(baseEvidence, sensitivePaths...)),
+				Questions:    buildSecurityQuestions("sensitive-path", candidate.ResourceName, probe.Endpoint, probe.Authenticated),
+			})
+		}
+	}
+	return dedupeSecurityFindings(findings)
+}
+
+func filterSensitiveSecurityPaths(paths []string) []string {
+	filtered := []string{}
+	for _, entry := range paths {
+		path := securityPathFromInterestingPath(entry)
+		if path == "" {
+			continue
+		}
+		if securityInterestingPathIsSensitive(path) {
+			filtered = append(filtered, "Reachable path: "+entry)
+		}
+	}
+	return uniqueNonEmptyStrings(filtered)
+}
+
+func securityPathFromInterestingPath(entry string) string {
+	trimmed := strings.TrimSpace(entry)
+	if trimmed == "" {
+		return ""
+	}
+	if idx := strings.Index(trimmed, " "); idx > 0 {
+		trimmed = strings.TrimSpace(trimmed[:idx])
+	}
+	return trimmed
+}
+
+func securityInterestingPathIsSensitive(path string) bool {
+	lower := strings.ToLower(strings.TrimSpace(path))
+	if lower == "" || lower == "/health" || lower == "/healthz" || lower == "/ready" || lower == "/live" {
+		return false
+	}
+	for _, marker := range []string{"admin", "graphql", "openapi", "swagger", "api-docs", "docs", "well-known", "metrics", "debug", "server-status", ".env", ".git", "config", "actuator"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func onlyLowSignalSecurityPaths(paths []string) bool {
+	if len(paths) == 0 {
+		return true
+	}
+	for _, entry := range paths {
+		lower := strings.ToLower(entry)
+		if strings.Contains(lower, ".env") || strings.Contains(lower, ".git") || strings.Contains(lower, "actuator/env") || strings.Contains(lower, "heapdump") || strings.Contains(lower, "debug") || strings.Contains(lower, "server-status") || strings.Contains(lower, "admin") || strings.Contains(lower, "metrics") {
+			return false
+		}
+	}
+	return true
 }
 
 func buildSecurityMisconfigurationFindings(resources []deepResearchResource, probes []securityProbeObservation) []securityFinding {
@@ -1830,7 +2567,7 @@ func buildSecurityAttackVectors(findings []securityFinding, probes []securityPro
 		vectors = append(vectors, vector)
 	}
 
-	return sortAndCapSecurityAttackVectors(dedupeSecurityAttackVectors(vectors))
+	return enrichSecurityAttackVectors(sortAndCapSecurityAttackVectors(dedupeSecurityAttackVectors(vectors)))
 }
 
 func buildSecurityAttackChainVectors(findings []securityFinding, probeByEndpoint map[string]securityProbeObservation, authPack securityRuntimeAuthPack) []securityAttackVector {
@@ -2225,6 +2962,192 @@ func buildSecurityAttackVector(finding securityFinding, probe securityProbeObser
 			},
 			Evidence: evidence,
 		}, true
+	case "agentic-risk", "mcp-tooling", "agent-supply-chain":
+		stage := "execution"
+		title := fmt.Sprintf("Agentic misuse path through %s", resourceLabel)
+		summary := "Validate how untrusted input, agent goals, tool selection, and privileged actions interact before the agent can turn context into side effects."
+		likelyImpact := "Prompt injection or supply-chain manipulation can steer the agent into data exposure, tool misuse, code execution, or privileged non-human identity abuse."
+		prerequisites := []string{
+			"An input path that can influence the agent or its retrieved context",
+			"A tool, skill, MCP server, model, or downstream API the agent can invoke",
+		}
+		steps := []string{
+			"Anchor the original user goal and list which inputs are instructions versus untrusted content.",
+			"Inventory every tool, MCP server, skill, model, file path, credential, and downstream API reachable during this run.",
+			"Run a bounded prompt-injection or tool-poisoning simulation that asks for an out-of-scope read, write, shell, deploy, or data-export action.",
+			"Confirm the policy layer outside the model blocks or approval-gates the action and records the decision.",
+		}
+		actions := []string{
+			"Disable unnecessary tools and narrow file, network, credential, and cloud permissions immediately.",
+			"Require human approval for write, deploy, identity, shell, data-export, or destructive actions.",
+			"Log tool calls with goal, parameters, actor identity, data touched, and policy decision.",
+		}
+		validation := []string{
+			"Verify malicious instructions in web, document, issue, email, or RAG content cannot change the agent goal.",
+			"Confirm tool descriptors and schemas are pinned or signed and alert on unexpected changes.",
+			"Prove the same out-of-scope action fails both with and without valid user credentials.",
+		}
+		detection := []string{
+			"Unexpected goal drift, new tool sequences, or tool parameters unrelated to the original request.",
+			"Agent access to secrets, source code, shell, identity APIs, or export endpoints outside normal baselines.",
+			"New or changed MCP servers, skills, plugins, models, or tool schemas before sensitive actions.",
+		}
+
+		switch finding.Category {
+		case "mcp-tooling":
+			stage = "initial-access -> tool-pivot"
+			title = fmt.Sprintf("Tool poisoning or cross-agent trust path through %s", resourceLabel)
+			summary = "Treat MCP servers, tool schemas, and peer agents as active trust boundaries: a changed descriptor or remote instruction can steer the agent into unsafe tool calls."
+			prerequisites = append(prerequisites, "A tool descriptor, MCP server, or peer-agent message that can influence tool selection")
+			steps[2] = "Run a bounded tool-poisoning or peer-agent deviation simulation that requests a sensitive action outside the original task."
+		case "agent-supply-chain":
+			stage = "supply-chain -> execution"
+			title = fmt.Sprintf("Agent dependency integrity path through %s", resourceLabel)
+			summary = "Treat skills, plugins, models, MCP servers, and images as privileged dependencies whose executable behavior can diverge from declared purpose."
+			prerequisites = []string{
+				"A third-party or unpinned component loaded by the agent runtime",
+				"Agent access to credentials, files, shell, network, or downstream APIs inherited by that component",
+			}
+			steps[1] = "Compare each installed component's manifest, natural-language instructions, and executable code for behavioral drift."
+			steps[2] = "Run a bounded behavioral-integrity check that looks for file reads, credential access, network egress, shell execution, and tool chaining not declared by the component."
+			actions[0] = "Freeze or disable unpinned and unreviewed agent dependencies until provenance and behavior are verified."
+			validation[1] = "Confirm component versions are pinned by digest or commit and installed only from approved sources."
+		}
+
+		return securityAttackVector{
+			ID:               buildDeepResearchFindingID("vector-agentic-risk", finding.ID),
+			Severity:         finding.Severity,
+			Title:            title,
+			Summary:          summary,
+			KillChainStage:   stage,
+			Exploitability:   ternaryString(strings.TrimSpace(finding.Endpoint) != "" || finding.Reachable, "high", "medium"),
+			Confidence:       ternaryString(len(evidence) > 0, "medium", "low"),
+			LikelyImpact:     likelyImpact,
+			BlastRadius:      blastRadius,
+			ResourceIDs:      resourceIDs,
+			EntryPoints:      entryPoints,
+			Prerequisites:    uniqueNonEmptyStrings(prerequisites),
+			Steps:            steps,
+			ImmediateActions: actions,
+			ValidationChecks: validation,
+			DetectionSignals: detection,
+			RequiresAuth:     finding.RequiresAuth,
+			AuthKinds:        authKinds,
+			Frameworks:       finding.Frameworks,
+			Threats:          finding.Threats,
+			Evidence:         evidence,
+		}, true
+	case "http-hardening", "cors-misconfiguration", "tls-posture", "sensitive-path", "risky-methods", "header-trust", "cache-policy", "api-resource-controls":
+		stage := "initial-access -> reconnaissance"
+		title := fmt.Sprintf("Curl-driven web exploitation path through %s", resourceLabel)
+		summary := "Use read-only HTTP probes to validate whether normal web hardening gaps can become an attacker-friendly path for reconnaissance, auth-boundary testing, session abuse, or browser-based data exposure."
+		impact := "Information disclosure, browser-side abuse, session weakening, forced browsing, or route mutation that can be chained with a public edge or weak authorization."
+		prerequisites := []string{
+			"Network reachability to the endpoint",
+			"Permission to run read-only HEAD, GET, OPTIONS, and preflight-style requests",
+		}
+		steps := []string{
+			"Capture baseline HEAD and GET responses with status, redirects, server, content type, cookies, and security headers.",
+			"Run OPTIONS and CORS preflight probes from an untrusted Origin and record allowed methods, origins, credentials, and exposed headers.",
+			"Forced-browse only low-impact discovery paths such as docs, OpenAPI, metrics, debug, admin, config, and well-known endpoints.",
+			"Compare anonymous behavior with authenticated behavior if a scoped test credential is available.",
+		}
+		actions := []string{
+			"Gate sensitive paths and docs behind explicit authentication or operator-only networks.",
+			"Apply strict CORS, cookie, header, method, and TLS baselines at the edge and origin.",
+			"Review access logs for route enumeration, OPTIONS bursts, and direct-origin probing.",
+		}
+		validation := []string{
+			"Re-run the exact HEAD, GET, OPTIONS, and Origin probes and confirm risky behavior is gone.",
+			"Verify sensitive paths return 401, 403, 404, or an approved public response anonymously.",
+			"Confirm deployment tests fail when headers, CORS, cookies, TLS, or method policy regresses.",
+		}
+		detection := []string{
+			"Spikes of HEAD, OPTIONS, and GET requests across docs, schema, admin, metrics, and debug paths.",
+			"Requests with unusual Origin headers, Access-Control-Request-* headers, or write method probes.",
+			"Direct-origin traffic that bypasses the expected gateway, CDN, WAF, or access policy.",
+		}
+		switch finding.Category {
+		case "cors-misconfiguration":
+			stage = "browser-abuse -> data-exposure"
+			title = fmt.Sprintf("Browser CORS exfiltration path through %s", resourceLabel)
+			summary = "Validate whether an attacker-controlled origin can make the browser read sensitive API responses or use credentialed context across origins."
+			impact = "Authenticated data exposure, token-assisted reads, or API response exfiltration through victim browser sessions."
+			steps[1] = "Send preflight and simple requests with attacker-controlled Origin values and compare Access-Control-Allow-* behavior on sensitive and non-sensitive routes."
+			actions[1] = "Replace wildcard or reflected origins with an explicit allowlist and disable credentials unless a route demonstrably needs them."
+		case "sensitive-path":
+			stage = "reconnaissance -> auth-boundary-testing"
+			title = fmt.Sprintf("Forced-browsing discovery path through %s", resourceLabel)
+			summary = "Validate which discovered docs, schema, metrics, debug, admin, config, or source metadata paths are reachable anonymously and whether they reveal exploitation instructions."
+			impact = "Accelerated route discovery, auth-bypass targeting, debug data exposure, or leaked operational details."
+			steps[2] = "Review each reachable discovery path for secrets, internal hostnames, API schemas, admin verbs, stack traces, version data, or debug state."
+			actions[0] = "Block, remove, or authenticate exposed docs, debug, admin, metrics, config, and source metadata paths."
+		case "tls-posture":
+			stage = "network-position -> session-interception"
+			title = fmt.Sprintf("Transport downgrade path through %s", resourceLabel)
+			summary = "Validate whether cleartext or weak TLS behavior can expose sessions, tokens, API data, or downgrade opportunities."
+			impact = "Interception or manipulation of traffic, cookies, tokens, and API responses on paths that should be protected by modern TLS."
+			steps[0] = "Confirm HTTP-to-HTTPS redirect behavior, HSTS presence, negotiated TLS version, and whether cleartext paths remain usable."
+			actions[1] = "Force HTTPS, enable HSTS, disable TLS 1.0/1.1, and keep only modern cipher/protocol policy at the edge."
+		case "risky-methods":
+			stage = "reconnaissance -> route-mutation"
+			title = fmt.Sprintf("HTTP verb tampering path through %s", resourceLabel)
+			summary = "Validate whether write-capable or tunneling methods are advertised or accepted where only read methods should exist."
+			impact = "Unexpected mutation, upload, delete, or proxy/tunnel behavior on routes that operators assume are read-only."
+			steps[1] = "Use OPTIONS and harmless method probes to confirm which verbs are advertised or accepted before and after authentication."
+			actions[1] = "Deny unused HTTP methods at the edge and origin, then allow write methods only on routes that require explicit authorization."
+		case "header-trust":
+			stage = "initial-access -> edge-confusion"
+			title = fmt.Sprintf("Host and proxy header trust path through %s", resourceLabel)
+			summary = "Validate whether spoofable Host, forwarded-host, original-url, or rewrite headers can alter redirects, routing, cache keys, tenant selection, or auth decisions."
+			impact = "Host-header injection, password-reset poisoning, cache poisoning, route confusion, tenant confusion, or auth bypass through misplaced proxy trust."
+			steps[1] = "Replay hostile Host, X-Forwarded-Host, X-Original-URL, X-Rewrite-URL, and X-Forwarded-For probes and compare redirects, status codes, and auth challenges against baseline."
+			actions[1] = "Normalize or strip proxy headers at the first trusted ingress and reject untrusted host values before application routing."
+			validation[0] = "Re-run hostile host and proxy-header probes and confirm redirects, routing, and auth decisions match the safe baseline."
+			detection[1] = "Requests with unexpected Host, X-Forwarded-Host, X-Original-URL, X-Rewrite-URL, or private-loopback forwarding values."
+		case "cache-policy":
+			stage = "browser-abuse -> data-exposure"
+			title = fmt.Sprintf("Shared-cache exposure path through %s", resourceLabel)
+			summary = "Validate whether cookie, auth, or tenant-specific responses can be retained and replayed by browsers, CDNs, reverse proxies, or service workers."
+			impact = "Cross-user data exposure, stale authenticated response replay, session-state leakage, or CDN/proxy cache poisoning."
+			steps[0] = "Capture baseline HEAD and GET responses with Cache-Control, Vary, Set-Cookie, Authorization-dependent behavior, and CDN cache diagnostics where available."
+			actions[1] = "Apply no-store or private cache policy to session-like responses and purge shared caches that may have retained sensitive content."
+			validation[0] = "Confirm cookie/auth-like responses include approved no-store, private, or Vary behavior at both edge and origin."
+			detection[0] = "Cache hits, CDN diagnostics, or service-worker reads for routes that carry cookies, tokens, tenant state, or user data."
+		case "api-resource-controls":
+			stage = "resource-abuse -> denial-of-wallet"
+			title = fmt.Sprintf("API resource-consumption path through %s", resourceLabel)
+			summary = "Validate whether cheap repeated requests, expensive queries, brute-force attempts, scraping, uploads, or third-party-cost paths are constrained before expensive work begins."
+			impact = "Resource exhaustion, denial of service, denial of wallet, credential stuffing, data scraping, or downstream quota burn."
+			prerequisites = append(prerequisites, "Permission to run bounded low-volume quota, payload-size, and query-complexity checks")
+			steps[1] = "Run bounded rate, burst, payload-size, pagination, query-depth, and operation-count checks against API-like routes without destructive inputs."
+			actions[1] = "Enforce server-side throttles, quotas, query-cost limits, payload limits, and consistent backoff before downstream work starts."
+			validation[0] = "Confirm throttles, query limits, upload limits, and backoff responses activate under bounded abuse tests while normal clients remain healthy."
+			detection[0] = "Repeated expensive API calls, high-cardinality client identities, query-depth spikes, upload bursts, and quota/backoff events."
+		}
+		return securityAttackVector{
+			ID:               buildDeepResearchFindingID("vector-web-posture", finding.ID),
+			Severity:         finding.Severity,
+			Title:            title,
+			Summary:          summary,
+			KillChainStage:   stage,
+			Exploitability:   ternaryString(strings.TrimSpace(finding.Endpoint) != "" || finding.Reachable, "high", "medium"),
+			Confidence:       ternaryString(len(evidence) > 0, "high", "medium"),
+			LikelyImpact:     impact,
+			BlastRadius:      blastRadius,
+			ResourceIDs:      resourceIDs,
+			EntryPoints:      entryPoints,
+			Prerequisites:    uniqueNonEmptyStrings(prerequisites),
+			Steps:            steps,
+			ImmediateActions: actions,
+			ValidationChecks: validation,
+			DetectionSignals: detection,
+			RequiresAuth:     finding.RequiresAuth,
+			AuthKinds:        authKinds,
+			Frameworks:       finding.Frameworks,
+			Threats:          finding.Threats,
+			Evidence:         evidence,
+		}, true
 	default:
 		return securityAttackVector{}, false
 	}
@@ -2364,18 +3287,47 @@ func buildSecurityScanSummary(estate deepResearchEstateSnapshot, candidates []se
 		}
 	}
 	for _, finding := range findings {
+		category := strings.ToLower(strings.TrimSpace(finding.Category))
 		switch strings.ToLower(strings.TrimSpace(finding.Severity)) {
 		case "critical":
 			summary.CriticalFindings++
 		case "high":
 			summary.HighFindings++
 		}
-		if finding.Category == "credential-leak" {
+		if category == "credential-leak" {
 			summary.CredentialRisks++
+		}
+		if category == "agentic-risk" {
+			summary.AgenticRisks++
+		}
+		if category == "mcp-tooling" {
+			summary.MCPRisks++
+		}
+		if category == "agent-supply-chain" {
+			summary.SupplyChainRisks++
+		}
+		if category == "identity-pivot" || category == "invoke-pivot" {
+			summary.PrivilegeRisks++
+		}
+		if category == "http-hardening" || category == "risky-methods" || category == "header-trust" || category == "cache-policy" || category == "api-resource-controls" {
+			summary.WebPostureRisks++
+		}
+		if category == "sensitive-path" {
+			summary.SensitivePathRisks++
+		}
+		if category == "cors-misconfiguration" {
+			summary.CORSRisks++
+		}
+		if category == "tls-posture" {
+			summary.TLSRisks++
 		}
 	}
 	if summary.CredentialRisks > 0 {
 		summary.PrimaryFocus = "credential exposure"
+	} else if summary.SensitivePathRisks > 0 || summary.CORSRisks > 0 || summary.WebPostureRisks > 0 {
+		summary.PrimaryFocus = "web attack surface"
+	} else if summary.AgenticRisks > 0 || summary.MCPRisks > 0 {
+		summary.PrimaryFocus = "agentic attack paths"
 	} else if summary.CriticalFindings > 0 {
 		summary.PrimaryFocus = "critical exploit paths"
 	} else if summary.ReachableEndpoints > 0 {
@@ -2435,8 +3387,8 @@ func sortAndCapSecurityFindings(findings []securityFinding) []securityFinding {
 		}
 		return findings[i].Title < findings[j].Title
 	})
-	if len(findings) > 18 {
-		return findings[:18]
+	if len(findings) > 32 {
+		return findings[:32]
 	}
 	return findings
 }
@@ -2565,6 +3517,72 @@ func buildSecurityQuestions(category string, resourceName string, endpoint strin
 			"How much of that path is role-driven versus network-driven?",
 			"Which privilege or invoke edge should be narrowed first?",
 		}
+	case "agentic-risk":
+		return []string{
+			fmt.Sprintf("Which untrusted inputs can influence %s before it selects tools or actions?", resourceLabel),
+			"Which tools, files, credentials, and downstream APIs can the agent reach during one run?",
+			"Which high-impact actions are enforced outside the model through policy, approval, or deny rules?",
+		}
+	case "mcp-tooling":
+		return []string{
+			fmt.Sprintf("Which MCP servers, tools, schemas, or peer agents does %s trust today?", resourceLabel),
+			"Are tool descriptors, dynamic tool changes, and sampling flows authenticated, logged, and pinned to known provenance?",
+			"Can users see and interrupt every sensitive tool call before it executes?",
+		}
+	case "agent-supply-chain":
+		return []string{
+			fmt.Sprintf("Which skills, plugins, models, MCP servers, or images are installed into %s?", resourceLabel),
+			"Are those components pinned, reviewed, signed, and behaviorally checked against their declared purpose?",
+			"Which credentials, files, or shell commands would a compromised component inherit?",
+		}
+	case "http-hardening":
+		return []string{
+			fmt.Sprintf("Which missing headers or cookie flags on %s can realistically be chained with browser, API, or session behavior?", resourceLabel),
+			"Is this response browser-facing, API-only, or shared by both clients?",
+			"Where should the security header baseline be enforced: app, ingress, CDN, or WAF?",
+		}
+	case "cors-misconfiguration":
+		return []string{
+			fmt.Sprintf("Which sensitive routes on %s share the observed CORS policy?", resourceLabel),
+			"Can an untrusted Origin read authenticated or token-bearing responses?",
+			"Which exact origins need cross-origin access in production?",
+		}
+	case "tls-posture":
+		return []string{
+			fmt.Sprintf("Should %s ever be reachable over cleartext HTTP or weak TLS?", resourceLabel),
+			"Where is TLS terminated and where should HSTS be enforced?",
+			"Which clients still require legacy protocol support, if any?",
+		}
+	case "sensitive-path":
+		return []string{
+			fmt.Sprintf("Which discovered paths under %s are intended to be public?", resourceLabel),
+			"Do docs, schemas, metrics, debug, admin, or config paths reveal secrets, internal hosts, privileged verbs, or implementation details?",
+			"Which paths should return 401, 403, or 404 from the public internet?",
+		}
+	case "risky-methods":
+		return []string{
+			fmt.Sprintf("Which routes on %s actually need PUT, PATCH, DELETE, TRACE, or CONNECT?", resourceLabel),
+			"Are write-capable methods blocked before authentication and authorization?",
+			"Can method override headers or proxies re-enable denied verbs?",
+		}
+	case "header-trust":
+		return []string{
+			fmt.Sprintf("Which proxy, ingress, CDN, or framework layer is allowed to trust Host and X-Forwarded-* headers for %s?", resourceLabel),
+			"Can spoofed host, forwarded-host, original-url, or rewrite headers affect redirects, reset links, tenant routing, or auth decisions?",
+			"Where should trusted proxy header normalization happen before traffic reaches application code?",
+		}
+	case "cache-policy":
+		return []string{
+			fmt.Sprintf("Which responses from %s can carry cookies, tokens, user data, or tenant-specific content?", resourceLabel),
+			"Can any CDN, reverse proxy, browser, or service worker cache those responses across users?",
+			"Where should no-store, private, and vary behavior be enforced for session-like responses?",
+		}
+	case "api-resource-controls":
+		return []string{
+			fmt.Sprintf("Which expensive operations, GraphQL queries, auth attempts, exports, or third-party calls sit behind %s?", resourceLabel),
+			"Which rate, quota, payload-size, query-depth, and backoff controls are enforced server-side today?",
+			"Do logs and response headers give operators enough signal to distinguish legitimate clients from abuse?",
+		}
 	default:
 		return []string{
 			fmt.Sprintf("What is the smallest safe validation step for %s?", resourceLabel),
@@ -2578,15 +3596,342 @@ func enrichSecurityFindingsWithRemediation(findings []securityFinding) []securit
 	for _, finding := range findings {
 		containment, remediation, verification := buildSecurityFindingRemediation(finding)
 		priority, owner, status := buildSecurityFindingTriage(finding)
+		attackerView, defenderView := buildSecurityFindingPerspective(finding)
 		finding.Containment = uniqueNonEmptyStrings(containment)
 		finding.Remediation = uniqueNonEmptyStrings(remediation)
 		finding.Verification = uniqueNonEmptyStrings(verification)
+		if strings.TrimSpace(finding.AttackerView) == "" {
+			finding.AttackerView = attackerView
+		}
+		if strings.TrimSpace(finding.DefenderView) == "" {
+			finding.DefenderView = defenderView
+		}
+		if len(finding.RegressionTests) == 0 {
+			finding.RegressionTests = uniqueNonEmptyStrings(buildSecurityFindingRegressionTests(finding))
+		}
 		finding.Priority = priority
 		finding.Owner = owner
 		finding.Status = status
 		enriched = append(enriched, finding)
 	}
 	return enriched
+}
+
+func enrichSecurityAttackVectors(vectors []securityAttackVector) []securityAttackVector {
+	enriched := make([]securityAttackVector, 0, len(vectors))
+	for _, vector := range vectors {
+		attackerView, defenderView := buildSecurityAttackVectorPerspective(vector)
+		if strings.TrimSpace(vector.AttackerView) == "" {
+			vector.AttackerView = attackerView
+		}
+		if strings.TrimSpace(vector.DefenderView) == "" {
+			vector.DefenderView = defenderView
+		}
+		if len(vector.RegressionTests) == 0 {
+			vector.RegressionTests = uniqueNonEmptyStrings(buildSecurityAttackVectorRegressionTests(vector))
+		}
+		enriched = append(enriched, vector)
+	}
+	return enriched
+}
+
+func buildSecurityFindingPerspective(finding securityFinding) (string, string) {
+	resourceLabel := coalesceSecurityName(finding.ResourceName, finding.Endpoint, finding.ResourceID, "this target")
+	category := strings.ToLower(strings.TrimSpace(finding.Category))
+	switch {
+	case category == "public-surface" || category == "reachable-surface" || category == "authenticated-surface":
+		return fmt.Sprintf("An attacker treats %s as an entry point for route discovery, direct-origin bypass, auth-boundary probing, and low-noise enumeration before chaining into adjacent services.", resourceLabel),
+			"Defenders should prove which routes must be public, close direct-origin bypasses, and keep anonymous/authenticated response diffs under continuous regression tests."
+	case category == "credential-leak":
+		return fmt.Sprintf("An attacker tries to replay the material tied to %s across cloud APIs, CI/CD systems, source hosts, and downstream services before rotation completes.", resourceLabel),
+			"Defenders should revoke first, then enumerate every place the same material or a derived token could still exist and verify old credentials fail."
+	case category == "identity-pivot" || category == "invoke-pivot":
+		return fmt.Sprintf("An attacker who lands on %s uses attached roles, trust relationships, metadata, and invoke paths to move from runtime access into the control plane.", resourceLabel),
+			"Defenders should narrow runtime identity, remove unused invoke edges, and alert on token exchange or downstream calls that do not match workload intent."
+	case category == "agentic-risk":
+		return fmt.Sprintf("An attacker feeds %s malicious web, document, issue, email, or RAG content to steer goals, tool choice, parameters, or data export without needing direct shell access.", resourceLabel),
+			"Defenders should separate untrusted content from instructions, enforce tool policy outside the model, and require approval for sensitive side effects."
+	case category == "mcp-tooling":
+		return fmt.Sprintf("An attacker targets %s through poisoned tool descriptions, changed MCP schemas, peer-agent messages, sampling flows, or tool-name collisions.", resourceLabel),
+			"Defenders should authenticate tool servers, pin schemas, surface every sensitive tool call to users, and block descriptor drift before execution."
+	case category == "agent-supply-chain":
+		return fmt.Sprintf("An attacker compromises %s by changing a skill, plugin, model, MCP server, image, or prompt dependency that inherits the agent runtime's permissions.", resourceLabel),
+			"Defenders should maintain an agent dependency bill of materials, pin versions by digest or commit, and run behavioral checks before loading components."
+	case category == "http-hardening":
+		return fmt.Sprintf("An attacker chains weak response headers or cookie flags on %s with XSS, clickjacking, content sniffing, referrer leaks, or session theft.", resourceLabel),
+			"Defenders should enforce a route-aware security header and cookie baseline at the edge and keep it under deployment regression tests."
+	case category == "cors-misconfiguration":
+		return fmt.Sprintf("An attacker hosts a malicious origin and tries to make a victim browser read responses from %s using permissive or reflected CORS.", resourceLabel),
+			"Defenders should allow only explicit trusted origins, disable credentials by default, and test sensitive routes with hostile Origin values."
+	case category == "tls-posture":
+		return fmt.Sprintf("An attacker with network position targets %s for cleartext access, weak protocol negotiation, or downgrade-friendly behavior.", resourceLabel),
+			"Defenders should force HTTPS, enable HSTS where applicable, and disable legacy TLS protocol support."
+	case category == "sensitive-path":
+		return fmt.Sprintf("An attacker forced-browses %s for schemas, docs, metrics, debug, admin, config, and source metadata that accelerate exploitation.", resourceLabel),
+			"Defenders should remove, authenticate, or operator-gate discovery and debug paths and monitor route enumeration."
+	case category == "risky-methods":
+		return fmt.Sprintf("An attacker probes %s for write-capable or tunneling HTTP verbs that can mutate resources or bypass route assumptions.", resourceLabel),
+			"Defenders should deny unused methods at the edge and enforce per-route authorization before any state-changing verb is accepted."
+	case category == "header-trust":
+		return fmt.Sprintf("An attacker spoofs Host, X-Forwarded-Host, X-Original-URL, or rewrite headers against %s to poison redirects, caches, tenant routing, or auth decisions.", resourceLabel),
+			"Defenders should normalize trusted proxy headers at the first ingress, reject untrusted values, and regression-test redirects and auth gates with hostile header values."
+	case category == "cache-policy":
+		return fmt.Sprintf("An attacker looks for session-like responses from %s that can be retained by browsers, CDNs, shared proxies, or service workers and replayed across users.", resourceLabel),
+			"Defenders should mark session-bound content no-store or private, vary on authorization/cookie state when caching is intentional, and verify cache layers honor the policy."
+	case category == "api-resource-controls":
+		return fmt.Sprintf("An attacker drives cheap repeated requests, expensive queries, credential stuffing, scraping, or denial-of-wallet behavior against %s.", resourceLabel),
+			"Defenders should enforce quotas, rate limits, payload/query complexity limits, and backoff server-side, then expose enough signals for detection and client behavior."
+	case securityFindingIsDatabaseExposure(finding):
+		return fmt.Sprintf("An attacker prioritizes %s for banner grabs, weak-auth checks, data exfiltration, destructive writes, and credential reuse against replicas or dependent services.", resourceLabel),
+			"Defenders should remove public ingress first, rotate exposed credentials, and validate private-only reachability from a known external vantage point."
+	case securityFindingIsPublicCompute(finding):
+		return fmt.Sprintf("An attacker looks at %s as a public foothold for service fingerprinting, metadata access, local secret discovery, and runtime identity abuse.", resourceLabel),
+			"Defenders should restrict ingress, harden metadata access, and baseline process, network, and identity activity from the workload."
+	case securityFindingIsBackupGap(finding):
+		return fmt.Sprintf("An attacker benefits from %s having weak recovery because destructive actions, ransomware, or accidental data loss become harder to reverse.", resourceLabel),
+			"Defenders should create restore evidence, assign recovery ownership, and make backup drift a deploy-blocking regression."
+	default:
+		return fmt.Sprintf("An attacker looks for the shortest path from %s to data access, privilege escalation, or durable control.", resourceLabel),
+			"Defenders should validate the risky behavior with the smallest read-only test, close the highest-blast-radius path first, and keep an automated regression for the control."
+	}
+}
+
+func buildSecurityFindingRegressionTests(finding securityFinding) []string {
+	resourceLabel := coalesceSecurityName(finding.ResourceName, finding.Endpoint, finding.ResourceID, "this target")
+	category := strings.ToLower(strings.TrimSpace(finding.Category))
+	switch {
+	case category == "public-surface" || category == "reachable-surface" || category == "authenticated-surface":
+		return []string{
+			fmt.Sprintf("From an external vantage point, assert %s only serves the documented public route set.", resourceLabel),
+			"Diff anonymous and authenticated HEAD/GET/OPTIONS responses and fail the test when private behavior leaks anonymously.",
+			"Assert direct-origin access cannot bypass the intended edge, CDN, gateway, or access policy.",
+		}
+	case category == "credential-leak":
+		return []string{
+			"Run secret scanning across code, CI logs, state exports, snapshots, and local config before release.",
+			"Assert the revoked credential fails one read-only identity check after rotation.",
+			"Assert equivalent newly issued credentials carry only the minimum required permissions.",
+		}
+	case category == "identity-pivot" || category == "invoke-pivot":
+		return []string{
+			fmt.Sprintf("Run a policy simulation for %s and fail if non-required control-plane actions are allowed.", resourceLabel),
+			"Assert unused invoke paths and trust relationships remain absent after deployment.",
+			"Assert token exchange and metadata access are logged with workload identity and source context.",
+		}
+	case category == "agentic-risk":
+		return []string{
+			"Replay prompt-injection fixtures from web pages, uploaded documents, emails, issues, and RAG records and assert the agent keeps the original goal.",
+			"Assert out-of-scope shell, file, deploy, identity, and data-export tool calls are blocked or require approval outside the model.",
+			"Assert every high-impact tool call logs goal, actor, parameters, data touched, and policy decision.",
+		}
+	case category == "mcp-tooling":
+		return []string{
+			"Inject a changed or malicious tool descriptor in test and assert the runtime blocks it before tool selection.",
+			"Assert MCP server identity, schema version, and requested permissions are authenticated and pinned before each session.",
+			"Assert users can see, pause, and reject sensitive tool invocations before execution.",
+		}
+	case category == "agent-supply-chain":
+		return []string{
+			"Assert every skill, plugin, MCP server, model, image, and prompt dependency is pinned to an approved digest, commit, or version.",
+			"Run a behavioral integrity test that fails on undeclared file reads, credential access, shell execution, network egress, or tool chaining.",
+			"Assert dependency install and update events are logged with provenance and requested permissions.",
+		}
+	case category == "http-hardening":
+		return []string{
+			fmt.Sprintf("Run a HEAD/GET regression against %s and assert required security headers and cookie flags are present.", resourceLabel),
+			"Assert browser-facing responses include CSP plus clickjacking protection and API responses include nosniff/referrer policy where applicable.",
+			"Fail deployment when session cookies miss Secure, HttpOnly, or SameSite on HTTPS routes.",
+		}
+	case category == "cors-misconfiguration":
+		return []string{
+			fmt.Sprintf("Send an OPTIONS preflight to %s with an untrusted Origin and fail if it is reflected or wildcarded for sensitive routes.", resourceLabel),
+			"Assert credentialed CORS is disabled unless the route and origin are explicitly allowlisted.",
+			"Assert sensitive authenticated responses cannot be read from hostile origins.",
+		}
+	case category == "tls-posture":
+		return []string{
+			fmt.Sprintf("Assert %s redirects cleartext HTTP to HTTPS or is unreachable over HTTP.", resourceLabel),
+			"Assert TLS 1.0 and TLS 1.1 handshakes fail.",
+			"Assert HSTS is present on HTTPS browser-facing routes where safe for the domain.",
+		}
+	case category == "sensitive-path":
+		return []string{
+			fmt.Sprintf("Forced-browse the sensitive path fixture list against %s and fail if unapproved paths return 2xx or 3xx anonymously.", resourceLabel),
+			"Assert docs, schema, metrics, debug, admin, config, and source metadata paths require auth or are absent.",
+			"Assert route enumeration is logged with source, path, status, and edge/origin context.",
+		}
+	case category == "risky-methods":
+		return []string{
+			fmt.Sprintf("Run OPTIONS against %s and fail if unused write or tunneling verbs are advertised.", resourceLabel),
+			"Assert PUT, PATCH, DELETE, TRACE, and CONNECT are denied before route-specific authorization.",
+			"Assert method override headers cannot bypass the edge or application method policy.",
+		}
+	case category == "header-trust":
+		return []string{
+			fmt.Sprintf("Send hostile Host, X-Forwarded-Host, X-Original-URL, and X-Rewrite-URL probes to %s and fail if redirects, routing, or auth gates change unexpectedly.", resourceLabel),
+			"Assert password-reset links, tenant routing, absolute URLs, and cache keys are built from trusted configured origins rather than request headers.",
+			"Assert only the first trusted ingress can set proxy headers and all downstream services receive normalized values.",
+		}
+	case category == "cache-policy":
+		return []string{
+			fmt.Sprintf("Run HEAD/GET checks against session-like responses from %s and fail if Cache-Control lacks no-store, private, or another approved directive.", resourceLabel),
+			"Assert Set-Cookie, Authorization, and tenant-specific responses are not stored by CDN, reverse-proxy, browser, or service-worker caches unless explicitly approved.",
+			"Assert Vary behavior prevents cross-user reuse when authenticated API responses are intentionally cacheable.",
+		}
+	case category == "api-resource-controls":
+		return []string{
+			fmt.Sprintf("Run bounded rate, quota, payload-size, and query-complexity checks against %s and fail when abuse controls are absent or unaudited.", resourceLabel),
+			"Assert GraphQL or search endpoints enforce query depth, cost, pagination, upload size, and operation-count limits.",
+			"Assert brute-force, scraping, and repeated expensive requests produce throttling/backoff telemetry without degrading normal clients.",
+		}
+	case securityFindingIsDatabaseExposure(finding):
+		return []string{
+			fmt.Sprintf("Assert %s rejects direct public TCP/TLS connections from an external test source.", resourceLabel),
+			"Assert application traffic still reaches the data store only through approved private network paths.",
+			"Assert old credentials tied to the exposure window no longer authenticate.",
+		}
+	case securityFindingIsPublicCompute(finding):
+		return []string{
+			fmt.Sprintf("Assert only approved source ranges can reach public services on %s.", resourceLabel),
+			"Assert metadata and workload identity endpoints are unavailable to unauthenticated application paths.",
+			"Assert no admin, debug, database, cache, or orchestration ports are exposed publicly.",
+		}
+	case securityFindingIsBackupGap(finding):
+		return []string{
+			fmt.Sprintf("Run a restore test for %s and fail if recovery exceeds the documented window.", resourceLabel),
+			"Assert backup retention, encryption, and ownership settings remain present after each deployment.",
+		}
+	default:
+		return []string{
+			fmt.Sprintf("Add a read-only regression that proves the risky behavior on %s is closed.", resourceLabel),
+			"Fail deployment when the same exposure, privilege, or data path reappears.",
+		}
+	}
+}
+
+func buildSecurityAttackVectorPerspective(vector securityAttackVector) (string, string) {
+	text := strings.ToLower(strings.Join(uniqueNonEmptyStrings(append(append([]string{vector.Title, vector.Summary, vector.KillChainStage}, vector.Threats...), vector.EntryPoints...)), " "))
+	switch {
+	case strings.Contains(text, "prompt") || strings.Contains(text, "agent") || strings.Contains(text, "tool") || strings.Contains(text, "mcp"):
+		return "Introduce untrusted instructions or a changed tool boundary, then wait for the agent to convert context into a privileged side effect.",
+			"Keep instructions, data, tools, and permissions as separate policy objects; block sensitive actions outside the model and log every decision."
+	case strings.Contains(text, "supply"):
+		return "Alter a dependency that the runtime trusts so malicious behavior executes with the agent or workload's inherited permissions.",
+			"Pin provenance, compare declared metadata with executable behavior, and quarantine dependency drift before runtime load."
+	case strings.Contains(text, "cors") || strings.Contains(text, "origin"):
+		return "Use a hostile origin to test whether victim browsers can read API responses or send credentialed cross-origin requests.",
+			"Constrain origins route-by-route, avoid credentialed CORS by default, and regression-test hostile Origin values."
+	case strings.Contains(text, "forced") || strings.Contains(text, "schema") || strings.Contains(text, "debug") || strings.Contains(text, "metrics"):
+		return "Forced-browse predictable paths to collect schemas, docs, debug state, metrics, and admin clues before attempting auth bypass.",
+			"Remove or authenticate discovery paths and alert on route-enumeration patterns against public edges."
+	case strings.Contains(text, "tls") || strings.Contains(text, "transport") || strings.Contains(text, "https"):
+		return "Look for cleartext, weak TLS, or downgrade-friendly behavior that exposes traffic or session material.",
+			"Force HTTPS, enable HSTS where applicable, and keep modern TLS policy under deployment tests."
+	case strings.Contains(text, "method") || strings.Contains(text, "verb"):
+		return "Probe HTTP verbs to find write-capable or tunneling behavior that route owners did not intend to expose.",
+			"Deny unused methods at the edge and verify application authorization before any state-changing verb."
+	case strings.Contains(text, "host") || strings.Contains(text, "forwarded") || strings.Contains(text, "rewrite"):
+		return "Spoof host and proxy headers to see whether redirects, tenants, cache keys, or auth decisions trust attacker-controlled request metadata.",
+			"Normalize trusted proxy headers at the first ingress, reject untrusted host values, and regression-test redirects and auth gates with hostile headers."
+	case strings.Contains(text, "cache"):
+		return "Look for session-like responses that can be stored and replayed by browsers, CDNs, shared proxies, or service workers.",
+			"Mark session-bound content no-store or private, vary on auth state when caching is intentional, and prove cache layers honor the policy."
+	case strings.Contains(text, "rate") || strings.Contains(text, "quota") || strings.Contains(text, "resource-consumption") || strings.Contains(text, "resource control") || strings.Contains(text, "denial-of-wallet") || strings.Contains(text, "graphql"):
+		return "Drive cheap repeated requests, expensive queries, brute-force attempts, scraping, or quota-burning calls until a server-side limit appears.",
+			"Enforce rate, quota, payload, query-complexity, and backoff controls before expensive downstream work starts."
+	case strings.Contains(text, "header") || strings.Contains(text, "cookie") || strings.Contains(text, "clickjacking"):
+		return "Chain missing headers or weak cookie flags with browser execution, clickjacking, sniffing, or session-theft opportunities.",
+			"Apply a route-aware response-header and cookie baseline at ingress and application layers."
+	case strings.Contains(text, "credential") || strings.Contains(text, "secret"):
+		return "Replay the exposed material quickly across identity, source, CI/CD, and cloud APIs to find the broadest surviving scope.",
+			"Revoke first, enumerate blast radius second, and verify old material is dead from multiple control planes."
+	case strings.Contains(text, "identity") || strings.Contains(text, "privilege") || strings.Contains(text, "pivot"):
+		return "Use initial access to harvest runtime identity, then chain allowed actions into adjacent services or the control plane.",
+			"Narrow non-human identities to workload intent and alert on token exchange, metadata, or invoke activity outside baseline."
+	case strings.Contains(text, "database") || strings.Contains(text, "data-store"):
+		return "Confirm database reachability, fingerprint auth posture, and look for fast data access or destructive write paths.",
+			"Remove public reachability before deeper testing and prove private-only access plus credential rotation."
+	default:
+		return "Start with the lowest-friction entry point, validate reachable behavior, and chain toward data, identity, or control-plane impact.",
+			"Close the highest-blast-radius control first, then preserve an automated test that proves the same path stays closed."
+	}
+}
+
+func buildSecurityAttackVectorRegressionTests(vector securityAttackVector) []string {
+	text := strings.ToLower(strings.Join(uniqueNonEmptyStrings(append(append([]string{vector.Title, vector.Summary, vector.KillChainStage}, vector.Threats...), vector.EntryPoints...)), " "))
+	switch {
+	case strings.Contains(text, "prompt") || strings.Contains(text, "agent") || strings.Contains(text, "tool") || strings.Contains(text, "mcp"):
+		return []string{
+			"Replay an indirect prompt-injection fixture and assert the original task, approved tools, and allowed parameters do not change.",
+			"Inject a malicious or changed tool descriptor and assert execution is blocked before any sensitive action.",
+			"Assert all write, shell, deploy, identity, data-export, and destructive actions require policy approval outside the model.",
+		}
+	case strings.Contains(text, "supply"):
+		return []string{
+			"Assert every runtime dependency is pinned to an approved digest, commit, or version.",
+			"Run behavioral integrity tests that fail on undeclared file, credential, shell, network, or tool-chain access.",
+		}
+	case strings.Contains(text, "cors") || strings.Contains(text, "origin"):
+		return []string{
+			"Replay hostile Origin and preflight requests and fail if untrusted origins are reflected or wildcarded on sensitive routes.",
+			"Assert credentialed CORS is disabled unless route and origin are explicitly allowlisted.",
+		}
+	case strings.Contains(text, "forced") || strings.Contains(text, "schema") || strings.Contains(text, "debug") || strings.Contains(text, "metrics"):
+		return []string{
+			"Forced-browse the approved sensitive-path fixture list and fail when docs, schemas, debug, metrics, admin, config, or source paths are public.",
+			"Assert route-enumeration attempts are logged with source, path, status, and edge/origin context.",
+		}
+	case strings.Contains(text, "tls") || strings.Contains(text, "transport") || strings.Contains(text, "https"):
+		return []string{
+			"Assert cleartext HTTP either redirects to HTTPS or is unreachable.",
+			"Assert TLS 1.0 and TLS 1.1 handshakes fail and HSTS is present where safe.",
+		}
+	case strings.Contains(text, "method") || strings.Contains(text, "verb"):
+		return []string{
+			"Run OPTIONS and harmless method probes and fail if unused write or tunneling methods are advertised or accepted.",
+			"Assert method override headers cannot bypass edge or application method policy.",
+		}
+	case strings.Contains(text, "host") || strings.Contains(text, "forwarded") || strings.Contains(text, "rewrite"):
+		return []string{
+			"Replay hostile Host, X-Forwarded-Host, X-Original-URL, and X-Rewrite-URL probes and fail when redirects, routing, or auth gates change.",
+			"Assert absolute URLs, tenant routing, and cache keys are derived from trusted configured origins or normalized ingress metadata.",
+		}
+	case strings.Contains(text, "cache"):
+		return []string{
+			"Run cache-policy checks against cookie, auth, and tenant-specific responses and fail when approved no-store, private, or Vary behavior disappears.",
+			"Assert CDN, reverse-proxy, browser, and service-worker caches cannot replay user-specific responses across sessions.",
+		}
+	case strings.Contains(text, "rate") || strings.Contains(text, "quota") || strings.Contains(text, "resource-consumption") || strings.Contains(text, "resource control") || strings.Contains(text, "denial-of-wallet") || strings.Contains(text, "graphql"):
+		return []string{
+			"Run bounded rate, quota, payload-size, and query-complexity checks and fail when abuse controls are absent or unaudited.",
+			"Assert brute-force, scraping, and repeated expensive requests create throttling/backoff telemetry without degrading normal clients.",
+		}
+	case strings.Contains(text, "header") || strings.Contains(text, "cookie") || strings.Contains(text, "clickjacking"):
+		return []string{
+			"Run HEAD/GET response-baseline tests and fail when required security headers or cookie flags disappear.",
+			"Assert browser-facing routes keep CSP plus clickjacking controls and session cookies keep Secure, HttpOnly, and SameSite.",
+		}
+	case strings.Contains(text, "credential") || strings.Contains(text, "secret"):
+		return []string{
+			"Assert secret scanning finds no matching material in code, config, state, logs, or snapshots.",
+			"Assert the old credential fails a read-only identity check after rotation.",
+		}
+	case strings.Contains(text, "identity") || strings.Contains(text, "privilege") || strings.Contains(text, "pivot"):
+		return []string{
+			"Run policy simulation and fail when the runtime identity can perform non-required high-risk actions.",
+			"Assert token exchange, metadata access, and downstream invokes are logged with workload identity context.",
+		}
+	case strings.Contains(text, "database") || strings.Contains(text, "data-store"):
+		return []string{
+			"Assert direct public connections to the data store fail from an external vantage point.",
+			"Assert the application can still reach the store only through approved private network paths.",
+		}
+	default:
+		return []string{
+			"Automate the smallest read-only proof that this attack path is closed.",
+			"Fail the release if the same endpoint, permission, or data path reappears.",
+		}
+	}
 }
 
 func buildSecurityFindingTriage(finding securityFinding) (string, string, string) {
@@ -2602,6 +3947,31 @@ func buildSecurityFindingTriage(finding securityFinding) (string, string, string
 		priority = "p0"
 	case category == "identity-pivot" || category == "invoke-pivot":
 		priority = "p1"
+	case category == "agentic-risk" || category == "mcp-tooling":
+		priority = "p1"
+		if securitySeverityRank(finding.Severity) >= 4 || finding.Reachable || finding.Endpoint != "" {
+			priority = "p0"
+		}
+	case category == "agent-supply-chain":
+		priority = "p2"
+		if securitySeverityRank(finding.Severity) >= 3 {
+			priority = "p1"
+		}
+	case category == "cors-misconfiguration" || category == "sensitive-path" || category == "risky-methods" || category == "header-trust":
+		priority = "p1"
+		if securitySeverityRank(finding.Severity) >= 4 {
+			priority = "p0"
+		}
+	case category == "api-resource-controls":
+		priority = "p2"
+		if securitySeverityRank(finding.Severity) >= 3 {
+			priority = "p1"
+		}
+	case category == "http-hardening" || category == "tls-posture" || category == "cache-policy":
+		priority = "p2"
+		if securitySeverityRank(finding.Severity) >= 3 {
+			priority = "p1"
+		}
 	case securityFindingIsPublicCompute(finding):
 		priority = "p1"
 	case category == "authenticated-surface" || category == "reachable-surface":
@@ -2641,6 +4011,14 @@ func inferSecurityFindingOwner(finding securityFinding) string {
 	switch category {
 	case "credential-leak", "identity-pivot", "invoke-pivot":
 		return "identity"
+	case "agentic-risk", "mcp-tooling", "agent-supply-chain":
+		return "agent-platform"
+	case "tls-posture", "cors-misconfiguration", "risky-methods", "http-hardening", "header-trust", "cache-policy":
+		return "edge"
+	case "api-resource-controls":
+		return "application"
+	case "sensitive-path":
+		return "application"
 	}
 
 	if securityFindingIsDatabaseExposure(finding) {
@@ -2745,6 +4123,150 @@ func buildSecurityFindingRemediation(finding securityFinding) ([]string, []strin
 				"Confirm the runtime can no longer perform the high-risk cloud actions or downstream invokes that created the pivot path.",
 				"Verify production traffic still succeeds with the narrowed role and trust policy in place.",
 				"Check that metadata or workload identity protections block opportunistic token retrieval paths.",
+			}
+	case "agentic-risk":
+		return []string{
+				"Disable or approval-gate high-impact tools for this agent until untrusted input paths are mapped.",
+				"Separate untrusted retrieved content from instructions and tool parameters before the next run.",
+				"Log and review recent agent tool calls for unusual file, shell, deploy, identity, or data access.",
+			}, []string{
+				fmt.Sprintf("Bind %s to a declared task scope and validate every tool call against that scope outside the model.", resourceLabel),
+				"Apply least-agency: remove unnecessary tools, narrow file and network access, and require human approval for writes, deploys, identity changes, and data export.",
+				"Add prompt-injection and context-poisoning tests using web, document, issue, email, and RAG payloads that the agent can encounter.",
+			}, []string{
+				"Confirm malicious instructions in retrieved content cannot change the goal, tool choice, or action parameters.",
+				"Verify high-impact tool calls are blocked or require approval when they deviate from the original task.",
+				"Review agent activity logs for goal state, selected tools, parameters, and approval outcomes.",
+			}
+	case "mcp-tooling":
+		return []string{
+				"Pin or disable unknown MCP/tool servers and require explicit approval before new tools appear in the agent runtime.",
+				"Block sensitive tool calls until tool descriptors, schemas, and peer-agent identities are verified.",
+			}, []string{
+				fmt.Sprintf("Inventory every MCP server, tool schema, sampling flow, and peer-agent trust path used by %s.", resourceLabel),
+				"Authenticate remote tool endpoints, sign or pin tool definitions, and alert on descriptor changes or tool-name collisions.",
+				"Expose tool invocations and remote-agent instructions in the UI with interrupt and rollback paths for sensitive actions.",
+			}, []string{
+				"Verify a malicious or changed tool descriptor cannot redirect the agent into credential, file, shell, or exfiltration actions.",
+				"Confirm peer-agent or MCP server identity is validated before a session begins and rechecked on changes.",
+				"Re-run a tool-poisoning simulation and confirm the policy engine blocks the unsafe call.",
+			}
+	case "agent-supply-chain":
+		return []string{
+				"Freeze the current skill, plugin, model, MCP server, and image versions until provenance is reviewed.",
+				"Disable components that are unpinned, recently changed, or able to reach credentials, files, shell, or network egress.",
+			}, []string{
+				fmt.Sprintf("Create a bill of materials for agent dependencies loaded by %s, including skills, prompts, scripts, models, MCP servers, and images.", resourceLabel),
+				"Pin versions by digest or commit, require trusted sources, and compare each component's declared metadata against executable behavior.",
+				"Run static and behavioral checks before installation and again whenever a third-party component updates.",
+			}, []string{
+				"Confirm the agent can only install or load allowlisted components from approved registries.",
+				"Verify no component can silently exfiltrate files, credentials, code, or tool outputs outside the intended boundary.",
+				"Check audit logs for component changes, install events, and newly requested permissions.",
+			}
+	case "http-hardening":
+		return []string{
+				"Apply missing security headers and cookie flags at the edge or origin before relying on browser clients.",
+				"Review routes setting cookies and treat missing Secure, HttpOnly, or SameSite as session-hardening work.",
+			}, []string{
+				fmt.Sprintf("Define the response-header baseline for %s by route type: browser page, API response, redirect, and static asset.", resourceLabel),
+				"Enforce HSTS on HTTPS surfaces where safe, X-Content-Type-Options, Referrer-Policy, CSP or frame-ancestors for browser routes, and strict session cookie flags.",
+				"Move the baseline into ingress/CDN/WAF or framework middleware so app teams cannot drift route-by-route.",
+			}, []string{
+				"Re-run HEAD and GET probes and confirm the missing or weak header/cookie evidence is gone.",
+				"Verify browser-facing pages keep CSP and clickjacking controls while API clients continue to function.",
+				"Add deployment tests that fail when required headers or cookie flags disappear.",
+			}
+	case "cors-misconfiguration":
+		return []string{
+				"Disable wildcard, reflected, or credentialed CORS behavior on sensitive routes until intended origins are documented.",
+				"Review access logs for requests with unusual Origin or Access-Control-Request-* headers.",
+			}, []string{
+				fmt.Sprintf("Create an explicit allowed-origin list for %s and apply it only to routes that need browser cross-origin access.", resourceLabel),
+				"Disable Access-Control-Allow-Credentials unless the route requires it and has route-specific origin validation.",
+				"Make CORS decisions before sensitive data is produced and keep preflight behavior consistent with actual route authorization.",
+			}, []string{
+				"Replay hostile Origin and preflight probes and confirm they no longer receive readable or credentialed access.",
+				"Verify approved origins still work for required product flows.",
+				"Assert sensitive authenticated responses cannot be read from untrusted origins.",
+			}
+	case "tls-posture":
+		return []string{
+				"Force HTTPS or close cleartext HTTP reachability where the endpoint carries sessions, tokens, or sensitive data.",
+				"Disable TLS 1.0 and TLS 1.1 at the first terminating edge that accepts public traffic.",
+			}, []string{
+				fmt.Sprintf("Document where TLS terminates for %s and apply a modern protocol/cipher policy there.", resourceLabel),
+				"Enable HSTS on browser-facing HTTPS routes once redirect and subdomain behavior is safe.",
+				"Ensure internal origin traffic is either private, encrypted, or covered by explicit compensating controls.",
+			}, []string{
+				"Confirm HTTP redirects to HTTPS or fails closed from an external vantage point.",
+				"Verify TLS 1.0 and TLS 1.1 handshakes fail and TLS 1.2/1.3 remain available.",
+				"Confirm HSTS appears on HTTPS browser-facing responses where intended.",
+			}
+	case "sensitive-path":
+		return []string{
+				"Block or authenticate exposed docs, schemas, metrics, debug, admin, config, and source metadata paths.",
+				"Review the discovered path responses for secrets, internal hosts, privileged verbs, stack traces, or implementation details.",
+			}, []string{
+				fmt.Sprintf("Define the public route inventory for %s and move every operator-only route behind auth or a private network.", resourceLabel),
+				"Serve API documentation and schemas from an authenticated developer portal when they describe non-public behavior.",
+				"Disable production debug, actuator, server-status, source metadata, and raw config endpoints unless explicitly approved.",
+			}, []string{
+				"Forced-browse the sensitive-path list and confirm unapproved paths return 401, 403, 404, or an approved public response.",
+				"Verify route enumeration is logged with source IP, path, status, edge, and origin context.",
+				"Confirm product-required public docs still expose only intended public API behavior.",
+			}
+	case "risky-methods":
+		return []string{
+				"Deny unused write-capable or tunneling HTTP methods at the edge before traffic reaches the application.",
+				"Confirm state-changing methods require route-specific authentication and authorization.",
+			}, []string{
+				fmt.Sprintf("Document allowed methods for each route family on %s and reject everything else.", resourceLabel),
+				"Disable TRACE and CONNECT on public application surfaces unless there is a tightly scoped operational need.",
+				"Review method override headers and proxy behavior so denied verbs cannot be reintroduced upstream.",
+			}, []string{
+				"Re-run OPTIONS and harmless method probes and confirm unused methods are no longer advertised or accepted.",
+				"Verify legitimate write routes still require proper authorization and CSRF/session controls where browser-facing.",
+				"Assert method override headers cannot bypass edge or app policy.",
+			}
+	case "header-trust":
+		return []string{
+				"Reject hostile Host, X-Forwarded-Host, X-Original-URL, and X-Rewrite-URL values at the first trusted edge.",
+				"Disable header-driven routing, redirects, reset-link generation, and auth decisions until trusted proxy normalization is confirmed.",
+			}, []string{
+				fmt.Sprintf("Configure %s to derive canonical origins and tenants from trusted configuration, not raw request headers.", resourceLabel),
+				"Allow proxy headers only from known ingress/CDN/load-balancer hops and strip or overwrite them everywhere else.",
+				"Separate public app routes from operator/admin routes so rewrite headers cannot cross the control-plane boundary.",
+			}, []string{
+				"Replay hostile Host and X-Forwarded-Host probes and confirm redirects never point at attacker-controlled hosts.",
+				"Replay X-Original-URL and X-Rewrite-URL probes and confirm auth challenges and routing do not weaken.",
+				"Verify edge and application logs include normalized host, original host, and proxy source context for suspicious requests.",
+			}
+	case "cache-policy":
+		return []string{
+				"Apply no-store or private Cache-Control to session-like responses that carry cookies, auth state, user data, or tenant-specific data.",
+				"Purge CDN, reverse-proxy, and browser-relevant caches for routes that may have stored session-like content.",
+			}, []string{
+				fmt.Sprintf("Define route-level cache policy for %s and enforce it consistently at app, CDN, and ingress layers.", resourceLabel),
+				"Use Vary on Authorization, Cookie, Origin, or tenant state when authenticated API caching is explicitly approved.",
+				"Prevent service workers and client caches from retaining sensitive API responses unless there is a documented product requirement.",
+			}, []string{
+				"Re-run HEAD/GET probes and confirm cookie/auth-like responses include approved Cache-Control behavior.",
+				"Confirm CDN/reverse-proxy cache diagnostics show misses or private handling for session-like responses.",
+				"Assert public cacheable assets still cache correctly without sharing user-specific content.",
+			}
+	case "api-resource-controls":
+		return []string{
+				"Add or tighten server-side throttles on authentication, search, export, GraphQL, upload, and third-party-cost paths.",
+				"Log repeated expensive requests, high-cardinality clients, and quota failures before raising limits.",
+			}, []string{
+				fmt.Sprintf("Define abuse budgets for %s by route: rate, burst, payload size, query depth/cost, pagination, and operation count.", resourceLabel),
+				"Enforce limits before expensive downstream work starts and return consistent backoff or quota responses.",
+				"Expose enough rate-limit or retry-after telemetry for operators and well-behaved clients without leaking sensitive policy internals.",
+			}, []string{
+				"Run bounded abuse tests that prove throttles, query limits, upload limits, and backoff responses activate before resource exhaustion.",
+				"Confirm legitimate clients still succeed within documented quotas.",
+				"Verify abuse-control events appear in logs, metrics, and alerting with source, route, actor, and limit context.",
 			}
 	default:
 		return []string{
