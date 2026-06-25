@@ -1868,7 +1868,7 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		if !ok {
 			return "", fmt.Errorf("service_name parameter required")
 		}
-		clusterName := input["cluster_name"].(string) // optional
+		clusterName, _ := input["cluster_name"].(string) // optional; absent → nil interface
 		if clusterName == "" {
 			clusterName = "default"
 		}
@@ -1911,7 +1911,7 @@ func (c *Client) executeAWSOperation(ctx context.Context, toolName string, input
 		if !ok {
 			return "", fmt.Errorf("task_arn parameter required")
 		}
-		clusterName := input["cluster_name"].(string)
+		clusterName, _ := input["cluster_name"].(string) // optional; absent → nil interface
 		if clusterName == "" {
 			clusterName = "default"
 		}
