@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -306,29 +307,33 @@ func runCommandStreaming(ctx context.Context, command string, args []string, pro
 		return "", err
 	}
 
-	var output strings.Builder
+	// strings.Builder is not safe for concurrent use; the two scanner
+	// goroutines write to it, so guard with a mutex and join them (via wg)
+	// before reading. Drain the pipes (wg.Wait) BEFORE cmd.Wait, per the
+	// os/exec docs ("incorrect to call Wait before all reads have completed").
+	var (
+		output strings.Builder
+		mu     sync.Mutex
+		wg     sync.WaitGroup
+	)
 
-	// Stream stdout
-	go func() {
-		scanner := bufio.NewScanner(stdout)
+	drain := func(r io.Reader) {
+		defer wg.Done()
+		scanner := bufio.NewScanner(r)
 		for scanner.Scan() {
 			line := scanner.Text()
+			mu.Lock()
 			output.WriteString(line)
 			output.WriteString("\n")
+			mu.Unlock()
 			progress.LogCommandOutput(prefix, line)
 		}
-	}()
+	}
 
-	// Stream stderr
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			line := scanner.Text()
-			output.WriteString(line)
-			output.WriteString("\n")
-			progress.LogCommandOutput(prefix, line)
-		}
-	}()
+	wg.Add(2)
+	go drain(stdout)
+	go drain(stderr)
+	wg.Wait()
 
 	if err := cmd.Wait(); err != nil {
 		return output.String(), err
