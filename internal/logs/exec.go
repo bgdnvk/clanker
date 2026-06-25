@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 )
 
 // runJSON runs a CLI to completion and returns stdout. Extra env vars are
@@ -36,7 +35,7 @@ func runJSON(ctx context.Context, name string, args []string, env map[string]str
 func streamLines(ctx context.Context, name string, args []string, env map[string]string, fn func(line string) error) error {
 	cmd := exec.Command(name, args...)
 	cmd.Env = mergedEnv(env)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(cmd)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -55,9 +54,7 @@ func streamLines(ctx context.Context, name string, args []string, env map[string
 	go func() {
 		select {
 		case <-ctx.Done():
-			if cmd.Process != nil {
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			}
+			killProcessGroup(cmd)
 		case <-done:
 		}
 	}()
@@ -68,9 +65,7 @@ func streamLines(ctx context.Context, name string, args []string, env map[string
 		if err := fn(scanner.Text()); err != nil {
 			// Consumer gave up (e.g. broken pipe): kill the whole process group
 			// and reap, so kubectl/flyctl don't outlive us as orphans.
-			if cmd.Process != nil {
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			}
+			killProcessGroup(cmd)
 			_ = cmd.Wait()
 			return err
 		}
