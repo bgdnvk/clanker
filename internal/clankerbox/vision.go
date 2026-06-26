@@ -471,6 +471,21 @@ func visionConfirmationReason(req VisionRequest, action string) string {
 	return ""
 }
 
+func visionRuntimeDir() string {
+	return filepath.Join(terminalWorkingDir(""), ".clanker-vision", "runtime")
+}
+
+func visionRuntimePython() string {
+	if python := strings.TrimSpace(os.Getenv("CLANKER_BOX_VISION_PYTHON")); python != "" {
+		return python
+	}
+	candidate := filepath.Join(visionRuntimeDir(), ".venv", "bin", "python")
+	if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+		return candidate
+	}
+	return "python3"
+}
+
 func runVisionBrowserAction(ctx context.Context, sessionID, action string, req VisionRequest) (*VisionObservation, error) {
 	if action == "browser.open" {
 		if _, err := url.ParseRequestURI(strings.TrimSpace(req.URL)); err != nil {
@@ -508,13 +523,14 @@ func runVisionBrowserAction(ctx context.Context, sessionID, action string, req V
 	}
 	timeoutCtx, cancel := context.WithTimeout(ctx, 55*time.Second)
 	defer cancel()
-	python := strings.TrimSpace(os.Getenv("CLANKER_BOX_VISION_PYTHON"))
-	if python == "" {
-		python = "python3"
-	}
+	python := visionRuntimePython()
 	cmd := exec.CommandContext(timeoutCtx, python, scriptPath, inputPath, outputPath)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "CLANKER_BOX_VISION_USER_AGENT="+visionUserAgent)
+	cmd.Env = append(
+		os.Environ(),
+		"CLANKER_BOX_VISION_USER_AGENT="+visionUserAgent,
+		"PLAYWRIGHT_BROWSERS_PATH="+filepath.Join(visionRuntimeDir(), "ms-playwright"),
+	)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -848,7 +864,7 @@ def main():
     try:
         from playwright.sync_api import sync_playwright
     except Exception as exc:
-        write_result(output_path, {"error": "Playwright is not installed in this Clanker Box image: %s" % exc})
+        write_result(output_path, {"error": "Playwright is not installed for Clanker Vision: %s. Run clanker box install clanker-vision to install the app-local browser runtime." % exc})
         return
 
     with open(input_path, "r", encoding="utf-8") as f:
