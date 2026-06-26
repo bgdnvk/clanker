@@ -31,6 +31,7 @@ type VisionRequest struct {
 	Instruction string     `json:"instruction,omitempty"`
 	URL         string     `json:"url,omitempty"`
 	Selector    string     `json:"selector,omitempty"`
+	Target      string     `json:"target,omitempty"`
 	X           int        `json:"x,omitempty"`
 	Y           int        `json:"y,omitempty"`
 	Text        string     `json:"text,omitempty"`
@@ -67,26 +68,40 @@ type VisionEvent struct {
 	X         int    `json:"x,omitempty"`
 	Y         int    `json:"y,omitempty"`
 	FilePath  string `json:"filePath,omitempty"`
+	TracePath string `json:"tracePath,omitempty"`
 	CreatedAt string `json:"createdAt"`
 }
 
 type VisionObservation struct {
-	URL                 string         `json:"url,omitempty"`
-	Title               string         `json:"title,omitempty"`
-	PageText            string         `json:"pageText,omitempty"`
-	Width               int            `json:"width,omitempty"`
-	Height              int            `json:"height,omitempty"`
-	ScreenshotMediaType string         `json:"screenshotMediaType,omitempty"`
-	ScreenshotBase64    string         `json:"screenshotBase64,omitempty"`
-	Pointer             *VisionPointer `json:"pointer,omitempty"`
-	ScreenshotPath      string         `json:"screenshotPath,omitempty"`
-	ScreenshotRedacted  bool           `json:"screenshotRedacted,omitempty"`
+	URL                 string          `json:"url,omitempty"`
+	Title               string          `json:"title,omitempty"`
+	PageText            string          `json:"pageText,omitempty"`
+	Width               int             `json:"width,omitempty"`
+	Height              int             `json:"height,omitempty"`
+	ScreenshotMediaType string          `json:"screenshotMediaType,omitempty"`
+	ScreenshotBase64    string          `json:"screenshotBase64,omitempty"`
+	Pointer             *VisionPointer  `json:"pointer,omitempty"`
+	ScreenshotPath      string          `json:"screenshotPath,omitempty"`
+	ScreenshotRedacted  bool            `json:"screenshotRedacted,omitempty"`
+	TracePath           string          `json:"tracePath,omitempty"`
+	Elements            []VisionElement `json:"elements,omitempty"`
 }
 
 type VisionPointer struct {
 	X     int    `json:"x"`
 	Y     int    `json:"y"`
 	Label string `json:"label,omitempty"`
+}
+
+type VisionElement struct {
+	Role     string `json:"role,omitempty"`
+	Label    string `json:"label,omitempty"`
+	Text     string `json:"text,omitempty"`
+	Selector string `json:"selector,omitempty"`
+	X        int    `json:"x,omitempty"`
+	Y        int    `json:"y,omitempty"`
+	Width    int    `json:"width,omitempty"`
+	Height   int    `json:"height,omitempty"`
 }
 
 type VisionArtifact struct {
@@ -121,16 +136,18 @@ type visionSession struct {
 }
 
 type browserBridgeResult struct {
-	URL                 string         `json:"url"`
-	Title               string         `json:"title"`
-	PageText            string         `json:"pageText,omitempty"`
-	Width               int            `json:"width"`
-	Height              int            `json:"height"`
-	ScreenshotMediaType string         `json:"screenshotMediaType"`
-	ScreenshotBase64    string         `json:"screenshotBase64"`
-	ScreenshotPath      string         `json:"screenshotPath"`
-	Pointer             *VisionPointer `json:"pointer,omitempty"`
-	Error               string         `json:"error,omitempty"`
+	URL                 string          `json:"url"`
+	Title               string          `json:"title"`
+	PageText            string          `json:"pageText,omitempty"`
+	Width               int             `json:"width"`
+	Height              int             `json:"height"`
+	ScreenshotMediaType string          `json:"screenshotMediaType"`
+	ScreenshotBase64    string          `json:"screenshotBase64"`
+	ScreenshotPath      string          `json:"screenshotPath"`
+	Pointer             *VisionPointer  `json:"pointer,omitempty"`
+	TracePath           string          `json:"tracePath,omitempty"`
+	Elements            []VisionElement `json:"elements,omitempty"`
+	Error               string          `json:"error,omitempty"`
 }
 
 var (
@@ -213,7 +230,7 @@ func (s *VisionService) Handle(ctx context.Context, req VisionRequest) VisionRes
 		}
 		resp.Observation = observation
 		resp.Summary = browserVisionSummary(action, observation)
-		resp.Events = []VisionEvent{s.appendEvent(session.ID, VisionEvent{Type: "browser", Action: action, Status: "completed", Summary: resp.Summary, X: req.X, Y: req.Y, FilePath: observation.ScreenshotPath})}
+		resp.Events = []VisionEvent{s.appendEvent(session.ID, VisionEvent{Type: "browser", Action: action, Status: "completed", Summary: resp.Summary, X: req.X, Y: req.Y, FilePath: observation.ScreenshotPath, TracePath: observation.TracePath})}
 	case "office.write_doc":
 		artifact, err := writeVisionDocument(ctx, session.ID, req)
 		if err != nil {
@@ -500,6 +517,7 @@ func runVisionBrowserAction(ctx context.Context, sessionID, action string, req V
 		"action":      action,
 		"url":         strings.TrimSpace(req.URL),
 		"selector":    strings.TrimSpace(req.Selector),
+		"target":      strings.TrimSpace(req.Target),
 		"x":           req.X,
 		"y":           req.Y,
 		"text":        req.Text,
@@ -554,7 +572,7 @@ func runVisionBrowserAction(ctx context.Context, sessionID, action string, req V
 	if bridge.Error != "" {
 		return nil, fmt.Errorf("%s", bridge.Error)
 	}
-	return &VisionObservation{
+	observation := &VisionObservation{
 		URL:                 bridge.URL,
 		Title:               bridge.Title,
 		PageText:            bridge.PageText,
@@ -564,7 +582,45 @@ func runVisionBrowserAction(ctx context.Context, sessionID, action string, req V
 		ScreenshotBase64:    bridge.ScreenshotBase64,
 		ScreenshotPath:      bridge.ScreenshotPath,
 		Pointer:             bridge.Pointer,
-	}, nil
+		Elements:            bridge.Elements,
+	}
+	observation.TracePath = writeVisionBrowserTrace(dir, action, req, observation)
+	return observation, nil
+}
+
+func writeVisionBrowserTrace(dir, action string, req VisionRequest, observation *VisionObservation) string {
+	if observation == nil {
+		return ""
+	}
+	tracePath := filepath.Join(dir, "browser-trace.jsonl")
+	record := map[string]any{
+		"id":             "browser-trace-" + strconv.FormatInt(time.Now().UTC().UnixMilli(), 10),
+		"createdAt":      time.Now().UTC().Format(time.RFC3339Nano),
+		"action":         action,
+		"url":            observation.URL,
+		"title":          observation.Title,
+		"screenshotPath": observation.ScreenshotPath,
+		"pointer":        observation.Pointer,
+		"target":         strings.TrimSpace(req.Target),
+		"selector":       strings.TrimSpace(req.Selector),
+		"x":              req.X,
+		"y":              req.Y,
+		"elementCount":   len(observation.Elements),
+		"tracePath":      tracePath,
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return ""
+	}
+	file, err := os.OpenFile(tracePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	if _, err := file.Write(append(data, '\n')); err != nil {
+		return ""
+	}
+	return tracePath
 }
 
 func browserVisionSummary(action string, observation *VisionObservation) string {
@@ -858,6 +914,124 @@ def launch_browser_context(p, profile_dir, launch_args):
         % " | ".join(attempts[:8])
     )
 
+def normalize_target(value):
+    return " ".join((value or "").lower().split())
+
+def collect_elements(page, limit=80):
+    try:
+        return page.evaluate(
+            """(limit) => {
+                const selectors = [
+                    "a",
+                    "button",
+                    "input",
+                    "textarea",
+                    "select",
+                    "summary",
+                    "[role='button']",
+                    "[role='link']",
+                    "[role='menuitem']",
+                    "[role='tab']",
+                    "[aria-label]",
+                    "[title]"
+                ].join(",");
+                const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+                const roleFor = (element) => {
+                    const explicitRole = clean(element.getAttribute("role"));
+                    if (explicitRole) return explicitRole;
+                    const tag = element.tagName.toLowerCase();
+                    if (tag === "a") return "link";
+                    if (tag === "button") return "button";
+                    if (tag === "input") return clean(element.getAttribute("type")) || "input";
+                    if (tag === "textarea") return "textbox";
+                    if (tag === "select") return "select";
+                    return tag;
+                };
+                const labelFor = (element) => {
+                    const tag = element.tagName.toLowerCase();
+                    return clean(element.getAttribute("aria-label"))
+                        || clean(element.innerText)
+                        || clean(element.value)
+                        || clean(element.getAttribute("title"))
+                        || clean(element.getAttribute("alt"))
+                        || clean(element.getAttribute("placeholder"))
+                        || clean(tag === "a" ? element.href : "");
+                };
+                const out = [];
+                const seen = new Set();
+                for (const element of Array.from(document.querySelectorAll(selectors))) {
+                    if (out.length >= limit) break;
+                    if (!(element instanceof HTMLElement)) continue;
+                    const style = window.getComputedStyle(element);
+                    if (style.visibility === "hidden" || style.display === "none" || Number(style.opacity || 1) === 0) continue;
+                    const rect = element.getBoundingClientRect();
+                    if (rect.width < 2 || rect.height < 2) continue;
+                    if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) continue;
+                    const label = labelFor(element);
+                    if (!label) continue;
+                    const key = roleFor(element) + ":" + label + ":" + Math.round(rect.left) + ":" + Math.round(rect.top);
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    const id = "clanker-vision-" + out.length;
+                    element.setAttribute("data-clanker-vision-id", id);
+                    out.push({
+                        role: roleFor(element),
+                        label,
+                        text: label,
+                        selector: '[data-clanker-vision-id="' + id + '"]',
+                        x: Math.round(rect.left + rect.width / 2),
+                        y: Math.round(rect.top + rect.height / 2),
+                        width: Math.round(rect.width),
+                        height: Math.round(rect.height)
+                    });
+                }
+                return out;
+            }""",
+            limit,
+        )
+    except Exception:
+        return []
+
+def element_for_target(elements, target):
+    value = normalize_target(target)
+    if not value or not elements:
+        return None
+    if value in ("that", "it", "that story", "the story", "first", "first story", "top", "top story", "first result", "top result"):
+        return elements[0]
+    ordinal_map = {
+        "second": 1,
+        "2nd": 1,
+        "third": 2,
+        "3rd": 2,
+        "fourth": 3,
+        "4th": 3,
+        "fifth": 4,
+        "5th": 4,
+    }
+    for marker, index in ordinal_map.items():
+        if marker in value and index < len(elements):
+            return elements[index]
+    best = None
+    best_score = 0
+    for element in elements:
+        label = normalize_target(element.get("label") or element.get("text") or "")
+        if not label:
+            continue
+        score = 0
+        if label == value:
+            score = 100
+        elif value in label or label in value:
+            score = 80
+        else:
+            target_words = set(value.split())
+            label_words = set(label.split())
+            if target_words and label_words:
+                score = int(100 * len(target_words & label_words) / max(len(target_words), len(label_words)))
+        if score > best_score:
+            best = element
+            best_score = score
+    return best if best_score >= 35 else None
+
 def main():
     input_path = sys.argv[1]
     output_path = sys.argv[2]
@@ -898,20 +1072,44 @@ def main():
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
         pointer = None
-        if action == "browser.click":
-            x = int(req.get("x") or 0)
-            y = int(req.get("y") or 0)
-            if x <= 0 or y <= 0:
-                selector = (req.get("selector") or "").strip()
-                if not selector:
-                    raise RuntimeError("browser.click needs x/y coordinates or a selector")
-                box = page.locator(selector).first.bounding_box()
-                if not box:
-                    raise RuntimeError("selector did not resolve to a visible element")
-                x = int(box["x"] + box["width"] / 2)
-                y = int(box["y"] + box["height"] / 2)
-            page.mouse.click(x, y)
-            pointer = {"x": x, "y": y, "label": "click"}
+        elements_before_action = collect_elements(page)
+		if action == "browser.click":
+			x = int(req.get("x") or 0)
+			y = int(req.get("y") or 0)
+			selector = (req.get("selector") or "").strip()
+			target = (req.get("target") or "").strip()
+			pointer_label = "click"
+			if selector:
+				box = page.locator(selector).first.bounding_box()
+				if not box:
+					raise RuntimeError("selector did not resolve to a visible element")
+				x = int(box["x"] + box["width"] / 2)
+				y = int(box["y"] + box["height"] / 2)
+				pointer_label = selector
+			elif target:
+				matched = element_for_target(elements_before_action, target)
+				if matched:
+					selector = matched.get("selector") or ""
+					x = int(matched.get("x") or 0)
+					y = int(matched.get("y") or 0)
+					pointer_label = matched.get("label") or target
+				else:
+					locator = page.get_by_text(target, exact=False).first
+					box = locator.bounding_box()
+					if box:
+						x = int(box["x"] + box["width"] / 2)
+						y = int(box["y"] + box["height"] / 2)
+						pointer_label = target
+			if x <= 0 or y <= 0:
+				raise RuntimeError("browser.click needs x/y coordinates, a selector, or visible target text")
+			if selector:
+				try:
+					page.locator(selector).first.click(timeout=3000)
+                except Exception:
+                    page.mouse.click(x, y)
+            else:
+                page.mouse.click(x, y)
+            pointer = {"x": x, "y": y, "label": pointer_label}
         elif action == "browser.type":
             x = int(req.get("x") or 0)
             y = int(req.get("y") or 0)
@@ -952,6 +1150,7 @@ def main():
             page_text = "\n".join([line for line in lines if line])
             if len(page_text) > 12000:
                 page_text = page_text[:12000]
+        elements = collect_elements(page)
         shot_path = os.path.join(shot_dir, "screen-%d.jpg" % int(time.time() * 1000))
         shot = page.screenshot(path=shot_path, type="jpeg", quality=70, full_page=False)
         if not shot:
@@ -972,6 +1171,7 @@ def main():
         "screenshotBase64": base64.b64encode(shot).decode("ascii"),
         "screenshotPath": shot_path,
         "pointer": pointer,
+        "elements": elements,
     })
 
 if __name__ == "__main__":
