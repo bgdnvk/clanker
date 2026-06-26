@@ -140,6 +140,14 @@ func Agents() []AgentSpec {
 			Status:         "ready",
 			DefaultCommand: []string{"clanker", "box", "serve", "--agent", "clanker-cli"},
 		},
+		{
+			ID:             VisionAgentID,
+			Name:           "Clanker Vision",
+			Summary:        "Native browser and office-work agent with visible click observations, scoped workspace state, and stop control.",
+			Runtime:        "browser-office-agent",
+			Status:         "prototype",
+			DefaultCommand: []string{"clanker", "box", "serve", "--agent", VisionAgentID},
+		},
 	}
 }
 
@@ -229,6 +237,9 @@ func NewManifest(name, agentID, regionID string, opts ManifestOptions) (Manifest
 		timeout = 60
 	}
 	size := DefaultSize()
+	if agent.ID == VisionAgentID {
+		size = VisionSize()
+	}
 	serviceName := ServiceName(displayName, agent.ID)
 	env := map[string]string{
 		"CLANKER_BOX_NAME":            displayName,
@@ -238,6 +249,10 @@ func NewManifest(name, agentID, regionID string, opts ManifestOptions) (Manifest
 		"CLANKER_BOX_ENABLE_TERMINAL": "true",
 		"CLANKER_BOX_AUTO_INSTALL":    "true",
 		"CLANKER_BOX_WORKDIR":         "/workspace",
+	}
+	if agent.ID == VisionAgentID {
+		env["CLANKER_BOX_VISION_RETENTION"] = "ephemeral"
+		env["CLANKER_BOX_VISION_HEADLESS"] = "true"
 	}
 	if agent.ID == "empty" {
 		env["CLANKER_BOX_AUTO_INSTALL"] = "false"
@@ -276,6 +291,8 @@ func NewManifest(name, agentID, regionID string, opts ManifestOptions) (Manifest
 				"Runtime must use a unique per-box service account.",
 				"Do not attach Cloud SQL roles, Secret Manager roles, database credentials, or a private VPC connector.",
 				"Grant Cloud Run invoker only to the Clanker Cloud control plane.",
+				"Vision actions are limited to browser and office-work tooling, with confirmation gates for send/submit/delete/install-like actions.",
+				"Use /v1/box/vision action=stop as the runtime kill switch.",
 			},
 		},
 		Environment: env,
@@ -285,6 +302,7 @@ func NewManifest(name, agentID, regionID string, opts ManifestOptions) (Manifest
 			{Kind: "message", Path: "/v1/box/messages", Description: "Authenticated request/response agent messages."},
 			{Kind: "websocket", Path: "/v1/box/ws", Description: "Authenticated bidirectional agent session stream."},
 			{Kind: "terminal", Path: "/v1/box/terminal", Description: "Authenticated WebSocket terminal for SSH-style box access."},
+			{Kind: "vision", Path: "/v1/box/vision", Description: "Authenticated browser and office-control endpoint with action observations and stop control."},
 		},
 		IAMRoles: []string{
 			"roles/logging.logWriter",
@@ -307,6 +325,17 @@ func DefaultSize() SizeSpec {
 	return SizeSpec{
 		CPU:                  "1",
 		Memory:               "2Gi",
+		MinInstances:         0,
+		MaxInstances:         1,
+		Concurrency:          1,
+		RequestTimeoutSecond: 3600,
+	}
+}
+
+func VisionSize() SizeSpec {
+	return SizeSpec{
+		CPU:                  "2",
+		Memory:               "4Gi",
 		MinInstances:         0,
 		MaxInstances:         1,
 		Concurrency:          1,
@@ -342,6 +371,8 @@ func normalizeID(raw string) string {
 		return "claude-code"
 	case "clanker", "cli":
 		return "clanker-cli"
+	case "vision", "computer-use", "office-agent", "browser-agent":
+		return VisionAgentID
 	case "openai-codex":
 		return "codex"
 	case "base", "blank", "empty-sandbox", "shell":

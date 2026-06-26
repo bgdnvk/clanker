@@ -63,6 +63,8 @@ func installAgent(parent context.Context, agentID string) (InstallResult, error)
 		return installOpenClaw(ctx)
 	case "hermes":
 		return installHermes(ctx)
+	case VisionAgentID:
+		return installClankerVision(ctx)
 	default:
 		return InstallResult{}, fmt.Errorf("unsupported agent %q", agentID)
 	}
@@ -107,6 +109,23 @@ func installHermes(ctx context.Context) (InstallResult, error) {
 	}
 	result.Installed = true
 	result.Version = vendorDir
+	return result, nil
+}
+
+func installClankerVision(ctx context.Context) (InstallResult, error) {
+	command := `set -e; python="${CLANKER_BOX_VISION_PYTHON:-python3}"; "$python" - <<'PY'
+import playwright
+print("playwright", getattr(playwright, "__version__", "installed"))
+PY
+if command -v chromium >/dev/null 2>&1; then chromium --version; elif command -v chromium-browser >/dev/null 2>&1; then chromium-browser --version; else echo "chromium is missing"; exit 1; fi
+if command -v libreoffice >/dev/null 2>&1; then libreoffice --version | head -n 1; else echo "libreoffice missing; office export falls back to html/csv"; fi`
+	output, err := runShell(ctx, command)
+	result := InstallResult{Agent: VisionAgentID, Command: "validate clanker-vision runtime", Output: output}
+	if err != nil {
+		return result, err
+	}
+	result.Installed = true
+	result.Version = "browser-office-agent"
 	return result, nil
 }
 
