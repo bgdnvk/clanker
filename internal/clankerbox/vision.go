@@ -73,6 +73,7 @@ type VisionEvent struct {
 type VisionObservation struct {
 	URL                 string         `json:"url,omitempty"`
 	Title               string         `json:"title,omitempty"`
+	PageText            string         `json:"pageText,omitempty"`
 	Width               int            `json:"width,omitempty"`
 	Height              int            `json:"height,omitempty"`
 	ScreenshotMediaType string         `json:"screenshotMediaType,omitempty"`
@@ -122,6 +123,7 @@ type visionSession struct {
 type browserBridgeResult struct {
 	URL                 string         `json:"url"`
 	Title               string         `json:"title"`
+	PageText            string         `json:"pageText,omitempty"`
 	Width               int            `json:"width"`
 	Height              int            `json:"height"`
 	ScreenshotMediaType string         `json:"screenshotMediaType"`
@@ -539,6 +541,7 @@ func runVisionBrowserAction(ctx context.Context, sessionID, action string, req V
 	return &VisionObservation{
 		URL:                 bridge.URL,
 		Title:               bridge.Title,
+		PageText:            bridge.PageText,
 		Width:               bridge.Width,
 		Height:              bridge.Height,
 		ScreenshotMediaType: bridge.ScreenshotMediaType,
@@ -856,6 +859,19 @@ def main():
 
         title = page.title()
         final_url = page.url
+        page_text = ""
+        try:
+            raw_text = page.locator("body").inner_text(timeout=3000)
+        except Exception:
+            try:
+                raw_text = page.evaluate("() => document.body ? document.body.innerText : ''")
+            except Exception:
+                raw_text = ""
+        if raw_text:
+            lines = [" ".join(line.split()) for line in raw_text.splitlines()]
+            page_text = "\n".join([line for line in lines if line])
+            if len(page_text) > 12000:
+                page_text = page_text[:12000]
         shot_path = os.path.join(shot_dir, "screen-%d.jpg" % int(time.time() * 1000))
         shot = page.screenshot(path=shot_path, type="jpeg", quality=70, full_page=False)
         if not shot:
@@ -869,6 +885,7 @@ def main():
     write_result(output_path, {
         "url": final_url,
         "title": title,
+        "pageText": page_text,
         "width": 1280,
         "height": 800,
         "screenshotMediaType": "image/jpeg",
