@@ -770,6 +770,78 @@ def write_result(path, payload):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f)
 
+def executable_candidates(*names):
+    seen = set()
+    for name in names:
+        value = (name or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        if os.path.isabs(value) and os.path.exists(value):
+            yield value
+            continue
+        path = shutil.which(value)
+        if path:
+            yield path
+
+def launch_browser_context(p, profile_dir, launch_args):
+    headless = os.environ.get("CLANKER_BOX_VISION_HEADLESS", "true").lower() != "false"
+    user_agent = os.environ.get("CLANKER_BOX_VISION_USER_AGENT", "ClankerVision/0.1")
+    attempts = []
+    candidates = []
+    chromium_env = os.environ.get("CLANKER_BOX_BROWSER_PATH") or os.environ.get("CLANKER_BOX_CHROMIUM_PATH")
+    for executable in executable_candidates(
+        chromium_env,
+        "chromium",
+        "chromium-browser",
+        "google-chrome",
+        "google-chrome-stable",
+        "microsoft-edge",
+        "microsoft-edge-stable",
+        "brave-browser",
+        "vivaldi",
+        "opera",
+    ):
+        candidates.append(("chromium", p.chromium, executable, launch_args))
+    candidates.append(("playwright-chromium", p.chromium, None, launch_args))
+    firefox_env = os.environ.get("CLANKER_BOX_FIREFOX_PATH")
+    for executable in executable_candidates(
+        firefox_env,
+        "firefox",
+        "firefox-esr",
+        "librewolf",
+        "waterfox",
+        "floorp",
+        "zen-browser",
+    ):
+        candidates.append(("firefox", p.firefox, executable, []))
+    candidates.append(("playwright-firefox", p.firefox, None, []))
+    candidates.append(("playwright-webkit", p.webkit, None, []))
+    seen = set()
+    for name, launcher, executable, args in candidates:
+        key = (name, executable or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        launch_profile = profile_dir if name.startswith("chromium") else "%s-%s" % (profile_dir, name)
+        os.makedirs(launch_profile, exist_ok=True)
+        try:
+            context = launcher.launch_persistent_context(
+                launch_profile,
+                headless=headless,
+                executable_path=executable,
+                viewport={"width": 1280, "height": 800},
+                user_agent=user_agent,
+                args=args,
+            )
+            return context, "%s%s" % (name, ":%s" % executable if executable else "")
+        except Exception as exc:
+            attempts.append("%s%s: %s" % (name, ":%s" % executable if executable else "", exc))
+    raise RuntimeError(
+        "No launchable browser was found for Clanker Vision. Install chromium/chromium-browser/google-chrome/firefox, set CLANKER_BOX_BROWSER_PATH or CLANKER_BOX_FIREFOX_PATH, or install Playwright managed browsers. Attempts: %s"
+        % " | ".join(attempts[:8])
+    )
+
 def main():
     input_path = sys.argv[1]
     output_path = sys.argv[2]
@@ -798,18 +870,10 @@ def main():
             state = {}
 
     url = (req.get("url") or state.get("url") or "about:blank").strip()
-    chromium = os.environ.get("CLANKER_BOX_CHROMIUM_PATH") or shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome")
     launch_args = ["--no-sandbox", "--disable-dev-shm-usage", "--disable-background-networking"]
 
     with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            profile_dir,
-            headless=os.environ.get("CLANKER_BOX_VISION_HEADLESS", "true").lower() != "false",
-            executable_path=chromium,
-            viewport={"width": 1280, "height": 800},
-            user_agent=os.environ.get("CLANKER_BOX_VISION_USER_AGENT", "ClankerVision/0.1"),
-            args=launch_args,
-        )
+        context, browser_label = launch_browser_context(p, profile_dir, launch_args)
         page = context.pages[0] if context.pages else context.new_page()
         page.set_default_timeout(15000)
         if action == "browser.open" or page.url == "about:blank":

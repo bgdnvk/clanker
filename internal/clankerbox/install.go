@@ -117,7 +117,13 @@ func installClankerVision(ctx context.Context) (InstallResult, error) {
 import playwright
 print("playwright", getattr(playwright, "__version__", "installed"))
 PY
-if command -v chromium >/dev/null 2>&1; then chromium --version; elif command -v chromium-browser >/dev/null 2>&1; then chromium-browser --version; else echo "chromium is missing"; exit 1; fi
+found_browser=0
+for candidate in "${CLANKER_BOX_BROWSER_PATH:-}" "${CLANKER_BOX_CHROMIUM_PATH:-}" chromium chromium-browser google-chrome google-chrome-stable microsoft-edge brave-browser vivaldi opera firefox firefox-esr librewolf waterfox floorp zen-browser; do
+  [ -n "$candidate" ] || continue
+  if [ -x "$candidate" ]; then "$candidate" --version 2>/dev/null || true; found_browser=1; continue; fi
+  if command -v "$candidate" >/dev/null 2>&1; then "$candidate" --version 2>/dev/null || true; found_browser=1; fi
+done
+if [ "$found_browser" -eq 0 ]; then echo "no system browser found; Clanker Vision will try Playwright managed browsers or CLANKER_BOX_BROWSER_PATH at runtime"; fi
 if command -v libreoffice >/dev/null 2>&1; then libreoffice --version | head -n 1; else echo "libreoffice missing; office export falls back to html/csv"; fi`
 	output, err := runShell(ctx, command)
 	result := InstallResult{Agent: VisionAgentID, Command: "validate clanker-vision runtime", Output: output}
