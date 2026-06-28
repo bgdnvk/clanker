@@ -63,6 +63,8 @@ func installAgent(parent context.Context, agentID string) (InstallResult, error)
 		return installOpenClaw(ctx)
 	case "hermes":
 		return installHermes(ctx)
+	case VisionAgentID:
+		return installClankerVision(ctx)
 	default:
 		return InstallResult{}, fmt.Errorf("unsupported agent %q", agentID)
 	}
@@ -107,6 +109,59 @@ func installHermes(ctx context.Context) (InstallResult, error) {
 	}
 	result.Installed = true
 	result.Version = vendorDir
+	return result, nil
+}
+
+func installClankerVision(ctx context.Context) (InstallResult, error) {
+	runtimeDir := visionRuntimeDir()
+	command := fmt.Sprintf(`set -e
+runtime=%s
+mkdir -p "$runtime"
+python="${CLANKER_BOX_VISION_PYTHON:-}"
+if [ -z "$python" ]; then
+  if command -v python3 >/dev/null 2>&1; then python="$(command -v python3)"; elif command -v python >/dev/null 2>&1; then python="$(command -v python)"; fi
+fi
+if [ -z "$python" ]; then
+  echo "Python 3 is required for Clanker Vision browser automation." >&2
+  exit 1
+fi
+if ! "$python" - <<'PY' >/dev/null 2>&1
+from playwright.sync_api import sync_playwright
+PY
+then
+  "$python" -m venv "$runtime/.venv"
+  "$runtime/.venv/bin/python" -m pip install --upgrade pip wheel setuptools
+  "$runtime/.venv/bin/python" -m pip install --upgrade playwright
+  python="$runtime/.venv/bin/python"
+fi
+"$python" - <<'PY'
+from playwright.sync_api import sync_playwright
+print("playwright installed")
+PY
+found_browser=0
+for candidate in "${CLANKER_BOX_BROWSER_PATH:-}" "${CLANKER_BOX_CHROMIUM_PATH:-}" chromium chromium-browser google-chrome google-chrome-stable microsoft-edge brave-browser vivaldi opera firefox firefox-esr librewolf waterfox floorp zen-browser; do
+  [ -n "$candidate" ] || continue
+  if [ -x "$candidate" ]; then "$candidate" --version 2>/dev/null || true; found_browser=1; continue; fi
+  if command -v "$candidate" >/dev/null 2>&1; then "$candidate" --version 2>/dev/null || true; found_browser=1; fi
+done
+if [ "$found_browser" -eq 0 ]; then
+  echo "no system browser found; installing Playwright managed Chromium in $runtime/ms-playwright"
+  PLAYWRIGHT_BROWSERS_PATH="$runtime/ms-playwright" "$python" -m playwright install chromium
+else
+  echo "system browser found; Playwright managed browser download skipped"
+fi
+PLAYWRIGHT_BROWSERS_PATH="$runtime/ms-playwright" "$python" - <<'PY'
+from playwright.sync_api import sync_playwright
+print("clanker vision browser runtime ready")
+PY
+if command -v libreoffice >/dev/null 2>&1; then libreoffice --version | head -n 1; else echo "libreoffice missing; office export falls back to html/csv"; fi`, shellQuote(runtimeDir))
+	output, err := runShell(ctx, command)
+	result := InstallResult{Agent: VisionAgentID, Command: "validate clanker-vision runtime", Output: output}
+	if err != nil {
+		return result, err
+	}
+	result.Installed = true
+	result.Version = "browser-office-agent"
 	return result, nil
 }
 
@@ -168,6 +223,10 @@ func installTimeout() time.Duration {
 		return duration
 	}
 	return 15 * time.Minute
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func findHermesVendorPath() (string, error) {

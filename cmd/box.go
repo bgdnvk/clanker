@@ -63,7 +63,7 @@ func newBoxCmd() *cobra.Command {
 		},
 	}
 	manifestCmd.Flags().StringVar(&name, "name", "clanker-box", "Box display name")
-	manifestCmd.Flags().StringVar(&agent, "agent", "clanker-cli", "Agent to run (hermes, openclaw, codex, claude-code, clanker-cli)")
+	manifestCmd.Flags().StringVar(&agent, "agent", "clanker-cli", "Agent to run (empty, hermes, openclaw, codex, claude-code, clanker-cli, clanker-vision)")
 	manifestCmd.Flags().StringVar(&region, "region", "us-central1", "Cloud Run region")
 	manifestCmd.Flags().StringVar(&image, "image", "", "Container image URI")
 	manifestCmd.Flags().StringVar(&projectID, "project", "", "GCP project ID")

@@ -68,6 +68,7 @@ type AgentRunner interface {
 type Server struct {
 	cfg      RuntimeConfig
 	runner   AgentRunner
+	vision   *VisionService
 	upgrader websocket.Upgrader
 }
 
@@ -90,6 +91,7 @@ func NewServer(cfg RuntimeConfig, runner AgentRunner) *Server {
 	return &Server{
 		cfg:    cfg,
 		runner: runner,
+		vision: NewVisionService(),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
@@ -103,6 +105,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/box/messages", s.withAuth(s.handleMessage))
 	mux.HandleFunc("/v1/box/ws", s.withAuth(s.handleWebSocket))
 	mux.HandleFunc("/v1/box/terminal", s.withAuth(s.handleTerminal))
+	mux.HandleFunc("/v1/box/vision", s.withAuth(s.handleVision))
 	return mux
 }
 
@@ -136,6 +139,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			{Kind: "message", Path: "/v1/box/messages", Description: "JSON message endpoint."},
 			{Kind: "websocket", Path: "/v1/box/ws", Description: "Bidirectional message endpoint."},
 			{Kind: "terminal", Path: "/v1/box/terminal", Description: "Authenticated WebSocket shell endpoint for box access."},
+			{Kind: "vision", Path: "/v1/box/vision", Description: "Authenticated browser and office-control endpoint with visible action observations and stop control."},
 		},
 	})
 }
@@ -218,6 +222,23 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+func (s *Server) handleVision(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req VisionRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, VisionResponse{OK: false, Status: "failed", Error: "invalid json", Policy: DefaultVisionPolicy()})
+		return
+	}
+	if s.vision == nil {
+		s.vision = NewVisionService()
+	}
+	resp := s.vision.Handle(r.Context(), req)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) runTerminal(parent context.Context, req TerminalRequest) TerminalResponse {
@@ -345,6 +366,8 @@ func (DefaultRunner) RunAgentMessage(ctx context.Context, cfg RuntimeConfig, req
 		return runClaudeCode(ctx, req.Message)
 	case "clanker-cli":
 		return runCommand(ctx, "CLANKER_BOX_CLANKER_COMMAND", []string{executable(), "ask", req.Message}, req.Message)
+	case "clanker-vision":
+		return RunClankerVisionMessage(ctx, req)
 	case "codex":
 		return runCommand(ctx, "CLANKER_BOX_CODEX_COMMAND", []string{"codex", "exec", "--skip-git-repo-check", req.Message}, req.Message)
 	case "openclaw":
@@ -398,6 +421,8 @@ func installCommandFromChat(target string, agent string) string {
 		return "clanker box install openclaw"
 	case "clanker", "clanker-cli", "cli":
 		return "clanker box install clanker-cli && clanker --version"
+	case "clanker-vision", "vision", "computer-use", "office-agent", "browser-agent":
+		return "clanker box install clanker-vision"
 	case "docker", "docker-cli":
 		return dockerCLIInstallCommand()
 	case "":

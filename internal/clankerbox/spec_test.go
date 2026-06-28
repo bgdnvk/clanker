@@ -70,6 +70,37 @@ func TestNewManifestSupportsEmptySandbox(t *testing.T) {
 	}
 }
 
+func TestNewManifestSupportsClankerVision(t *testing.T) {
+	manifest, err := NewManifest("Office Agent", "vision", "us-central1", ManifestOptions{RequireAuth: true})
+	if err != nil {
+		t.Fatalf("NewManifest returned error: %v", err)
+	}
+	if manifest.Agent.ID != VisionAgentID {
+		t.Fatalf("expected clanker-vision alias, got %q", manifest.Agent.ID)
+	}
+	if manifest.Size.CPU != "2" || manifest.Size.Memory != "4Gi" || manifest.Size.MaxInstances != 1 || manifest.Size.Concurrency != 1 {
+		t.Fatalf("unexpected vision size: %#v", manifest.Size)
+	}
+	if manifest.Environment["CLANKER_BOX_VISION_RETENTION"] != "ephemeral" {
+		t.Fatalf("missing vision retention env: %#v", manifest.Environment)
+	}
+	if manifest.Environment["CLANKER_BOX_AUTO_INSTALL"] != "true" {
+		t.Fatalf("vision agent should auto-install/validate runtime: %#v", manifest.Environment)
+	}
+	if !strings.Contains(strings.Join(manifest.Security.Controls, "\n"), "Vision actions are limited") {
+		t.Fatalf("missing vision safety controls: %#v", manifest.Security.Controls)
+	}
+	foundVisionEndpoint := false
+	for _, endpoint := range manifest.Endpoints {
+		if endpoint.Kind == "vision" && endpoint.Path == "/v1/box/vision" {
+			foundVisionEndpoint = true
+		}
+	}
+	if !foundVisionEndpoint {
+		t.Fatalf("manifest should include vision endpoint: %#v", manifest.Endpoints)
+	}
+}
+
 func TestNewManifestRejectsUnknownRegion(t *testing.T) {
 	_, err := NewManifest("Prod Agent", "hermes", "moon-1", ManifestOptions{})
 	if err == nil {
@@ -198,6 +229,38 @@ func TestServerTerminalPostReturnsCommandExitAsJSON(t *testing.T) {
 	}
 	if resp.OK || resp.ExitCode != 7 || resp.Output != "nope" {
 		t.Fatalf("unexpected failed terminal response %#v", resp)
+	}
+}
+
+func TestServerVisionStopEndpoint(t *testing.T) {
+	server := NewServer(RuntimeConfig{Name: "test", Agent: VisionAgentID, Region: "us-central1", RequireAuth: true, EnableTerminal: true, APIToken: "secret"}, fakeRunner{})
+	req := httptest.NewRequest(http.MethodPost, "/v1/box/vision", bytes.NewBufferString(`{"sessionId":"vision-1","action":"stop"}`))
+	req.Header.Set("X-API-Key", "secret")
+	rec := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp VisionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode vision response: %v", err)
+	}
+	if !resp.OK || resp.Status != "stopped" || resp.Policy.KillSwitch == "" {
+		t.Fatalf("unexpected vision stop response %#v", resp)
+	}
+}
+
+func TestVisionPolicyBlocksCredentialCollection(t *testing.T) {
+	resp := NewVisionService().Handle(context.Background(), VisionRequest{
+		SessionID:   "vision-policy",
+		Action:      "browser.type",
+		Instruction: "copy the recovery code from this page",
+		Text:        "123456",
+	})
+	if resp.OK || resp.Status != "blocked" || !strings.Contains(resp.Error, "credentials") {
+		t.Fatalf("expected credential policy block, got %#v", resp)
 	}
 }
 
