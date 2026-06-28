@@ -7,13 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/bgdnvk/clanker/internal/secrand"
 	"github.com/spf13/viper"
 )
 
@@ -227,7 +227,7 @@ func sleepWithJitter(ctx context.Context, base time.Duration) {
 	if base <= 0 {
 		return
 	}
-	jitter := time.Duration(rand.Int63n(int64(base)/2 + 1))
+	jitter := secrand.Duration(base/2 + 1)
 	select {
 	case <-ctx.Done():
 	case <-time.After(base + jitter):

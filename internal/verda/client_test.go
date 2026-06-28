@@ -141,6 +141,18 @@ func TestClientRetriesOn429(t *testing.T) {
 	}
 }
 
+func TestRetryBackoffBounds(t *testing.T) {
+	backoffs := []time.Duration{time.Second, 2 * time.Second}
+	if got, ok := retryBackoff(backoffs, 1); !ok || got != 2*time.Second {
+		t.Fatalf("retryBackoff(1) = %v, %v; want 2s, true", got, ok)
+	}
+	for _, attempt := range []int{-1, len(backoffs)} {
+		if got, ok := retryBackoff(backoffs, attempt); ok || got != 0 {
+			t.Fatalf("retryBackoff(%d) = %v, %v; want 0, false", attempt, got, ok)
+		}
+	}
+}
+
 func TestReadVerdaCredentialsYAML(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)

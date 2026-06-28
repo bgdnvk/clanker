@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bgdnvk/clanker/internal/secfile"
 	tfclient "github.com/bgdnvk/clanker/internal/terraform"
 	"github.com/spf13/viper"
 )
@@ -216,7 +218,7 @@ func ApplyPlan(plan InstallPlan, baseDir string) error {
 		}
 		baseDir = filepath.Join(dir, "install")
 	}
-	if err := os.MkdirAll(baseDir, 0755); err != nil {
+	if err := secfile.EnsurePrivateDir(baseDir); err != nil {
 		return err
 	}
 	for _, file := range plan.Files {
@@ -242,7 +244,7 @@ func ApplyPlan(plan InstallPlan, baseDir string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(baseDir, "sre-install.json"), append(payload, '\n'), 0644)
+	return secfile.WritePrivate(filepath.Join(baseDir, "sre-install.json"), append(payload, '\n'))
 }
 
 func Run(ctx context.Context, opts RunOptions) error {
@@ -340,11 +342,15 @@ func PostHeartbeat(ctx context.Context, discovery Discovery, observations map[st
 }
 
 func postHeartbeatPayload(ctx context.Context, baseURL string, token string, payload map[string]any) error {
+	normalizedBaseURL, err := normalizeAPIBaseURL(baseURL)
+	if err != nil {
+		return err
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+"/cerebro/hooks/sre", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(normalizedBaseURL, "/")+"/cerebro/hooks/sre", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -366,14 +372,39 @@ func postHeartbeatPayload(ctx context.Context, baseURL string, token string, pay
 }
 
 func NormalizeAPIBaseURL(value string) string {
-	value = strings.TrimRight(strings.TrimSpace(value), "/")
-	if value == "" {
+	normalized, err := normalizeAPIBaseURL(value)
+	if err != nil {
 		return ""
 	}
-	if strings.HasSuffix(value, "/api") {
-		return value
+	return normalized
+}
+
+func normalizeAPIBaseURL(value string) (string, error) {
+	trimmed := strings.TrimRight(strings.TrimSpace(value), "/")
+	if trimmed == "" {
+		return "", fmt.Errorf("empty API base URL")
 	}
-	return value + "/api"
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("API base URL must use http or https")
+	}
+	if parsed.User != nil {
+		return "", fmt.Errorf("API base URL must not include user info")
+	}
+	if parsed.Host == "" {
+		return "", fmt.Errorf("API base URL must include a host")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("API base URL must not include query or fragment")
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	if !strings.HasSuffix(parsed.Path, "/api") {
+		parsed.Path += "/api"
+	}
+	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
 func DefaultStateDir() (string, error) {

@@ -515,7 +515,7 @@ func runCredentialsList(cmd *cobra.Command, args []string) error {
 		if len(cred.Masked) > 0 {
 			fmt.Println("  Fields:")
 			for key, value := range cred.Masked {
-				fmt.Printf("    %s: %s\n", key, value)
+				fmt.Printf("    %s: %s\n", key, redactCredentialDisplayValue(key, value))
 			}
 		}
 		fmt.Println()

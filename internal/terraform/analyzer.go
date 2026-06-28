@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -281,6 +282,11 @@ func scanWorkspace(root string) workspaceMetadata {
 	seenSources := map[string]bool{}
 	seenModules := map[string]bool{}
 	seenResourceTypes := map[string]bool{}
+	rootFS, rootErr := os.OpenRoot(root)
+	if rootErr != nil {
+		return metadata
+	}
+	defer rootFS.Close()
 	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -292,12 +298,18 @@ func scanWorkspace(root string) workspaceMetadata {
 			}
 			return nil
 		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
 		if !isTerraformFile(path) {
 			return nil
 		}
-		rel, _ := filepath.Rel(root, path)
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil
+		}
 		metadata.files = append(metadata.files, rel)
-		data, readErr := os.ReadFile(path)
+		data, readErr := readWorkspaceFile(rootFS, rel)
 		if readErr != nil {
 			return nil
 		}
@@ -329,6 +341,15 @@ func scanWorkspace(root string) workspaceMetadata {
 	sort.Strings(metadata.resourceTypes)
 	metadata.remote = hasRemoteBackend(metadata.backends)
 	return metadata
+}
+
+func readWorkspaceFile(rootFS *os.Root, rel string) ([]byte, error) {
+	file, err := rootFS.Open(rel)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return io.ReadAll(file)
 }
 
 func isTerraformFile(path string) bool {

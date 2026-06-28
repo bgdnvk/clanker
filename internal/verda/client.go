@@ -393,7 +393,11 @@ func (c *Client) RunAPIWithContext(ctx context.Context, method, path, body strin
 			if !isRetryableNetError(err) || attempt == maxAttempts-1 {
 				return "", err
 			}
-			if err := sleepCtx(ctx, backoffs[attempt]); err != nil {
+			wait, ok := retryBackoff(backoffs, attempt)
+			if !ok {
+				return "", err
+			}
+			if err := sleepCtx(ctx, wait); err != nil {
 				return "", err
 			}
 			continue
@@ -416,7 +420,11 @@ func (c *Client) RunAPIWithContext(ctx context.Context, method, path, body strin
 			if attempt < maxAttempts-1 {
 				wait := resp.RetryAfter
 				if wait == 0 {
-					wait = backoffs[attempt]
+					var ok bool
+					wait, ok = retryBackoff(backoffs, attempt)
+					if !ok {
+						return string(resp.Body), decodeAPIErrorBody(resp.Body, resp.StatusCode)
+					}
 				}
 				if err := sleepCtx(ctx, wait); err != nil {
 					return "", err
@@ -427,7 +435,11 @@ func (c *Client) RunAPIWithContext(ctx context.Context, method, path, body strin
 		}
 
 		if resp.StatusCode >= 500 && resp.StatusCode < 600 && attempt < maxAttempts-1 {
-			if err := sleepCtx(ctx, backoffs[attempt]); err != nil {
+			wait, ok := retryBackoff(backoffs, attempt)
+			if !ok {
+				return string(resp.Body), decodeAPIErrorBody(resp.Body, resp.StatusCode)
+			}
+			if err := sleepCtx(ctx, wait); err != nil {
 				return "", err
 			}
 			continue
@@ -444,6 +456,13 @@ func (c *Client) RunAPIWithContext(ctx context.Context, method, path, body strin
 		lastErr = fmt.Errorf("verda API call failed after %d attempts", maxAttempts)
 	}
 	return "", lastErr
+}
+
+func retryBackoff(backoffs []time.Duration, attempt int) (time.Duration, bool) {
+	if attempt < 0 || attempt >= len(backoffs) {
+		return 0, false
+	}
+	return backoffs[attempt], true
 }
 
 func (c *Client) doRequest(ctx context.Context, method, path, body, token string) (*apiResponse, error) {

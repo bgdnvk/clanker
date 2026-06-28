@@ -12,10 +12,14 @@ import (
 
 func FindGcloudBinary() (string, error) {
 	if override := strings.TrimSpace(os.Getenv("CLANKER_GCLOUD_PATH")); override != "" {
-		if st, err := os.Stat(override); err == nil && !st.IsDir() {
-			return override, nil
+		if !filepath.IsAbs(override) {
+			return "", fmt.Errorf("CLANKER_GCLOUD_PATH must be an absolute path: %q", override)
 		}
-		return "", fmt.Errorf("CLANKER_GCLOUD_PATH set but not found: %q", override)
+		cleaned := filepath.Clean(override)
+		if st, err := os.Stat(cleaned); err == nil && !st.IsDir() {
+			return cleaned, nil
+		}
+		return "", fmt.Errorf("CLANKER_GCLOUD_PATH set but not found: %q", cleaned)
 	}
 
 	names := []string{"gcloud"}

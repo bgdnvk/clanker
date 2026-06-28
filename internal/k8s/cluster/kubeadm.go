@@ -434,7 +434,7 @@ func (p *KubeadmProvider) GetKubeconfig(ctx context.Context, clusterName string)
 	home, _ := os.UserHomeDir()
 	kubeconfigPath := filepath.Join(home, ".kube", fmt.Sprintf("kubeadm-%s", clusterName))
 
-	if err := os.MkdirAll(filepath.Dir(kubeconfigPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(kubeconfigPath), 0700); err != nil {
 		return "", fmt.Errorf("failed to create .kube directory: %w", err)
 	}
 

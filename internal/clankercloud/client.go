@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -93,11 +94,14 @@ func NewClient() *Client {
 
 func (c *Client) ResolveBaseURL(ctx context.Context) (string, error) {
 	if explicit := strings.TrimSpace(os.Getenv("CLANKER_CLOUD_API_BASE_URL")); explicit != "" {
-		return strings.TrimRight(explicit, "/"), nil
+		return normalizeLocalAPIBaseURL(explicit)
 	}
 	if trimmed := strings.TrimSpace(c.baseURL); trimmed != "" {
-		if err := c.checkHealth(ctx, trimmed); err == nil {
-			return trimmed, nil
+		base, err := normalizeLocalAPIBaseURL(trimmed)
+		if err == nil {
+			if err := c.checkHealth(ctx, base); err == nil {
+				return base, nil
+			}
 		}
 	}
 	for _, port := range candidatePorts {
@@ -127,9 +131,14 @@ func (c *Client) Status(ctx context.Context) AppStatus {
 	}
 
 	if explicit := strings.TrimSpace(os.Getenv("CLANKER_CLOUD_API_BASE_URL")); explicit != "" {
-		base := strings.TrimRight(explicit, "/")
+		base, normalizeErr := normalizeLocalAPIBaseURL(explicit)
+		if normalizeErr != nil {
+			base = strings.TrimRight(explicit, "/")
+		}
 		portStatus := AppPortStatus{BaseURL: base, MCPEndpoint: MCPEndpointForBase(base)}
-		if err := c.checkHealth(ctx, base); err == nil {
+		if normalizeErr != nil {
+			portStatus.Error = normalizeErr.Error()
+		} else if err := c.checkHealth(ctx, base); err == nil {
 			portStatus.Healthy = true
 			status.Running = true
 			status.APIBaseURL = base
@@ -449,6 +458,10 @@ func (c *Client) CallAPI(ctx context.Context, method string, path string, query 
 }
 
 func (c *Client) checkHealth(ctx context.Context, baseURL string) error {
+	baseURL, err := normalizeLocalAPIBaseURL(baseURL)
+	if err != nil {
+		return err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/health", nil)
 	if err != nil {
 		return err
@@ -462,6 +475,39 @@ func (c *Client) checkHealth(ctx context.Context, baseURL string) error {
 		return fmt.Errorf("health check returned %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func normalizeLocalAPIBaseURL(raw string) (string, error) {
+	trimmed := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if trimmed == "" {
+		return "", fmt.Errorf("clanker cloud API base URL is empty")
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("parse clanker cloud API base URL: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("clanker cloud API base URL must use http or https")
+	}
+	if parsed.User != nil {
+		return "", fmt.Errorf("clanker cloud API base URL must not include user info")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("clanker cloud API base URL must not include query or fragment")
+	}
+	if !isLoopbackHost(parsed.Hostname()) {
+		return "", fmt.Errorf("clanker cloud API base URL must point at localhost or a loopback address")
+	}
+	return strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func isLoopbackHost(host string) bool {
+	normalized := strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
+	if normalized == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(normalized)
+	return ip != nil && ip.IsLoopback()
 }
 
 func firstNonEmpty(values ...string) string {

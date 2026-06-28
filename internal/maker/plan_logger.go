@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/bgdnvk/clanker/internal/secfile"
 )
 
 // PlanLogWriter writes plan execution output to ~/.clanker/logs/plan/<runID>/
@@ -73,25 +75,25 @@ func NewPlanLogWriter(runID string) (*PlanLogWriter, error) {
 	}
 
 	logDir := filepath.Join(homeDir, ".clanker", "logs", "plan", runID)
-	if err := os.MkdirAll(logDir, 0755); err != nil {
+	if err := secfile.EnsurePrivateDir(logDir); err != nil {
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
 	// Open output.log
-	outputFile, err := os.Create(filepath.Join(logDir, "output.log"))
+	outputFile, err := secfile.OpenPrivate(filepath.Join(logDir, "output.log"), os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create output.log: %w", err)
 	}
 
 	// Open events.log
-	eventsFile, err := os.Create(filepath.Join(logDir, "events.log"))
+	eventsFile, err := secfile.OpenPrivate(filepath.Join(logDir, "events.log"), os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		outputFile.Close()
 		return nil, fmt.Errorf("failed to create events.log: %w", err)
 	}
 
 	// Open fixes.log
-	fixesFile, err := os.Create(filepath.Join(logDir, "fixes.log"))
+	fixesFile, err := secfile.OpenPrivate(filepath.Join(logDir, "fixes.log"), os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		outputFile.Close()
 		eventsFile.Close()
@@ -193,7 +195,7 @@ func (w *PlanLogWriter) WritePlan(plan *Plan) error {
 		return fmt.Errorf("failed to marshal plan: %w", err)
 	}
 
-	return os.WriteFile(planPath, data, 0644)
+	return secfile.WritePrivate(planPath, data)
 }
 
 // RecordCommandStart records the start of a command execution
@@ -278,7 +280,7 @@ func (w *PlanLogWriter) WriteSummary(status string, plan *Plan) error {
 		return fmt.Errorf("failed to marshal summary: %w", err)
 	}
 
-	return os.WriteFile(summaryPath, data, 0644)
+	return secfile.WritePrivate(summaryPath, data)
 }
 
 // GetLogDir returns the log directory path

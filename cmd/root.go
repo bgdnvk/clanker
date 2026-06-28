@@ -193,6 +193,9 @@ func initConfig() {
 	viper.AutomaticEnv()
 
 	if err := viper.ReadInConfig(); err == nil {
+		if err := hardenUserConfigFile(viper.ConfigFileUsed()); err != nil && viper.GetBool("debug") {
+			fmt.Fprintf(os.Stderr, "warning: failed to secure config file permissions: %v\n", err)
+		}
 		if viper.GetBool("debug") {
 			fmt.Println("Using config file:", viper.ConfigFileUsed())
 		}

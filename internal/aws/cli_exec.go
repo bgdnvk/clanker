@@ -2,7 +2,7 @@ package aws
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"strings"
@@ -22,7 +22,7 @@ func ShortStableHash(s string) string {
 	if s == "" {
 		return ""
 	}
-	sum := sha1.Sum([]byte(s))
+	sum := sha256.Sum256([]byte(s))
 	return fmt.Sprintf("%x", sum)[:6]
 }
 
