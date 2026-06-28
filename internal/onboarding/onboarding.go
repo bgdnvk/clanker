@@ -205,6 +205,19 @@ func Guides() map[string]ToolGuide {
 			},
 			DocsURL: "https://github.com/hetznercloud/cli",
 		},
+		"oci": {
+			ID:            "oci",
+			Tool:          "Oracle Cloud Infrastructure CLI",
+			Binary:        "oci",
+			Providers:     []string{"Oracle Cloud", "OCI", "OKE"},
+			VerifyCommand: "oci --version",
+			InstallCommands: map[string][]string{
+				"darwin":  {"bash -c \"$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)\""},
+				"linux":   {"bash -c \"$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)\""},
+				"windows": {"python -m pip install oci-cli"},
+			},
+			DocsURL: "https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm",
+		},
 		"kubectl": {
 			ID:            "kubectl",
 			Tool:          "kubectl",
@@ -564,6 +577,16 @@ func AuthGuides() map[string]AuthGuide {
 			EnvVars:       []string{"HCLOUD_TOKEN", "HETZNER_API_TOKEN"},
 			DocsURL:       "https://github.com/hetznercloud/cli",
 		},
+		"oracle": {
+			ID:            "oracle",
+			Provider:      "Oracle Cloud Infrastructure",
+			Purpose:       "Configure an OCI CLI profile with an API signing key, then provide the tenancy or compartment OCID Clanker should inspect.",
+			LoginCommands: []string{"oci setup config", "oci iam compartment list --access-level ACCESSIBLE --compartment-id <tenancy-ocid> --compartment-id-in-subtree true --all"},
+			EnvVars:       []string{"OCI_CLI_PROFILE", "OCI_CLI_CONFIG_FILE", "OCI_TENANCY_OCID", "OCI_COMPARTMENT_ID"},
+			DocsURL:       "https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliconfigure.htm",
+			TokenURL:      "https://docs.oracle.com/en-us/iaas/Content/API/Concepts/apisigningkey.htm",
+			Notes:         []string{"Clanker uses local OCI CLI profiles; do not paste OCI private keys into chat."},
+		},
 		"kubernetes": {
 			ID:            "kubernetes",
 			Provider:      "Kubernetes",
@@ -788,6 +811,16 @@ func providerGuides() []providerGuide {
 			}
 			return len(notes) > 0, len(notes) > 0, notes
 		}},
+		{ID: "oracle", Name: "Oracle Cloud", RequiredTools: []string{"oci"}, Detect: func() (bool, bool, []string) {
+			notes := []string{}
+			if hasAnyEnv("OCI_CLI_PROFILE", "OCI_CLI_CONFIG_FILE", "OCI_TENANCY_OCID", "OCI_TENANCY_ID", "OCI_COMPARTMENT_ID") {
+				notes = append(notes, "oracle env")
+			}
+			if fileExists(homePath(".oci", "config")) {
+				notes = append(notes, "oci config")
+			}
+			return len(notes) > 0, len(notes) > 0, notes
+		}},
 		{ID: "kubernetes", Name: "Kubernetes", RequiredTools: []string{"kubectl"}, Detect: func() (bool, bool, []string) {
 			notes := []string{}
 			if hasAnyEnv("KUBECONFIG") {
@@ -958,6 +991,8 @@ func normalizeToolID(raw string) string {
 		return "doctl"
 	case "hetzner":
 		return "hcloud"
+	case "oracle", "oracle cloud", "oracle-cloud", "oracle cloud infrastructure", "oracle-cloud-infrastructure", "oci-cli":
+		return "oci"
 	case "railway":
 		return "railway"
 	case "supabase":

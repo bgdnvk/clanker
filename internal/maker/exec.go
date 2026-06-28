@@ -253,6 +253,11 @@ type ExecOptions struct {
 	TencentSecretKey string
 	TencentRegion    string
 
+	// Oracle Cloud Infrastructure options
+	OracleProfile       string
+	OracleCompartmentID string
+	OracleTenancyOCID   string
+
 	CheckpointKey            string
 	DisableDurableCheckpoint bool
 

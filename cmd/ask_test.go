@@ -80,12 +80,12 @@ func TestCreateAIClient_AppliesK8sModelOverride(t *testing.T) {
 func TestApplyDiscoveryContextDefaults_UsesConfiguredHetzner(t *testing.T) {
 	useDefaultInfraProvider(t, "hetzner")
 
-	includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda, includeRailway := applyDiscoveryContextDefaults(false, false, false, false, false, false, false, false, false, false)
+	includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeOracle, includeTerraform, includeVercel, includeVerda, includeRailway := applyDiscoveryContextDefaults(false, false, false, false, false, false, false, false, false, false, false)
 
 	if includeAWS {
 		t.Fatal("expected discovery defaults not to force AWS when Hetzner is configured")
 	}
-	if includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeVercel || includeVerda || includeRailway {
+	if includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeOracle || includeVercel || includeVerda || includeRailway {
 		t.Fatal("expected discovery defaults to select only the configured provider")
 	}
 	if !includeHetzner {
@@ -99,9 +99,9 @@ func TestApplyDiscoveryContextDefaults_UsesConfiguredHetzner(t *testing.T) {
 func TestApplyDiscoveryContextDefaults_PreservesExplicitProviderSelection(t *testing.T) {
 	useDefaultInfraProvider(t, "hetzner")
 
-	includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda, includeRailway := applyDiscoveryContextDefaults(false, false, false, false, false, true, false, false, false, false)
+	includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeOracle, includeTerraform, includeVercel, includeVerda, includeRailway := applyDiscoveryContextDefaults(false, false, false, false, false, true, false, false, false, false, false)
 
-	if includeAWS || includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeVercel || includeVerda || includeRailway {
+	if includeAWS || includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeOracle || includeVercel || includeVerda || includeRailway {
 		t.Fatal("expected explicit provider selection to be preserved without adding other providers")
 	}
 	if !includeHetzner {
@@ -115,12 +115,12 @@ func TestApplyDiscoveryContextDefaults_PreservesExplicitProviderSelection(t *tes
 func TestApplyDiscoveryContextDefaults_UsesConfiguredVercel(t *testing.T) {
 	useDefaultInfraProvider(t, "vercel")
 
-	includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda, includeRailway := applyDiscoveryContextDefaults(false, false, false, false, false, false, false, false, false, false)
+	includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeOracle, includeTerraform, includeVercel, includeVerda, includeRailway := applyDiscoveryContextDefaults(false, false, false, false, false, false, false, false, false, false, false)
 
 	if includeAWS {
 		t.Fatal("expected discovery defaults not to force AWS when Vercel is configured")
 	}
-	if includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeHetzner || includeVerda || includeRailway {
+	if includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeHetzner || includeOracle || includeVerda || includeRailway {
 		t.Fatal("expected discovery defaults to select only the configured provider")
 	}
 	if !includeVercel {
@@ -131,15 +131,34 @@ func TestApplyDiscoveryContextDefaults_UsesConfiguredVercel(t *testing.T) {
 	}
 }
 
+func TestApplyDiscoveryContextDefaults_UsesConfiguredOracle(t *testing.T) {
+	useDefaultInfraProvider(t, "oracle")
+
+	includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeOracle, includeTerraform, includeVercel, includeVerda, includeRailway := applyDiscoveryContextDefaults(false, false, false, false, false, false, false, false, false, false, false)
+
+	if includeAWS {
+		t.Fatal("expected discovery defaults not to force AWS when Oracle is configured")
+	}
+	if includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeHetzner || includeVercel || includeVerda || includeRailway {
+		t.Fatal("expected discovery defaults to select only the configured provider")
+	}
+	if !includeOracle {
+		t.Fatal("expected discovery defaults to enable Oracle when configured")
+	}
+	if !includeTerraform {
+		t.Fatal("expected discovery defaults to enable Terraform context")
+	}
+}
+
 func TestApplyDiscoveryContextDefaults_UsesConfiguredVerda(t *testing.T) {
 	useDefaultInfraProvider(t, "verda")
 
-	includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda, includeRailway := applyDiscoveryContextDefaults(false, false, false, false, false, false, false, false, false, false)
+	includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeOracle, includeTerraform, includeVercel, includeVerda, includeRailway := applyDiscoveryContextDefaults(false, false, false, false, false, false, false, false, false, false, false)
 
 	if includeAWS {
 		t.Fatal("expected discovery defaults not to force AWS when Verda is configured")
 	}
-	if includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeHetzner || includeVercel || includeRailway {
+	if includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeHetzner || includeOracle || includeVercel || includeRailway {
 		t.Fatal("expected discovery defaults to select only the configured provider")
 	}
 	if !includeVerda {
@@ -153,12 +172,12 @@ func TestApplyDiscoveryContextDefaults_UsesConfiguredVerda(t *testing.T) {
 func TestApplyDiscoveryContextDefaults_UsesConfiguredRailway(t *testing.T) {
 	useDefaultInfraProvider(t, "railway")
 
-	includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda, includeRailway := applyDiscoveryContextDefaults(false, false, false, false, false, false, false, false, false, false)
+	includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeOracle, includeTerraform, includeVercel, includeVerda, includeRailway := applyDiscoveryContextDefaults(false, false, false, false, false, false, false, false, false, false, false)
 
 	if includeAWS {
 		t.Fatal("expected discovery defaults not to force AWS when Railway is configured")
 	}
-	if includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeHetzner || includeVercel || includeVerda {
+	if includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeHetzner || includeOracle || includeVercel || includeVerda {
 		t.Fatal("expected discovery defaults to select only the configured provider")
 	}
 	if !includeRailway {

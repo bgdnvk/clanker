@@ -17,7 +17,7 @@ var onboardingCmd = &cobra.Command{
 	Long: `Scan this machine for provider CLIs and credentials Clanker Cloud can use.
 
 The JSON output is designed for Clanker Cloud and MCP agents so first-run setup
-can detect AWS, GCP, Azure, Cloudflare, DigitalOcean, Hetzner, Kubernetes,
+can detect AWS, GCP, Azure, Oracle Cloud, Cloudflare, DigitalOcean, Hetzner, Kubernetes,
 GitHub, and Terraform tooling before asking the user to install anything.`,
 }
 

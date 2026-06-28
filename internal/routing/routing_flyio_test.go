@@ -46,7 +46,7 @@ func TestApplyLLMClassification_Flyio(t *testing.T) {
 }
 
 func TestApplyLLMClassification_OtherProvidersResetFlyio(t *testing.T) {
-	for _, target := range []string{"aws", "gcp", "azure", "cloudflare", "digitalocean", "hetzner", "vercel", "railway", "verda", "iam"} {
+	for _, target := range []string{"aws", "gcp", "azure", "cloudflare", "digitalocean", "hetzner", "oracle", "vercel", "railway", "verda", "iam"} {
 		ctx := &ServiceContext{Flyio: true}
 		ApplyLLMClassification(ctx, target)
 		if ctx.Flyio {

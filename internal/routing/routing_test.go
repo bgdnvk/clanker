@@ -376,6 +376,20 @@ func TestApplyLLMClassification_GeneralUsesConfiguredDefault(t *testing.T) {
 	}
 }
 
+func TestApplyLLMClassification_GeneralUsesConfiguredOracleDefault(t *testing.T) {
+	useDefaultProvider(t, "oracle")
+
+	ctx := ServiceContext{}
+	ApplyLLMClassification(&ctx, "general")
+
+	if !ctx.Oracle {
+		t.Error("general classification should use configured Oracle default")
+	}
+	if ctx.AWS {
+		t.Error("general classification should not force AWS when Oracle is configured")
+	}
+}
+
 func TestApplyLLMClassification_GeneralPreservesGitHubContext(t *testing.T) {
 	useDefaultProvider(t, "hetzner")
 
@@ -492,7 +506,7 @@ func TestApplyLLMClassification_OtherProvidersClearVerda(t *testing.T) {
 	useDefaultProvider(t, "")
 	// Each sibling provider case should clear Verda so a keyword-inferred Verda
 	// doesn't leak into an LLM-picked different provider.
-	for _, svc := range []string{"cloudflare", "k8s", "gcp", "azure", "digitalocean", "hetzner", "vercel", "aws", "iam"} {
+	for _, svc := range []string{"cloudflare", "k8s", "gcp", "azure", "digitalocean", "hetzner", "oracle", "vercel", "aws", "iam"} {
 		t.Run(svc, func(t *testing.T) {
 			ctx := ServiceContext{Verda: true}
 			ApplyLLMClassification(&ctx, svc)
@@ -505,14 +519,14 @@ func TestApplyLLMClassification_OtherProvidersClearVerda(t *testing.T) {
 
 func TestApplyLLMClassification_Verda(t *testing.T) {
 	useDefaultProvider(t, "")
-	ctx := ServiceContext{AWS: true, Cloudflare: true, DigitalOcean: true, Hetzner: true, Vercel: true, IAM: true}
+	ctx := ServiceContext{AWS: true, Cloudflare: true, DigitalOcean: true, Hetzner: true, Oracle: true, Vercel: true, IAM: true}
 	ApplyLLMClassification(&ctx, "verda")
 	if !ctx.Verda {
 		t.Error("Verda should be set")
 	}
 	// Per the existing ApplyLLMClassification convention, the Verda case
 	// clears cloud providers + IAM but preserves GitHub/Terraform.
-	if ctx.AWS || ctx.Cloudflare || ctx.DigitalOcean || ctx.Hetzner || ctx.Vercel || ctx.IAM {
+	if ctx.AWS || ctx.Cloudflare || ctx.DigitalOcean || ctx.Hetzner || ctx.Oracle || ctx.Vercel || ctx.IAM {
 		t.Error("other cloud providers should be cleared when LLM picks verda")
 	}
 }
