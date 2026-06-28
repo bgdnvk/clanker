@@ -12,6 +12,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/digitalocean"
 	"github.com/bgdnvk/clanker/internal/gcp"
 	"github.com/bgdnvk/clanker/internal/hetzner"
+	"github.com/bgdnvk/clanker/internal/oracle"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcptransport "github.com/mark3labs/mcp-go/server"
 )
@@ -60,6 +61,12 @@ var cloudProviderMCPConfigs = []cloudProviderMCPConfig{
 		Command:      "hetzner",
 		ResourceHelp: "servers, load-balancers, volumes, networks, firewalls, floating-ips, primary-ips, ssh-keys, images, isos, certificates, placement-groups, server-types, locations, datacenters",
 	},
+	{
+		Key:          "oracle",
+		DisplayName:  "Oracle Cloud Infrastructure",
+		Command:      "oracle",
+		ResourceHelp: "compartments, instances, instance-pools, images, boot-volumes, volumes, volume-backups, vcns, subnets, route-tables, security-lists, nsgs, internet-gateways, nat-gateways, service-gateways, load-balancers, network-load-balancers, buckets, file-systems, mount-targets, databases, autonomous-databases, mysql-systems, oke-clusters, node-pools, functions, container-repositories, api-gateways, dns-zones, vaults, secrets, streams, queues, alarms, log-groups, events-rules",
+	},
 }
 
 func registerCloudProviderMCPTools(server *mcptransport.MCPServer) {
@@ -86,6 +93,7 @@ func registerCloudMCPCatalogTool(server *mcptransport.MCPServer) {
 					{"provider": "cloudflare", "ask_tool": "clanker_cloudflare_ask", "list_tool": "clanker_cloudflare_list"},
 					{"provider": "digitalocean", "ask_tool": "clanker_digitalocean_ask", "list_tool": "clanker_digitalocean_list"},
 					{"provider": "hetzner", "ask_tool": "clanker_hetzner_ask", "list_tool": "clanker_hetzner_list"},
+					{"provider": "oracle", "ask_tool": "clanker_oracle_ask", "list_tool": "clanker_oracle_list"},
 				},
 				"official_remote_mcps": []map[string]string{
 					{"provider": "Cloudflare", "name": "Cloudflare API MCP server", "transport": "streamable-http", "endpoint": "https://mcp.cloudflare.com/mcp", "docs": "https://developers.cloudflare.com/agents/model-context-protocol/cloudflare/servers-for-cloudflare/"},
@@ -103,6 +111,7 @@ func registerCloudMCPCatalogTool(server *mcptransport.MCPServer) {
 					{"provider": "Google Cloud", "name": "Google Cloud remote MCP servers", "transport": "streamable-http", "endpoint": "https://docs.cloud.google.com/mcp", "docs": "https://docs.cloud.google.com/mcp"},
 					{"provider": "Microsoft Learn", "name": "Microsoft Learn MCP Server", "transport": "streamable-http", "endpoint": "https://learn.microsoft.com/api/mcp", "docs": "https://learn.microsoft.com/en-us/training/support/mcp"},
 					{"provider": "DigitalOcean", "name": "DigitalOcean MCP services", "transport": "remote MCP", "endpoint": "https://docs.digitalocean.com/reference/mcp/mcp-tools/", "docs": "https://docs.digitalocean.com/reference/mcp/mcp-tools/"},
+					{"provider": "Oracle Cloud", "name": "Oracle Cloud Infrastructure CLI", "transport": "local CLI", "endpoint": "oci", "docs": "https://docs.oracle.com/en-us/iaas/Content/API/Concepts/cliconcepts.htm"},
 				},
 			})
 		},
@@ -121,6 +130,9 @@ func registerCloudProviderAskTool(server *mcptransport.MCPServer, cfg cloudProvi
 			mcp.WithString("subscription", mcp.Description("Azure subscription ID.")),
 			mcp.WithString("account_id", mcp.Description("Cloudflare account ID.")),
 			mcp.WithString("token", mcp.Description("Provider API token for Cloudflare, DigitalOcean, or Hetzner.")),
+			mcp.WithString("oci_profile", mcp.Description("OCI CLI profile name for Oracle Cloud Infrastructure.")),
+			mcp.WithString("compartment_id", mcp.Description("OCI compartment OCID for Oracle Cloud Infrastructure.")),
+			mcp.WithString("tenancy_ocid", mcp.Description("OCI tenancy OCID for Oracle Cloud Infrastructure.")),
 			mcp.WithBoolean("debug", mcp.Description("Enable provider debug output.")),
 			mcp.WithReadOnlyHintAnnotation(true),
 		),
@@ -147,6 +159,9 @@ func registerCloudProviderListTool(server *mcptransport.MCPServer, cfg cloudProv
 			mcp.WithString("namespace", mcp.Description("Cloudflare AI Search namespace for namespace-scoped resources.")),
 			mcp.WithString("region", mcp.Description("DigitalOcean Gradient region for region-scoped resources.")),
 			mcp.WithString("project_id", mcp.Description("DigitalOcean project ID for project-scoped resources.")),
+			mcp.WithString("oci_profile", mcp.Description("OCI CLI profile name for Oracle Cloud Infrastructure.")),
+			mcp.WithString("compartment_id", mcp.Description("OCI compartment OCID for Oracle Cloud Infrastructure.")),
+			mcp.WithString("tenancy_ocid", mcp.Description("OCI tenancy OCID for Oracle Cloud Infrastructure.")),
 			mcp.WithReadOnlyHintAnnotation(true),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -245,6 +260,24 @@ func collectMCPCloudProviderContext(ctx context.Context, req mcp.CallToolRequest
 			return "", fmt.Errorf("failed to create Hetzner client: %w", err)
 		}
 		return client.GetRelevantContext(ctx, question)
+	case "oracle":
+		profile := strParam(req, "oci_profile")
+		if profile == "" {
+			profile = oracle.ResolveProfile()
+		}
+		compartmentID := strParam(req, "compartment_id")
+		if compartmentID == "" {
+			compartmentID = oracle.ResolveCompartmentID()
+		}
+		tenancyOCID := strParam(req, "tenancy_ocid")
+		if tenancyOCID == "" {
+			tenancyOCID = oracle.ResolveTenancyOCID(profile)
+		}
+		client, err := oracle.NewClient(profile, compartmentID, tenancyOCID, debug)
+		if err != nil {
+			return "", fmt.Errorf("failed to create Oracle Cloud client: %w", err)
+		}
+		return client.GetRelevantContext(ctx, question)
 	default:
 		return "", fmt.Errorf("unsupported provider: %s", provider)
 	}
@@ -259,6 +292,7 @@ func mcpCloudProviderContextQuestion(provider, question string) string {
 		"cloudflare":   "zones workers pages kv d1 r2 queues vectorize hyperdrive ai gateway logs datasets evaluations provider configs ai search namespaces browser rendering images stream secrets store pipelines durable objects turnstile tunnels workflows logpush dns waf firewall rules page rules account roles members",
 		"digitalocean": "droplets autoscale kubernetes databases spaces app platform serverless functions serverless inference dedicated inference registries gradient agents gradient models gradient knowledge bases load balancers cdns volumes nfs vpcs vpc peerings nat gateways domains firewalls reserved ips certificates images snapshots sizes regions ssh keys tags monitoring uptime security scans projects",
 		"hetzner":      "servers load balancers volumes networks firewalls floating ips primary ips ssh keys images isos certificates placement groups server types locations datacenters",
+		"oracle":       "compartments compute instances instance pools images boot volumes block volumes vcns subnets route tables security lists network security groups internet gateways nat gateways service gateways load balancers network load balancers object storage buckets file systems db systems autonomous databases mysql oke clusters node pools functions container repositories api gateways dns zones vault secrets streams queues alarms log groups events rules",
 	}
 	if base == "" {
 		return hints[provider]
@@ -309,6 +343,10 @@ func handleMCPCloudProviderList(ctx context.Context, req mcp.CallToolRequest, cf
 	case "digitalocean":
 		args = mcpAppendIf(args, "--region", strParam(req, "region"))
 		args = mcpAppendIf(args, "--project-id", strParam(req, "project_id"))
+	case "oracle":
+		args = mcpAppendIf(args, "--profile", strParam(req, "oci_profile"))
+		args = mcpAppendIf(args, "--compartment-id", strParam(req, "compartment_id"))
+		args = mcpAppendIf(args, "--tenancy-ocid", strParam(req, "tenancy_ocid"))
 	}
 
 	result, err := runClankerCommand(ctx, commandArgs{Args: args})

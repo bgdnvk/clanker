@@ -24,6 +24,7 @@ type ServiceContext struct {
 	Cloudflare   bool
 	DigitalOcean bool
 	Hetzner      bool
+	Oracle       bool
 	Vercel       bool
 	Flyio        bool
 	Railway      bool
@@ -44,7 +45,7 @@ type Classification struct {
 func DefaultInfraProvider() string {
 	p := strings.ToLower(strings.TrimSpace(viper.GetString("infra.default_provider")))
 	switch p {
-	case "aws", "gcp", "azure", "cloudflare", "digitalocean", "hetzner", "vercel", "flyio", "railway", "verda":
+	case "aws", "gcp", "azure", "cloudflare", "digitalocean", "hetzner", "oracle", "vercel", "flyio", "railway", "verda":
 		return p
 	default:
 		return "aws"
@@ -61,6 +62,7 @@ func applyConfiguredDefaultContext(ctx *ServiceContext) {
 	ctx.Cloudflare = false
 	ctx.DigitalOcean = false
 	ctx.Hetzner = false
+	ctx.Oracle = false
 	ctx.Vercel = false
 	ctx.Flyio = false
 	ctx.Railway = false
@@ -78,6 +80,8 @@ func applyConfiguredDefaultContext(ctx *ServiceContext) {
 		ctx.DigitalOcean = true
 	case "hetzner":
 		ctx.Hetzner = true
+	case "oracle":
+		ctx.Oracle = true
 	case "vercel":
 		ctx.Vercel = true
 	case "flyio":
@@ -342,6 +346,30 @@ func InferContext(question string) ServiceContext {
 		"hetzner iso",
 	}
 
+	oracleKeywords := []string{
+		"oracle cloud",
+		"oracle cloud infrastructure",
+		"oci",
+		"oci cli",
+		"oracle tenancy",
+		"oracle compartment",
+		"compartment ocid",
+		"tenancy ocid",
+		"oracle compute",
+		"oci compute",
+		"oracle vcn",
+		"oci vcn",
+		"oracle object storage",
+		"oci object storage",
+		"oracle autonomous database",
+		"autonomous database",
+		"oracle load balancer",
+		"oracle kubernetes engine",
+		"oke",
+		"oracle functions",
+		"ocir",
+	}
+
 	vercelKeywords := []string{
 		// Only match when Vercel is explicitly referenced — we do not want to
 		// catch generic "deploy" / "preview" / "edge function" phrasing.
@@ -499,6 +527,13 @@ func InferContext(question string) ServiceContext {
 		}
 	}
 
+	for _, keyword := range oracleKeywords {
+		if contains(questionLower, keyword) {
+			ctx.Oracle = true
+			break
+		}
+	}
+
 	for _, keyword := range vercelKeywords {
 		if contains(questionLower, keyword) {
 			ctx.Vercel = true
@@ -537,7 +572,7 @@ func InferContext(question string) ServiceContext {
 
 	// Default to the configured provider if nothing is detected.
 	// AWS keeps GitHub enabled for backward compatibility.
-	if !ctx.AWS && !ctx.GitHub && !ctx.Terraform && !ctx.K8s && !ctx.GCP && !ctx.Azure && !ctx.Cloudflare && !ctx.DigitalOcean && !ctx.Hetzner && !ctx.Vercel && !ctx.Flyio && !ctx.Verda && !ctx.IAM {
+	if !ctx.AWS && !ctx.GitHub && !ctx.Terraform && !ctx.K8s && !ctx.GCP && !ctx.Azure && !ctx.Cloudflare && !ctx.DigitalOcean && !ctx.Hetzner && !ctx.Oracle && !ctx.Vercel && !ctx.Flyio && !ctx.Verda && !ctx.IAM {
 		applyConfiguredDefaultContext(&ctx)
 	}
 
@@ -560,6 +595,7 @@ Available services:
 - azure: Microsoft Azure (VMs, AKS, App Service, Storage, Key Vault, Cosmos DB, VNets, etc.)
 - digitalocean: Digital Ocean (Droplets, DOKS, Managed Databases, Spaces, App Platform, Load Balancers, VPCs, etc.)
 - hetzner: Hetzner Cloud (Servers, Load Balancers, Volumes, Networks, Firewalls, Floating IPs, Primary IPs, etc.)
+- oracle: Oracle Cloud Infrastructure / OCI (Compute instances, VCNs, Object Storage buckets, OKE, DB Systems, Autonomous Database, Load Balancers, Vault, Streams, Queues)
 - vercel: Vercel projects, deployments, domains, env vars, edge functions, KV/Blob/Postgres/Edge Config, analytics
 - flyio: Fly.io apps, machines (VMs), volumes, secrets, IPs, certificates, regions, Postgres clusters (managed + unmanaged), Upstash Redis, Tigris object storage, WireGuard peers, flyctl, fly.toml
 - verda: Verda Cloud / DataCrunch GPU instances, Instant Clusters, volumes (incl. SFS), serverless containers & jobs, SSH keys, startup scripts, container registry
@@ -574,15 +610,16 @@ IMPORTANT RULES:
 4. If the query mentions AWS services (EC2, Lambda, S3, CloudFront, Route53, etc.) but NOT IAM-specific topics, classify as "aws"
 5. Only classify as "digitalocean" if the query EXPLICITLY mentions Digital Ocean, doctl, droplets, DOKS, or Digital Ocean-specific products
 6. Only classify as "hetzner" if the query EXPLICITLY mentions Hetzner, hcloud, or Hetzner-specific products
-7. Only classify as "vercel" if the query EXPLICITLY mentions Vercel, vercel.app, a Vercel deployment/project, or Vercel-specific products (Edge Config, Vercel KV / Blob / Postgres)
-8. Only classify as "flyio" if the query EXPLICITLY mentions Fly.io, flyctl, fly.toml, a Fly machine/app/volume, or Fly-managed Postgres/Redis/Tigris (do NOT route generic "machine" or "deploy" questions to flyio)
-9. Only classify as "railway" if the query EXPLICITLY mentions Railway, railway.app, a Railway project/service/deployment/volume/environment, Nixpacks, or a railway.json/railway.toml file
-10. Only classify as "verda" if the query EXPLICITLY mentions Verda, DataCrunch, Verda clusters/instances, or an Instant Cluster (Verda's managed cluster product)
-11. If uncertain, classify as "%s" (the configured default cloud provider)
+7. Only classify as "oracle" if the query EXPLICITLY mentions Oracle Cloud, OCI, OKE, OCIR, an Oracle tenancy/compartment/OCID, or Oracle-specific products
+8. Only classify as "vercel" if the query EXPLICITLY mentions Vercel, vercel.app, a Vercel deployment/project, or Vercel-specific products (Edge Config, Vercel KV / Blob / Postgres)
+9. Only classify as "flyio" if the query EXPLICITLY mentions Fly.io, flyctl, fly.toml, a Fly machine/app/volume, or Fly-managed Postgres/Redis/Tigris (do NOT route generic "machine" or "deploy" questions to flyio)
+10. Only classify as "railway" if the query EXPLICITLY mentions Railway, railway.app, a Railway project/service/deployment/volume/environment, Nixpacks, or a railway.json/railway.toml file
+11. Only classify as "verda" if the query EXPLICITLY mentions Verda, DataCrunch, Verda clusters/instances, or an Instant Cluster (Verda's managed cluster product)
+12. If uncertain, classify as "%s" (the configured default cloud provider)
 
 Respond with ONLY a JSON object:
 {
-	"service": "cloudflare|aws|iam|k8s|gcp|azure|digitalocean|hetzner|vercel|flyio|railway|verda|github|terraform|general",
+	"service": "cloudflare|aws|iam|k8s|gcp|azure|digitalocean|hetzner|oracle|vercel|flyio|railway|verda|github|terraform|general",
     "confidence": "high|medium|low",
     "reason": "brief explanation of why this classification"
 }`, question, defaultProvider, defaultProvider)
@@ -681,6 +718,9 @@ func NeedsLLMClassification(ctx ServiceContext) bool {
 	if ctx.Hetzner {
 		count++
 	}
+	if ctx.Oracle {
+		count++
+	}
 	if ctx.Vercel {
 		count++
 	}
@@ -702,174 +742,78 @@ func NeedsLLMClassification(ctx ServiceContext) bool {
 	// 2. Cloudflare was inferred (verify it's actually Cloudflare-related)
 	// 3. Digital Ocean was inferred (verify it's actually DO-related)
 	// 4. Hetzner was inferred (verify it's actually Hetzner-related)
-	// 5. Vercel was inferred (verify it's actually Vercel-related)
-	// 6. Fly.io was inferred (verify it's actually Fly-related)
-	// 7. Verda was inferred (verify it's actually Verda-related)
-	// 8. IAM was inferred (verify it's actually IAM-related for disambiguation)
-	return count > 1 || ctx.Cloudflare || ctx.DigitalOcean || ctx.Hetzner || ctx.Vercel || ctx.Flyio || ctx.Railway || ctx.Verda || ctx.IAM
+	// 5. Oracle was inferred (verify it's actually OCI-related)
+	// 6. Vercel was inferred (verify it's actually Vercel-related)
+	// 7. Fly.io was inferred (verify it's actually Fly-related)
+	// 8. Verda was inferred (verify it's actually Verda-related)
+	// 9. IAM was inferred (verify it's actually IAM-related for disambiguation)
+	return count > 1 || ctx.Cloudflare || ctx.DigitalOcean || ctx.Hetzner || ctx.Oracle || ctx.Vercel || ctx.Flyio || ctx.Railway || ctx.Verda || ctx.IAM
 }
 
 // ApplyLLMClassification updates the ServiceContext based on LLM classification result
 func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
+	clearInfraProviders := func() {
+		ctx.AWS = false
+		ctx.K8s = false
+		ctx.GCP = false
+		ctx.Azure = false
+		ctx.Cloudflare = false
+		ctx.DigitalOcean = false
+		ctx.Hetzner = false
+		ctx.Oracle = false
+		ctx.Vercel = false
+		ctx.Flyio = false
+		ctx.Railway = false
+		ctx.Verda = false
+		ctx.IAM = false
+	}
+
 	switch llmService {
 	case "cloudflare":
+		clearInfraProviders()
 		ctx.Cloudflare = true
-		ctx.K8s = false
-		ctx.GCP = false
-		ctx.Azure = false
-		ctx.AWS = false
-		ctx.DigitalOcean = false
-		ctx.Hetzner = false
-		ctx.Vercel = false
-		ctx.Flyio = false
-		ctx.Railway = false
-		ctx.Verda = false
-		ctx.IAM = false
 	case "k8s":
+		clearInfraProviders()
 		ctx.K8s = true
-		ctx.Cloudflare = false
-		ctx.GCP = false
-		ctx.Azure = false
-		ctx.DigitalOcean = false
-		ctx.Hetzner = false
-		ctx.Vercel = false
-		ctx.Flyio = false
-		ctx.Railway = false
-		ctx.Verda = false
-		ctx.IAM = false
 	case "gcp":
+		clearInfraProviders()
 		ctx.GCP = true
-		ctx.Cloudflare = false
-		ctx.K8s = false
-		ctx.Azure = false
-		ctx.DigitalOcean = false
-		ctx.Hetzner = false
-		ctx.Vercel = false
-		ctx.Flyio = false
-		ctx.Railway = false
-		ctx.Verda = false
-		ctx.IAM = false
 	case "azure":
+		clearInfraProviders()
 		ctx.Azure = true
-		ctx.GCP = false
-		ctx.Cloudflare = false
-		ctx.K8s = false
-		ctx.AWS = false
-		ctx.DigitalOcean = false
-		ctx.Hetzner = false
-		ctx.Vercel = false
-		ctx.Flyio = false
-		ctx.Railway = false
-		ctx.Verda = false
-		ctx.IAM = false
 	case "digitalocean":
+		clearInfraProviders()
 		ctx.DigitalOcean = true
-		ctx.AWS = false
-		ctx.GCP = false
-		ctx.Cloudflare = false
-		ctx.K8s = false
-		ctx.Azure = false
-		ctx.Hetzner = false
-		ctx.Vercel = false
-		ctx.Flyio = false
-		ctx.Railway = false
-		ctx.Verda = false
-		ctx.IAM = false
 	case "hetzner":
+		clearInfraProviders()
 		ctx.Hetzner = true
-		ctx.AWS = false
-		ctx.GCP = false
-		ctx.Cloudflare = false
-		ctx.K8s = false
-		ctx.Azure = false
-		ctx.DigitalOcean = false
-		ctx.Vercel = false
-		ctx.Flyio = false
-		ctx.Railway = false
-		ctx.Verda = false
-		ctx.IAM = false
+	case "oracle":
+		clearInfraProviders()
+		ctx.Oracle = true
 	case "vercel":
+		clearInfraProviders()
 		ctx.Vercel = true
-		ctx.AWS = false
-		ctx.GCP = false
-		ctx.Cloudflare = false
-		ctx.K8s = false
-		ctx.Azure = false
-		ctx.DigitalOcean = false
-		ctx.Hetzner = false
-		ctx.Flyio = false
-		ctx.Verda = false
-		ctx.IAM = false
 	case "flyio":
+		clearInfraProviders()
 		ctx.Flyio = true
-		ctx.AWS = false
-		ctx.GCP = false
-		ctx.Cloudflare = false
-		ctx.K8s = false
-		ctx.Azure = false
-		ctx.DigitalOcean = false
-		ctx.Hetzner = false
-		ctx.Vercel = false
-		ctx.Verda = false
-		ctx.Railway = false
-		ctx.IAM = false
 	case "verda":
+		clearInfraProviders()
 		ctx.Verda = true
-		ctx.AWS = false
-		ctx.GCP = false
-		ctx.Cloudflare = false
-		ctx.K8s = false
-		ctx.Azure = false
-		ctx.DigitalOcean = false
-		ctx.Hetzner = false
-		ctx.Vercel = false
-		ctx.Flyio = false
-		ctx.Railway = false
-		ctx.IAM = false
 	case "railway":
+		clearInfraProviders()
 		ctx.Railway = true
-		ctx.AWS = false
-		ctx.GCP = false
-		ctx.Cloudflare = false
-		ctx.K8s = false
-		ctx.Azure = false
-		ctx.DigitalOcean = false
-		ctx.Hetzner = false
-		ctx.Vercel = false
-		ctx.Flyio = false
-		ctx.Verda = false
-		ctx.IAM = false
 	case "aws":
+		clearInfraProviders()
 		ctx.AWS = true
-		ctx.Cloudflare = false
-		ctx.K8s = false
-		ctx.GCP = false
-		ctx.Azure = false
-		ctx.DigitalOcean = false
-		ctx.Hetzner = false
-		ctx.Vercel = false
-		ctx.Flyio = false
-		ctx.Railway = false
-		ctx.Verda = false
-		ctx.IAM = false
 	case "iam":
+		clearInfraProviders()
 		ctx.IAM = true
-		ctx.AWS = false
-		ctx.Cloudflare = false
-		ctx.K8s = false
-		ctx.GCP = false
-		ctx.Azure = false
-		ctx.DigitalOcean = false
-		ctx.Hetzner = false
-		ctx.Vercel = false
-		ctx.Flyio = false
-		ctx.Railway = false
-		ctx.Verda = false
 	case "terraform":
 		ctx.Terraform = true
 		ctx.Cloudflare = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Oracle = false
 		ctx.Vercel = false
 		ctx.Flyio = false
 		ctx.Railway = false
@@ -879,6 +823,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Cloudflare = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Oracle = false
 		ctx.Vercel = false
 		ctx.Flyio = false
 		ctx.Railway = false
@@ -889,6 +834,7 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 		ctx.Cloudflare = false
 		ctx.DigitalOcean = false
 		ctx.Hetzner = false
+		ctx.Oracle = false
 		ctx.Vercel = false
 		ctx.Flyio = false
 		ctx.Railway = false
@@ -907,6 +853,8 @@ func ApplyLLMClassification(ctx *ServiceContext, llmService string) {
 			ctx.DigitalOcean = true
 		case "hetzner":
 			ctx.Hetzner = true
+		case "oracle":
+			ctx.Oracle = true
 		case "vercel":
 			ctx.Vercel = true
 		case "flyio":

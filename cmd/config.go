@@ -219,6 +219,12 @@ codebase:
 # hetzner:
 #   api_token: ""           # Hetzner Cloud API token (or set HCLOUD_TOKEN)
 
+# Oracle Cloud Infrastructure (for 'clanker oracle ...' and 'clanker ask --oracle ...'):
+# oracle:
+#   profile: DEFAULT        # OCI CLI profile (or set OCI_CLI_PROFILE)
+#   tenancy_ocid: ""        # Root tenancy OCID for compartment discovery (or set OCI_TENANCY_OCID)
+#   compartment_id: ""      # Optional target compartment OCID (or set OCI_COMPARTMENT_ID)
+
 # General settings
 timeout: 30  # Timeout for AI requests in seconds
 

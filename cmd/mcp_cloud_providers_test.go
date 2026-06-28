@@ -13,8 +13,8 @@ func TestMCPCloudProviderTools_RegistrationDoesNotPanic(t *testing.T) {
 }
 
 func TestMCPCloudProviderTools_ConfigCoverage(t *testing.T) {
-	if len(cloudProviderMCPConfigs) != 6 {
-		t.Fatalf("expected 6 cloud provider MCP configs, got %d", len(cloudProviderMCPConfigs))
+	if len(cloudProviderMCPConfigs) != 7 {
+		t.Fatalf("expected 7 cloud provider MCP configs, got %d", len(cloudProviderMCPConfigs))
 	}
 
 	found := map[string]bool{}
@@ -24,7 +24,7 @@ func TestMCPCloudProviderTools_ConfigCoverage(t *testing.T) {
 			t.Errorf("provider %s has empty resource help", cfg.Key)
 		}
 	}
-	for _, key := range []string{"aws", "gcp", "azure", "cloudflare", "digitalocean", "hetzner"} {
+	for _, key := range []string{"aws", "gcp", "azure", "cloudflare", "digitalocean", "hetzner", "oracle"} {
 		if !found[key] {
 			t.Errorf("missing provider MCP config for %s", key)
 		}
@@ -63,6 +63,7 @@ func TestMCPCloudProviderContextQuestion_IncludesLatestCoverageHints(t *testing.
 		"gcp":          {"cloud asset inventory", "vertex ai", "alloydb", "workflows"},
 		"azure":        {"resource graph", "container apps", "azure ai search", "private endpoints"},
 		"hetzner":      {"placement groups", "server types", "isos"},
+		"oracle":       {"compartments", "oke", "vault", "queues"},
 	}
 
 	for provider, expected := range tests {

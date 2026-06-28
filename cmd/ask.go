@@ -32,6 +32,7 @@ import (
 	"github.com/bgdnvk/clanker/internal/k8s"
 	"github.com/bgdnvk/clanker/internal/k8s/plan"
 	"github.com/bgdnvk/clanker/internal/maker"
+	"github.com/bgdnvk/clanker/internal/oracle"
 	"github.com/bgdnvk/clanker/internal/railway"
 	"github.com/bgdnvk/clanker/internal/resourcedb"
 	"github.com/bgdnvk/clanker/internal/routing"
@@ -46,10 +47,10 @@ import (
 // askCmd represents the ask command
 const defaultGeminiModel = "gemini-2.5-flash"
 
-func applyDiscoveryContextDefaults(includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda, includeRailway bool) (bool, bool, bool, bool, bool, bool, bool, bool, bool, bool) {
+func applyDiscoveryContextDefaults(includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeOracle, includeTerraform, includeVercel, includeVerda, includeRailway bool) (bool, bool, bool, bool, bool, bool, bool, bool, bool, bool, bool) {
 	includeTerraform = true
-	if includeAWS || includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeHetzner || includeVercel || includeVerda || includeRailway {
-		return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda, includeRailway
+	if includeAWS || includeGCP || includeAzure || includeCloudflare || includeDigitalOcean || includeHetzner || includeOracle || includeVercel || includeVerda || includeRailway {
+		return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeOracle, includeTerraform, includeVercel, includeVerda, includeRailway
 	}
 
 	switch routing.DefaultInfraProvider() {
@@ -63,6 +64,8 @@ func applyDiscoveryContextDefaults(includeAWS, includeGCP, includeAzure, include
 		includeDigitalOcean = true
 	case "hetzner":
 		includeHetzner = true
+	case "oracle":
+		includeOracle = true
 	case "vercel":
 		includeVercel = true
 	case "verda":
@@ -73,13 +76,13 @@ func applyDiscoveryContextDefaults(includeAWS, includeGCP, includeAzure, include
 		includeAWS = true
 	}
 
-	return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda, includeRailway
+	return includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeOracle, includeTerraform, includeVercel, includeVerda, includeRailway
 }
 
 var askCmd = &cobra.Command{
 	Use:   "ask [question]",
 	Short: "Ask AI about your cloud infrastructure or GitHub repository",
-	Long: `Ask natural language questions about your AWS or GCP infrastructure or GitHub repository.
+	Long: `Ask natural language questions about your cloud infrastructure or GitHub repository.
 	
 Examples:
   clanker ask "What EC2 instances are running?"
@@ -115,6 +118,7 @@ Examples:
 		includeCloudflare, _ := cmd.Flags().GetBool("cloudflare")
 		includeDigitalOcean, _ := cmd.Flags().GetBool("digitalocean")
 		includeHetzner, _ := cmd.Flags().GetBool("hetzner")
+		includeOracle, _ := cmd.Flags().GetBool("oracle")
 		includeVercel, _ := cmd.Flags().GetBool("vercel")
 		includeFlyio, _ := cmd.Flags().GetBool("flyio")
 		includeRailway, _ := cmd.Flags().GetBool("railway")
@@ -342,6 +346,18 @@ Examples:
 				})
 			}
 
+			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "oracle") {
+				profile := oracle.ResolveProfile()
+				return maker.ExecuteOraclePlan(ctx, makerPlan, maker.ExecOptions{
+					OracleProfile:       profile,
+					OracleCompartmentID: oracle.ResolveCompartmentID(),
+					OracleTenancyOCID:   oracle.ResolveTenancyOCID(profile),
+					Writer:              os.Stdout,
+					Destroyer:           destroyer,
+					Debug:               debug,
+				})
+			}
+
 			if strings.EqualFold(strings.TrimSpace(makerPlan.Provider), "vercel") {
 				vcToken, vcTeamID, vcErr := resolveVercelToken(ctx, debug)
 				if vcErr != nil {
@@ -547,6 +563,7 @@ Examples:
 			explicitCloudflare := cmd.Flags().Changed("cloudflare") && includeCloudflare
 			explicitDigitalOcean := cmd.Flags().Changed("digitalocean") && includeDigitalOcean
 			explicitHetzner := cmd.Flags().Changed("hetzner") && includeHetzner
+			explicitOracle := cmd.Flags().Changed("oracle") && includeOracle
 			explicitAzure := cmd.Flags().Changed("azure") && includeAzure
 			explicitVercel := cmd.Flags().Changed("vercel") && includeVercel
 			explicitRailway := cmd.Flags().Changed("railway") && includeRailway
@@ -568,6 +585,9 @@ Examples:
 			if explicitHetzner {
 				explicitCount++
 			}
+			if explicitOracle {
+				explicitCount++
+			}
 			if explicitAzure {
 				explicitCount++
 			}
@@ -584,9 +604,12 @@ Examples:
 				explicitCount++
 			}
 			if explicitCount > 1 {
-				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --azure, --cloudflare, --digitalocean, --hetzner, --vercel, --railway, --verda, --tencent) together with --maker")
+				return fmt.Errorf("cannot use multiple provider flags (--aws, --gcp, --azure, --cloudflare, --digitalocean, --hetzner, --oracle, --vercel, --railway, --verda, --tencent) together with --maker")
 			}
 			switch {
+			case explicitOracle:
+				makerProvider = "oracle"
+				makerProviderReason = "explicit"
 			case explicitHetzner:
 				makerProvider = "hetzner"
 				makerProviderReason = "explicit"
@@ -628,6 +651,9 @@ Examples:
 				} else if svcCtx.Hetzner {
 					makerProvider = "hetzner"
 					makerProviderReason = "inferred"
+				} else if svcCtx.Oracle {
+					makerProvider = "oracle"
+					makerProviderReason = "inferred"
 				} else if svcCtx.Azure {
 					makerProvider = "azure"
 					makerProviderReason = "inferred"
@@ -661,6 +687,8 @@ Examples:
 				prompt = maker.DigitalOceanPlanPromptWithMode(question, destroyer)
 			case "hetzner":
 				prompt = maker.HetznerPlanPromptWithMode(question, destroyer)
+			case "oracle":
+				prompt = maker.OraclePlanPromptWithMode(question, destroyer)
 			case "azure":
 				prompt = maker.AzurePlanPromptWithMode(question, destroyer)
 			case "gcp":
@@ -733,9 +761,9 @@ Examples:
 
 			plan.Provider = makerProvider
 
-			// Handle GCP, Azure, Cloudflare, Digital Ocean, Hetzner, Vercel, Verda, and Railway plans (output directly, no enrichment)
+			// Handle GCP, Azure, Cloudflare, Digital Ocean, Hetzner, Oracle, Vercel, Verda, and Railway plans (output directly, no enrichment)
 			providerLower := strings.ToLower(strings.TrimSpace(plan.Provider))
-			if providerLower == "gcp" || providerLower == "azure" || providerLower == "cloudflare" || providerLower == "digitalocean" || providerLower == "hetzner" || providerLower == "vercel" || providerLower == "verda" || providerLower == "railway" || providerLower == "tencent" {
+			if providerLower == "gcp" || providerLower == "azure" || providerLower == "cloudflare" || providerLower == "digitalocean" || providerLower == "hetzner" || providerLower == "oracle" || providerLower == "vercel" || providerLower == "verda" || providerLower == "railway" || providerLower == "tencent" {
 				if plan.CreatedAt.IsZero() {
 					plan.CreatedAt = time.Now().UTC()
 				}
@@ -825,13 +853,14 @@ Format as a professional compliance table suitable for government security docum
 
 		// Discovery mode enables comprehensive infrastructure analysis
 		if discovery {
-			includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeTerraform, includeVercel, includeVerda, includeRailway = applyDiscoveryContextDefaults(
+			includeAWS, includeGCP, includeAzure, includeCloudflare, includeDigitalOcean, includeHetzner, includeOracle, includeTerraform, includeVercel, includeVerda, includeRailway = applyDiscoveryContextDefaults(
 				includeAWS,
 				includeGCP,
 				includeAzure,
 				includeCloudflare,
 				includeDigitalOcean,
 				includeHetzner,
+				includeOracle,
 				includeTerraform,
 				includeVercel,
 				includeVerda,
@@ -870,6 +899,11 @@ Format as a professional compliance table suitable for government security docum
 			return handleHetznerQuery(context.Background(), question, debug)
 		}
 
+		// Handle explicit --oracle flag
+		if includeOracle && !makerMode {
+			return handleOracleQuery(context.Background(), question, debug)
+		}
+
 		// Handle explicit --vercel flag
 		if includeVercel && !makerMode {
 			return handleVercelQuery(context.Background(), question, debug)
@@ -895,7 +929,7 @@ Format as a professional compliance table suitable for government security docum
 			return handleTencentQuery(context.Background(), question, debug)
 		}
 
-		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare && !includeDigitalOcean && !includeHetzner && !includeVercel && !includeFlyio && !includeRailway && !includeVerda && !includeDB {
+		if !includeAWS && !includeGitHub && !includeTerraform && !includeGCP && !includeAzure && !includeCloudflare && !includeDigitalOcean && !includeHetzner && !includeOracle && !includeVercel && !includeFlyio && !includeRailway && !includeVerda && !includeDB {
 			routingQuestion := questionForRouting(question)
 
 			// First, do quick keyword check for explicit terms
@@ -904,8 +938,8 @@ Format as a professional compliance table suitable for government security docum
 			includeGitHub = svcCtx.GitHub
 
 			if debug {
-				fmt.Printf("Keyword inference: AWS=%v, GitHub=%v, Terraform=%v, K8s=%v, GCP=%v, Cloudflare=%v\n",
-					svcCtx.AWS, svcCtx.GitHub, svcCtx.Terraform, svcCtx.K8s, svcCtx.GCP, svcCtx.Cloudflare)
+				fmt.Printf("Keyword inference: AWS=%v, GitHub=%v, Terraform=%v, K8s=%v, GCP=%v, Cloudflare=%v, Oracle=%v\n",
+					svcCtx.AWS, svcCtx.GitHub, svcCtx.Terraform, svcCtx.K8s, svcCtx.GCP, svcCtx.Cloudflare, svcCtx.Oracle)
 			}
 
 			// For ambiguous queries (multiple services detected or Cloudflare detected),
@@ -927,8 +961,8 @@ Format as a professional compliance table suitable for government security docum
 					routing.ApplyLLMClassification(&svcCtx, llmService)
 
 					if debug {
-						fmt.Printf("LLM override: AWS=%v, K8s=%v, GCP=%v, Azure=%v, Cloudflare=%v\n",
-							svcCtx.AWS, svcCtx.K8s, svcCtx.GCP, svcCtx.Azure, svcCtx.Cloudflare)
+						fmt.Printf("LLM override: AWS=%v, K8s=%v, GCP=%v, Azure=%v, Cloudflare=%v, Oracle=%v\n",
+							svcCtx.AWS, svcCtx.K8s, svcCtx.GCP, svcCtx.Azure, svcCtx.Cloudflare, svcCtx.Oracle)
 					}
 				}
 			}
@@ -964,6 +998,11 @@ Format as a professional compliance table suitable for government security docum
 			// Handle Hetzner queries
 			if svcCtx.Hetzner {
 				return handleHetznerQuery(context.Background(), routingQuestion, debug)
+			}
+
+			// Handle Oracle Cloud queries
+			if svcCtx.Oracle {
+				return handleOracleQuery(context.Background(), routingQuestion, debug)
 			}
 
 			// Handle Vercel queries
@@ -1473,6 +1512,7 @@ func init() {
 	askCmd.Flags().Bool("cloudflare", false, "Include Cloudflare infrastructure context")
 	askCmd.Flags().Bool("digitalocean", false, "Include Digital Ocean infrastructure context")
 	askCmd.Flags().Bool("hetzner", false, "Include Hetzner Cloud infrastructure context")
+	askCmd.Flags().Bool("oracle", false, "Include Oracle Cloud Infrastructure context")
 	askCmd.Flags().Bool("vercel", false, "Include Vercel context")
 	askCmd.Flags().Bool("flyio", false, "Include Fly.io context")
 	askCmd.Flags().Bool("railway", false, "Include Railway context")
@@ -1510,7 +1550,7 @@ func init() {
 	askCmd.Flags().String("minimax-model", "", "MiniMax model to use (overrides config)")
 	askCmd.Flags().String("github-model", "", "GitHub Models model to use (overrides config)")
 	askCmd.Flags().Bool("agent-trace", false, "Show detailed coordinator agent lifecycle logs (overrides config)")
-	askCmd.Flags().Bool("maker", false, "Generate an AWS, GCP, Azure, Cloudflare, Digital Ocean, Hetzner, Vercel, Railway, or Verda plan (JSON) for infrastructure changes")
+	askCmd.Flags().Bool("maker", false, "Generate an AWS, GCP, Azure, Cloudflare, Digital Ocean, Hetzner, Oracle, Vercel, Railway, or Verda plan (JSON) for infrastructure changes")
 	askCmd.Flags().Bool("destroyer", false, "Allow destructive operations when using --maker (requires explicit confirmation in UI/workflow)")
 	askCmd.Flags().Bool("apply", false, "Apply an approved maker plan (reads from stdin unless --plan-file is provided)")
 	askCmd.Flags().String("plan-file", "", "Optional path to maker plan JSON file for --apply")
@@ -2492,6 +2532,64 @@ Hetzner Cloud Context:
 User Question: %s
 
 Provide a clear, concise answer based on the data above. If the data doesn't contain enough information to fully answer the question, say so and suggest what additional information might be needed.`, hetznerContext, question)
+
+	response, err := aiClient.AskPrompt(ctx, prompt)
+	if err != nil {
+		return fmt.Errorf("failed to get AI response: %w", err)
+	}
+
+	fmt.Println(response)
+	return nil
+}
+
+// handleOracleQuery delegates an Oracle Cloud Infrastructure query to the OCI CLI client.
+func handleOracleQuery(ctx context.Context, question string, debug bool) error {
+	if debug {
+		fmt.Println("Delegating query to Oracle Cloud Infrastructure agent...")
+	}
+
+	client, err := oracle.NewClient(oracle.ResolveProfile(), oracle.ResolveCompartmentID(), oracle.ResolveTenancyOCID(oracle.ResolveProfile()), debug)
+	if err != nil {
+		return fmt.Errorf("failed to create Oracle Cloud client: %w", err)
+	}
+
+	oracleContext, err := client.GetRelevantContext(ctx, question)
+	if err != nil {
+		return fmt.Errorf("failed to get Oracle Cloud context: %w", err)
+	}
+
+	provider := viper.GetString("ai.default_provider")
+	if provider == "" {
+		provider = "openai"
+	}
+
+	var apiKey string
+	switch provider {
+	case "gemini", "gemini-api":
+		apiKey = ""
+	case "openai":
+		apiKey = resolveOpenAIKey("")
+	case "anthropic":
+		apiKey = resolveAnthropicKey("")
+	case "cohere":
+		apiKey = resolveCohereKey("")
+	case "deepseek":
+		apiKey = resolveDeepSeekKey("")
+	case "minimax":
+		apiKey = resolveMiniMaxKey("")
+	default:
+		apiKey = viper.GetString("ai.api_key")
+	}
+
+	aiClient := ai.NewClient(provider, apiKey, debug, provider)
+	prompt := fmt.Sprintf(`You are an Oracle Cloud Infrastructure expert. Answer the user's question based on the following OCI context data.
+
+Oracle Cloud Context:
+%s
+
+User Question: %s
+
+Provide a clear, concise answer based on the data above. Cite compartment OCIDs, resource OCIDs, regions, and lifecycle states when relevant. If the data is insufficient, say which OCI CLI command or missing IAM policy would surface it.`, oracleContext, question)
 
 	response, err := aiClient.AskPrompt(ctx, prompt)
 	if err != nil {

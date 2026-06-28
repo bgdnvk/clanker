@@ -7,9 +7,9 @@ import (
 )
 
 func TestScanIncludesOfficialAuthGuides(t *testing.T) {
-	result := Scan(context.Background(), ScanOptions{WantedProviders: []string{"aws", "gcp", "azure", "railway", "supabase", "flyio", "tencent", "verda", "sentry", "linear", "notion"}})
+	result := Scan(context.Background(), ScanOptions{WantedProviders: []string{"aws", "gcp", "azure", "oracle", "railway", "supabase", "flyio", "tencent", "verda", "sentry", "linear", "notion"}})
 
-	for _, id := range []string{"aws", "gcp", "azure", "railway", "supabase", "flyio", "tencent", "verda", "sentry", "linear", "notion"} {
+	for _, id := range []string{"aws", "gcp", "azure", "oracle", "railway", "supabase", "flyio", "tencent", "verda", "sentry", "linear", "notion"} {
 		guide, ok := result.AuthGuides[id]
 		if !ok {
 			t.Fatalf("missing auth guide for %s", id)
@@ -44,6 +44,7 @@ func TestGuidesPreferOfficialVendorDocs(t *testing.T) {
 		"gcloud":     "https://docs.cloud.google.com/",
 		"az":         "https://learn.microsoft.com/",
 		"doctl":      "https://docs.digitalocean.com/",
+		"oci":        "https://docs.oracle.com/",
 		"railway":    "https://docs.railway.com/",
 		"supabase":   "https://supabase.com/docs/",
 		"flyctl":     "https://fly.io/docs/",
@@ -66,7 +67,7 @@ func TestProviderGuidesRequireOfficialTencentAndSentryCLIs(t *testing.T) {
 	for _, guide := range providerGuides() {
 		found[guide.ID] = guide.RequiredTools
 	}
-	for id, want := range map[string]string{"tencent": "tccli", "sentry": "sentry-cli"} {
+	for id, want := range map[string]string{"oracle": "oci", "tencent": "tccli", "sentry": "sentry-cli"} {
 		tools := found[id]
 		if len(tools) != 1 || tools[0] != want {
 			t.Fatalf("%s required tools = %#v, want [%s]", id, tools, want)
@@ -74,6 +75,9 @@ func TestProviderGuidesRequireOfficialTencentAndSentryCLIs(t *testing.T) {
 	}
 	if normalizeToolID("tencent cloud") != "tccli" {
 		t.Fatal("tencent cloud alias did not normalize to tccli")
+	}
+	if normalizeToolID("oracle cloud infrastructure") != "oci" {
+		t.Fatal("oracle cloud infrastructure alias did not normalize to oci")
 	}
 	if normalizeToolID("sentry") != "sentry-cli" {
 		t.Fatal("sentry alias did not normalize to sentry-cli")

@@ -168,6 +168,8 @@ func inferProviderFromCommands(cmds []Command) string {
 			return "cloudflare"
 		case "hcloud":
 			return "hetzner"
+		case "oci":
+			return "oracle"
 		case "doctl":
 			return "digitalocean"
 		case "gcloud":
