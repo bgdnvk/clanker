@@ -8,6 +8,8 @@ Agent swarm powering [Clanker Cloud](https://clankercloud.ai), the first AI DevO
 
 Docs available at [docs.clankercloud.ai](https://docs.clankercloud.ai/)
 
+Language: English | [简体中文](README.zh-CN.md)
+
 Ask questions about your infra (and optionally GitHub/etc). Clanker can inspect existing environments and also generate or apply infrastructure and deploy plans through its maker and deploy flows.
 
 Repo: [bgdnvk/clanker](https://github.com/bgdnvk/clanker)
