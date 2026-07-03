@@ -2,6 +2,9 @@ package onboarding
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -81,5 +84,86 @@ func TestProviderGuidesRequireOfficialTencentAndSentryCLIs(t *testing.T) {
 	}
 	if normalizeToolID("sentry") != "sentry-cli" {
 		t.Fatal("sentry alias did not normalize to sentry-cli")
+	}
+}
+
+func writeTestFile(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func TestVercelAndWranglerPathsIncludePlatformConfigDirs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("WRANGLER_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("XDG_DATA_HOME", "")
+
+	if fileExistsAny(vercelAuthPaths()...) {
+		t.Fatal("expected no vercel auth in fresh home")
+	}
+	if fileExistsAny(wranglerConfigPaths()...) {
+		t.Fatal("expected no wrangler config in fresh home")
+	}
+
+	var vercelAuth, wranglerConfig string
+	switch runtime.GOOS {
+	case "darwin":
+		vercelAuth = filepath.Join(home, "Library", "Application Support", "com.vercel.cli", "auth.json")
+		wranglerConfig = filepath.Join(home, "Library", "Preferences", ".wrangler", "config", "default.toml")
+	case "windows":
+		appData := filepath.Join(home, "AppData", "Roaming")
+		t.Setenv("APPDATA", appData)
+		vercelAuth = filepath.Join(appData, "com.vercel.cli", "auth.json")
+		wranglerConfig = filepath.Join(appData, ".wrangler", "config", "default.toml")
+	default:
+		vercelAuth = filepath.Join(home, ".local", "share", "com.vercel.cli", "auth.json")
+		wranglerConfig = filepath.Join(home, ".config", ".wrangler", "config", "default.toml")
+	}
+	writeTestFile(t, vercelAuth)
+	writeTestFile(t, wranglerConfig)
+
+	if !fileExistsAny(vercelAuthPaths()...) {
+		t.Fatalf("vercel auth at %s not detected", vercelAuth)
+	}
+	if !fileExistsAny(wranglerConfigPaths()...) {
+		t.Fatalf("wrangler config at %s not detected", wranglerConfig)
+	}
+}
+
+func TestVercelAndWranglerPathsKeepLegacyLocations(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("WRANGLER_HOME", "")
+
+	writeTestFile(t, filepath.Join(home, ".vercel", "auth.json"))
+	writeTestFile(t, filepath.Join(home, ".wrangler", "config", "default.toml"))
+
+	if !fileExistsAny(vercelAuthPaths()...) {
+		t.Fatal("legacy ~/.vercel/auth.json not detected")
+	}
+	if !fileExistsAny(wranglerConfigPaths()...) {
+		t.Fatal("legacy ~/.wrangler/config/default.toml not detected")
+	}
+}
+
+func TestWranglerConfigPathsHonorWranglerHome(t *testing.T) {
+	home := t.TempDir()
+	custom := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("WRANGLER_HOME", custom)
+
+	writeTestFile(t, filepath.Join(custom, "config", "default.toml"))
+
+	if !fileExistsAny(wranglerConfigPaths()...) {
+		t.Fatal("config under $WRANGLER_HOME not detected")
 	}
 }
