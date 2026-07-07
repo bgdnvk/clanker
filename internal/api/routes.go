@@ -58,6 +58,7 @@ func (s *Server) registerRoutes() {
 
 	// Topology (Phase 7)
 	s.mux.HandleFunc("GET /api/v1/tencent/topology", s.handleTencentTopology)
+	s.mux.HandleFunc("GET /api/v1/tencent/cls/search", s.handleTencentCLSSearch)
 	s.mux.HandleFunc("GET /api/v1/tencent/scan/public-exposure", s.handleTencentPublicExposure)
 	s.mux.HandleFunc("GET /api/v1/tencent/scan/clb-exposure", s.handleTencentCLBExposure)
 	s.mux.HandleFunc("GET /api/v1/tencent/scan/idle-eips", s.handleTencentIdleEIPs)
@@ -278,6 +279,37 @@ func (s *Server) handleTencentTopology(w http.ResponseWriter, r *http.Request) {
 	}
 	region := strings.TrimSpace(r.URL.Query().Get("region"))
 	body, err := client.TopologyJSON(r.Context(), region)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "tencent_api_error", err.Error())
+		return
+	}
+	writeRawData(w, body)
+}
+
+// handleTencentCLSSearch searches a single CLS log topic and returns flattened
+// log entries. Query params: region, topic_id (required), query, limit, from,
+// to (from/to are epoch milliseconds; default = last hour).
+func (s *Server) handleTencentCLSSearch(w http.ResponseWriter, r *http.Request) {
+	client, err := s.tencentClient(r)
+	if err != nil {
+		writeTencentClientErr(w, err)
+		return
+	}
+	q := r.URL.Query()
+	topicID := strings.TrimSpace(q.Get("topic_id"))
+	if topicID == "" {
+		writeError(w, http.StatusBadRequest, "missing_topic_id", "topic_id query param is required")
+		return
+	}
+	region := strings.TrimSpace(q.Get("region"))
+	query := q.Get("query")
+	parse := func(key string) int64 {
+		if n, err := strconv.ParseInt(strings.TrimSpace(q.Get(key)), 10, 64); err == nil {
+			return n
+		}
+		return 0
+	}
+	body, err := client.CLSSearchLogJSON(r.Context(), region, topicID, query, parse("from"), parse("to"), parse("limit"))
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "tencent_api_error", err.Error())
 		return

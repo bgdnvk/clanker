@@ -1,10 +1,13 @@
 package tencent
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	cloudaudit "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cloudaudit/v20190319"
 	cls "github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/cls/v20201016"
@@ -164,6 +167,101 @@ func listCLSTopics(c *Client, regions []string) error {
 	}
 	printWarnings(warnings)
 	return nil
+}
+
+// ── CLS log search (Cloud Log Service content) ──────────────────────────────
+
+// CLSLogEntry is one flattened SearchLog result for the console log viewer.
+type CLSLogEntry struct {
+	Time     int64  `json:"time"` // epoch milliseconds
+	Source   string `json:"source"`
+	FileName string `json:"filename"`
+	HostName string `json:"hostname"`
+	Content  string `json:"content"` // structured LogJson, or RawLog fallback
+}
+
+// CLSSearchResult is the JSON payload returned to the API for a topic search.
+type CLSSearchResult struct {
+	Region   string        `json:"region"`
+	TopicID  string        `json:"topic_id"`
+	Query    string        `json:"query"`
+	From     int64         `json:"from"`
+	To       int64         `json:"to"`
+	ListOver bool          `json:"list_over"`
+	Count    int           `json:"count"`
+	Results  []CLSLogEntry `json:"results"`
+}
+
+// CLSSearchLogJSON runs a CLS SearchLog against a single topic and returns a
+// flattened JSON string ({region, topic_id, results:[...]}). Time range is in
+// epoch milliseconds; from/to<=0 default to the last hour. An empty query
+// matches all logs ("*"). limit is clamped to [1,1000], default 200.
+func (c *Client) CLSSearchLogJSON(_ context.Context, region, topicID, query string, fromMs, toMs, limit int64) (string, error) {
+	if strings.TrimSpace(topicID) == "" {
+		return "", fmt.Errorf("topic_id is required")
+	}
+	if strings.TrimSpace(region) == "" {
+		region = c.creds.Region
+	}
+	client, err := newCLSClient(c, region)
+	if err != nil {
+		return "", fmt.Errorf("init cls client: %w", err)
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	if toMs <= 0 {
+		toMs = time.Now().UnixMilli()
+	}
+	if fromMs <= 0 {
+		fromMs = toMs - 3600*1000 // last hour
+	}
+	q := strings.TrimSpace(query)
+	if q == "" {
+		q = "*"
+	}
+	sort := "desc"
+
+	req := cls.NewSearchLogRequest()
+	req.TopicId = &topicID
+	req.From = &fromMs
+	req.To = &toMs
+	req.Query = &q
+	req.Sort = &sort
+	req.Limit = &limit
+
+	resp, err := client.SearchLog(req)
+	if err != nil {
+		return "", friendlyError(err)
+	}
+
+	out := CLSSearchResult{Region: region, TopicID: topicID, Query: query, From: fromMs, To: toMs, Results: []CLSLogEntry{}}
+	if resp != nil && resp.Response != nil {
+		out.ListOver = derefBool(resp.Response.ListOver)
+		for _, r := range resp.Response.Results {
+			if r == nil {
+				continue
+			}
+			content := derefString(r.LogJson)
+			if content == "" {
+				content = derefString(r.RawLog)
+			}
+			out.Results = append(out.Results, CLSLogEntry{
+				Time:     derefInt64(r.Time),
+				Source:   derefString(r.Source),
+				FileName: derefString(r.FileName),
+				HostName: derefString(r.HostName),
+				Content:  content,
+			})
+		}
+	}
+	out.Count = len(out.Results)
+
+	b, err := json.Marshal(out)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 func newCLSClient(c *Client, region string) (*cls.Client, error) {
