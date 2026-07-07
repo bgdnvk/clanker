@@ -325,6 +325,8 @@ func newClankerMCPServer() *mcptransport.MCPServer {
 		}),
 	)
 
+	registerCloudSandboxMCPTools(server)
+
 	server.AddTool(
 		mcp.NewTool(
 			"clanker_vercel_ask",
