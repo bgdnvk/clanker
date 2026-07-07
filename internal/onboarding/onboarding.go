@@ -786,7 +786,7 @@ func providerGuides() []providerGuide {
 			if hasAnyEnv("CLOUDFLARE_API_TOKEN", "CF_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID") {
 				notes = append(notes, "cloudflare env")
 			}
-			if fileExists(homePath(".wrangler", "config", "default.toml")) {
+			if fileExistsAny(wranglerConfigPaths()...) {
 				notes = append(notes, "wrangler config")
 			}
 			return len(notes) > 0, len(notes) > 0, notes
@@ -866,7 +866,7 @@ func providerGuides() []providerGuide {
 			if hasAnyEnv("VERCEL_TOKEN") {
 				notes = append(notes, "vercel env")
 			}
-			if fileExists(homePath(".vercel", "auth.json")) {
+			if fileExistsAny(vercelAuthPaths()...) {
 				notes = append(notes, "vercel auth")
 			}
 			return len(notes) > 0, len(notes) > 0, notes
@@ -1129,6 +1129,72 @@ func fileExists(path string) bool {
 	}
 	st, err := os.Stat(path)
 	return err == nil && !st.IsDir()
+}
+
+func fileExistsAny(paths ...string) bool {
+	for _, path := range paths {
+		if fileExists(path) {
+			return true
+		}
+	}
+	return false
+}
+
+// vercelAuthPaths lists the auth.json locations used by the Vercel CLI: the
+// legacy ~/.vercel directory and the platform data directory newer releases
+// write to (macOS: ~/Library/Application Support/com.vercel.cli, Linux:
+// $XDG_DATA_HOME/com.vercel.cli, Windows: %AppData%/com.vercel.cli).
+func vercelAuthPaths() []string {
+	paths := []string{homePath(".vercel", "auth.json")}
+	switch runtime.GOOS {
+	case "darwin":
+		paths = append(paths, homePath("Library", "Application Support", "com.vercel.cli", "auth.json"))
+	case "windows":
+		if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
+			paths = append(paths, filepath.Join(appData, "com.vercel.cli", "auth.json"))
+		}
+	default:
+		paths = append(paths, filepath.Join(xdgDataHome(), "com.vercel.cli", "auth.json"))
+	}
+	return paths
+}
+
+// wranglerConfigPaths lists the global config locations used by Wrangler:
+// $WRANGLER_HOME when set, the legacy ~/.wrangler directory, and the platform
+// config directory newer releases use when ~/.wrangler is absent (macOS:
+// ~/Library/Preferences/.wrangler, Linux: $XDG_CONFIG_HOME/.wrangler,
+// Windows: %AppData%/.wrangler).
+func wranglerConfigPaths() []string {
+	paths := []string{}
+	if custom := strings.TrimSpace(os.Getenv("WRANGLER_HOME")); custom != "" {
+		paths = append(paths, filepath.Join(custom, "config", "default.toml"))
+	}
+	paths = append(paths, homePath(".wrangler", "config", "default.toml"))
+	switch runtime.GOOS {
+	case "darwin":
+		paths = append(paths, homePath("Library", "Preferences", ".wrangler", "config", "default.toml"))
+	case "windows":
+		if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
+			paths = append(paths, filepath.Join(appData, ".wrangler", "config", "default.toml"))
+		}
+	default:
+		paths = append(paths, filepath.Join(xdgConfigHome(), ".wrangler", "config", "default.toml"))
+	}
+	return paths
+}
+
+func xdgConfigHome() string {
+	if dir := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); dir != "" {
+		return dir
+	}
+	return homePath(".config")
+}
+
+func xdgDataHome() string {
+	if dir := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); dir != "" {
+		return dir
+	}
+	return homePath(".local", "share")
 }
 
 func truncate(value string, max int) string {
