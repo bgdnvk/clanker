@@ -177,14 +177,85 @@ clanker cf list --help
 
 ### Clanker Apps
 
-Clanker Apps are account-scoped, immutable declarative deployments. App content
-is data in the `appSpec` v1 format; Clanker owns the renderer, so deployments
-cannot supply executable HTML, CSS, JavaScript, navigation targets, or network
-policy.
-Creating an app or deployment keeps it private; `activate` is the separate step
-that makes a reviewed deployment public.
+Clanker Apps are account-scoped, immutable deployments for small team software.
+Deploy a complete HTML document when you need working JavaScript, forms,
+browser storage, external resources, downloads, navigation, or API calls. The
+document runs as supplied at its own public app URL; network calls follow normal
+browser and API CORS behavior.
 
-Save a specification such as this as `app-spec.json`:
+Creating an app or deployment keeps it private. `activate` publishes one
+deployment and returns its shareable link. `unpublish` removes public access
+without removing retained versions. `delete` permanently disposes of the app,
+all versions, and hosted artifacts.
+
+For example, save a complete app as `index.html`, then deploy it:
+
+```html
+<!doctype html>
+<title>Team CRM</title>
+<main id="app"></main>
+<script>
+  const contacts = [{ name: "Ada", company: "Analytical Engines" }];
+  document.querySelector("#app").textContent =
+    `${contacts.length} contact: ${contacts[0].name}`;
+</script>
+```
+
+```bash
+export CLANKER_CLOUD_API_KEY="..."
+
+clanker cloud apps create "Team CRM" --description "Shared contact workspace"
+clanker cloud apps deploy APP_ID --html-file ./index.html
+clanker cloud apps deployments APP_ID
+clanker cloud apps activate APP_ID DEPLOYMENT_ID
+clanker cloud apps unpublish APP_ID
+clanker cloud apps delete APP_ID
+```
+
+Single-file HTML deployments are valid UTF-8 and limited to 2 MiB. The CLI
+sends exactly the supplied HTML; it does not remove features or filter content.
+Deployment output identifies this runtime as `clanker-html-v1` and reports its
+file count, total bytes, and browser network policy.
+
+HTML apps can explicitly opt into hosted Gemini and/or Kimi calls without
+shipping provider credentials in the document:
+
+```bash
+clanker cloud apps deploy APP_ID \
+  --html-file ./agent.html \
+  --agentic-provider gemini \
+  --agentic-provider kimi
+```
+
+Inside the deployed HTML, derive the root-stable app endpoint before calling it
+so the request still works after client-side navigation:
+
+```js
+const slug = location.pathname.split("/")[2];
+const endpoint = `/a/${encodeURIComponent(slug)}/__clanker/llm`;
+const response = await fetch(endpoint, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    provider: "gemini",
+    messages: [{ role: "user", content: "Summarize these contacts" }],
+  }),
+});
+const result = await response.json();
+```
+
+Agentic access is absent unless at least one `--agentic-provider` is supplied.
+When enabled, the defaults are also the launch ceilings: 25 requests per app
+per UTC day, 16000 input characters per request, and 1024 output tokens per
+request.
+Lower them with `--agentic-daily-requests`, `--agentic-max-input-chars`, and
+`--agentic-max-output-tokens`. The limits must remain at least 1. Agentic
+options apply only to HTML deployments. These controls are versioned with the
+deployment, while the daily request counter is app-wide and continues across
+deployment activations until the next UTC day.
+
+The existing fixed-renderer `appSpec` v1 runtime remains available for
+declarative snapshots. Save a specification such as this as `app-spec.json`:
 
 ```json
 {
@@ -209,22 +280,13 @@ Save a specification such as this as `app-spec.json`:
 ```
 
 ```bash
-export CLANKER_CLOUD_API_KEY="..."
-
-clanker cloud apps create "Team CRM" --description "Shared contact workspace"
-clanker cloud apps deploy APP_ID --app-spec-json @app-spec.json
-clanker cloud apps deployments APP_ID
-clanker cloud apps activate APP_ID DEPLOYMENT_ID
-clanker cloud apps unpublish APP_ID
-clanker cloud apps delete APP_ID
+clanker cloud apps deploy APP_ID --app-spec-file ./app-spec.json
 ```
 
 The v1 block types are `metrics`, `text`, `table`, `cards`, and `list`.
-Specifications are limited to 24 blocks and 256 KiB. Unknown or duplicate
-fields, unsafe control characters, and common credential signatures are
-rejected locally and by the service. HTML- or URL-looking strings are displayed
-as inert text. The service derives its own public-data disclosure; clients
-cannot supply or override exposure metadata.
+Specifications are limited to 24 blocks and 256 KiB. Use exactly one of
+`--html`, `--html-file`, `--app-spec-json`, or `--app-spec-file` for each
+deployment.
 
 Create and deploy generate a valid idempotency key automatically. Pass
 `--idempotency-key` when you need the same stable key across manual retries.

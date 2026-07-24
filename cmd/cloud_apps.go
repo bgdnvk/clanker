@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/bgdnvk/clanker/internal/clankercloud"
 	"github.com/spf13/cobra"
@@ -23,8 +24,16 @@ type appCreateFlags struct {
 }
 
 type appDeploymentFlags struct {
-	appSpecJSON    string
-	idempotencyKey string
+	html                      string
+	htmlFile                  string
+	appSpecJSON               string
+	appSpecFile               string
+	agenticProviders          []string
+	agenticDailyRequests      int
+	agenticMaxInputCharacters int
+	agenticMaxOutputTokens    int
+	agenticLimitsSet          bool
+	idempotencyKey            string
 }
 
 func newCloudAppsCmd() *cobra.Command {
@@ -43,10 +52,11 @@ func newCloudAppsCmd() *cobra.Command {
 		Short:   "Create, publish, roll back, unpublish, and delete Clanker Apps",
 		Long: strings.TrimSpace(`Manage account-scoped Clanker Apps and immutable deployments.
 
-Deployments accept declarative appSpec v1 data only; the hosted renderer owns
-all executable HTML, CSS, and JavaScript. Creating an app or deployment is
-private. Use activate only after reviewing the deployment you want to share
-publicly.`),
+Deploy complete HTML/CSS/JavaScript when the app needs normal browser features,
+or use declarative appSpec v1 data for a fixed-renderer snapshot. Creating an
+app or deployment is private. Activate a deployment to get a public link,
+unpublish it to remove public access, or delete the app and all of its retained
+deployments.`),
 	}
 	cmd.PersistentFlags().StringVar(&apiBaseURL, "api-base-url", "", "Clanker Cloud API base URL (HTTPS, or loopback HTTP for development)")
 	cmd.PersistentFlags().StringVar(&apiKey, "api-key", "", "Clanker Cloud account API key (prefer CLANKER_CLOUD_API_KEY)")
@@ -120,7 +130,7 @@ func newCloudAppsGetCmd(client func() *clankercloud.AppsClient) *cobra.Command {
 func newCloudAppsDeleteCmd(client func() *clankercloud.AppsClient) *cobra.Command {
 	return &cobra.Command{
 		Use:   "delete APP_ID",
-		Short: "Delete an app and its retained deployments",
+		Short: "Permanently delete an app and all retained deployments",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			result, err := client().DeleteApp(cmd.Context(), args[0])
@@ -133,8 +143,13 @@ func newCloudAppsDeploymentsCmd(client func() *clankercloud.AppsClient) *cobra.C
 	return &cobra.Command{
 		Use:     "deployments APP_ID",
 		Aliases: []string{"versions"},
-		Short:   "List immutable deployments for an app",
-		Args:    cobra.ExactArgs(1),
+		Short:   "List immutable deployments and runtime details for an app",
+		Long: strings.TrimSpace(`List every retained deployment for an app.
+
+HTML deployments are identified as clanker-html-v1 and include fileCount,
+totalBytes, networkPolicy, and any enabled agentic capability in the JSON
+output.`),
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			result, err := client().ListDeployments(cmd.Context(), args[0])
 			return printAppsResult(result, err)
@@ -146,16 +161,33 @@ func newCloudAppsDeployCmd(client func() *clankercloud.AppsClient) *cobra.Comman
 	var flags appDeploymentFlags
 	cmd := &cobra.Command{
 		Use:   "deploy APP_ID",
-		Short: "Create a private immutable declarative deployment",
-		Long: strings.TrimSpace(`Create a private immutable deployment from one declarative appSpec v1 JSON object.
+		Short: "Create a private immutable HTML or declarative deployment",
+		Long: strings.TrimSpace(`Create a private immutable deployment from exactly one runtime input.
 
-Pass the JSON inline or use @path. The supported block types are metrics, text,
-table, cards, and list. Executable HTML, CSS, JavaScript, navigation targets,
-client-supplied exposure metadata, and network policy are not accepted.`),
-		Example: "  clanker cloud apps deploy APP_ID --app-spec-json @app-spec.json",
-		Args:    cobra.ExactArgs(1),
+Use --html or --html-file for a complete UTF-8 HTML document up to 2 MiB. Its
+HTML, CSS, and JavaScript run as supplied, including browser storage, navigation,
+external resources, and network calls subject to ordinary browser rules.
+
+Use --app-spec-json or --app-spec-file for declarative appSpec v1 data up to
+256 KiB. Supported block types are metrics, text, table, cards, and list.
+
+HTML deployments can opt into the hosted agentic endpoint with one or two
+repeatable --agentic-provider flags. Supported providers are gemini and kimi.
+The versioned controls default to their launch maxima: 25 requests per app per
+UTC day, 16000 input characters, and 1024 output tokens. The app-wide daily
+counter continues across deployment activations. The deployed HTML calls the
+root-stable /a/{slug}/__clanker/llm endpoint.`),
+		Example: strings.TrimSpace(`clanker cloud apps deploy APP_ID --html-file ./index.html
+clanker cloud apps deploy APP_ID --html '<!doctype html><script>document.body.textContent = "Hello"</script>'
+clanker cloud apps deploy APP_ID --html-file ./agent.html --agentic-provider gemini --agentic-provider kimi
+clanker cloud apps deploy APP_ID --app-spec-file ./app-spec.json`),
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			input, err := flags.input()
+			flags.agenticLimitsSet =
+				cmd.Flags().Changed("agentic-daily-requests") ||
+					cmd.Flags().Changed("agentic-max-input-chars") ||
+					cmd.Flags().Changed("agentic-max-output-tokens")
+			payload, err := flags.input()
 			if err != nil {
 				return err
 			}
@@ -163,14 +195,12 @@ client-supplied exposure metadata, and network policy are not accepted.`),
 			if err != nil {
 				return err
 			}
-			result, err := client().CreateDeployment(cmd.Context(), args[0], clankercloud.AppDeploymentCreateRequest{
-				AppSpec:        input,
-				IdempotencyKey: idempotencyKey,
-			})
+			payload.IdempotencyKey = idempotencyKey
+			result, err := client().CreateDeployment(cmd.Context(), args[0], payload)
 			return printAppsResult(result, err)
 		},
 	}
-	flags.addAppSpecFlags(cmd)
+	flags.addRuntimeFlags(cmd)
 	return cmd
 }
 
@@ -199,39 +229,131 @@ func newCloudAppsUnpublishCmd(client func() *clankercloud.AppsClient) *cobra.Com
 	}
 }
 
-func (flags *appDeploymentFlags) addAppSpecFlags(cmd *cobra.Command) {
-	cmd.Flags().StringVar(&flags.appSpecJSON, "app-spec-json", "", "declarative appSpec v1 JSON object, or @path")
+func (flags *appDeploymentFlags) addRuntimeFlags(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&flags.html, "html", "", "complete single-file HTML/CSS/JavaScript content")
+	cmd.Flags().StringVar(&flags.htmlFile, "html-file", "", "read complete single-file HTML/CSS/JavaScript from this path")
+	cmd.Flags().StringVar(&flags.appSpecJSON, "app-spec-json", "", "declarative appSpec v1 JSON object")
+	cmd.Flags().StringVar(&flags.appSpecFile, "app-spec-file", "", "read declarative appSpec v1 JSON from this path")
+	cmd.Flags().StringArrayVar(&flags.agenticProviders, "agentic-provider", nil, "enable hosted app inference for this provider; repeat for gemini and kimi")
+	cmd.Flags().IntVar(&flags.agenticDailyRequests, "agentic-daily-requests", clankercloud.DefaultAppAgenticDailyRequests, "agentic requests per app per UTC day (1-25)")
+	cmd.Flags().IntVar(&flags.agenticMaxInputCharacters, "agentic-max-input-chars", clankercloud.DefaultAppAgenticInputCharacters, "maximum input characters per agentic request (1-16000)")
+	cmd.Flags().IntVar(&flags.agenticMaxOutputTokens, "agentic-max-output-tokens", clankercloud.DefaultAppAgenticOutputTokens, "maximum output tokens per agentic request (1-1024)")
 	cmd.Flags().StringVar(&flags.idempotencyKey, "idempotency-key", "", "stable 8-128 character retry key (generated automatically when omitted)")
+	cmd.MarkFlagsMutuallyExclusive("html", "html-file", "app-spec-json", "app-spec-file")
+	cmd.MarkFlagsOneRequired("html", "html-file", "app-spec-json", "app-spec-file")
 }
 
-func (flags appDeploymentFlags) input() (clankercloud.AppSpec, error) {
-	raw := flags.appSpecJSON
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return clankercloud.AppSpec{}, fmt.Errorf("--app-spec-json is required")
+func (flags appDeploymentFlags) input() (clankercloud.AppDeploymentCreateRequest, error) {
+	sources := 0
+	if flags.html != "" {
+		sources++
 	}
-	var data []byte
-	if strings.HasPrefix(trimmed, "@") {
-		path := strings.TrimSpace(strings.TrimPrefix(trimmed, "@"))
-		if path == "" {
-			return clankercloud.AppSpec{}, fmt.Errorf("app spec JSON @path is empty")
+	if strings.TrimSpace(flags.htmlFile) != "" {
+		sources++
+	}
+	if strings.TrimSpace(flags.appSpecJSON) != "" {
+		sources++
+	}
+	if strings.TrimSpace(flags.appSpecFile) != "" {
+		sources++
+	}
+	if sources != 1 {
+		return clankercloud.AppDeploymentCreateRequest{}, fmt.Errorf("provide exactly one of --html, --html-file, --app-spec-json, or --app-spec-file")
+	}
+
+	agentic, err := flags.agenticConfig()
+	if err != nil {
+		return clankercloud.AppDeploymentCreateRequest{}, err
+	}
+	if flags.html != "" {
+		html, err := validateCLIAppHTML([]byte(flags.html), "inline app HTML")
+		if err != nil {
+			return clankercloud.AppDeploymentCreateRequest{}, err
 		}
+		return clankercloud.AppDeploymentCreateRequest{HTML: &html, Agentic: agentic}, nil
+	}
+	if path := strings.TrimSpace(flags.htmlFile); path != "" {
+		content, err := readBoundedAppFileWithLimit(path, clankercloud.MaxAppHTMLBytes)
+		if err != nil {
+			return clankercloud.AppDeploymentCreateRequest{}, fmt.Errorf("read app HTML: %w", err)
+		}
+		html, err := validateCLIAppHTML(content, "app HTML")
+		if err != nil {
+			return clankercloud.AppDeploymentCreateRequest{}, err
+		}
+		return clankercloud.AppDeploymentCreateRequest{HTML: &html, Agentic: agentic}, nil
+	}
+	if agentic != nil {
+		return clankercloud.AppDeploymentCreateRequest{}, fmt.Errorf("agentic options are only supported with --html or --html-file")
+	}
+
+	var data []byte
+	if path := strings.TrimSpace(flags.appSpecFile); path != "" {
 		content, err := readBoundedAppFileWithLimit(path, clankercloud.MaxAppSpecBytes)
 		if err != nil {
-			return clankercloud.AppSpec{}, fmt.Errorf("read app spec JSON: %w", err)
+			return clankercloud.AppDeploymentCreateRequest{}, fmt.Errorf("read app spec JSON: %w", err)
 		}
 		data = content
 	} else {
-		if len(raw) > clankercloud.MaxAppSpecBytes {
-			return clankercloud.AppSpec{}, fmt.Errorf("inline app spec JSON exceeds %d bytes", clankercloud.MaxAppSpecBytes)
+		raw := flags.appSpecJSON
+		trimmed := strings.TrimSpace(raw)
+		// Keep the branch's @path spelling working while the clearer
+		// --app-spec-file flag becomes the documented interface.
+		if strings.HasPrefix(trimmed, "@") {
+			path := strings.TrimSpace(strings.TrimPrefix(trimmed, "@"))
+			if path == "" {
+				return clankercloud.AppDeploymentCreateRequest{}, fmt.Errorf("app spec JSON @path is empty")
+			}
+			content, err := readBoundedAppFileWithLimit(path, clankercloud.MaxAppSpecBytes)
+			if err != nil {
+				return clankercloud.AppDeploymentCreateRequest{}, fmt.Errorf("read app spec JSON: %w", err)
+			}
+			data = content
+		} else {
+			if len(raw) > clankercloud.MaxAppSpecBytes {
+				return clankercloud.AppDeploymentCreateRequest{}, fmt.Errorf("inline app spec JSON exceeds %d bytes", clankercloud.MaxAppSpecBytes)
+			}
+			data = []byte(raw)
 		}
-		data = []byte(raw)
 	}
 	spec, err := clankercloud.DecodeAppSpecJSON(data)
 	if err != nil {
-		return clankercloud.AppSpec{}, fmt.Errorf("decode app spec JSON: %w", err)
+		return clankercloud.AppDeploymentCreateRequest{}, fmt.Errorf("decode app spec JSON: %w", err)
 	}
-	return spec, nil
+	return clankercloud.AppDeploymentCreateRequest{AppSpec: &spec}, nil
+}
+
+func (flags appDeploymentFlags) agenticConfig() (*clankercloud.AppAgenticConfig, error) {
+	if len(flags.agenticProviders) == 0 {
+		if flags.agenticLimitsSet {
+			return nil, fmt.Errorf("at least one --agentic-provider is required when setting agentic limits")
+		}
+		return nil, nil
+	}
+	config, err := clankercloud.ValidateAppAgenticConfig(clankercloud.AppAgenticConfig{
+		Providers:          flags.agenticProviders,
+		DailyRequestLimit:  flags.agenticDailyRequests,
+		MaxInputCharacters: flags.agenticMaxInputCharacters,
+		MaxOutputTokens:    flags.agenticMaxOutputTokens,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &config, nil
+}
+
+func validateCLIAppHTML(content []byte, label string) (string, error) {
+	if len(content) > clankercloud.MaxAppHTMLBytes {
+		return "", fmt.Errorf("%s exceeds %d bytes", label, clankercloud.MaxAppHTMLBytes)
+	}
+	if !utf8.Valid(content) {
+		return "", fmt.Errorf("%s must be valid UTF-8", label)
+	}
+	html := string(content)
+	if len(html) == 0 {
+		return "", fmt.Errorf("%s must not be empty", label)
+	}
+	return html, nil
 }
 
 func resolveCLIAppIdempotencyKey(raw string, operation string) (string, error) {

@@ -28,8 +28,8 @@ var (
 	appSpecPrivateKeyPattern   = regexp.MustCompile(`-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----`)
 )
 
-// AppSpec is the only artifact accepted by the Apps deployment API. Every
-// value remains data; the hosted renderer owns all HTML, CSS, and JavaScript.
+// AppSpec is the fixed-renderer deployment option. Every value remains data;
+// use the HTML deployment option when the app needs executable browser code.
 type AppSpec struct {
 	SchemaVersion int        `json:"schemaVersion"`
 	Title         string     `json:"title"`
