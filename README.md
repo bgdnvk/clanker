@@ -177,20 +177,54 @@ clanker cf list --help
 
 ### Clanker Apps
 
-Clanker Apps are account-scoped, immutable static deployments. Creating an app
-or deployment keeps it private; `activate` is the separate step that makes a
-reviewed deployment public.
+Clanker Apps are account-scoped, immutable declarative deployments. App content
+is data in the `appSpec` v1 format; Clanker owns the renderer, so deployments
+cannot supply executable HTML, CSS, JavaScript, navigation targets, or network
+policy.
+Creating an app or deployment keeps it private; `activate` is the separate step
+that makes a reviewed deployment public.
+
+Save a specification such as this as `app-spec.json`:
+
+```json
+{
+  "schemaVersion": 1,
+  "title": "Team CRM",
+  "description": "Shared contact workspace",
+  "theme": "ocean",
+  "blocks": [
+    {
+      "type": "metrics",
+      "title": "Overview",
+      "items": [{ "label": "Contacts", "value": "12" }]
+    },
+    {
+      "type": "table",
+      "title": "Contacts",
+      "columns": ["Name", "Company"],
+      "rows": [["Ada", "Analytical Engines"]]
+    }
+  ]
+}
+```
 
 ```bash
 export CLANKER_CLOUD_API_KEY="..."
 
 clanker cloud apps create "Team CRM" --description "Shared contact workspace"
-clanker cloud apps deploy APP_ID --html-file ./index.html
+clanker cloud apps deploy APP_ID --app-spec-json @app-spec.json
 clanker cloud apps deployments APP_ID
 clanker cloud apps activate APP_ID DEPLOYMENT_ID
 clanker cloud apps unpublish APP_ID
 clanker cloud apps delete APP_ID
 ```
+
+The v1 block types are `metrics`, `text`, `table`, `cards`, and `list`.
+Specifications are limited to 24 blocks and 256 KiB. Unknown or duplicate
+fields, unsafe control characters, and common credential signatures are
+rejected locally and by the service. HTML- or URL-looking strings are displayed
+as inert text. The service derives its own public-data disclosure; clients
+cannot supply or override exposure metadata.
 
 Create and deploy generate a valid idempotency key automatically. Pass
 `--idempotency-key` when you need the same stable key across manual retries.

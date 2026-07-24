@@ -26,13 +26,6 @@ type AppsClientOptions struct {
 
 type AppsAPIResult = APIResult
 
-type AppFile struct {
-	Path        string  `json:"path"`
-	Content     *string `json:"content,omitempty"`
-	Base64      *string `json:"base64,omitempty"`
-	ContentType string  `json:"contentType,omitempty"`
-}
-
 type AppCreateRequest struct {
 	Name           string         `json:"name"`
 	Description    string         `json:"description,omitempty"`
@@ -41,21 +34,15 @@ type AppCreateRequest struct {
 	IdempotencyKey string         `json:"-"`
 }
 
-// AppDeploymentInput creates an immutable private deployment. It does not
-// activate or publish that deployment.
-type AppDeploymentInput struct {
-	HTML          string         `json:"html,omitempty"`
-	Files         []AppFile      `json:"files,omitempty"`
-	Entrypoint    string         `json:"entrypoint,omitempty"`
-	SPA           bool           `json:"spa,omitempty"`
-	DataSummary   map[string]any `json:"dataSummary,omitempty"`
-	NetworkPolicy string         `json:"networkPolicy"`
-	Exposure      map[string]any `json:"exposure,omitempty"`
+type AppDeploymentCreateRequest struct {
+	AppSpec        AppSpec `json:"appSpec"`
+	IdempotencyKey string  `json:"-"`
 }
 
-type AppDeploymentCreateRequest struct {
-	AppDeploymentInput
-	IdempotencyKey string `json:"-"`
+// Avoid inflating canonical display text such as "<" into six-byte JSON escape
+// sequences before the server applies the same 256 KiB raw appSpec limit.
+func (AppDeploymentCreateRequest) escapeHTMLInCloudJSON() bool {
+	return false
 }
 
 func NewAppsClient(opts AppsClientOptions) *AppsClient {
@@ -138,33 +125,14 @@ func (c *AppsClient) CreateDeployment(ctx context.Context, appID string, payload
 	if err != nil {
 		return nil, err
 	}
-	hasHTML := payload.HTML != ""
-	hasFiles := len(payload.Files) > 0
-	if hasHTML == hasFiles {
-		return nil, fmt.Errorf("provide exactly one of deployment html or files")
-	}
-	for _, file := range payload.Files {
-		if strings.TrimSpace(file.Path) == "" {
-			return nil, fmt.Errorf("deployment file path is required")
-		}
-		if (file.Content == nil) == (file.Base64 == nil) {
-			return nil, fmt.Errorf("%s must provide exactly one of content or base64", strings.TrimSpace(file.Path))
-		}
-	}
-	if strings.TrimSpace(payload.Entrypoint) == "" {
-		payload.Entrypoint = "index.html"
-	}
-	if strings.TrimSpace(payload.NetworkPolicy) == "" {
-		payload.NetworkPolicy = "none"
-	}
-	if !strings.EqualFold(strings.TrimSpace(payload.NetworkPolicy), "none") {
-		return nil, fmt.Errorf("network policy must be none for static app deployments")
+	payload.AppSpec = normalizeAppSpec(payload.AppSpec)
+	if err := ValidateAppSpec(payload.AppSpec); err != nil {
+		return nil, err
 	}
 	idempotencyKey, err := ValidateAppIdempotencyKey(payload.IdempotencyKey)
 	if err != nil {
 		return nil, err
 	}
-	payload.NetworkPolicy = "none"
 	return c.callJSON(ctx, http.MethodPost, "/apps/"+escaped+"/deployments", payload, idempotencyKey)
 }
 

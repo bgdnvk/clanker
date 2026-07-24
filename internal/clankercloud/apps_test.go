@@ -3,6 +3,7 @@ package clankercloud
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ func TestAppsClientLifecycleRoutesAndPrivatePayloads(t *testing.T) {
 	var requests []string
 	var createPayload map[string]any
 	var deploymentPayload map[string]any
+	var deploymentRaw []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests = append(requests, r.Method+" "+r.URL.Path)
 		if got := r.Header.Get("X-API-Key"); got != "account-token" {
@@ -41,7 +43,11 @@ func TestAppsClientLifecycleRoutesAndPrivatePayloads(t *testing.T) {
 			if got := r.Header.Get("Idempotency-Key"); got != "deployment-key" {
 				t.Errorf("deployment Idempotency-Key = %q", got)
 			}
-			if err := json.NewDecoder(r.Body).Decode(&deploymentPayload); err != nil {
+			var err error
+			deploymentRaw, err = io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read deployment payload: %v", err)
+			} else if err := json.Unmarshal(deploymentRaw, &deploymentPayload); err != nil {
 				t.Errorf("decode deployment payload: %v", err)
 			}
 			_, _ = w.Write([]byte(`{"ok":true,"deployment":{"id":"dep_123","status":"private"}}`))
@@ -93,21 +99,18 @@ func TestAppsClientLifecycleRoutesAndPrivatePayloads(t *testing.T) {
 	if result, err := client.ListDeployments(ctx, "app_123"); err != nil || !AppsResultOK(result) {
 		t.Fatalf("ListDeployments result=%#v err=%v", result, err)
 	}
-	indexHTML := "<h1>Revision 2</h1>"
-	emptyCSS := ""
 	deploymentResult, err := client.CreateDeployment(ctx, "app_123", AppDeploymentCreateRequest{
-		AppDeploymentInput: AppDeploymentInput{
-			Files: []AppFile{
-				{Path: "index.html", Content: &indexHTML},
-				{Path: "assets/empty.css", Content: &emptyCSS},
-			},
-			Entrypoint: "index.html",
-			DataSummary: map[string]any{
-				"records": 12,
-			},
-			NetworkPolicy: "none",
-			Exposure: map[string]any{
-				"publicFields": []any{"name", "company"},
+		AppSpec: AppSpec{
+			SchemaVersion: 1,
+			Title:         "Customer CRM",
+			Description:   "<public> & shared contact workspace",
+			Blocks: []AppBlock{
+				{
+					Type:    "table",
+					Title:   "Contacts",
+					Columns: []string{"Name", "Company"},
+					Rows:    [][]string{{"<Ada>", "Analytical & Engines"}},
+				},
 			},
 		},
 		IdempotencyKey: "deployment-key",
@@ -115,23 +118,27 @@ func TestAppsClientLifecycleRoutesAndPrivatePayloads(t *testing.T) {
 	if err != nil || !AppsResultOK(deploymentResult) {
 		t.Fatalf("CreateDeployment result=%#v err=%v", deploymentResult, err)
 	}
-	if deploymentPayload["networkPolicy"] != "none" {
+	if len(deploymentPayload) != 1 {
 		t.Fatalf("deployment payload = %#v", deploymentPayload)
 	}
-	filesPayload, ok := deploymentPayload["files"].([]any)
-	if !ok || len(filesPayload) != 2 {
-		t.Fatalf("deployment files payload = %#v", deploymentPayload["files"])
+	appSpecPayload, ok := deploymentPayload["appSpec"].(map[string]any)
+	if !ok {
+		t.Fatalf("deployment appSpec payload = %#v", deploymentPayload["appSpec"])
 	}
-	emptyFile, ok := filesPayload[1].(map[string]any)
-	if !ok || emptyFile["path"] != "assets/empty.css" {
-		t.Fatalf("empty file payload = %#v", filesPayload[1])
+	if appSpecPayload["theme"] != "light" {
+		t.Fatalf("deployment appSpec theme = %#v, want default light", appSpecPayload["theme"])
 	}
-	if content, present := emptyFile["content"]; !present || content != "" {
-		t.Fatalf("empty file content was omitted: %#v", emptyFile)
+	if strings.Contains(string(deploymentRaw), `\u003c`) ||
+		!strings.Contains(string(deploymentRaw), "<public>") ||
+		!strings.Contains(string(deploymentRaw), "<Ada>") {
+		t.Fatalf("deployment display text was inflated by HTML escaping: %s", deploymentRaw)
 	}
-	for _, forbidden := range []string{"name", "activate"} {
+	for _, forbidden := range []string{
+		"html", "files", "entrypoint", "spa", "networkPolicy", "exposure",
+		"dataSummary", "name", "activate",
+	} {
 		if _, ok := deploymentPayload[forbidden]; ok {
-			t.Fatalf("private deployment payload included %q: %#v", forbidden, deploymentPayload)
+			t.Fatalf("declarative deployment payload included %q: %#v", forbidden, deploymentPayload)
 		}
 	}
 
@@ -191,48 +198,63 @@ func TestAppsClientRequiresNamesAndIDs(t *testing.T) {
 		}
 	}
 	if _, err := client.CreateDeployment(context.Background(), "app_123", AppDeploymentCreateRequest{
-		AppDeploymentInput: AppDeploymentInput{HTML: "<h1>unsafe</h1>", NetworkPolicy: "connect"},
-		IdempotencyKey:     "deploy-valid-key",
+		AppSpec:        AppSpec{SchemaVersion: 1, Title: "No blocks"},
+		IdempotencyKey: "deploy-valid-key",
 	}); err == nil {
-		t.Fatal("CreateDeployment accepted a network-enabled static app")
+		t.Fatal("CreateDeployment accepted an app spec without blocks")
 	}
 }
 
-func TestAppsClientRequiresExactlyOneArtifactSourceAndFileEncoding(t *testing.T) {
-	content := "<h1>hello</h1>"
-	base64Content := "PGgxPmhlbGxvPC9oMT4="
+func TestAppsClientRejectsInvalidDeclarativeDeploymentsBeforeNetwork(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
 	client := NewAppsClient(AppsClientOptions{
-		BaseURL:    "https://clankercloud.ai/api",
+		BaseURL:    server.URL + "/api",
 		AccountKey: "account-token",
+		HTTPClient: server.Client(),
 	})
 	ctx := context.Background()
 
-	cases := []AppDeploymentCreateRequest{
-		{IdempotencyKey: "artifact-none-key"},
+	cases := []AppSpec{
+		{},
 		{
-			AppDeploymentInput: AppDeploymentInput{
-				HTML:  content,
-				Files: []AppFile{{Path: "index.html", Content: &content}},
-			},
-			IdempotencyKey: "artifact-both-key",
+			SchemaVersion: 1,
+			Title:         "Unsupported execution",
+			Blocks:        []AppBlock{{Type: "html", Body: "<script>alert(1)</script>"}},
 		},
 		{
-			AppDeploymentInput: AppDeploymentInput{
-				Files: []AppFile{{Path: "index.html"}},
-			},
-			IdempotencyKey: "encoding-none-key",
+			SchemaVersion: 1,
+			Title:         "Broken table",
+			Blocks: []AppBlock{{
+				Type:    "table",
+				Columns: []string{"Name"},
+				Rows:    [][]string{{"Ada", "extra"}},
+			}},
 		},
 		{
-			AppDeploymentInput: AppDeploymentInput{
-				Files: []AppFile{{Path: "index.html", Content: &content, Base64: &base64Content}},
-			},
-			IdempotencyKey: "encoding-both-key",
+			SchemaVersion: 1,
+			Title:         "Credential leak",
+			Blocks: []AppBlock{{
+				Type: "text",
+				Body: "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
+			}},
 		},
 	}
-	for index, payload := range cases {
-		if _, err := client.CreateDeployment(ctx, "app_123", payload); err == nil {
-			t.Fatalf("invalid artifact case %d succeeded", index)
+	for index, spec := range cases {
+		if _, err := client.CreateDeployment(ctx, "app_123", AppDeploymentCreateRequest{
+			AppSpec:        spec,
+			IdempotencyKey: "declarative-test-key",
+		}); err == nil {
+			t.Fatalf("invalid app spec case %d succeeded", index)
 		}
+	}
+	if requests != 0 {
+		t.Fatalf("invalid app specs made %d network requests", requests)
 	}
 }
 

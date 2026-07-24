@@ -149,7 +149,7 @@ func callCloudJSON(
 
 	var bodyReader io.Reader
 	if body != nil {
-		encoded, err := json.Marshal(body)
+		encoded, err := marshalCloudJSONRequest(body)
 		if err != nil {
 			return nil, nil, fmt.Errorf("encode Clanker Cloud request: %w", err)
 		}
@@ -197,6 +197,24 @@ func callCloudJSON(
 	decoded := decodeBody(rawBody)
 	result.Body = RedactCloudSecrets(decoded)
 	return result, decoded, nil
+}
+
+type cloudJSONHTMLEscapePolicy interface {
+	escapeHTMLInCloudJSON() bool
+}
+
+func marshalCloudJSONRequest(body any) ([]byte, error) {
+	policy, hasPolicy := body.(cloudJSONHTMLEscapePolicy)
+	if !hasPolicy || policy.escapeHTMLInCloudJSON() {
+		return json.Marshal(body)
+	}
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(body); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(encoded.Bytes(), []byte{'\n'}), nil
 }
 
 func safeCloudResponseHeaders(headers http.Header) map[string]string {

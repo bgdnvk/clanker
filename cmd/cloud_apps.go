@@ -22,14 +22,8 @@ type appCreateFlags struct {
 }
 
 type appDeploymentFlags struct {
-	html            string
-	htmlFile        string
-	filesJSON       string
-	entrypoint      string
-	spa             bool
-	dataSummaryJSON string
-	exposureJSON    string
-	idempotencyKey  string
+	appSpecJSON    string
+	idempotencyKey string
 }
 
 func newCloudAppsCmd() *cobra.Command {
@@ -48,7 +42,10 @@ func newCloudAppsCmd() *cobra.Command {
 		Short:   "Create, publish, roll back, unpublish, and delete Clanker Apps",
 		Long: strings.TrimSpace(`Manage account-scoped Clanker Apps and immutable deployments.
 
-Creating an app or deployment is private. Use activate only after reviewing the deployment you want to share publicly.`),
+Deployments accept declarative appSpec v1 data only; the hosted renderer owns
+all executable HTML, CSS, and JavaScript. Creating an app or deployment is
+private. Use activate only after reviewing the deployment you want to share
+publicly.`),
 	}
 	cmd.PersistentFlags().StringVar(&apiBaseURL, "api-base-url", "", "Clanker Cloud API base URL (HTTPS, or loopback HTTP for development)")
 	cmd.PersistentFlags().StringVar(&apiKey, "api-key", "", "Clanker Cloud account API key (prefer CLANKER_CLOUD_API_KEY)")
@@ -148,8 +145,14 @@ func newCloudAppsDeployCmd(client func() *clankercloud.AppsClient) *cobra.Comman
 	var flags appDeploymentFlags
 	cmd := &cobra.Command{
 		Use:   "deploy APP_ID",
-		Short: "Create a private immutable deployment",
-		Args:  cobra.ExactArgs(1),
+		Short: "Create a private immutable declarative deployment",
+		Long: strings.TrimSpace(`Create a private immutable deployment from one declarative appSpec v1 JSON object.
+
+Pass the JSON inline or use @path. The supported block types are metrics, text,
+table, cards, and list. Executable HTML, CSS, JavaScript, navigation targets,
+client-supplied exposure metadata, and network policy are not accepted.`),
+		Example: "  clanker cloud apps deploy APP_ID --app-spec-json @app-spec.json",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			input, err := flags.input()
 			if err != nil {
@@ -160,13 +163,13 @@ func newCloudAppsDeployCmd(client func() *clankercloud.AppsClient) *cobra.Comman
 				return err
 			}
 			result, err := client().CreateDeployment(cmd.Context(), args[0], clankercloud.AppDeploymentCreateRequest{
-				AppDeploymentInput: input,
-				IdempotencyKey:     idempotencyKey,
+				AppSpec:        input,
+				IdempotencyKey: idempotencyKey,
 			})
 			return printAppsResult(result, err)
 		},
 	}
-	flags.addArtifactFlags(cmd)
+	flags.addAppSpecFlags(cmd)
 	return cmd
 }
 
@@ -195,66 +198,39 @@ func newCloudAppsUnpublishCmd(client func() *clankercloud.AppsClient) *cobra.Com
 	}
 }
 
-func (flags *appDeploymentFlags) addArtifactFlags(cmd *cobra.Command) {
-	cmd.Flags().StringVar(&flags.html, "html", "", "single-file HTML content")
-	cmd.Flags().StringVar(&flags.htmlFile, "html-file", "", "read single-file HTML content from this path")
-	cmd.Flags().StringVar(&flags.filesJSON, "files-json", "", "JSON array of app files, or @path to a JSON file")
-	cmd.Flags().StringVar(&flags.entrypoint, "entrypoint", "index.html", "deployment entrypoint")
-	cmd.Flags().BoolVar(&flags.spa, "spa", false, "serve the entrypoint for unknown paths")
-	cmd.Flags().StringVar(&flags.dataSummaryJSON, "data-summary-json", "", "JSON object describing included data, or @path")
-	cmd.Flags().StringVar(&flags.exposureJSON, "exposure-json", "", "JSON object describing reviewed public data exposure, or @path")
+func (flags *appDeploymentFlags) addAppSpecFlags(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&flags.appSpecJSON, "app-spec-json", "", "declarative appSpec v1 JSON object, or @path")
 	cmd.Flags().StringVar(&flags.idempotencyKey, "idempotency-key", "", "stable 8-128 character retry key (generated automatically when omitted)")
 }
 
-func (flags appDeploymentFlags) input() (clankercloud.AppDeploymentInput, error) {
-	if strings.TrimSpace(flags.html) != "" && strings.TrimSpace(flags.htmlFile) != "" {
-		return clankercloud.AppDeploymentInput{}, fmt.Errorf("--html and --html-file cannot be used together")
+func (flags appDeploymentFlags) input() (clankercloud.AppSpec, error) {
+	raw := flags.appSpecJSON
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return clankercloud.AppSpec{}, fmt.Errorf("--app-spec-json is required")
 	}
-
-	html := flags.html
-	if path := strings.TrimSpace(flags.htmlFile); path != "" {
-		content, err := readBoundedAppFile(path)
+	var data []byte
+	if strings.HasPrefix(trimmed, "@") {
+		path := strings.TrimSpace(strings.TrimPrefix(trimmed, "@"))
+		if path == "" {
+			return clankercloud.AppSpec{}, fmt.Errorf("app spec JSON @path is empty")
+		}
+		content, err := readBoundedAppFileWithLimit(path, clankercloud.MaxAppSpecBytes)
 		if err != nil {
-			return clankercloud.AppDeploymentInput{}, fmt.Errorf("read app HTML: %w", err)
+			return clankercloud.AppSpec{}, fmt.Errorf("read app spec JSON: %w", err)
 		}
-		html = string(content)
-	}
-	if len(html) > maxCLIAppInputBytes {
-		return clankercloud.AppDeploymentInput{}, fmt.Errorf("inline app HTML exceeds %d bytes", maxCLIAppInputBytes)
-	}
-
-	var files []clankercloud.AppFile
-	if raw := strings.TrimSpace(flags.filesJSON); raw != "" {
-		data, err := readAppJSONArgument(raw)
-		if err != nil {
-			return clankercloud.AppDeploymentInput{}, fmt.Errorf("read app files JSON: %w", err)
+		data = content
+	} else {
+		if len(raw) > clankercloud.MaxAppSpecBytes {
+			return clankercloud.AppSpec{}, fmt.Errorf("inline app spec JSON exceeds %d bytes", clankercloud.MaxAppSpecBytes)
 		}
-		if err := json.Unmarshal(data, &files); err != nil {
-			return clankercloud.AppDeploymentInput{}, fmt.Errorf("decode app files JSON: %w", err)
-		}
+		data = []byte(raw)
 	}
-	if (html != "") == (len(files) > 0) {
-		return clankercloud.AppDeploymentInput{}, fmt.Errorf("provide exactly one of --html/--html-file or --files-json")
-	}
-
-	dataSummary, err := readAppJSONObject(flags.dataSummaryJSON)
+	spec, err := clankercloud.DecodeAppSpecJSON(data)
 	if err != nil {
-		return clankercloud.AppDeploymentInput{}, fmt.Errorf("decode data summary: %w", err)
+		return clankercloud.AppSpec{}, fmt.Errorf("decode app spec JSON: %w", err)
 	}
-	exposure, err := readAppJSONObject(flags.exposureJSON)
-	if err != nil {
-		return clankercloud.AppDeploymentInput{}, fmt.Errorf("decode exposure summary: %w", err)
-	}
-
-	return clankercloud.AppDeploymentInput{
-		HTML:          html,
-		Files:         files,
-		Entrypoint:    strings.TrimSpace(flags.entrypoint),
-		SPA:           flags.spa,
-		DataSummary:   dataSummary,
-		NetworkPolicy: "none",
-		Exposure:      exposure,
-	}, nil
+	return spec, nil
 }
 
 func resolveCLIAppIdempotencyKey(raw string, operation string) (string, error) {
@@ -306,6 +282,10 @@ func readAppJSONArgument(raw string) ([]byte, error) {
 }
 
 func readBoundedAppFile(path string) ([]byte, error) {
+	return readBoundedAppFileWithLimit(path, maxCLIAppInputBytes)
+}
+
+func readBoundedAppFileWithLimit(path string, limit int) ([]byte, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, err
@@ -313,15 +293,15 @@ func readBoundedAppFile(path string) ([]byte, error) {
 	if info.IsDir() {
 		return nil, fmt.Errorf("%s is a directory", path)
 	}
-	if info.Size() > maxCLIAppInputBytes {
-		return nil, fmt.Errorf("%s exceeds %d bytes", path, maxCLIAppInputBytes)
+	if info.Size() > int64(limit) {
+		return nil, fmt.Errorf("%s exceeds %d bytes", path, limit)
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	if len(content) > maxCLIAppInputBytes {
-		return nil, fmt.Errorf("%s exceeds %d bytes", path, maxCLIAppInputBytes)
+	if len(content) > limit {
+		return nil, fmt.Errorf("%s exceeds %d bytes", path, limit)
 	}
 	return content, nil
 }

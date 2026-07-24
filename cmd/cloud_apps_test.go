@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -50,24 +51,83 @@ func TestResolveCLIAppIdempotencyKeyPreservesValidExplicitKey(t *testing.T) {
 	}
 }
 
-func TestAppDeploymentFlagsRequireOneSourceAndPreserveEmptyFiles(t *testing.T) {
-	both := appDeploymentFlags{
-		html:      "<h1>hello</h1>",
-		filesJSON: `[{"path":"index.html","content":"hello"}]`,
+func TestAppDeploymentFlagsRequireAndDecodeDeclarativeSpec(t *testing.T) {
+	if _, err := (appDeploymentFlags{}).input(); err == nil {
+		t.Fatal("deployment flags accepted a missing app spec")
 	}
-	if _, err := both.input(); err == nil {
-		t.Fatal("deployment flags accepted both HTML and files")
+	flags := appDeploymentFlags{
+		appSpecJSON: `{
+			"schemaVersion":1,
+			"title":"Team CRM",
+			"blocks":[{"type":"table","columns":["Name"],"rows":[["Ada"]]}]
+		}`,
 	}
-
-	emptyFile := appDeploymentFlags{
-		filesJSON:  `[{"path":"index.html","content":""}]`,
-		entrypoint: "index.html",
-	}
-	input, err := emptyFile.input()
+	input, err := flags.input()
 	if err != nil {
-		t.Fatalf("decode empty file: %v", err)
+		t.Fatalf("decode app spec: %v", err)
 	}
-	if len(input.Files) != 1 || input.Files[0].Content == nil || *input.Files[0].Content != "" {
-		t.Fatalf("empty file was not preserved: %#v", input.Files)
+	if input.Title != "Team CRM" || input.Theme != "light" || len(input.Blocks) != 1 {
+		t.Fatalf("decoded app spec = %#v", input)
+	}
+}
+
+func TestCloudAppsDeploySendsOnlyAppSpec(t *testing.T) {
+	var payload map[string]any
+	var idempotencyKey string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idempotencyKey = r.Header.Get("Idempotency-Key")
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode payload: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"ok":true,"deployment":{"id":"dep_123","status":"ready"}}`))
+	}))
+	defer server.Close()
+
+	client := func() *clankercloud.AppsClient {
+		return clankercloud.NewAppsClient(clankercloud.AppsClientOptions{
+			BaseURL:    server.URL + "/api",
+			AccountKey: "account-token",
+			HTTPClient: server.Client(),
+		})
+	}
+	command := newCloudAppsDeployCmd(client)
+	command.SetArgs([]string{
+		"app_123",
+		"--app-spec-json",
+		`{"schemaVersion":1,"title":"Team CRM","blocks":[{"type":"text","body":"Ready"}]}`,
+	})
+	if err := command.Execute(); err != nil {
+		t.Fatalf("deploy command: %v", err)
+	}
+	if len(payload) != 1 {
+		t.Fatalf("deployment payload = %#v, want exactly appSpec", payload)
+	}
+	appSpec, ok := payload["appSpec"].(map[string]any)
+	if !ok || appSpec["title"] != "Team CRM" || appSpec["theme"] != "light" {
+		t.Fatalf("appSpec payload = %#v", payload["appSpec"])
+	}
+	for _, forbidden := range []string{
+		"html", "files", "entrypoint", "spa", "networkPolicy", "exposure", "dataSummary",
+	} {
+		if _, exists := payload[forbidden]; exists {
+			t.Fatalf("deployment payload contains legacy field %q: %#v", forbidden, payload)
+		}
+	}
+	if _, err := clankercloud.ValidateAppIdempotencyKey(idempotencyKey); err != nil {
+		t.Fatalf("generated Idempotency-Key %q: %v", idempotencyKey, err)
+	}
+}
+
+func TestCloudAppsDeployDoesNotExposeLegacyArtifactFlags(t *testing.T) {
+	command := newCloudAppsDeployCmd(func() *clankercloud.AppsClient { return nil })
+	for _, legacy := range []string{
+		"html", "html-file", "files-json", "entrypoint", "spa",
+		"data-summary-json", "exposure-json", "network-policy",
+	} {
+		if command.Flags().Lookup(legacy) != nil {
+			t.Fatalf("legacy deployment flag --%s is still exposed", legacy)
+		}
 	}
 }
