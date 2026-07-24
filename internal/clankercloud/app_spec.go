@@ -599,6 +599,7 @@ func isUnsafeAppRune(character rune) bool {
 		return true
 	}
 	return character >= '\u200b' && character <= '\u200f' ||
+		character >= '\u2028' && character <= '\u2029' ||
 		character >= '\u202a' && character <= '\u202e' ||
 		character >= '\u2066' && character <= '\u2069' ||
 		unicode.Is(unicode.Cs, character)

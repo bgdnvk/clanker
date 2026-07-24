@@ -211,6 +211,8 @@ func TestValidateAppSpecRejectsUnsafeUnicodeAndCredentialSignatures(t *testing.T
 		"nul\u0000byte",
 		"delete\u007fcontrol",
 		"replacement\ufffdcharacter",
+		"line\u2028separator",
+		"paragraph\u2029separator",
 		"bidi\u202etext",
 		"zero\u200bwidth",
 		"-----BEGIN OPENSSH PRIVATE KEY-----",
@@ -238,7 +240,7 @@ func TestValidateAppSpecRejectsUnsafeUnicodeAndCredentialSignatures(t *testing.T
 func TestCanonicalAppSpecJSONUsesStableSafeEncoding(t *testing.T) {
 	spec := AppSpec{
 		SchemaVersion: 1,
-		Title:         "<CRM>&\u2028",
+		Title:         "<CRM>&",
 		Description:   "",
 		Theme:         "light",
 		Blocks:        []AppBlock{{Type: "text", Body: "A&B"}},
@@ -247,7 +249,7 @@ func TestCanonicalAppSpecJSONUsesStableSafeEncoding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("canonicalAppSpecJSON: %v", err)
 	}
-	want := `{"blocks":[{"body":"A&B","type":"text"}],"schemaVersion":1,"theme":"light","title":"<CRM>&\u2028"}`
+	want := `{"blocks":[{"body":"A&B","type":"text"}],"schemaVersion":1,"theme":"light","title":"<CRM>&"}`
 	if string(got) != want {
 		t.Fatalf("canonical JSON = %s, want %s", got, want)
 	}
