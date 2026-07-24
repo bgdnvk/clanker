@@ -14,6 +14,7 @@ import (
 const (
 	AppSpecSchemaVersion = 1
 	MaxAppSpecBytes      = 256 << 10
+	maxAppJSONDepth      = 64
 )
 
 var (
@@ -229,8 +230,8 @@ func requireAppJSONEOF(decoder *json.Decoder) error {
 
 func rejectDuplicateAppJSONKeys(data []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	var walk func() error
-	walk = func() error {
+	var walk func(int) error
+	walk = func(depth int) error {
 		token, err := decoder.Token()
 		if err != nil {
 			return err
@@ -238,6 +239,9 @@ func rejectDuplicateAppJSONKeys(data []byte) error {
 		delim, isDelim := token.(json.Delim)
 		if !isDelim {
 			return nil
+		}
+		if depth >= maxAppJSONDepth {
+			return fmt.Errorf("app spec JSON exceeds the maximum nesting depth of %d", maxAppJSONDepth)
 		}
 		switch delim {
 		case '{':
@@ -255,7 +259,7 @@ func rejectDuplicateAppJSONKeys(data []byte) error {
 					return fmt.Errorf("duplicate app spec key %q", key)
 				}
 				seen[key] = struct{}{}
-				if err := walk(); err != nil {
+				if err := walk(depth + 1); err != nil {
 					return err
 				}
 			}
@@ -268,7 +272,7 @@ func rejectDuplicateAppJSONKeys(data []byte) error {
 			}
 		case '[':
 			for decoder.More() {
-				if err := walk(); err != nil {
+				if err := walk(depth + 1); err != nil {
 					return err
 				}
 			}
@@ -284,7 +288,7 @@ func rejectDuplicateAppJSONKeys(data []byte) error {
 		}
 		return nil
 	}
-	if err := walk(); err != nil {
+	if err := walk(0); err != nil {
 		return err
 	}
 	return requireAppJSONEOF(decoder)
@@ -409,6 +413,28 @@ func validateRawAppItemObjects(field string, value any, allowed ...string) error
 func normalizeAppSpec(spec AppSpec) AppSpec {
 	if spec.Theme == "" {
 		spec.Theme = "light"
+	}
+	if strings.TrimSpace(spec.Description) == "" {
+		spec.Description = ""
+	}
+	for blockIndex := range spec.Blocks {
+		block := &spec.Blocks[blockIndex]
+		if strings.TrimSpace(block.Title) == "" {
+			block.Title = ""
+		}
+		for itemIndex := range block.MetricItems {
+			if strings.TrimSpace(block.MetricItems[itemIndex].Detail) == "" {
+				block.MetricItems[itemIndex].Detail = ""
+			}
+		}
+		for itemIndex := range block.CardItems {
+			if strings.TrimSpace(block.CardItems[itemIndex].Body) == "" {
+				block.CardItems[itemIndex].Body = ""
+			}
+			if strings.TrimSpace(block.CardItems[itemIndex].Meta) == "" {
+				block.CardItems[itemIndex].Meta = ""
+			}
+		}
 	}
 	return spec
 }

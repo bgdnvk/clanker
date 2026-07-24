@@ -93,6 +93,18 @@ func TestDecodeAppSpecJSONRejectsUnknownDuplicateNullAndWrongTypes(t *testing.T)
 	}
 }
 
+func TestRejectDuplicateAppJSONKeysBoundsNestingDepth(t *testing.T) {
+	atLimit := strings.Repeat("[", maxAppJSONDepth) + "0" + strings.Repeat("]", maxAppJSONDepth)
+	if err := rejectDuplicateAppJSONKeys([]byte(atLimit)); err != nil {
+		t.Fatalf("depth %d was rejected: %v", maxAppJSONDepth, err)
+	}
+	overLimit := "[" + atLimit + "]"
+	if err := rejectDuplicateAppJSONKeys([]byte(overLimit)); err == nil ||
+		!strings.Contains(err.Error(), "maximum nesting depth") {
+		t.Fatalf("depth %d error = %v", maxAppJSONDepth+1, err)
+	}
+}
+
 func TestDecodeAppSpecJSONRejectsInvalidUTF8AndOversizedRawInput(t *testing.T) {
 	invalidUTF8 := []byte(`{"schemaVersion":1,"title":"x","blocks":[{"type":"text","body":"`)
 	invalidUTF8 = append(invalidUTF8, 0xff)
@@ -252,6 +264,35 @@ func TestCanonicalAppSpecJSONUsesStableSafeEncoding(t *testing.T) {
 	want := `{"blocks":[{"body":"A&B","type":"text"}],"schemaVersion":1,"theme":"light","title":"<CRM>&"}`
 	if string(got) != want {
 		t.Fatalf("canonical JSON = %s, want %s", got, want)
+	}
+}
+
+func TestDecodeAppSpecJSONCanonicalizesWhitespaceOnlyOptionalStringsToAbsent(t *testing.T) {
+	spec, err := DecodeAppSpecJSON([]byte(`{
+		"schemaVersion": 1,
+		"title": "Whitespace",
+		"description": "   ",
+		"blocks": [
+			{"type":"metrics","title":"  ","items":[{"label":"A","value":"1","detail":" \t "}]},
+			{"type":"cards","items":[{"title":"Card","body":" \n ","meta":"  "}]}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("DecodeAppSpecJSON: %v", err)
+	}
+	if spec.Description != "" || spec.Blocks[0].Title != "" ||
+		spec.Blocks[0].MetricItems[0].Detail != "" ||
+		spec.Blocks[1].CardItems[0].Body != "" ||
+		spec.Blocks[1].CardItems[0].Meta != "" {
+		t.Fatalf("whitespace-only optional strings were retained: %#v", spec)
+	}
+	canonical, err := canonicalAppSpecJSON(spec)
+	if err != nil {
+		t.Fatalf("canonicalAppSpecJSON: %v", err)
+	}
+	want := `{"blocks":[{"items":[{"label":"A","value":"1"}],"type":"metrics"},{"items":[{"title":"Card"}],"type":"cards"}],"schemaVersion":1,"theme":"light","title":"Whitespace"}`
+	if string(canonical) != want {
+		t.Fatalf("canonical JSON = %s, want %s", canonical, want)
 	}
 }
 
