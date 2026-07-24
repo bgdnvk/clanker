@@ -22,9 +22,9 @@ func TestAppsClientLifecycleRoutesAndPrivatePayloads(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method + " " + r.URL.Path {
-		case "GET /api/apps":
+		case "GET /api/v1/apps":
 			_, _ = w.Write([]byte(`{"ok":true,"apps":[]}`))
-		case "POST /api/apps":
+		case "POST /api/v1/apps":
 			if got := r.Header.Get("Idempotency-Key"); got != "create-key" {
 				t.Errorf("create Idempotency-Key = %q", got)
 			}
@@ -32,14 +32,14 @@ func TestAppsClientLifecycleRoutesAndPrivatePayloads(t *testing.T) {
 				t.Errorf("decode create payload: %v", err)
 			}
 			_, _ = w.Write([]byte(`{"ok":true,"app":{"id":"app_123","visibility":"private"}}`))
-		case "GET /api/apps/app_123":
+		case "GET /api/v1/apps/app_123":
 			_, _ = w.Write([]byte(`{"ok":true,"app":{"id":"app_123"}}`))
-		case "DELETE /api/apps/app_123":
+		case "DELETE /api/v1/apps/app_123":
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"ok":false,"error":"app not found"}`))
-		case "GET /api/apps/app_123/deployments":
+		case "GET /api/v1/apps/app_123/deployments":
 			_, _ = w.Write([]byte(`{"ok":true,"deployments":[]}`))
-		case "POST /api/apps/app_123/deployments":
+		case "POST /api/v1/apps/app_123/deployments":
 			if got := r.Header.Get("Idempotency-Key"); got != "deployment-key" {
 				t.Errorf("deployment Idempotency-Key = %q", got)
 			}
@@ -51,9 +51,9 @@ func TestAppsClientLifecycleRoutesAndPrivatePayloads(t *testing.T) {
 				t.Errorf("decode deployment payload: %v", err)
 			}
 			_, _ = w.Write([]byte(`{"ok":true,"deployment":{"id":"dep_123","status":"private"}}`))
-		case "POST /api/apps/app_123/deployments/dep_123/activate":
+		case "POST /api/v1/apps/app_123/deployments/dep_123/activate":
 			_, _ = w.Write([]byte(`{"ok":true,"publicUrl":"https://apps.example/app_123"}`))
-		case "POST /api/apps/app_123/unpublish":
+		case "POST /api/v1/apps/app_123/unpublish":
 			_, _ = w.Write([]byte(`{"ok":true,"published":false}`))
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -63,7 +63,7 @@ func TestAppsClientLifecycleRoutesAndPrivatePayloads(t *testing.T) {
 	defer server.Close()
 
 	client := NewAppsClient(AppsClientOptions{
-		BaseURL:    server.URL + "/api",
+		BaseURL:    server.URL + "/api/",
 		AccountKey: "account-token",
 		HTTPClient: server.Client(),
 	})
@@ -154,14 +154,14 @@ func TestAppsClientLifecycleRoutesAndPrivatePayloads(t *testing.T) {
 	}
 
 	want := []string{
-		"GET /api/apps",
-		"POST /api/apps",
-		"GET /api/apps/app_123",
-		"GET /api/apps/app_123/deployments",
-		"POST /api/apps/app_123/deployments",
-		"POST /api/apps/app_123/deployments/dep_123/activate",
-		"POST /api/apps/app_123/unpublish",
-		"DELETE /api/apps/app_123",
+		"GET /api/v1/apps",
+		"POST /api/v1/apps",
+		"GET /api/v1/apps/app_123",
+		"GET /api/v1/apps/app_123/deployments",
+		"POST /api/v1/apps/app_123/deployments",
+		"POST /api/v1/apps/app_123/deployments/dep_123/activate",
+		"POST /api/v1/apps/app_123/unpublish",
+		"DELETE /api/v1/apps/app_123",
 	}
 	if len(requests) != len(want) {
 		t.Fatalf("requests = %#v, want %#v", requests, want)
@@ -170,6 +170,62 @@ func TestAppsClientLifecycleRoutesAndPrivatePayloads(t *testing.T) {
 		if requests[index] != want[index] {
 			t.Fatalf("request[%d] = %q, want %q", index, requests[index], want[index])
 		}
+	}
+}
+
+func TestAppsClientBaseURLNormalizationKeepsStableAPIBase(t *testing.T) {
+	for _, name := range []string{
+		"CLANKER_CLOUD_APPS_API_BASE_URL",
+		"CLANKER_CLOUD_SANDBOX_API_BASE_URL",
+		"CLANKER_SANDBOX_API_BASE_URL",
+	} {
+		t.Setenv(name, "")
+	}
+
+	tests := []struct {
+		name    string
+		baseURL string
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "default production base",
+			want: DefaultCloudAPIBaseURL,
+		},
+		{
+			name:    "production trailing slash",
+			baseURL: "https://clankercloud.ai/api/",
+			want:    DefaultCloudAPIBaseURL,
+		},
+		{
+			name:    "host gets stable api prefix",
+			baseURL: "https://clankercloud.ai",
+			want:    DefaultCloudAPIBaseURL,
+		},
+		{
+			name:    "version is not part of base",
+			baseURL: "https://clankercloud.ai/api/v1",
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := NewAppsClient(AppsClientOptions{BaseURL: test.baseURL})
+			got, err := client.BaseURL()
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("BaseURL() = %q, want error", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("BaseURL(): %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("BaseURL() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 

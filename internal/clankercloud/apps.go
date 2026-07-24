@@ -15,6 +15,7 @@ import (
 var appIdempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`)
 
 const (
+	appsAPIPath                      = "/v1/apps"
 	MaxAppHTMLBytes                  = 2 << 20
 	MaxAppAgenticDailyRequests       = 25
 	MaxAppAgenticInputCharacters     = 16000
@@ -100,7 +101,7 @@ func (c *AppsClient) AccountKey() string {
 }
 
 func (c *AppsClient) ListApps(ctx context.Context) (*AppsAPIResult, error) {
-	return c.callJSON(ctx, http.MethodGet, "/apps", nil, "")
+	return c.callJSON(ctx, http.MethodGet, appsAPIPath, nil, "")
 }
 
 func (c *AppsClient) CreateApp(ctx context.Context, payload AppCreateRequest) (*AppsAPIResult, error) {
@@ -114,7 +115,7 @@ func (c *AppsClient) CreateApp(ctx context.Context, payload AppCreateRequest) (*
 	payload.Name = strings.TrimSpace(payload.Name)
 	payload.Description = strings.TrimSpace(payload.Description)
 	payload.ProjectID = strings.TrimSpace(payload.ProjectID)
-	return c.callJSON(ctx, http.MethodPost, "/apps", payload, idempotencyKey)
+	return c.callJSON(ctx, http.MethodPost, appsAPIPath, payload, idempotencyKey)
 }
 
 func (c *AppsClient) GetApp(ctx context.Context, appID string) (*AppsAPIResult, error) {
@@ -122,7 +123,7 @@ func (c *AppsClient) GetApp(ctx context.Context, appID string) (*AppsAPIResult, 
 	if err != nil {
 		return nil, err
 	}
-	return c.callJSON(ctx, http.MethodGet, "/apps/"+escaped, nil, "")
+	return c.callJSON(ctx, http.MethodGet, appsAPIPath+"/"+escaped, nil, "")
 }
 
 func (c *AppsClient) DeleteApp(ctx context.Context, appID string) (*AppsAPIResult, error) {
@@ -130,7 +131,7 @@ func (c *AppsClient) DeleteApp(ctx context.Context, appID string) (*AppsAPIResul
 	if err != nil {
 		return nil, err
 	}
-	return c.callJSON(ctx, http.MethodDelete, "/apps/"+escaped, nil, "")
+	return c.callJSON(ctx, http.MethodDelete, appsAPIPath+"/"+escaped, nil, "")
 }
 
 func (c *AppsClient) ListDeployments(ctx context.Context, appID string) (*AppsAPIResult, error) {
@@ -138,7 +139,7 @@ func (c *AppsClient) ListDeployments(ctx context.Context, appID string) (*AppsAP
 	if err != nil {
 		return nil, err
 	}
-	return c.callJSON(ctx, http.MethodGet, "/apps/"+escaped+"/deployments", nil, "")
+	return c.callJSON(ctx, http.MethodGet, appsAPIPath+"/"+escaped+"/deployments", nil, "")
 }
 
 func (c *AppsClient) CreateDeployment(ctx context.Context, appID string, payload AppDeploymentCreateRequest) (*AppsAPIResult, error) {
@@ -182,7 +183,7 @@ func (c *AppsClient) CreateDeployment(ctx context.Context, appID string, payload
 	if err != nil {
 		return nil, err
 	}
-	return c.callJSON(ctx, http.MethodPost, "/apps/"+escaped+"/deployments", payload, idempotencyKey)
+	return c.callJSON(ctx, http.MethodPost, appsAPIPath+"/"+escaped+"/deployments", payload, idempotencyKey)
 }
 
 // ValidateAppAgenticConfig mirrors the hosted Apps launch contract and returns
@@ -240,7 +241,7 @@ func (c *AppsClient) ActivateDeployment(ctx context.Context, appID string, deplo
 	if err != nil {
 		return nil, err
 	}
-	path := "/apps/" + escapedAppID + "/deployments/" + escapedDeploymentID + "/activate"
+	path := appsAPIPath + "/" + escapedAppID + "/deployments/" + escapedDeploymentID + "/activate"
 	return c.callJSON(ctx, http.MethodPost, path, map[string]any{}, "")
 }
 
@@ -249,7 +250,7 @@ func (c *AppsClient) UnpublishApp(ctx context.Context, appID string) (*AppsAPIRe
 	if err != nil {
 		return nil, err
 	}
-	return c.callJSON(ctx, http.MethodPost, "/apps/"+escaped+"/unpublish", map[string]any{}, "")
+	return c.callJSON(ctx, http.MethodPost, appsAPIPath+"/"+escaped+"/unpublish", map[string]any{}, "")
 }
 
 func (c *AppsClient) callJSON(ctx context.Context, method string, path string, body any, idempotencyKey string) (*AppsAPIResult, error) {
