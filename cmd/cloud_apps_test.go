@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +13,158 @@ import (
 
 	"github.com/bgdnvk/clanker/internal/clankercloud"
 )
+
+func TestCloudAppsPublishAndShareActivateAndSurfacePublicURL(t *testing.T) {
+	for _, alias := range []string{"publish", "share"} {
+		t.Run(alias, func(t *testing.T) {
+			var requestMethod string
+			var requestPath string
+			httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				requestMethod = request.Method
+				requestPath = request.URL.Path
+				return testHTTPResponse(http.StatusOK, `{
+					"ok":true,
+					"app":{
+						"id":"app_123",
+						"publicUrl":"https://apps.example.test/a/team-crm"
+					},
+					"deployment":{"id":"dep_123"}
+				}`), nil
+			})}
+			client := func() *clankercloud.AppsClient {
+				return clankercloud.NewAppsClient(clankercloud.AppsClientOptions{
+					BaseURL:    "http://127.0.0.1:8080/api",
+					AccountKey: "account-token",
+					HTTPClient: httpClient,
+				})
+			}
+			command := newCloudAppsCommand(client)
+			command.SilenceErrors = true
+			command.SilenceUsage = true
+			command.SetArgs([]string{alias, "app_123", "dep_123"})
+			var stderr bytes.Buffer
+			command.SetErr(&stderr)
+
+			stdout, err := captureCloudAppsStdout(t, command.Execute)
+			if err != nil {
+				t.Fatalf("%s command: %v", alias, err)
+			}
+			if requestMethod != http.MethodPost ||
+				requestPath != "/api/v1/apps/app_123/deployments/dep_123/activate" {
+				t.Fatalf("%s request = %s %s", alias, requestMethod, requestPath)
+			}
+			if got := stderr.String(); got != "Public URL: https://apps.example.test/a/team-crm\n" {
+				t.Fatalf("%s stderr = %q", alias, got)
+			}
+
+			var result clankercloud.AppsAPIResult
+			if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+				t.Fatalf("%s stdout is not compatible JSON: %v\n%s", alias, err, stdout)
+			}
+			body, ok := result.Body.(map[string]any)
+			app, appOK := body["app"].(map[string]any)
+			if !ok || !appOK || app["publicUrl"] != "https://apps.example.test/a/team-crm" {
+				t.Fatalf("%s JSON body = %#v", alias, result.Body)
+			}
+		})
+	}
+}
+
+func TestCloudAppsUnpublishCommandUsesLifecycleRoute(t *testing.T) {
+	var requestMethod string
+	var requestPath string
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requestMethod = request.Method
+		requestPath = request.URL.Path
+		return testHTTPResponse(http.StatusOK, `{"ok":true,"published":false}`), nil
+	})}
+	command := newCloudAppsCommand(func() *clankercloud.AppsClient {
+		return clankercloud.NewAppsClient(clankercloud.AppsClientOptions{
+			BaseURL:    "http://127.0.0.1:8080/api",
+			AccountKey: "account-token",
+			HTTPClient: httpClient,
+		})
+	})
+	command.SilenceErrors = true
+	command.SilenceUsage = true
+	command.SetArgs([]string{"unpublish", "app_123"})
+
+	stdout, err := captureCloudAppsStdout(t, command.Execute)
+	if err != nil {
+		t.Fatalf("unpublish command: %v", err)
+	}
+	if requestMethod != http.MethodPost || requestPath != "/api/v1/apps/app_123/unpublish" {
+		t.Fatalf("unpublish request = %s %s", requestMethod, requestPath)
+	}
+	var result clankercloud.AppsAPIResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("unpublish stdout is not compatible JSON: %v\n%s", err, stdout)
+	}
+}
+
+func TestCloudAppsDeleteCommandIsPermanentlyRetryable(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "deleted", status: http.StatusNoContent},
+		{name: "already deleted", status: http.StatusNotFound, body: `{"ok":false,"error":"app not found"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var requestMethod string
+			var requestPath string
+			httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				requestMethod = request.Method
+				requestPath = request.URL.Path
+				return testHTTPResponse(test.status, test.body), nil
+			})}
+			command := newCloudAppsCommand(func() *clankercloud.AppsClient {
+				return clankercloud.NewAppsClient(clankercloud.AppsClientOptions{
+					BaseURL:    "http://127.0.0.1:8080/api",
+					AccountKey: "account-token",
+					HTTPClient: httpClient,
+				})
+			})
+			command.SilenceErrors = true
+			command.SilenceUsage = true
+			command.SetArgs([]string{"delete", "app_123"})
+
+			stdout, err := captureCloudAppsStdout(t, command.Execute)
+			if err != nil {
+				t.Fatalf("delete command: %v", err)
+			}
+			if requestMethod != http.MethodDelete || requestPath != "/api/v1/apps/app_123" {
+				t.Fatalf("delete request = %s %s", requestMethod, requestPath)
+			}
+			var result clankercloud.AppsAPIResult
+			if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+				t.Fatalf("delete stdout is not compatible JSON: %v\n%s", err, stdout)
+			}
+			if result.Status != test.status {
+				t.Fatalf("delete status = %d, want %d", result.Status, test.status)
+			}
+		})
+	}
+}
+
+func TestCloudAppsParentRejectsUnknownBuildInsteadOfReturningHelpSuccess(t *testing.T) {
+	command := newCloudAppsCommand(func() *clankercloud.AppsClient {
+		t.Fatal("unknown command attempted an API request")
+		return nil
+	})
+	command.SilenceErrors = true
+	command.SilenceUsage = true
+	command.SetArgs([]string{"build"})
+
+	err := command.Execute()
+	if err == nil {
+		t.Fatal("unknown build command returned success")
+	}
+	if !strings.Contains(err.Error(), `unknown command "build"`) {
+		t.Fatalf("unknown build error = %v", err)
+	}
+}
 
 func TestCloudAppsCreateGeneratesCanonicalIdempotencyHeader(t *testing.T) {
 	var idempotencyKey string
@@ -445,4 +599,31 @@ func TestReadBoundedAppFileWithLimitRequiresRegularBoundedInput(t *testing.T) {
 		!strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("directory error = %v, want non-regular-file rejection", err)
 	}
+}
+
+func captureCloudAppsStdout(t *testing.T, run func() error) (string, error) {
+	t.Helper()
+
+	previous := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("capture stdout: %v", err)
+	}
+	os.Stdout = writer
+	defer func() {
+		os.Stdout = previous
+		_ = reader.Close()
+		_ = writer.Close()
+	}()
+
+	runErr := run()
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close captured stdout: %v", err)
+	}
+	os.Stdout = previous
+	content, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read captured stdout: %v", err)
+	}
+	return string(content), runErr
 }

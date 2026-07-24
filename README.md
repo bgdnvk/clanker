@@ -183,10 +183,12 @@ browser storage, external resources, downloads, navigation, or API calls. The
 document runs as supplied at its own public app URL; network calls follow normal
 browser and API CORS behavior.
 
-Creating an app or deployment keeps it private. `activate` publishes one
-deployment and returns its shareable link. `unpublish` removes public access
-without removing retained versions. `delete` permanently disposes of the app,
-all versions, and hosted artifacts.
+Creating an app or deployment keeps it private. `activate` (also available as
+`publish` or `share`) publishes one deployment and returns its shareable link.
+The full JSON result stays available while a concise `Public URL:` line makes
+the link easy to copy. `unpublish` removes public access without removing
+retained versions. `delete` permanently disposes of the app, all versions, and
+hosted artifacts.
 
 For example, save a complete app as `index.html`, then deploy it:
 
@@ -207,7 +209,7 @@ export CLANKER_CLOUD_API_KEY="..."
 clanker cloud apps create "Team CRM" --description "Shared contact workspace"
 clanker cloud apps deploy APP_ID --html-file ./index.html
 clanker cloud apps deployments APP_ID
-clanker cloud apps activate APP_ID DEPLOYMENT_ID
+clanker cloud apps share APP_ID DEPLOYMENT_ID
 clanker cloud apps unpublish APP_ID
 clanker cloud apps delete APP_ID
 ```

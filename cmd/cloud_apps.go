@@ -46,6 +46,13 @@ func newCloudAppsCmd() *cobra.Command {
 		})
 	}
 
+	cmd := newCloudAppsCommand(client)
+	cmd.PersistentFlags().StringVar(&apiBaseURL, "api-base-url", "", "Clanker Cloud API base URL (HTTPS, or loopback HTTP for development)")
+	cmd.PersistentFlags().StringVar(&apiKey, "api-key", "", "Clanker Cloud account API key (prefer CLANKER_CLOUD_API_KEY)")
+	return cmd
+}
+
+func newCloudAppsCommand(client func() *clankercloud.AppsClient) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "apps",
 		Aliases: []string{"app"},
@@ -57,9 +64,11 @@ or use declarative appSpec v1 data for a fixed-renderer snapshot. Creating an
 app or deployment is private. Activate a deployment to get a public link,
 unpublish it to remove public access, or delete the app and all of its retained
 deployments.`),
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return cmd.Help()
+		},
 	}
-	cmd.PersistentFlags().StringVar(&apiBaseURL, "api-base-url", "", "Clanker Cloud API base URL (HTTPS, or loopback HTTP for development)")
-	cmd.PersistentFlags().StringVar(&apiKey, "api-key", "", "Clanker Cloud account API key (prefer CLANKER_CLOUD_API_KEY)")
 
 	cmd.AddCommand(newCloudAppsListCmd(client))
 	cmd.AddCommand(newCloudAppsCreateCmd(client))
@@ -207,12 +216,12 @@ clanker cloud apps deploy APP_ID --app-spec-file ./app-spec.json`),
 func newCloudAppsActivateCmd(client func() *clankercloud.AppsClient) *cobra.Command {
 	return &cobra.Command{
 		Use:     "activate APP_ID DEPLOYMENT_ID",
-		Aliases: []string{"publish", "rollback"},
+		Aliases: []string{"publish", "share", "rollback"},
 		Short:   "Make one reviewed deployment public",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			result, err := client().ActivateDeployment(cmd.Context(), args[0], args[1])
-			return printAppsResult(result, err)
+			return printAppsActivationResult(cmd, result, err)
 		},
 	}
 }
@@ -461,6 +470,33 @@ func printAppsResult(result *clankercloud.AppsAPIResult, err error) error {
 		return err
 	}
 	return clankercloud.AppsResultStatusError(result)
+}
+
+func printAppsActivationResult(cmd *cobra.Command, result *clankercloud.AppsAPIResult, err error) error {
+	if err := printAppsResult(result, err); err != nil {
+		return err
+	}
+	if publicURL := appPublicURL(result); publicURL != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Public URL: %s\n", publicURL)
+	}
+	return nil
+}
+
+func appPublicURL(result *clankercloud.AppsAPIResult) string {
+	if result == nil {
+		return ""
+	}
+	body, ok := result.Body.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if app, ok := body["app"].(map[string]any); ok {
+		if publicURL, ok := app["publicUrl"].(string); ok {
+			return strings.TrimSpace(publicURL)
+		}
+	}
+	publicURL, _ := body["publicUrl"].(string)
+	return strings.TrimSpace(publicURL)
 }
 
 func init() {
