@@ -11,67 +11,55 @@ import (
 )
 
 type cloudSandboxCreateArgs struct {
-	Name       string         `json:"name,omitempty" jsonschema:"description=Sandbox name; defaults to agent-sandbox."`
-	Agent      string         `json:"agent,omitempty" jsonschema:"description=Agent image: clanker-cli, codex, claude-code, openclaw, hermes, empty, or clanker-vision."`
-	Region     string         `json:"region,omitempty" jsonschema:"description=Sandbox region; defaults to earth."`
-	Metadata   map[string]any `json:"metadata,omitempty" jsonschema:"description=Optional non-secret orchestration metadata."`
-	APIBaseURL string         `json:"apiBaseUrl,omitempty" jsonschema:"description=Sandbox API base URL; defaults to CLANKER_CLOUD_SANDBOX_API_BASE_URL or https://clankercloud.ai/api."`
-	APIKey     string         `json:"apiKey,omitempty" jsonschema:"description=Clanker Cloud account API key; defaults to CLANKER_CLOUD_API_KEY."`
+	Name     string         `json:"name,omitempty" jsonschema:"description=Sandbox name; defaults to agent-sandbox."`
+	Agent    string         `json:"agent,omitempty" jsonschema:"description=Agent image: clanker-cli, codex, claude-code, openclaw, hermes, empty, or clanker-vision."`
+	Region   string         `json:"region,omitempty" jsonschema:"description=Sandbox region; defaults to earth."`
+	Metadata map[string]any `json:"metadata,omitempty" jsonschema:"description=Optional non-secret orchestration metadata."`
 }
 
-type cloudSandboxListArgs struct {
-	APIBaseURL string `json:"apiBaseUrl,omitempty" jsonschema:"description=Sandbox API base URL."`
-	APIKey     string `json:"apiKey,omitempty" jsonschema:"description=Clanker Cloud account API key; defaults to CLANKER_CLOUD_API_KEY."`
-}
+type cloudSandboxListArgs struct{}
 
 type cloudSandboxIDArgs struct {
-	SandboxID    string `json:"sandboxId" jsonschema:"description=Sandbox id,required"`
-	APIBaseURL   string `json:"apiBaseUrl,omitempty" jsonschema:"description=Sandbox API base URL."`
-	APIKey       string `json:"apiKey,omitempty" jsonschema:"description=Clanker Cloud account API key; defaults to CLANKER_CLOUD_API_KEY."`
-	SandboxToken string `json:"sandboxToken,omitempty" jsonschema:"description=Sandbox token returned by create; defaults to CLANKER_SANDBOX_TOKEN."`
+	SandboxID string `json:"sandboxId" jsonschema:"description=Sandbox id,required"`
 }
 
 type cloudSandboxCommandArgs struct {
 	SandboxID      string            `json:"sandboxId" jsonschema:"description=Sandbox id,required"`
 	Command        string            `json:"command" jsonschema:"description=Shell command to run in the sandbox,required"`
+	WorkingDir     string            `json:"workingDir,omitempty" jsonschema:"description=Optional sandbox working directory such as /workspace or /data."`
 	TimeoutSeconds int               `json:"timeoutSeconds,omitempty" jsonschema:"description=Optional command timeout in seconds."`
 	Env            map[string]string `json:"env,omitempty" jsonschema:"description=Optional non-secret environment variables for the command."`
-	APIBaseURL     string            `json:"apiBaseUrl,omitempty" jsonschema:"description=Sandbox API base URL."`
-	APIKey         string            `json:"apiKey,omitempty" jsonschema:"description=Clanker Cloud account API key; defaults to CLANKER_CLOUD_API_KEY."`
-	SandboxToken   string            `json:"sandboxToken,omitempty" jsonschema:"description=Sandbox token returned by create; defaults to CLANKER_SANDBOX_TOKEN."`
 }
 
 type cloudSandboxMessageArgs struct {
-	SandboxID    string         `json:"sandboxId" jsonschema:"description=Sandbox id,required"`
-	Role         string         `json:"role,omitempty" jsonschema:"description=Message role; defaults to user."`
-	Content      string         `json:"content" jsonschema:"description=Message content to send to the sandbox agent,required"`
-	Metadata     map[string]any `json:"metadata,omitempty" jsonschema:"description=Optional non-secret orchestration metadata."`
-	APIBaseURL   string         `json:"apiBaseUrl,omitempty" jsonschema:"description=Sandbox API base URL."`
-	APIKey       string         `json:"apiKey,omitempty" jsonschema:"description=Clanker Cloud account API key; defaults to CLANKER_CLOUD_API_KEY."`
-	SandboxToken string         `json:"sandboxToken,omitempty" jsonschema:"description=Sandbox token returned by create; defaults to CLANKER_SANDBOX_TOKEN."`
+	SandboxID string         `json:"sandboxId" jsonschema:"description=Sandbox id,required"`
+	Role      string         `json:"role,omitempty" jsonschema:"description=Message role; defaults to user."`
+	Content   string         `json:"content" jsonschema:"description=Message content to send to the sandbox agent,required"`
+	Metadata  map[string]any `json:"metadata,omitempty" jsonschema:"description=Optional non-secret orchestration metadata."`
 }
 
 type cloudSandboxTaskArgs struct {
-	Task       string         `json:"task" jsonschema:"description=Task to send to the new sandbox agent,required"`
-	Name       string         `json:"name,omitempty" jsonschema:"description=Sandbox name; defaults to agent-runner."`
-	Agent      string         `json:"agent,omitempty" jsonschema:"description=Agent image; defaults to clanker-cli."`
-	Region     string         `json:"region,omitempty" jsonschema:"description=Sandbox region; defaults to earth."`
-	Metadata   map[string]any `json:"metadata,omitempty" jsonschema:"description=Optional non-secret orchestration metadata."`
-	APIBaseURL string         `json:"apiBaseUrl,omitempty" jsonschema:"description=Sandbox API base URL."`
-	APIKey     string         `json:"apiKey,omitempty" jsonschema:"description=Clanker Cloud account API key; defaults to CLANKER_CLOUD_API_KEY."`
+	Task     string         `json:"task" jsonschema:"description=Task to send to the new sandbox agent,required"`
+	Name     string         `json:"name,omitempty" jsonschema:"description=Sandbox name; defaults to agent-runner."`
+	Agent    string         `json:"agent,omitempty" jsonschema:"description=Agent image; defaults to clanker-cli."`
+	Region   string         `json:"region,omitempty" jsonschema:"description=Sandbox region; defaults to earth."`
+	Metadata map[string]any `json:"metadata,omitempty" jsonschema:"description=Optional non-secret orchestration metadata."`
 }
 
 func registerCloudSandboxMCPTools(server *mcptransport.MCPServer) {
 	server.AddTool(
 		mcp.NewTool(
 			"clanker_cloud_create_sandbox",
-			mcp.WithDescription("Create an anonymous or account-owned hosted Clanker Cloud sandbox. The response includes sandboxToken; keep it out of user-visible transcripts unless the user explicitly asks."),
+			mcp.WithDescription("Create an account-owned hosted Clanker Cloud sandbox using trusted server configuration. The sandbox remains allocated until it is explicitly deleted."),
 			mcp.WithInputSchema[cloudSandboxCreateArgs](),
 			mcp.WithDestructiveHintAnnotation(false),
 			mcp.WithIdempotentHintAnnotation(false),
 		),
 		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args cloudSandboxCreateArgs) (*mcp.CallToolResult, error) {
-			client := newMCPSandboxClient(args.APIBaseURL, args.APIKey, "")
+			client := newMCPSandboxClient()
+			if client.AccountKey() == "" {
+				return mcp.NewToolResultError("CLANKER_CLOUD_API_KEY is required so the sandbox remains account-owned and cleanup can always be retried"), nil
+			}
 			result, err := client.Create(ctx, clankercloud.SandboxCreateRequest{
 				Name:     args.Name,
 				Agent:    args.Agent,
@@ -90,7 +78,7 @@ func registerCloudSandboxMCPTools(server *mcptransport.MCPServer) {
 			mcp.WithReadOnlyHintAnnotation(true),
 		),
 		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args cloudSandboxListArgs) (*mcp.CallToolResult, error) {
-			result, err := newMCPSandboxClient(args.APIBaseURL, args.APIKey, "").List(ctx)
+			result, err := newMCPSandboxClient().List(ctx)
 			return mcpSandboxResult(result, err)
 		}),
 	)
@@ -106,7 +94,7 @@ func registerCloudSandboxMCPTools(server *mcptransport.MCPServer) {
 			if strings.TrimSpace(args.SandboxID) == "" {
 				return mcp.NewToolResultError("sandboxId is required"), nil
 			}
-			result, err := newMCPSandboxClient(args.APIBaseURL, args.APIKey, args.SandboxToken).Inspect(ctx, args.SandboxID)
+			result, err := newMCPSandboxClient().Inspect(ctx, args.SandboxID)
 			return mcpSandboxResult(result, err)
 		}),
 	)
@@ -117,13 +105,13 @@ func registerCloudSandboxMCPTools(server *mcptransport.MCPServer) {
 			mcp.WithDescription("Delete one hosted Clanker Cloud sandbox by id. Use only after user approval if the sandbox still contains needed work."),
 			mcp.WithInputSchema[cloudSandboxIDArgs](),
 			mcp.WithDestructiveHintAnnotation(true),
-			mcp.WithIdempotentHintAnnotation(false),
+			mcp.WithIdempotentHintAnnotation(true),
 		),
 		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args cloudSandboxIDArgs) (*mcp.CallToolResult, error) {
 			if strings.TrimSpace(args.SandboxID) == "" {
 				return mcp.NewToolResultError("sandboxId is required"), nil
 			}
-			result, err := newMCPSandboxClient(args.APIBaseURL, args.APIKey, args.SandboxToken).Delete(ctx, args.SandboxID)
+			result, err := newMCPSandboxClient().Delete(ctx, args.SandboxID)
 			return mcpSandboxResult(result, err)
 		}),
 	)
@@ -131,9 +119,9 @@ func registerCloudSandboxMCPTools(server *mcptransport.MCPServer) {
 	server.AddTool(
 		mcp.NewTool(
 			"clanker_cloud_run_sandbox_command",
-			mcp.WithDescription("Run a shell command in a hosted Clanker Cloud sandbox. Prefer read-only commands unless the user has approved side effects."),
+			mcp.WithDescription("Run a shell command in a hosted Clanker Cloud sandbox. Shell commands may change or delete data and require appropriate user authorization."),
 			mcp.WithInputSchema[cloudSandboxCommandArgs](),
-			mcp.WithDestructiveHintAnnotation(false),
+			mcp.WithDestructiveHintAnnotation(true),
 		),
 		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args cloudSandboxCommandArgs) (*mcp.CallToolResult, error) {
 			if strings.TrimSpace(args.SandboxID) == "" {
@@ -142,8 +130,9 @@ func registerCloudSandboxMCPTools(server *mcptransport.MCPServer) {
 			if strings.TrimSpace(args.Command) == "" {
 				return mcp.NewToolResultError("command is required"), nil
 			}
-			result, err := newMCPSandboxClient(args.APIBaseURL, args.APIKey, args.SandboxToken).Command(ctx, args.SandboxID, clankercloud.SandboxCommandRequest{
+			result, err := newMCPSandboxClient().Command(ctx, args.SandboxID, clankercloud.SandboxCommandRequest{
 				Command:        args.Command,
+				WorkingDir:     args.WorkingDir,
 				TimeoutSeconds: args.TimeoutSeconds,
 				Env:            args.Env,
 			})
@@ -154,9 +143,9 @@ func registerCloudSandboxMCPTools(server *mcptransport.MCPServer) {
 	server.AddTool(
 		mcp.NewTool(
 			"clanker_cloud_send_sandbox_message",
-			mcp.WithDescription("Send a message to a hosted Clanker Cloud sandbox agent."),
+			mcp.WithDescription("Send a message to a hosted Clanker Cloud sandbox agent. Agent messages may cause side effects in the sandbox."),
 			mcp.WithInputSchema[cloudSandboxMessageArgs](),
-			mcp.WithDestructiveHintAnnotation(false),
+			mcp.WithDestructiveHintAnnotation(true),
 		),
 		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args cloudSandboxMessageArgs) (*mcp.CallToolResult, error) {
 			if strings.TrimSpace(args.SandboxID) == "" {
@@ -165,7 +154,7 @@ func registerCloudSandboxMCPTools(server *mcptransport.MCPServer) {
 			if strings.TrimSpace(args.Content) == "" {
 				return mcp.NewToolResultError("content is required"), nil
 			}
-			result, err := newMCPSandboxClient(args.APIBaseURL, args.APIKey, args.SandboxToken).Message(ctx, args.SandboxID, clankercloud.SandboxMessageRequest{
+			result, err := newMCPSandboxClient().Message(ctx, args.SandboxID, clankercloud.SandboxMessageRequest{
 				Role:     args.Role,
 				Content:  args.Content,
 				Metadata: args.Metadata,
@@ -177,62 +166,55 @@ func registerCloudSandboxMCPTools(server *mcptransport.MCPServer) {
 	server.AddTool(
 		mcp.NewTool(
 			"clanker_cloud_run_sandbox_task",
-			mcp.WithDescription("Create a hosted Clanker Cloud sandbox and send the initial task message to its agent."),
+			mcp.WithDescription("Create an account-owned temporary Clanker Cloud sandbox, run one task, and dispose the sandbox before returning. Account ownership preserves a manual cleanup path if automatic disposal fails."),
 			mcp.WithInputSchema[cloudSandboxTaskArgs](),
-			mcp.WithDestructiveHintAnnotation(false),
+			mcp.WithDestructiveHintAnnotation(true),
 			mcp.WithIdempotentHintAnnotation(false),
 		),
 		mcp.NewTypedToolHandler(func(ctx context.Context, _ mcp.CallToolRequest, args cloudSandboxTaskArgs) (*mcp.CallToolResult, error) {
 			if strings.TrimSpace(args.Task) == "" {
 				return mcp.NewToolResultError("task is required"), nil
 			}
-			client := newMCPSandboxClient(args.APIBaseURL, args.APIKey, "")
-			metadata := map[string]any{
-				"source": "clanker-mcp",
-				"mode":   "sandbox-task",
+			client := newMCPSandboxClient()
+			if client.AccountKey() == "" {
+				return mcp.NewToolResultError("CLANKER_CLOUD_API_KEY is required so the temporary sandbox remains manageable if automatic cleanup fails"), nil
 			}
-			for key, value := range args.Metadata {
-				metadata[key] = value
-			}
-			created, err := client.Create(ctx, clankercloud.SandboxCreateRequest{
+			metadata := trustedMCPSandboxTaskMetadata(args.Metadata)
+			result, err := executeSandboxRun(ctx, client, clankercloud.SandboxCreateRequest{
 				Name:     firstNonEmpty(args.Name, "agent-runner"),
 				Agent:    args.Agent,
 				Region:   args.Region,
 				Metadata: metadata,
-			})
-			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			if !clankercloud.SandboxResultOK(created) {
-				return mcp.NewToolResultJSON(map[string]any{"created": created})
-			}
-			sandboxID := clankercloud.ExtractSandboxID(created.Body)
-			if sandboxID == "" {
-				return mcp.NewToolResultError("create response did not include a sandbox id"), nil
-			}
-			token := firstNonEmpty(clankercloud.ExtractSandboxToken(created.Body), client.SandboxToken(), client.AccountKey())
-			message, err := newMCPSandboxClient(args.APIBaseURL, args.APIKey, token).Message(ctx, sandboxID, clankercloud.SandboxMessageRequest{
+			}, clankercloud.SandboxMessageRequest{
 				Role:     "user",
 				Content:  args.Task,
 				Metadata: metadata,
-			})
+			}, false)
 			if err != nil {
-				return mcp.NewToolResultError(err.Error()), nil
+				result["ok"] = false
+				result["error"] = err.Error()
 			}
-			return mcp.NewToolResultJSON(map[string]any{
-				"created": created,
-				"message": message,
-			})
+			return mcp.NewToolResultJSON(result)
 		}),
 	)
 }
 
-func newMCPSandboxClient(apiBaseURL string, apiKey string, sandboxToken string) *clankercloud.SandboxClient {
-	return clankercloud.NewSandboxClient(clankercloud.SandboxClientOptions{
-		BaseURL:      apiBaseURL,
-		AccountKey:   apiKey,
-		SandboxToken: sandboxToken,
-	})
+func newMCPSandboxClient() *clankercloud.SandboxClient {
+	return clankercloud.NewSandboxClient(clankercloud.SandboxClientOptions{})
+}
+
+func trustedMCPSandboxTaskMetadata(input map[string]any) map[string]any {
+	metadata := make(map[string]any, len(input)+2)
+	for key, value := range input {
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "source", "mode":
+			continue
+		}
+		metadata[key] = value
+	}
+	metadata["source"] = "clanker-mcp"
+	metadata["mode"] = "sandbox-task"
+	return metadata
 }
 
 func mcpSandboxResult(result *clankercloud.SandboxAPIResult, err error) (*mcp.CallToolResult, error) {

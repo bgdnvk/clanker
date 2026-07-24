@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -27,7 +29,7 @@ func newCloudSandboxesCmd() *cobra.Command {
 		Use:     "sandboxes",
 		Aliases: []string{"sandbox"},
 		Short:   "Create and operate hosted Clanker Cloud sandboxes",
-		Long: strings.TrimSpace(`Create anonymous or account-owned Clanker Cloud sandboxes, then run commands or send task messages.
+		Long: strings.TrimSpace(`Create account-owned Clanker Cloud sandboxes, then run commands or send task messages. The run command also requires account ownership so a failed automatic cleanup can always be retried.
 
 The public sandbox API defaults to https://clankercloud.ai/api. Set CLANKER_CLOUD_API_KEY for account-owned sandboxes and CLANKER_SANDBOX_TOKEN for per-sandbox commands.`),
 	}
@@ -54,7 +56,11 @@ func newCloudSandboxesCreateCmd(client func() *clankercloud.SandboxClient) *cobr
 		Use:   "create",
 		Short: "Create a hosted sandbox",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			result, err := client().Create(cmd.Context(), clankercloud.SandboxCreateRequest{Name: name, Agent: agent, Region: region})
+			sandboxClient := client()
+			if sandboxClient.AccountKey() == "" {
+				return fmt.Errorf("CLANKER_CLOUD_API_KEY is required so the sandbox remains account-owned and cleanup can always be retried")
+			}
+			result, err := sandboxClient.Create(cmd.Context(), clankercloud.SandboxCreateRequest{Name: name, Agent: agent, Region: region})
 			return printSandboxResult(result, err)
 		},
 	}
@@ -101,6 +107,7 @@ func newCloudSandboxesDeleteCmd(client func() *clankercloud.SandboxClient) *cobr
 
 func newCloudSandboxesCommandCmd(client func() *clankercloud.SandboxClient) *cobra.Command {
 	var timeoutSeconds int
+	var workingDir string
 	cmd := &cobra.Command{
 		Use:   "command SANDBOX_ID COMMAND...",
 		Short: "Run a shell command in a sandbox",
@@ -108,6 +115,7 @@ func newCloudSandboxesCommandCmd(client func() *clankercloud.SandboxClient) *cob
 		RunE: func(cmd *cobra.Command, args []string) error {
 			payload := clankercloud.SandboxCommandRequest{
 				Command:        strings.Join(args[1:], " "),
+				WorkingDir:     workingDir,
 				TimeoutSeconds: timeoutSeconds,
 			}
 			result, err := client().Command(cmd.Context(), args[0], payload)
@@ -115,6 +123,7 @@ func newCloudSandboxesCommandCmd(client func() *clankercloud.SandboxClient) *cob
 		},
 	}
 	cmd.Flags().IntVar(&timeoutSeconds, "timeout-seconds", 0, "optional command timeout in seconds")
+	cmd.Flags().StringVar(&workingDir, "working-dir", "", "sandbox working directory (for example /workspace or /data)")
 	return cmd
 }
 
@@ -141,9 +150,10 @@ func newCloudSandboxesRunCmd(apiBaseURL *string, apiKey *string, sandboxToken *s
 	var name string
 	var agentName string
 	var region string
+	var keepSandbox bool
 	cmd := &cobra.Command{
 		Use:   "run TASK...",
-		Short: "Create a sandbox and send it a task message",
+		Short: "Run a task in an account-owned temporary sandbox",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			task := strings.TrimSpace(strings.Join(args, " "))
@@ -152,58 +162,83 @@ func newCloudSandboxesRunCmd(apiBaseURL *string, apiKey *string, sandboxToken *s
 				AccountKey:   derefString(apiKey),
 				SandboxToken: derefString(sandboxToken),
 			})
-			created, err := client.Create(cmd.Context(), clankercloud.SandboxCreateRequest{Name: name, Agent: agentName, Region: region})
-			if err != nil {
-				return err
+			if client.AccountKey() == "" {
+				return fmt.Errorf("CLANKER_CLOUD_API_KEY is required so the temporary sandbox remains manageable if automatic cleanup fails")
 			}
-			if !clankercloud.SandboxResultOK(created) {
-				_ = printJSON(created)
-				return clankercloud.SandboxResultStatusError(created)
-			}
-
-			sandboxID := clankercloud.ExtractSandboxID(created.Body)
-			token := clankercloud.ExtractSandboxToken(created.Body)
-			if sandboxID == "" {
-				_ = printJSON(created)
-				return fmt.Errorf("create response did not include a sandbox id")
-			}
-			if token == "" {
-				token = client.SandboxToken()
-			}
-			if token == "" {
-				token = client.AccountKey()
-			}
-			runClient := clankercloud.NewSandboxClient(clankercloud.SandboxClientOptions{
-				BaseURL:      derefString(apiBaseURL),
-				AccountKey:   derefString(apiKey),
-				SandboxToken: token,
-			})
-			message, err := runClient.Message(cmd.Context(), sandboxID, clankercloud.SandboxMessageRequest{
+			result, runErr := executeSandboxRun(cmd.Context(), client, clankercloud.SandboxCreateRequest{
+				Name:   name,
+				Agent:  agentName,
+				Region: region,
+			}, clankercloud.SandboxMessageRequest{
 				Role:    "user",
 				Content: task,
 				Metadata: map[string]any{
 					"source": "clanker-cli",
 					"mode":   "sandboxes.run",
 				},
-			})
-			if err != nil {
-				return err
-			}
-			out := map[string]any{
-				"created": created,
-				"message": message,
-			}
-			if !clankercloud.SandboxResultOK(message) {
-				_ = printJSON(out)
-				return clankercloud.SandboxResultStatusError(message)
-			}
-			return printJSON(out)
+			}, keepSandbox)
+			return errors.Join(printJSON(result), runErr)
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "agent-runner", "sandbox name")
 	cmd.Flags().StringVar(&agentName, "agent", "clanker-cli", "sandbox agent image")
 	cmd.Flags().StringVar(&region, "region", "earth", "sandbox region")
+	cmd.Flags().BoolVar(&keepSandbox, "keep-sandbox", false, "keep the account-owned sandbox after the task for debugging (default: dispose it)")
 	return cmd
+}
+
+func executeSandboxRun(
+	ctx context.Context,
+	client *clankercloud.SandboxClient,
+	createRequest clankercloud.SandboxCreateRequest,
+	messageRequest clankercloud.SandboxMessageRequest,
+	keepSandbox bool,
+) (map[string]any, error) {
+	out := map[string]any{}
+	if client == nil || client.AccountKey() == "" {
+		return out, fmt.Errorf("Clanker Cloud account API key is required for a manageable one-shot sandbox")
+	}
+	created, createErr := client.Create(ctx, createRequest)
+	if created != nil {
+		out["created"] = created
+	}
+	if createErr != nil {
+		return out, createErr
+	}
+	if !clankercloud.SandboxResultOK(created) {
+		return out, clankercloud.SandboxResultStatusError(created)
+	}
+
+	sandboxID := clankercloud.ExtractSandboxID(created.Body)
+	if sandboxID == "" {
+		return out, fmt.Errorf("create response did not include a sandbox id")
+	}
+	out["sandboxId"] = sandboxID
+
+	message, messageErr := client.Message(ctx, sandboxID, messageRequest)
+	if message != nil {
+		out["message"] = message
+	}
+	if messageErr == nil && !clankercloud.SandboxResultOK(message) {
+		messageErr = clankercloud.SandboxResultStatusError(message)
+	}
+
+	if keepSandbox {
+		out["sandboxRetained"] = true
+		return out, messageErr
+	}
+
+	disposal, disposalErr := client.Dispose(ctx, sandboxID)
+	if disposal != nil {
+		out["disposal"] = disposal
+		out["alreadyDisposed"] = disposal.Status == 404 && clankercloud.SandboxResultOK(disposal)
+	}
+	out["disposed"] = disposalErr == nil && clankercloud.SandboxResultOK(disposal)
+	if disposalErr != nil {
+		out["cleanupRequired"] = true
+		out["cleanupHint"] = fmt.Sprintf("Retry cleanup with: clanker cloud sandboxes delete %s", sandboxID)
+	}
+	return out, errors.Join(messageErr, disposalErr)
 }
 
 func printSandboxResult(result any, err error) error {

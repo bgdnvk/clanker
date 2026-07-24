@@ -175,6 +175,36 @@ clanker cf list --help
 
 ## Usage
 
+### Clanker Apps
+
+Clanker Apps are account-scoped, immutable static deployments. Creating an app
+or deployment keeps it private; `activate` is the separate step that makes a
+reviewed deployment public.
+
+```bash
+export CLANKER_CLOUD_API_KEY="..."
+
+clanker cloud apps create "Team CRM" --description "Shared contact workspace"
+clanker cloud apps deploy APP_ID --html-file ./index.html
+clanker cloud apps deployments APP_ID
+clanker cloud apps activate APP_ID DEPLOYMENT_ID
+clanker cloud apps unpublish APP_ID
+clanker cloud apps delete APP_ID
+```
+
+Create and deploy generate a valid idempotency key automatically. Pass
+`--idempotency-key` when you need the same stable key across manual retries.
+
+One-shot sandbox tasks require an account key, then dispose their compute and
+persistent sandbox storage before returning. If cleanup fails, the command
+prints the sandbox id and an exact `sandboxes delete` retry command. Use
+`--keep-sandbox` only for intentional debugging work:
+
+```bash
+clanker cloud sandboxes run "inspect this repository and summarize it"
+clanker cloud sandboxes run --keep-sandbox "prepare a debugging workspace"
+```
+
 ### MCP
 
 Clanker also exposes its own MCP surface as a CLI command.
