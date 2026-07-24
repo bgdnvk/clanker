@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -286,17 +287,41 @@ func readBoundedAppFile(path string) ([]byte, error) {
 }
 
 func readBoundedAppFileWithLimit(path string, limit int) ([]byte, error) {
+	if limit < 0 {
+		return nil, fmt.Errorf("invalid file size limit %d", limit)
+	}
+	// Reject ordinary directories, devices, and pipes before opening, then
+	// recheck the descriptor to catch common path-replacement races. The
+	// limited reader remains the authoritative byte bound.
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, err
 	}
-	if info.IsDir() {
-		return nil, fmt.Errorf("%s is a directory", path)
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
 	if info.Size() > int64(limit) {
 		return nil, fmt.Errorf("%s exceeds %d bytes", path, limit)
 	}
-	content, err := os.ReadFile(path)
+
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !openedInfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	if openedInfo.Size() > int64(limit) {
+		return nil, fmt.Errorf("%s exceeds %d bytes", path, limit)
+	}
+
+	content, err := io.ReadAll(io.LimitReader(file, int64(limit)+1))
 	if err != nil {
 		return nil, err
 	}

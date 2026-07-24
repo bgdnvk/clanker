@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -129,5 +131,34 @@ func TestCloudAppsDeployDoesNotExposeLegacyArtifactFlags(t *testing.T) {
 		if command.Flags().Lookup(legacy) != nil {
 			t.Fatalf("legacy deployment flag --%s is still exposed", legacy)
 		}
+	}
+}
+
+func TestReadBoundedAppFileWithLimitRequiresRegularBoundedInput(t *testing.T) {
+	directory := t.TempDir()
+	exactPath := filepath.Join(directory, "exact.json")
+	if err := os.WriteFile(exactPath, []byte("1234"), 0o600); err != nil {
+		t.Fatalf("write exact file: %v", err)
+	}
+	content, err := readBoundedAppFileWithLimit(exactPath, 4)
+	if err != nil {
+		t.Fatalf("read exact-limit file: %v", err)
+	}
+	if string(content) != "1234" {
+		t.Fatalf("exact-limit content = %q, want 1234", content)
+	}
+
+	oversizePath := filepath.Join(directory, "oversize.json")
+	if err := os.WriteFile(oversizePath, []byte("12345"), 0o600); err != nil {
+		t.Fatalf("write oversize file: %v", err)
+	}
+	if _, err := readBoundedAppFileWithLimit(oversizePath, 4); err == nil ||
+		!strings.Contains(err.Error(), "exceeds 4 bytes") {
+		t.Fatalf("oversize error = %v, want bounded-size rejection", err)
+	}
+
+	if _, err := readBoundedAppFileWithLimit(directory, 4); err == nil ||
+		!strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("directory error = %v, want non-regular-file rejection", err)
 	}
 }
