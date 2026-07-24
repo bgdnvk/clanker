@@ -1,23 +1,21 @@
 package clankercloud
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
+	"sync"
+	"time"
 )
 
-const DefaultSandboxAPIBaseURL = "https://clankercloud.ai/api"
+const DefaultSandboxAPIBaseURL = DefaultCloudAPIBaseURL
 
 type SandboxClient struct {
 	httpClient   *http.Client
 	baseURL      string
 	accountKey   string
+	tokenMu      sync.RWMutex
 	sandboxToken string
 }
 
@@ -28,15 +26,7 @@ type SandboxClientOptions struct {
 	HTTPClient   *http.Client
 }
 
-type SandboxAPIResult struct {
-	BaseURL     string            `json:"baseUrl"`
-	Method      string            `json:"method"`
-	Path        string            `json:"path"`
-	Status      int               `json:"status"`
-	ContentType string            `json:"contentType,omitempty"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	Body        any               `json:"body,omitempty"`
-}
+type SandboxAPIResult = APIResult
 
 type SandboxCreateRequest struct {
 	Name     string         `json:"name,omitempty"`
@@ -47,6 +37,7 @@ type SandboxCreateRequest struct {
 
 type SandboxCommandRequest struct {
 	Command        string            `json:"command"`
+	WorkingDir     string            `json:"workingDir,omitempty"`
 	TimeoutSeconds int               `json:"timeoutSeconds,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`
 }
@@ -62,39 +53,24 @@ func NewSandboxClient(opts SandboxClientOptions) *SandboxClient {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
+	configuredSandboxBaseURL := os.Getenv("CLANKER_CLOUD_SANDBOX_API_BASE_URL")
+	configuredLegacyBaseURL := os.Getenv("CLANKER_SANDBOX_API_BASE_URL")
+	accountKey := strings.TrimSpace(opts.AccountKey)
+	sandboxToken := strings.TrimSpace(opts.SandboxToken)
+	if configuredCredentialAllowed(opts.BaseURL, configuredSandboxBaseURL, configuredLegacyBaseURL) {
+		accountKey = firstNonEmpty(accountKey, os.Getenv("CLANKER_CLOUD_API_KEY"))
+		sandboxToken = firstNonEmpty(sandboxToken, os.Getenv("CLANKER_SANDBOX_TOKEN"))
+	}
 	return &SandboxClient{
 		httpClient:   httpClient,
-		baseURL:      firstNonEmpty(opts.BaseURL, os.Getenv("CLANKER_CLOUD_SANDBOX_API_BASE_URL"), os.Getenv("CLANKER_SANDBOX_API_BASE_URL"), DefaultSandboxAPIBaseURL),
-		accountKey:   firstNonEmpty(opts.AccountKey, os.Getenv("CLANKER_CLOUD_API_KEY")),
-		sandboxToken: firstNonEmpty(opts.SandboxToken, os.Getenv("CLANKER_SANDBOX_TOKEN")),
+		baseURL:      firstNonEmpty(opts.BaseURL, configuredSandboxBaseURL, configuredLegacyBaseURL, DefaultSandboxAPIBaseURL),
+		accountKey:   accountKey,
+		sandboxToken: sandboxToken,
 	}
 }
 
 func NormalizeSandboxAPIBaseURL(raw string) (string, error) {
-	trimmed := strings.TrimRight(strings.TrimSpace(raw), "/")
-	if trimmed == "" {
-		return "", fmt.Errorf("clanker cloud sandbox API base URL is empty")
-	}
-	parsed, err := url.Parse(trimmed)
-	if err != nil {
-		return "", fmt.Errorf("parse clanker cloud sandbox API base URL: %w", err)
-	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", fmt.Errorf("clanker cloud sandbox API base URL must use http or https")
-	}
-	if parsed.User != nil {
-		return "", fmt.Errorf("clanker cloud sandbox API base URL must not include user info")
-	}
-	if parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", fmt.Errorf("clanker cloud sandbox API base URL must not include query or fragment")
-	}
-	path := strings.TrimRight(parsed.EscapedPath(), "/")
-	if path == "" {
-		parsed.Path = "/api"
-	} else if path != "/api" && !strings.HasSuffix(path, "/api") {
-		return "", fmt.Errorf("clanker cloud sandbox API base URL must end with /api")
-	}
-	return strings.TrimRight(parsed.String(), "/"), nil
+	return NormalizeCloudAPIBaseURL(raw)
 }
 
 func (c *SandboxClient) BaseURL() (string, error) {
@@ -106,6 +82,8 @@ func (c *SandboxClient) AccountKey() string {
 }
 
 func (c *SandboxClient) SandboxToken() string {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
 	return strings.TrimSpace(c.sandboxToken)
 }
 
@@ -119,7 +97,13 @@ func (c *SandboxClient) Create(ctx context.Context, payload SandboxCreateRequest
 	if strings.TrimSpace(payload.Region) == "" {
 		payload.Region = "earth"
 	}
-	return c.callJSON(ctx, http.MethodPost, "/sandboxes", c.AccountKey(), payload)
+	result, rawBody, err := c.callJSONWithRawBody(ctx, http.MethodPost, "/sandboxes", c.AccountKey(), payload)
+	if err == nil && SandboxResultOK(result) {
+		if token := ExtractSandboxToken(rawBody); token != "" {
+			c.setSandboxToken(token)
+		}
+	}
+	return result, err
 }
 
 func (c *SandboxClient) List(ctx context.Context) (*SandboxAPIResult, error) {
@@ -127,97 +111,96 @@ func (c *SandboxClient) List(ctx context.Context) (*SandboxAPIResult, error) {
 }
 
 func (c *SandboxClient) Inspect(ctx context.Context, sandboxID string) (*SandboxAPIResult, error) {
-	return c.callJSON(ctx, http.MethodGet, "/sandboxes/"+url.PathEscape(strings.TrimSpace(sandboxID)), c.preferredSandboxToken(), nil)
-}
-
-func (c *SandboxClient) Delete(ctx context.Context, sandboxID string) (*SandboxAPIResult, error) {
-	return c.callJSON(ctx, http.MethodDelete, "/sandboxes/"+url.PathEscape(strings.TrimSpace(sandboxID)), c.preferredSandboxToken(), nil)
-}
-
-func (c *SandboxClient) Command(ctx context.Context, sandboxID string, payload SandboxCommandRequest) (*SandboxAPIResult, error) {
-	return c.callJSON(ctx, http.MethodPost, "/sandboxes/"+url.PathEscape(strings.TrimSpace(sandboxID))+"/commands", c.preferredSandboxToken(), payload)
-}
-
-func (c *SandboxClient) Message(ctx context.Context, sandboxID string, payload SandboxMessageRequest) (*SandboxAPIResult, error) {
-	if strings.TrimSpace(payload.Role) == "" {
-		payload.Role = "user"
-	}
-	return c.callJSON(ctx, http.MethodPost, "/sandboxes/"+url.PathEscape(strings.TrimSpace(sandboxID))+"/messages", c.preferredSandboxToken(), payload)
-}
-
-func (c *SandboxClient) preferredSandboxToken() string {
-	return firstNonEmpty(c.sandboxToken, c.accountKey)
-}
-
-func (c *SandboxClient) callJSON(ctx context.Context, method string, path string, token string, body any) (*SandboxAPIResult, error) {
-	baseURL, err := c.BaseURL()
+	escaped, err := requiredCloudID("sandbox", sandboxID)
 	if err != nil {
 		return nil, err
 	}
-	trimmedPath := strings.TrimSpace(path)
-	if !strings.HasPrefix(trimmedPath, "/") {
-		trimmedPath = "/" + trimmedPath
-	}
+	return c.callJSON(ctx, http.MethodGet, "/sandboxes/"+escaped, c.preferredSandboxToken(), nil)
+}
 
-	var bodyReader io.Reader
-	if body != nil {
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			return nil, fmt.Errorf("encode sandbox request: %w", err)
-		}
-		bodyReader = bytes.NewReader(encoded)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(baseURL, "/")+trimmedPath, bodyReader)
+func (c *SandboxClient) Delete(ctx context.Context, sandboxID string) (*SandboxAPIResult, error) {
+	escaped, err := requiredCloudID("sandbox", sandboxID)
 	if err != nil {
-		return nil, fmt.Errorf("create sandbox request: %w", err)
+		return nil, err
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+	path := "/sandboxes/" + escaped
+	token := c.preferredSandboxToken()
+	result, err := c.callJSON(ctx, http.MethodDelete, path, token, nil)
+	if err == nil &&
+		result != nil &&
+		(result.Status == http.StatusUnauthorized || result.Status == http.StatusForbidden) &&
+		c.AccountKey() != "" &&
+		token != c.AccountKey() {
+		return c.callJSON(ctx, http.MethodDelete, path, c.AccountKey(), nil)
 	}
-	if trimmedToken := strings.TrimSpace(token); trimmedToken != "" {
-		req.Header.Set("X-API-Key", trimmedToken)
-	}
+	return result, err
+}
 
-	resp, err := c.httpClient.Do(req)
+// Dispose deletes a sandbox with a fresh bounded context so cleanup still runs
+// after a command or parent request is cancelled. DELETE 404 is treated as an
+// idempotent already-disposed result.
+func (c *SandboxClient) Dispose(ctx context.Context, sandboxID string) (*SandboxAPIResult, error) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+	result, err := c.Delete(cleanupCtx, sandboxID)
 	if err != nil {
-		return nil, fmt.Errorf("perform sandbox request: %w", err)
+		return result, err
 	}
-	defer resp.Body.Close()
+	return result, SandboxResultStatusError(result)
+}
 
-	result := &SandboxAPIResult{
-		BaseURL:     baseURL,
-		Method:      method,
-		Path:        trimmedPath,
-		Status:      resp.StatusCode,
-		ContentType: resp.Header.Get("Content-Type"),
-		Headers:     map[string]string{},
-	}
-	for key, values := range resp.Header {
-		if len(values) > 0 {
-			result.Headers[key] = strings.Join(values, ", ")
-		}
-	}
-	rawBody, err := io.ReadAll(resp.Body)
+func (c *SandboxClient) Command(ctx context.Context, sandboxID string, payload SandboxCommandRequest) (*SandboxAPIResult, error) {
+	escaped, err := requiredCloudID("sandbox", sandboxID)
 	if err != nil {
-		return nil, fmt.Errorf("read sandbox response: %w", err)
+		return nil, err
 	}
-	result.Body = decodeBody(rawBody)
-	return result, nil
+	return c.callJSON(ctx, http.MethodPost, "/sandboxes/"+escaped+"/commands", c.preferredSandboxToken(), payload)
+}
+
+func (c *SandboxClient) Message(ctx context.Context, sandboxID string, payload SandboxMessageRequest) (*SandboxAPIResult, error) {
+	escaped, err := requiredCloudID("sandbox", sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(payload.Role) == "" {
+		payload.Role = "user"
+	}
+	return c.callJSON(ctx, http.MethodPost, "/sandboxes/"+escaped+"/messages", c.preferredSandboxToken(), payload)
+}
+
+func (c *SandboxClient) preferredSandboxToken() string {
+	return firstNonEmpty(c.SandboxToken(), c.accountKey)
+}
+
+func (c *SandboxClient) callJSON(ctx context.Context, method string, path string, token string, body any) (*SandboxAPIResult, error) {
+	result, _, err := c.callJSONWithRawBody(ctx, method, path, token, body)
+	return result, err
+}
+
+func (c *SandboxClient) callJSONWithRawBody(ctx context.Context, method string, path string, token string, body any) (*SandboxAPIResult, any, error) {
+	baseURL, err := c.BaseURL()
+	if err != nil {
+		return nil, nil, err
+	}
+	return callCloudJSON(ctx, c.httpClient, baseURL, method, path, token, body, nil)
+}
+
+func (c *SandboxClient) setSandboxToken(token string) {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	c.sandboxToken = strings.TrimSpace(token)
 }
 
 func SandboxResultOK(result *SandboxAPIResult) bool {
-	return result != nil && result.Status >= 200 && result.Status < 300
+	return CloudResultOK(result) ||
+		cloudDeleteResourceNotFound(result, "sandbox not found", "box not found")
 }
 
 func SandboxResultStatusError(result *SandboxAPIResult) error {
-	if SandboxResultOK(result) {
+	if cloudDeleteResourceNotFound(result, "sandbox not found", "box not found") {
 		return nil
 	}
-	if result == nil {
-		return fmt.Errorf("sandbox request failed")
-	}
-	return fmt.Errorf("sandbox request returned status %d", result.Status)
+	return CloudResultStatusError("sandbox", result)
 }
 
 func ExtractSandboxID(body any) string {
@@ -232,9 +215,16 @@ func ExtractSandboxID(body any) string {
 
 func ExtractSandboxToken(body any) string {
 	if token := extractStringAt(body, "sandboxToken"); token != "" {
-		return token
+		if token != "[REDACTED]" {
+			return token
+		}
+		return ""
 	}
-	return extractStringAt(body, "token")
+	token := extractStringAt(body, "token")
+	if token == "[REDACTED]" {
+		return ""
+	}
+	return token
 }
 
 func extractStringAt(value any, path ...string) string {

@@ -12,7 +12,7 @@ import (
 
 var cloudCmd = &cobra.Command{
 	Use:   "cloud",
-	Short: "Work with the local Clanker Cloud desktop app",
+	Short: "Work with Clanker Cloud and the local desktop app",
 }
 
 var cloudDoctorCmd = &cobra.Command{
