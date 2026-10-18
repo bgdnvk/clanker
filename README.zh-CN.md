@@ -6,7 +6,11 @@
 
 [English](README.md) | 简体中文
 
-Clanker CLI 是支撑 [Clanker Cloud](https://clankercloud.ai) 的 agent swarm。Clanker Cloud 是面向智能体和人的 AI DevOps IDE。
+Clanker CLI 是 [Clanker DevOps](https://clankercloud.ai/clanker-devops) 的开源基础设施命令行工具。Clanker DevOps 是 Clanker Cloud 中用于云基础设施运维的工作流。
+
+[Clanker Cloud](https://clankercloud.ai/) 是面向用户和智能体的浏览器 AI 工作空间。Project 将文件、指令、Session 和已保存的成果放在一起。持续进行的项目工作可参考 [AI 智能体工作空间指南](https://clankercloud.ai/learn/ai-agent-workspace)；设计、配置、测试、维护和分发可复用自定义智能体可参考 [AI 智能体工厂指南](https://clankercloud.ai/learn/ai-agent-factory)。
+
+使用托管 Workspace 时，可以[直接在浏览器中开始](https://workspace.clankercloud.ai/)，或通过 [Workspace 托管 MCP](https://clankercloud.ai/for-ai-agents) 连接兼容的外部助手。普通的托管 Project 工作不需要安装本 CLI、配置云提供商凭据或扫描本地基础设施。本仓库介绍独立的终端和本地基础设施工作流。
 
 文档地址：[docs.clankercloud.ai](https://docs.clankercloud.ai/)
 
@@ -69,7 +73,7 @@ clanker onboarding install --dry-run --provider aws,gcp,azure,kubernetes,flyio
 clanker onboarding install --yes aws gcloud az kubectl flyctl
 ```
 
-`clanker onboarding scan` 会检测本地凭据和缺失的 provider CLI，并返回官方安装文档、认证命令、token/account URL，方便用户和智能体继续操作。只安装所选或检测到的 provider 所需工具即可。例如：AWS 使用官方 AWS CLI 安装器和本地 profile，GCP 使用官方 Google Cloud CLI 与 Application Default Credentials，Azure 使用官方 Azure CLI 登录流程。被要求安装或使用 Clanker Cloud 的智能体应先运行安装步骤，再重新扫描，并和用户一起完成剩余的浏览器登录、SSO、sudo 或官方 API token 步骤。
+`clanker onboarding scan` 会检测本地凭据和缺失的 provider CLI，并返回官方安装文档、认证命令、token/account URL，方便用户和智能体继续操作。只安装所选或检测到的 provider 所需工具即可。例如：AWS 使用官方 AWS CLI 安装器和本地 profile，GCP 使用官方 Google Cloud CLI 与 Application Default Credentials，Azure 使用官方 Azure CLI 登录流程。被要求安装或使用 Clanker 基础设施 CLI 的智能体应先运行安装步骤，再重新扫描，并和用户一起完成剩余的浏览器登录、SSO、sudo 或官方 API token 步骤。对于托管 Workspace 的 Project、文件或自定义智能体，请改用 [Workspace 托管接入指南](https://clankercloud.ai/for-ai-agents)，通过浏览器授权并使用用户批准的权限。
 
 ## 配置
 

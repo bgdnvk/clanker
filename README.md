@@ -4,7 +4,11 @@
   <img src="assets/clanker-logo.png" alt="Clanker logo" width="96" height="96">
 </p>
 
-Agent swarm powering [Clanker Cloud](https://clankercloud.ai), the first AI DevOps IDE for agents and humans.
+Open-source infrastructure CLI for [Clanker DevOps](https://clankercloud.ai/clanker-devops), the cloud-operations workflow within Clanker Cloud.
+
+[Clanker Cloud](https://clankercloud.ai/) is a browser-based AI workspace for people and agents. Its Projects keep files, instructions, Sessions, and saved outputs together. Use the [AI agent workspace guide](https://clankercloud.ai/learn/ai-agent-workspace) for ongoing project work and the [AI agent factory guide](https://clankercloud.ai/learn/ai-agent-factory) to design, configure, test, maintain, and distribute reusable custom Agents.
+
+For hosted Workspace, [start in your browser](https://workspace.clankercloud.ai/) or connect a compatible external assistant through [hosted Workspace MCP](https://clankercloud.ai/for-ai-agents). Ordinary hosted Project work does not require installing this CLI, configuring cloud-provider credentials, or running a local infrastructure scan. This repository documents the separate terminal and local infrastructure workflows.
 
 Docs available at [docs.clankercloud.ai](https://docs.clankercloud.ai/)
 
@@ -76,10 +80,12 @@ then returns official install docs, auth commands, and token/account URLs for
 users and agents. Install only the tools needed for selected or detected
 providers. Examples: AWS uses the official AWS CLI installer and local profiles,
 GCP uses the official Google Cloud CLI plus Application Default Credentials, and
-Azure uses the official Azure CLI sign-in flow. Agents that have been asked to
-install or use Clanker Cloud should run the install step, rerun the scan, then
-walk any remaining browser login, SSO, sudo, or official API-token step with the
-user.
+Azure uses the official Azure CLI sign-in flow. Agents asked to install or use
+the Clanker infrastructure CLI should run the install step, rerun the scan,
+then walk any remaining browser login, SSO, sudo, or official API-token step
+with the user. For hosted Workspace Projects, files, or custom Agents, follow
+[hosted Workspace onboarding](https://clankercloud.ai/for-ai-agents) instead;
+that connection uses browser authorization and the permissions the user grants.
 
 ## Config
 
